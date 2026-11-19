@@ -4,7 +4,7 @@ services:
     runtime: node
     region: virginia
     rootDir: apps/api
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     preDeployCommand: npm run db:migrate
     startCommand: npm run start
     healthCheckPath: /ready

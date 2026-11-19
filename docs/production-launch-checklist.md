@@ -11,6 +11,7 @@ This is a speed-first production launch, not the final general-availability post
 ## Code-side work completed
 
 - Render is configured as the production API service in `render.yaml`.
+- The Render build explicitly installs dev dependencies so the TypeScript compiler and Node.js type definitions are available even with `NODE_ENV=production`.
 - The API migration runner is forward-only, checksum-verified, advisory-locked, and runs before deployment.
 - Production env templates use the public domains and support RDS CA validation through a Render Secret File at `DATABASE_SSL_CA_FILE`.
 - The API has `/health` liveness, `/ready` database readiness, request IDs, security headers, and process-local request limits.
