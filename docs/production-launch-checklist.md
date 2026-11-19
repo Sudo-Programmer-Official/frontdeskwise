@@ -2,7 +2,7 @@
 
 The first public environment will use:
 
-- Web: `https://frontdeskwise.com`
+- Web: `https://frontdeskwise.com` and `https://www.frontdeskwise.com`
 - API: `https://api.frontdeskwise.com`
 - Database: the existing RDS instance, targeting the dedicated `frontdeskwise` database
 

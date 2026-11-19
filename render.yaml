@@ -24,7 +24,7 @@ services:
       - key: FRONTDESKWISE_CREDENTIAL_KEY
         sync: false
       - key: WEB_ORIGIN
-        value: https://frontdeskwise.com
+        value: https://frontdeskwise.com,https://www.frontdeskwise.com
       - key: FRONTDESKWISE_PUBLIC_API_ORIGIN
         value: https://api.frontdeskwise.com
       - key: FRONTDESKWISE_WIDGET_ORIGIN

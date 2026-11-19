@@ -1547,7 +1547,9 @@ void processIntegrationOutbox();
 
 app.addHook("onRequest", async (request, reply) => {
   const requestOrigin = typeof request.headers.origin === "string" ? request.headers.origin : null;
-  const allowOrigin = allowedWebOrigins.includes("*")
+  const path = request.url.split("?", 1)[0];
+  const isPublicWidgetRoute = path.startsWith("/api/v1/widget/");
+  const allowOrigin = isPublicWidgetRoute || allowedWebOrigins.includes("*")
     ? "*"
     : (requestOrigin && allowedWebOrigins.includes(requestOrigin) ? requestOrigin : allowedWebOrigins[0] ?? "null");
   reply.header("Access-Control-Allow-Origin", allowOrigin);
@@ -1560,7 +1562,6 @@ app.addHook("onRequest", async (request, reply) => {
   reply.header("X-Content-Type-Options", "nosniff");
   if (request.method === "OPTIONS") return reply.code(204).send();
 
-  const path = request.url.split("?", 1)[0];
   if (!path.startsWith("/api/")) return;
   const limiter = request.method === "POST" && path === "/api/v1/demos" ? demoRateLimiter : apiRateLimiter;
   const result = limiter.consume(`${request.ip}:${request.method}:${path}`);
