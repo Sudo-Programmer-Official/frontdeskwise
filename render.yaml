@@ -62,7 +62,7 @@ services:
       - key: FRONTDESKWISE_STRIPE_PORTAL_RETURN_URL
         value: https://frontdeskwise.com/?billing=portal
       - key: FRONTDESKWISE_DEFAULT_TRIAL_DAYS
-        value: "14"
+        value: "7"
       - key: FRONTDESKWISE_SUPER_ADMIN_EMAILS
         sync: false
       - key: AWS_REGION

@@ -50,12 +50,12 @@ Render's `preDeployCommand` is the preferred migration hook. If the selected Ren
 
 ## Firebase and other services
 
-Firebase is not required for this staging slice. The current owner access path is the temporary hashed demo session. Identity SDK session exchange should be completed before production accounts are enabled. Stripe checkout and verified billing webhooks should remain disabled until billing acceptance tests pass.
+Firebase and Stripe can be optional for an isolated crawl-only staging slice, but production accounts use Firebase bootstrap and verified Stripe webhooks. The temporary hashed demo session remains useful for login-free staging previews; it is not a replacement for production organization authorization.
 
 ## Production blockers after staging
 
 - Replace demo bearer access with Identity SDK sessions and rotation.
-- Add verified billing webhooks and live subscription entitlements.
+- Validate verified billing webhooks and live subscription entitlements before enabling live prices.
 - Move RDS SSL validation to a mounted/trusted CA configuration.
 - Add rate limiting, request tracing, alerting, backups/restore verification, and PII retention/deletion controls.
 - Add scheduled recrawls/change detection and a production CDN/widget release process.

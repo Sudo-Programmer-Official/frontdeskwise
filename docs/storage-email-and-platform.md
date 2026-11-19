@@ -16,12 +16,13 @@ The API never proxies file bytes through the application server:
 
 1. An authenticated organization owner/admin requests a presigned upload URL.
 2. The browser uploads directly to S3 with a short-lived URL and AES-256 server-side encryption.
-3. The API verifies the object with `HeadObject` and marks the database row `uploaded`.
-4. Downloads use a separate short-lived presigned URL.
+3. The API verifies the object with `HeadObject`, marks the database row `uploaded`, and starts private extraction.
+4. PDF, TXT/Markdown/CSV/JSON/RTF, DOCX, and XLS/XLSX content is parsed into a document source and tenant-scoped knowledge chunks; the existing embedding worker runs when configured.
+5. Downloads use a separate short-lived presigned URL.
 
 All document routes require organization membership and, for business documents, owner/admin access to that business. Deleted documents remain as audit metadata with status `deleted`; their S3 object is removed.
 
-The first supported content types are PDF, plain text, Markdown, CSV, JSON, RTF, Word, and Excel files. The default limit is 25 MB and can be changed with `FRONTDESKWISE_MAX_DOCUMENT_BYTES`.
+The first supported content types are PDF, plain text, Markdown, CSV, JSON, RTF, DOCX, and Excel files. Legacy `.doc` uploads return a clear conversion message. The default limit is 25 MB and can be changed with `FRONTDESKWISE_MAX_DOCUMENT_BYTES`.
 
 ### SES
 
@@ -158,10 +159,10 @@ After Render redeploys:
 2. Sign in with the Firebase user whose email is `hello@frontdeskwise.com`.
 3. Open `https://app.frontdeskwise.com/platform`.
 4. Click **Test SES email** and confirm delivery.
-5. Open a business, go to **Knowledge**, upload a PDF or text file, and confirm it appears as `uploaded`.
+5. Open a business, go to **Knowledge**, upload a PDF or text file, and confirm it moves from `uploaded`/`processing` to `ready`.
 6. Download the document and verify the browser receives a short-lived S3 URL.
 7. Remove the document and confirm it disappears from the active list.
 8. Submit a landing-page demo request and confirm the super-admin notification arrives; a delivery failure must not fail the demo crawl.
 9. Review the API logs and S3 access logs/CloudTrail if enabled.
 
-The database migration is `infra/db/015_organization_documents.sql`. Render runs it through the existing `preDeployCommand: npm run db:migrate`.
+The database migrations are `infra/db/015_organization_documents.sql` and `infra/db/017_document_ingestion.sql`. Render runs them through the existing `preDeployCommand: npm run db:migrate`.

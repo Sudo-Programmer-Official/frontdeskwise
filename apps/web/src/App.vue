@@ -12,7 +12,8 @@ import {
   type AuthSnapshot,
 } from "./auth/firebase";
 
-type View = "home" | "overview" | "conversations" | "leads" | "knowledge" | "actions" | "agent" | "billing" | "admin";
+type View = "home" | "overview" | "conversations" | "leads" | "knowledge" | "actions" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin";
+type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 
 interface Lead {
   id: string;
@@ -49,6 +50,7 @@ interface OrganizationDocument {
   sizeBytes: number;
   etag: string | null;
   status: string;
+  metadata: { error?: string; parser?: string; chunkCount?: number; characterCount?: number };
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -87,6 +89,7 @@ interface WorkspacePayload {
   status: string;
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
   agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean };
+  ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; readiness?: { score: number; sources: number; chunks: number; openGaps: number } };
   stats?: WorkspaceStats;
 }
@@ -181,6 +184,7 @@ const isGenerating = ref(false);
 const generationError = ref("");
 const demoSlug = ref("british-swim-school-tampa-bay");
 const demoAccessToken = ref(typeof window !== "undefined" ? window.localStorage.getItem("frontdeskwiseDemoAccessToken") ?? "" : "");
+const publicDemoMode = ref(false);
 const firebaseToken = ref("");
 const authSnapshot = ref<AuthSnapshot | null>(null);
 const authModalOpen = ref(false);
@@ -208,6 +212,13 @@ const answerConfidenceBand = ref<"high" | "medium" | "low">("low");
 const answerRetrievalMode = ref("");
 const widgetInstall = ref<WidgetInstall | null>(null);
 const widgetInstallMessage = ref("");
+const ownershipVerification = ref<WorkspacePayload["ownership"] | null>(null);
+const verificationMethod = ref<VerificationMethod>("meta_tag");
+const verificationToken = ref("");
+const verificationInstructions = ref("");
+const verificationMessage = ref("");
+const verificationError = ref("");
+const verificationLoading = ref(false);
 const isAsking = ref(false);
 const leadName = ref("");
 const leadEmail = ref("");
@@ -270,6 +281,9 @@ const navItems: Array<{ id: View; label: string; icon: string }> = [
   { id: "knowledge", label: "Knowledge", icon: "▤" },
   { id: "actions", label: "Actions & Integrations", icon: "ϟ" },
   { id: "agent", label: "Agent & Widget", icon: "✦" },
+  { id: "analytics", label: "Analytics", icon: "◒" },
+  { id: "businesses", label: "Businesses", icon: "▦" },
+  { id: "settings", label: "Settings", icon: "⚙" },
   { id: "billing", label: "Billing", icon: "$" },
 ];
 
@@ -288,6 +302,12 @@ const conversationCount = computed(() => workspaceStats.value?.conversations ?? 
 const readinessScore = computed(() => workspaceReadiness.value);
 const chartMax = computed(() => Math.max(1, ...(workspaceStats.value?.trend ?? []).flatMap((point) => [point.conversations, point.leads])));
 const featuredDemo = computed(() => featuredDemos.value[0] ?? null);
+const trialDaysRemaining = computed(() => {
+  const end = billingSnapshot.value?.billing.trialEndAt;
+  if (!end || billingSnapshot.value?.billing.status !== "trial") return 0;
+  return Math.max(0, Math.ceil((Date.parse(end) - Date.now()) / (24 * 60 * 60 * 1_000)));
+});
+const billingReadOnly = computed(() => Boolean(billingSnapshot.value && !billingSnapshot.value.billing.access.allowed && billingSnapshot.value.billing.mode !== "sandbox"));
 const workspaceSelection = computed({
   get: () => showAllBusinesses.value ? "__all__" : demoSlug.value,
   set: (value: string) => {
@@ -323,6 +343,7 @@ async function submitAuth() {
       ? await signUpAndBootstrap(authEmail.value, authPassword.value, demoAccessToken.value || undefined, authOrganizationName.value)
       : await signInAndBootstrap(authEmail.value, authPassword.value, demoAccessToken.value || undefined, authOrganizationName.value);
     await syncAuthenticatedBusiness(authSnapshot.value);
+    await loadBilling();
     authModalOpen.value = false;
     authPassword.value = "";
     view.value = "overview";
@@ -341,6 +362,7 @@ async function submitGoogleAuth() {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in is not configured yet. Add the Firebase web settings to the Vercel environment.");
     authSnapshot.value = await signInWithGoogleAndBootstrap(demoAccessToken.value || undefined, authOrganizationName.value);
     await syncAuthenticatedBusiness(authSnapshot.value);
+    await loadBilling();
     authModalOpen.value = false;
     view.value = "overview";
   } catch (error) {
@@ -388,6 +410,11 @@ function clearWorkspaceState() {
   organizationDocuments.value = [];
   integrations.value = [];
   widgetInstall.value = null;
+  ownershipVerification.value = null;
+  verificationToken.value = "";
+  verificationInstructions.value = "";
+  verificationMessage.value = "";
+  verificationError.value = "";
   conversationId.value = "";
 }
 
@@ -400,6 +427,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   widgetColor.value = payload.agent?.widgetColor ?? "#0d6efd";
   showLeadCapture.value = payload.agent?.collectLeads ?? true;
   showBookingAction.value = payload.agent?.showBookingAction ?? true;
+  ownershipVerification.value = payload.ownership ?? null;
   workspaceStats.value = payload.stats ?? null;
   workspaceKnowledge.value = payload.knowledge ?? null;
   workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
@@ -408,6 +436,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
 
 async function loadBusinessWorkspace(slug: string, publicOnly = false) {
   workspaceLoading.value = true;
+  publicDemoMode.value = publicOnly;
   workspaceError.value = "";
   clearWorkspaceState();
   try {
@@ -417,7 +446,7 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
     if (!response.ok) throw new Error(payload.error ?? "Could not load this workspace.");
     applyWorkspacePayload(payload);
     if (!publicOnly) {
-      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadDocuments()]);
+      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadDocuments(), loadOwnershipVerification()]);
     }
   } catch (error) {
     workspaceError.value = error instanceof Error ? error.message : "Could not load this workspace.";
@@ -470,6 +499,7 @@ async function openPublicDemo(slug = featuredDemo.value?.slug ?? demoSlug.value)
 
 async function selectBusiness(slug: string) {
   if (!slug) return;
+  publicDemoMode.value = false;
   showAllBusinesses.value = false;
   demoSlug.value = slug;
   await loadBusinessWorkspace(slug);
@@ -645,6 +675,23 @@ async function loadDocuments() {
   }
 }
 
+async function watchDocumentProcessing(documentId: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    await loadDocuments();
+    const current = organizationDocuments.value.find((item) => item.id === documentId);
+    if (current?.status === "ready") {
+      documentsMessage.value = `${current.fileName} is searchable in the private knowledge base.`;
+      return;
+    }
+    if (current?.status === "failed") {
+      documentsError.value = current.metadata.error ?? `${current.fileName} could not be processed.`;
+      return;
+    }
+  }
+  documentsMessage.value = "Upload complete. Processing is still running; refresh Knowledge in a moment.";
+}
+
 async function uploadDocument(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -678,11 +725,12 @@ async function uploadDocument(event: Event) {
       method: "POST",
       headers: ownerHeaders(),
     });
-    const completePayload = await completeResponse.json() as { error?: string };
+    const completePayload = await completeResponse.json() as { error?: string; document?: OrganizationDocument };
     if (!completeResponse.ok) throw new Error(completePayload.error ?? "The upload could not be finalized.");
     documentsMessage.value = `${file.name} uploaded securely.`;
     documentsLoading.value = false;
     await loadDocuments();
+    if (completePayload.document?.id) void watchDocumentProcessing(completePayload.document.id);
   } catch (error) {
     documentsError.value = error instanceof Error ? error.message : "Could not upload this document.";
   } finally {
@@ -740,6 +788,69 @@ async function loadWidgetInstall() {
   const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
   if (!response.ok) return;
   widgetInstall.value = await response.json() as WidgetInstall;
+}
+
+async function loadOwnershipVerification() {
+  if (!firebaseToken.value || !authSnapshot.value) return;
+  try {
+    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification`), { headers: ownerHeaders() });
+    const payload = await response.json() as { verification?: WorkspacePayload["ownership"] };
+    if (response.ok && payload.verification) ownershipVerification.value = payload.verification;
+  } catch {
+    // The install gate remains closed until the next successful verification read.
+  }
+}
+
+async function requestOwnershipVerification() {
+  if (!firebaseToken.value || !authSnapshot.value || verificationLoading.value) return;
+  verificationLoading.value = true;
+  verificationError.value = "";
+  verificationMessage.value = "";
+  try {
+    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification/request`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ method: verificationMethod.value }),
+    });
+    const payload = await response.json() as { error?: string; verification?: WorkspacePayload["ownership"]; token?: string | null; instructions?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not start ownership verification.");
+    ownershipVerification.value = payload.verification ?? ownershipVerification.value;
+    verificationToken.value = payload.token ?? "";
+    verificationInstructions.value = payload.instructions ?? "";
+    verificationMessage.value = verificationMethod.value === "email" ? "Ownership verified · live publishing is enabled" : "Verification request created · complete the instructions, then check again";
+  } catch (error) {
+    verificationError.value = error instanceof Error ? error.message : "Could not start ownership verification.";
+  } finally {
+    verificationLoading.value = false;
+  }
+}
+
+async function checkOwnershipVerification() {
+  if (!firebaseToken.value || !authSnapshot.value || !verificationToken.value.trim() || verificationLoading.value) return;
+  verificationLoading.value = true;
+  verificationError.value = "";
+  verificationMessage.value = "";
+  try {
+    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification/check`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ token: verificationToken.value.trim() }),
+    });
+    const payload = await response.json() as { error?: string; message?: string; verified?: boolean; verification?: WorkspacePayload["ownership"] };
+    if (!response.ok) throw new Error(payload.error ?? "Could not check ownership verification.");
+    ownershipVerification.value = payload.verification ?? ownershipVerification.value;
+    if (payload.verified) {
+      verificationMessage.value = payload.message ?? "Ownership verified · live publishing is enabled";
+      verificationToken.value = "";
+      await loadWidgetInstall();
+    } else {
+      verificationError.value = payload.message ?? "The verification proof was not found yet.";
+    }
+  } catch (error) {
+    verificationError.value = error instanceof Error ? error.message : "Could not check ownership verification.";
+  } finally {
+    verificationLoading.value = false;
+  }
 }
 
 async function loadLeads() {
@@ -1184,6 +1295,7 @@ onMounted(() => {
         authSnapshot.value = user ? await currentAuthSnapshot() : null;
         if (authSnapshot.value) {
           await syncAuthenticatedBusiness(authSnapshot.value);
+          await loadBilling();
           await loadAdminOrganizations();
           if (isPlatformRoute()) {
             if (isSuperAdmin.value) view.value = "admin";
@@ -1288,15 +1400,18 @@ function openHome() {
       <aside class="sidebar">
         <button class="sidebar-brand" type="button" @click="openHome"><img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
         <div class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" @click="openAddBusiness">+</button><span class="chevron">⌄</span></div>
-        <nav class="sidebar-nav">
-          <button v-for="item in navItems" :key="item.id" type="button" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'conversations' && conversationCount">{{ conversationCount }}</b></button>
+          <nav class="sidebar-nav">
+          <button v-for="item in navItems" :key="item.id" type="button" :disabled="publicDemoMode && item.id !== 'overview'" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'conversations' && conversationCount">{{ conversationCount }}</b></button>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon">⚙</span><span>Admin control plane</span></button>
         </nav>
         <div class="sidebar-bottom"><div class="setup-card"><div class="setup-row"><span>Setup progress</span><strong>{{ workspaceStats?.setup.percent ?? 0 }}%</strong></div><div class="progress-bar"><span :style="{ width: `${workspaceStats?.setup.percent ?? 0}%` }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete</small></div><button class="sidebar-link" type="button" @click="openHome">← Back to landing page</button></div>
       </aside>
 
       <section class="content-area">
-        <header class="content-header"><div><p class="breadcrumb">{{ showAllBusinesses ? 'All businesses' : (businessName || 'Workspace') }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
+        <header class="content-header"><div><p class="breadcrumb">{{ showAllBusinesses ? 'All businesses' : (businessName || 'Workspace') }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
+        <div v-if="publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
+        <div v-else-if="billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>Keep your workspace, knowledge, and leads active by choosing a plan.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Upgrade →</button></div>
+        <div v-else-if="billingReadOnly" class="trial-banner danger"><span><strong>Your workspace is read-only</strong><small>Existing data is preserved. Restore billing to resume publishing and production lead capture.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Restore billing →</button></div>
 
         <div v-if="view === 'overview' && showAllBusinesses" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Organization overview</p><h2>All businesses</h2><p>One account, one subscription, and a clear view across every business you manage.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
@@ -1357,6 +1472,25 @@ function openHome() {
             </article>
             <article class="panel form-panel"><div class="form-section"><h3>Connected systems</h3><p v-if="!integrations.length">No CRM connected yet.</p><div v-for="integration in integrations" :key="integration.id" class="integration-card"><div class="setup-row"><strong>{{ integration.displayName }}</strong><span :class="['status-pill', integration.connectionStatus === 'active' ? 'booked' : integration.connectionStatus === 'error' ? 'new' : 'qualified']">{{ integration.connectionStatus }}</span></div><small>{{ integration.provider }} · {{ integration.sync.synced }}/{{ integration.sync.total }} leads synced</small><small v-if="integration.sync.pending">{{ integration.sync.pending }} pending delivery</small><small v-if="integration.sync.failed" class="form-error">{{ integration.sync.failed }} failed delivery</small><small v-if="integration.lastError" class="form-error">{{ integration.lastError }}</small><div class="toolbar-actions"><button class="outline-button small" type="button" :disabled="integrationLoading" @click="testIntegration(integration)">Test connection</button><button v-if="integration.sync.failed" class="text-button" type="button" :disabled="integrationLoading" @click="retryIntegration(integration)">Retry failed</button></div></div></div></article>
           </div>
+        </div>
+
+        <div v-else-if="view === 'analytics'" class="view-content">
+          <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ showAllBusinesses ? 'all businesses' : (businessName || 'this business') }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh data</button></div>
+          <div class="metric-grid"><article class="metric-card blue-tint"><strong>{{ workspaceStats?.conversations ?? 0 }}</strong><span>Conversations</span><em>Recorded conversations</em></article><article class="metric-card green-tint"><strong>{{ workspaceStats?.leads ?? 0 }}</strong><span>Leads captured</span><em>Durable FrontDeskWise records</em></article><article class="metric-card orange-tint"><strong>{{ workspaceStats?.bookingClicks ?? 0 }}</strong><span>Booking actions</span><em>Visitor next steps</em></article><article class="metric-card purple-tint"><strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong><span>Widget loads</span><em>Verified public installs</em></article></div>
+          <article class="panel chart-panel analytics-chart"><div class="panel-heading"><div><h2>Activity by day</h2><p>Last 30 days · live records</p></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Analytics activity by day"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
+          <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>Most common visitor questions</p></div></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Knowledge gaps</h2><p>Questions that need a stronger answer</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Review</button></div></div><div v-else class="diagnostics-empty">No open knowledge gaps.</div></article></div>
+        </div>
+
+        <div v-else-if="view === 'businesses'" class="view-content">
+          <div class="section-toolbar"><div><p class="eyebrow">One account · multiple businesses</p><h2>Businesses</h2><p>Manage every business under {{ activeOrganization?.name ?? 'your organization' }}.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
+          <article class="panel table-panel"><div class="table-heading business-row"><span>Business</span><span>Website</span><span>Access</span><span>Actions</span></div><div v-if="!availableBusinesses.length" class="diagnostics-empty">No businesses yet. Add your first public website to begin.</div><div v-for="business in availableBusinesses" :key="business.id" class="table-row business-row"><div><strong>{{ business.name }}</strong><small>{{ business.role }} · {{ business.planKey }}</small></div><span>{{ business.websiteUrl || 'Website pending' }}</span><span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ business.billingStatus }}</span></span><button class="outline-button small" type="button" @click="workspaceSelection = business.slug">Open →</button></div></article>
+          <article class="panel aggregate-billing-note"><p class="eyebrow">Shared organization billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h2><p>{{ availableBusinesses.length }} of {{ activeOrganization?.billing.plan.maxBusinesses ?? 1 }} business slots used. Add capacity from Billing when you are ready to grow.</p><button class="text-button" type="button" @click="view = 'billing'">View plan →</button></article>
+        </div>
+
+        <div v-else-if="view === 'settings'" class="view-content">
+          <div class="section-toolbar"><div><p class="eyebrow">Account controls</p><h2>Settings</h2><p>Identity, organization, and access details for this FrontDeskWise account.</p></div></div>
+          <div class="settings-grid"><article class="panel settings-card"><p class="eyebrow">Signed-in account</p><h3>{{ authSnapshot?.user.name ?? 'FrontDeskWise user' }}</h3><p>{{ authSnapshot?.user.email ?? 'Not signed in' }}</p><small>Authentication is managed by Firebase. Password changes and Google sign-in are handled by the identity provider.</small><button v-if="authSnapshot" class="outline-button small" type="button" @click="signOut">Sign out</button></article><article class="panel settings-card"><p class="eyebrow">Organization</p><h3>{{ activeOrganization?.name ?? 'Your organization' }}</h3><p>{{ activeOrganization?.role ?? 'owner' }} · {{ availableBusinesses.length }} businesses</p><small>One organization owns the businesses, CRM connections, knowledge, and billing relationship.</small><button class="outline-button small" type="button" @click="view = 'businesses'">Manage businesses →</button></article><article class="panel settings-card"><p class="eyebrow">Billing access</p><h3>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h3><p>{{ activeOrganization?.billing.status ?? 'trial' }} · {{ activeOrganization?.billing.access.allowed ? 'write access enabled' : 'read-only access' }}</p><small>Access changes only after the server receives the provider-confirmed billing state.</small><button class="outline-button small" type="button" @click="view = 'billing'">Open billing →</button></article></div>
+          <article v-if="authSnapshot && ownershipVerification" class="panel verification-panel"><div class="panel-heading"><div><p class="eyebrow">Website ownership</p><h2>{{ ownershipVerification.status === 'verified' ? 'Ownership verified' : 'Verify before publishing' }}</h2><p>{{ ownershipVerification.status === 'verified' ? 'This business can publish its widget and receive production leads.' : 'Verify the website connected to this business before installing the live widget.' }}</p></div><span :class="['status-pill', ownershipVerification.status === 'verified' ? 'booked' : ownershipVerification.status === 'rejected' ? 'new' : 'qualified']">{{ ownershipVerification.status }}</span></div><div v-if="ownershipVerification.status !== 'verified'" class="verification-controls"><label>Method<select v-model="verificationMethod"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><button class="outline-button small" type="button" :disabled="verificationLoading" @click="requestOwnershipVerification">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethod !== 'email' && verificationMethod !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="checkOwnershipVerification">Check now</button></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="verificationMessage" class="saved-message">✓ {{ verificationMessage }}</p><p v-if="verificationError" class="form-error">{{ verificationError }}</p></article>
         </div>
 
         <div v-else-if="view === 'billing'" class="view-content">

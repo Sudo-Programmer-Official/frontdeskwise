@@ -83,7 +83,11 @@ No password is stored in PostgreSQL. The Firebase account must be created/manage
 - `POST /api/v1/auth/businesses` — crawls and creates another business under an authorized organization.
 - Existing `/api/v1/demo/:slug/*` owner routes accept either a valid demo bearer or a verified Firebase bearer with owner/admin access.
 
-Claiming a non-internal demo moves the business into the new organization, marks it as a 14-day starter trial, grants the user business admin access, and closes the demo session for future claims. The internal sales demo is never moved by a visitor claim.
+Ownership verification uses `GET /api/v1/demo/:slug/verification`, `POST /api/v1/demo/:slug/verification/request`, and `POST /api/v1/demo/:slug/verification/check`. A super-admin can manually approve a business through `POST /api/v1/admin/businesses/:businessId/verification/approve`.
+
+Claiming a non-internal demo moves the business into the new organization, marks it as a seven-day starter trial, grants the user business admin access, and closes the demo session for future claims. The internal sales demo is never moved by a visitor claim. The default is controlled by `FRONTDESKWISE_DEFAULT_TRIAL_DAYS` and is set to `7` in the Render blueprint.
+
+Before a claimed business can publish a live widget or capture production leads, ownership must be verified. The dashboard supports meta-tag, verification-file, DNS TXT, signed-email-domain, and super-admin manual approval methods. Internal sandbox demos are pre-verified so the login-free sales demo remains usable.
 
 ## Client configuration
 

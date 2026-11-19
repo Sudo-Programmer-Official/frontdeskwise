@@ -17,9 +17,13 @@ This is a speed-first production launch, not the final general-availability post
 - The API has `/health` liveness, `/ready` database readiness, request IDs, security headers, and process-local request limits.
 - The public web build generates the production canonical URL, robots file, sitemap, manifest, and structured metadata when built with `VITE_SITE_ORIGIN=https://frontdeskwise.com`.
 - Leads remain durable in FrontDeskWise before CRM delivery. Webhook and HubSpot delivery are idempotent, encrypted, retryable, and observable from the owner dashboard.
+- Firebase email/password and Google sign-in bootstrap each account into an organization; the browser never receives server secrets.
+- Stripe Checkout, Customer Portal, signed webhook reconciliation, seven-day trials, entitlements, and read-only billing states are implemented.
+- Private S3 document upload/download plus PDF, DOCX, spreadsheet, and text extraction are implemented; SES is used for super-admin and demo-request notifications.
+- Website ownership verification gates live publishing and production lead capture while internal sandbox demos remain pre-verified.
 - The frontend API origin is build-time configurable and is no longer coupled to the Vercel origin.
 
-## Six remaining launch items
+## Launch items
 
 ### 1. Deploy the API and bind the API domain
 
@@ -56,21 +60,28 @@ OPENAI_API_KEY=the production OpenAI key
 
 Keep `DATABASE_SSL_REJECT_UNAUTHORIZED=true`. In Render, add a Secret File named `rds-ca.pem` containing the AWS RDS PEM bundle. Render exposes it at `/etc/secrets/rds-ca.pem`; do not paste the large base64 bundle into an environment variable. If the current RDS certificate chain is not available to Render yet, stop before public traffic and add the CA file; do not silently downgrade certificate validation for the public service.
 
-### 4. Complete the owner identity boundary
+### 4. Configure and test the owner identity boundary
 
-The current URL demo uses a short-lived hashed bearer session so the value loop can be tested. Before selling accounts, exchange the demo session into the existing Identity SDK session and bind `workspace_users.identity_subject` to the verified identity subject. Do not add a second password store. This is the one remaining application integration that cannot be completed from deployment configuration alone because it requires the Identity SDK issuer/client settings.
+Enable Email/Password and Google in Firebase Auth, add the deployed domains to Firebase Authorized Domains, and create the allowlisted super-admin account. The URL demo remains short-lived and login-free until Save, Customize, Install, or Subscribe; those actions bootstrap/claim the demo into the Firebase-authenticated organization. Do not add a second password store.
 
-### 5. Keep billing disabled until the webhook contract is verified
+### 5. Configure and test billing in Stripe Test mode
 
-The database already models sandbox/live billing, plans, entitlements, and billing events. The first public build may keep the demo path enabled, but live checkout must remain disabled until the subscription provider webhook is signature-verified, idempotent, and tested for activation, cancellation, grace, and retry. Do not mark a workspace paid from a browser return URL.
+Create FrontDeskWise-specific products/prices, set the four Test-mode price IDs together with `sk_test_...` and the Test-mode `whsec_...`, and verify Checkout, Portal, subscription updates, cancellation, paid invoices, failed invoices, and idempotent retries. The browser return URL never marks a workspace paid; only the signed webhook does. See [organization billing](organization-billing-and-control-plane.md) for the exact Render mapping and live cutover procedure.
 
-### 6. Run the acceptance and operations pass
+### 6. Configure private files, SES, and ownership verification
+
+Create the private S3 bucket and least-privilege runtime identity, configure bucket CORS for the three web origins, verify `hello@frontdeskwise.com` or the domain in SES, and test PDF/DOCX/text upload until the document reaches `ready`. Verify a claimed business with a meta tag, file, DNS TXT, or signed email before installing the production widget.
+
+### 7. Run the acceptance and operations pass
 
 - Submit a disposable public website URL and confirm a tenant, crawl sources, owner token, and dashboard.
 - Ask a supported question and verify citation/source metadata.
 - Ask an unsupported question and verify a safe fallback plus knowledge gap.
 - Capture a lead from the dashboard and widget; confirm `leads`, `lead_events`, and outbox state.
 - Connect a webhook or HubSpot sandbox and verify sync, retry, idempotency, and no credential exposure.
+- Verify a website ownership method, then install the widget; confirm an unverified claimed business is blocked from production lead capture.
+- Upload a private document, confirm extraction creates searchable chunks, and verify the S3 bucket remains private.
+- Sign in as `hello@frontdeskwise.com` and confirm `/platform` shows live organization/demo request data and SES test delivery.
 - Confirm `robots.txt`, `sitemap.xml`, canonical metadata, mobile layout, and `api.frontdeskwise.com` network calls.
 - Configure database backups/restore verification, alerting, log retention, PII deletion/retention policy, and a scheduled recrawl plan.
 

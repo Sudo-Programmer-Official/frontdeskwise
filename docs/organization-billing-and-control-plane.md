@@ -32,6 +32,8 @@ Firebase user
 | `paused` | Block paid product operations |
 | `cancelled` | Block paid product operations; retain data for recovery |
 
+The API enforces this boundary server-side on every mutating workspace route. Trial/active/grace organizations can write; paused/cancelled or expired trials remain readable but are read-only until billing is restored. A separate ownership boundary blocks production publishing, CRM connection, booking actions, and lead capture until the business website is verified.
+
 The demo organization remains `sandbox` and does not require a Stripe subscription. Customer-specific terms belong in `organization_plan_overrides`; no customer price is hard-coded in application code.
 
 ## Database ownership

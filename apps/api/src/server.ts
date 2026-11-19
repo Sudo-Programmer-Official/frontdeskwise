@@ -1,11 +1,13 @@
 import "dotenv/config";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { resolveTxt } from "node:dns/promises";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
 import { crawlWebsite, normalisePublicUrl, type CrawledPage } from "./crawler.js";
+import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
@@ -18,6 +20,7 @@ import {
   isAllowedDocumentType,
   maxDocumentBytes,
   organizationDocumentKey,
+  readDocumentObject,
   safeDocumentFileName,
   storageConfigured,
   storageConfigurationMessage,
@@ -55,7 +58,7 @@ const demoRateLimiter = new FixedWindowRateLimiter(
 );
 const stripe = process.env.STRIPE_SECRET_KEY?.trim() ? new Stripe(process.env.STRIPE_SECRET_KEY.trim()) : null;
 const stripeAppMetadata = "frontdeskwise";
-const defaultTrialDays = Math.max(1, Number(process.env.FRONTDESKWISE_DEFAULT_TRIAL_DAYS ?? 14));
+const defaultTrialDays = Math.max(1, Number(process.env.FRONTDESKWISE_DEFAULT_TRIAL_DAYS ?? 7));
 
 function trialEndFromNow(): string {
   return new Date(Date.now() + defaultTrialDays * 24 * 60 * 60 * 1_000).toISOString();
@@ -113,6 +116,8 @@ type KnowledgeChunk = {
 };
 
 type BillingStatus = "trial" | "active" | "grace" | "paused" | "cancelled";
+type OwnershipStatus = "pending" | "verified" | "rejected";
+type OwnershipVerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 
 type BillingState = {
   mode: "sandbox" | "live";
@@ -214,6 +219,12 @@ type Business = {
   vertical: string;
   websiteUrl: string;
   location: string;
+  ownershipStatus: OwnershipStatus;
+  ownershipVerificationMethod: OwnershipVerificationMethod | null;
+  ownershipVerificationTokenHash: string | null;
+  ownershipVerificationExpiresAt: string | null;
+  ownershipVerifiedAt: string | null;
+  ownershipVerifiedByUserId: string | null;
   sources: Source[];
   chunks: KnowledgeChunk[];
   conversations: Map<string, Conversation>;
@@ -380,6 +391,11 @@ function organizationBillingAccess(row: Record<string, unknown>): { allowed: boo
   if (status === "trial" && (!row.trial_end_at || Date.parse(toIso(row.trial_end_at)) > Date.now())) return { allowed: true, reason: "trial" };
   if (status === "grace" && (!row.grace_end_at || Date.parse(toIso(row.grace_end_at)) > Date.now())) return { allowed: true, reason: "billing_grace" };
   return { allowed: false, reason: status };
+}
+
+function requireWritableOrganization(row: Record<string, unknown>): void {
+  const access = organizationBillingAccess(row);
+  if (!access.allowed) throw httpError(402, "This organization is read-only until billing is restored");
 }
 
 function organizationBillingPayload(row: Record<string, unknown>): Record<string, unknown> {
@@ -791,6 +807,12 @@ function makeBusiness(input: {
     vertical: "local_business",
     websiteUrl: input.websiteUrl,
     location: input.location ?? "Demo workspace",
+    ownershipStatus: "pending",
+    ownershipVerificationMethod: null,
+    ownershipVerificationTokenHash: null,
+    ownershipVerificationExpiresAt: null,
+    ownershipVerifiedAt: null,
+    ownershipVerifiedByUserId: null,
     sources,
     chunks,
     conversations: new Map(),
@@ -880,6 +902,9 @@ function seedInternalBusiness(input: {
     pages: [page],
     location: input.location,
   });
+  business.ownershipStatus = "verified";
+  business.ownershipVerificationMethod = "manual";
+  business.ownershipVerifiedAt = now;
   businesses.set(business.slug, business);
   return business;
 }
@@ -1017,6 +1042,99 @@ async function enqueueAndRunEmbeddingJob(business: Business): Promise<void> {
   if (jobId) void processEmbeddingJob(business, jobId);
 }
 
+async function processOrganizationDocument(documentId: string): Promise<void> {
+  if (!pool) return;
+  const documentResult = await pool.query<Record<string, unknown>>(
+    `select id, organization_id, business_id, object_key, original_file_name, content_type, metadata
+     from organization_documents
+     where id = $1 and status = 'uploaded'`,
+    [documentId],
+  );
+  if (!documentResult.rowCount) return;
+  const document = documentResult.rows[0];
+  const businessId = typeof document.business_id === "string" ? document.business_id : null;
+  if (!businessId) {
+    await pool.query(
+      `update organization_documents
+       set status = 'failed', metadata = metadata || $2::jsonb, updated_at = now()
+       where id = $1`,
+      [documentId, JSON.stringify({ error: "Select a business before processing organization knowledge." })],
+    );
+    return;
+  }
+
+  await pool.query(
+    `update organization_documents
+     set status = 'processing', metadata = metadata || $2::jsonb, updated_at = now()
+     where id = $1 and status = 'uploaded'`,
+    [documentId, JSON.stringify({ error: null })],
+  );
+
+  try {
+    const buffer = await readDocumentObject(String(document.object_key));
+    const extracted = await extractDocumentText(buffer, String(document.content_type), String(document.original_file_name));
+    const chunks = chunkDocumentText(extracted.text);
+    if (!chunks.length) throw new Error("No readable text was found in this document");
+    const sourceId = randomUUID();
+    const sourceHash = contentHash(extracted.text);
+    const sourceResult = await pool.query<{ id: string }>(
+      `insert into business_sources
+         (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
+       values ($1, $2, $3, $3, $4, $5, 'document', 'ready', $6, now())
+       on conflict (business_id, content_hash) do update set
+         source_url = excluded.source_url,
+         canonical_url = excluded.canonical_url,
+         title = excluded.title,
+         content_type = excluded.content_type,
+         page_type = excluded.page_type,
+         crawl_status = excluded.crawl_status,
+         last_crawled_at = excluded.last_crawled_at,
+         error_message = null
+       returning id`,
+      [sourceId, businessId, `document:${documentId}`, String(document.original_file_name), String(document.content_type), sourceHash],
+    );
+    const resolvedSourceId = sourceResult.rows[0].id;
+    for (const [index, chunk] of chunks.entries()) {
+      await pool.query(
+        `insert into knowledge_chunks (id, business_id, source_id, content, content_hash, metadata)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (business_id, content_hash) do update set
+           source_id = excluded.source_id,
+           content = excluded.content,
+           metadata = excluded.metadata`,
+        [
+          randomUUID(),
+          businessId,
+          resolvedSourceId,
+          chunk,
+          contentHash(chunk),
+          JSON.stringify({ sourceType: "uploaded_document", documentId, fileName: document.original_file_name, parser: extracted.parser, chunkIndex: index, pageCount: extracted.pageCount }),
+        ],
+      );
+    }
+    await pool.query(
+      `update organization_documents
+       set status = 'ready', metadata = metadata || $2::jsonb, updated_at = now()
+       where id = $1`,
+      [documentId, JSON.stringify({ error: null, parser: extracted.parser, pageCount: extracted.pageCount, characterCount: extracted.text.length, chunkCount: chunks.length })],
+    );
+    const businessResult = await pool.query<{ slug: string }>("select slug from businesses where id = $1", [businessId]);
+    if (businessResult.rowCount) {
+      const business = await getBusiness(businessResult.rows[0].slug);
+      await enqueueAndRunEmbeddingJob(business);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 1_000) : "Document processing failed";
+    await pool.query(
+      `update organization_documents
+       set status = 'failed', metadata = metadata || $2::jsonb, updated_at = now()
+       where id = $1`,
+      [documentId, JSON.stringify({ error: message })],
+    );
+    app.log.warn({ documentId, error: message }, "Organization document processing failed");
+  }
+}
+
 async function persistBusiness(business: Business, organizationIdOverride?: string): Promise<void> {
   if (!pool) return;
   const client = await pool.connect();
@@ -1043,10 +1161,12 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     const businessResult = await client.query<{ id: string }>(
       `insert into businesses (id, name, slug, vertical, website_url, timezone, location,
                               organization_id, billing_mode, is_demo, is_internal_demo, billing_status, plan_key, billing_interval,
+                              ownership_status, ownership_verification_method, ownership_verification_token_hash,
+                              ownership_verification_expires_at, ownership_verified_at, ownership_verified_by_user_id,
                               trial_ends_at, current_period_ends_at, grace_ends_at, billing_provider,
                               provider_customer_id, provider_subscription_id, public_site_key,
                               widget_enabled, widget_last_loaded_at, widget_load_count)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
        on conflict (slug) do update set
          name = excluded.name,
          vertical = excluded.vertical,
@@ -1059,6 +1179,12 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
          billing_status = excluded.billing_status,
          plan_key = excluded.plan_key,
          billing_interval = excluded.billing_interval,
+         ownership_status = case when businesses.ownership_status = 'verified' then businesses.ownership_status else excluded.ownership_status end,
+         ownership_verification_method = case when businesses.ownership_status = 'verified' then businesses.ownership_verification_method else excluded.ownership_verification_method end,
+         ownership_verification_token_hash = case when businesses.ownership_status = 'verified' then businesses.ownership_verification_token_hash else excluded.ownership_verification_token_hash end,
+         ownership_verification_expires_at = case when businesses.ownership_status = 'verified' then businesses.ownership_verification_expires_at else excluded.ownership_verification_expires_at end,
+         ownership_verified_at = coalesce(businesses.ownership_verified_at, excluded.ownership_verified_at),
+         ownership_verified_by_user_id = coalesce(businesses.ownership_verified_by_user_id, excluded.ownership_verified_by_user_id),
          trial_ends_at = excluded.trial_ends_at,
          current_period_ends_at = excluded.current_period_ends_at,
          grace_ends_at = excluded.grace_ends_at,
@@ -1085,6 +1211,12 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.billing.status,
         business.billing.planKey,
         business.billing.interval,
+        isInternalDemo ? "verified" : business.ownershipStatus,
+        business.ownershipVerificationMethod,
+        business.ownershipVerificationTokenHash,
+        business.ownershipVerificationExpiresAt,
+        business.ownershipVerifiedAt,
+        business.ownershipVerifiedByUserId,
         business.billing.trialEndsAt,
         business.billing.currentPeriodEndsAt,
         business.billing.graceEndsAt,
@@ -1238,6 +1370,17 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     vertical: String(row.vertical),
     websiteUrl: String(row.website_url ?? ""),
     location: String(row.location ?? "Demo workspace"),
+    ownershipStatus: row.ownership_status === "verified" || row.ownership_status === "rejected" ? row.ownership_status : "pending",
+    ownershipVerificationMethod: row.ownership_verification_method === "email"
+      || row.ownership_verification_method === "meta_tag"
+      || row.ownership_verification_method === "file"
+      || row.ownership_verification_method === "dns_txt"
+      || row.ownership_verification_method === "manual"
+      ? row.ownership_verification_method : null,
+    ownershipVerificationTokenHash: typeof row.ownership_verification_token_hash === "string" ? row.ownership_verification_token_hash : null,
+    ownershipVerificationExpiresAt: row.ownership_verification_expires_at ? toIso(row.ownership_verification_expires_at) : null,
+    ownershipVerifiedAt: row.ownership_verified_at ? toIso(row.ownership_verified_at) : null,
+    ownershipVerifiedByUserId: typeof row.ownership_verified_by_user_id === "string" ? row.ownership_verified_by_user_id : null,
     sources: sourceResult.rows.map((source) => ({
       id: String(source.id),
       url: String(source.source_url),
@@ -1777,6 +1920,72 @@ async function requireAuthenticatedBusinessOwner(business: Business, request: Fa
   if (!result.rowCount) throw httpError(403, "Your account does not have owner access to this business");
 }
 
+function requireWritableBusiness(business: Business): void {
+  const access = billingAccess(business.billing);
+  if (!access.allowed) throw httpError(402, "This workspace is read-only until billing is restored");
+}
+
+function requireVerifiedBusiness(business: Business): void {
+  if (business.billing.isDemo && business.billing.mode === "sandbox") return;
+  if (business.ownershipStatus !== "verified") {
+    throw httpError(403, "Verify ownership of this business before publishing the live widget or collecting production leads");
+  }
+}
+
+function verificationHostname(business: Business): string {
+  return new URL(business.websiteUrl).hostname.replace(/^www\./i, "").toLowerCase();
+}
+
+function verificationInstructions(method: OwnershipVerificationMethod, hostname: string, token: string): string {
+  if (method === "meta_tag") return `Add <meta name="frontdeskwise-verification" content="${token}"> inside the public homepage <head>, then click Verify.`;
+  if (method === "file") return `Publish this exact file at https://${hostname}/.well-known/frontdeskwise-verification.txt with this single line: ${token}`;
+  if (method === "dns_txt") return `Create a DNS TXT record for ${hostname} with this value: frontdeskwise-verification=${token}`;
+  if (method === "email") return `Sign in with a verified business email whose domain matches ${hostname}.`;
+  return "A FrontDeskWise super-admin will review this ownership request manually.";
+}
+
+async function fetchVerificationPage(url: string): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal, redirect: "follow", headers: { accept: "text/html,text/plain" } });
+    if (!response.ok) throw new Error(`Verification fetch returned ${response.status}`);
+    return (await response.text()).slice(0, 2_000_000);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function verifyBusinessOwnership(business: Business, method: OwnershipVerificationMethod, token: string, authUser: FirebaseAuthUser): Promise<boolean> {
+  if (method === "email") {
+    return authUser.email.split("@").pop()?.toLowerCase() === verificationHostname(business);
+  }
+  if (method === "meta_tag") {
+    const html = await fetchVerificationPage(business.websiteUrl);
+    return new RegExp(`<meta[^>]+name=["']frontdeskwise-verification["'][^>]+content=["']${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(["'])`, "i").test(html)
+      || new RegExp(`<meta[^>]+content=["']${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(["'])[^>]+name=["']frontdeskwise-verification["']`, "i").test(html);
+  }
+  if (method === "file") {
+    const origin = new URL(business.websiteUrl).origin;
+    const content = await fetchVerificationPage(`${origin}/.well-known/frontdeskwise-verification.txt`);
+    return content.trim() === token;
+  }
+  if (method === "dns_txt") {
+    const records = await resolveTxt(verificationHostname(business));
+    return records.flat().some((record) => record.trim() === `frontdeskwise-verification=${token}`);
+  }
+  return false;
+}
+
+function ownershipPayload(business: Business): Record<string, unknown> {
+  return {
+    status: business.ownershipStatus,
+    method: business.ownershipVerificationMethod,
+    verifiedAt: business.ownershipVerifiedAt,
+    hostname: verificationHostname(business),
+  };
+}
+
 function billingAccess(billing: BillingState): { allowed: boolean; reason: string } {
   if (billing.isDemo && billing.mode === "sandbox") return { allowed: true, reason: "demo" };
   if (billing.status === "active") return { allowed: true, reason: "active_subscription" };
@@ -2304,6 +2513,11 @@ function workspacePayload(business: Business) {
       websiteUrl: business.websiteUrl,
     },
     agent: business.agentConfig,
+    ownership: {
+      status: business.ownershipStatus,
+      method: business.ownershipVerificationMethod,
+      verifiedAt: business.ownershipVerifiedAt,
+    },
     billing: {
       ...business.billing,
       access: billingAccess(business.billing),
@@ -2789,7 +3003,8 @@ app.post("/api/v1/storage/documents/presign", async (request) => {
   const fileName = requiredString(body.fileName, "fileName", 240);
   const contentType = requiredString(body.contentType, "contentType", 160).toLowerCase();
   const sizeBytes = Number(body.sizeBytes);
-  await organizationForUser(appUser.id, organizationId);
+  const organization = await organizationForUser(appUser.id, organizationId);
+  requireWritableOrganization(organization);
   if (businessId) await organizationBusinessForUser(appUser.id, organizationId, businessId);
   if (!isAllowedDocumentType(contentType)) throw httpError(400, `Unsupported document type. Allowed types: ${allowedDocumentTypeList().join(", ")}`);
   if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) throw httpError(400, "sizeBytes must be a positive integer");
@@ -2830,6 +3045,8 @@ app.post("/api/v1/storage/documents/:documentId/complete", async (request) => {
   );
   if (!result.rowCount) throw httpError(404, "Document not found");
   const row = result.rows[0];
+  const organization = await organizationForUser(appUser.id, String(row.organization_id));
+  requireWritableOrganization(organization);
   const object = await inspectDocumentObject(String(row.object_key));
   if (object.ContentLength !== undefined && object.ContentLength !== Number(row.size_bytes)) {
     await deleteDocumentObject(String(row.object_key));
@@ -2844,6 +3061,9 @@ app.post("/api/v1/storage/documents/:documentId/complete", async (request) => {
                size_bytes, etag, status, metadata, created_at, updated_at`,
     [documentId, object.ContentLength ?? null, object.ETag?.replace(/^"|"$/g, "") ?? null],
   );
+  void processOrganizationDocument(documentId).catch((error: unknown) => {
+    app.log.warn({ documentId, error: error instanceof Error ? error.message : "unknown error" }, "Organization document processing could not start");
+  });
   return { document: organizationDocumentPayload(updated.rows[0]) };
 });
 
@@ -2880,6 +3100,8 @@ app.delete("/api/v1/storage/documents/:documentId", async (request) => {
     [documentId, appUser.id, ["owner", "admin"]],
   );
   if (!result.rowCount) throw httpError(404, "Document not found");
+  const organization = await organizationForUser(appUser.id, String(result.rows[0].organization_id));
+  requireWritableOrganization(organization);
   await deleteDocumentObject(String(result.rows[0].object_key));
   await pool.query("update organization_documents set status = 'deleted', updated_at = now() where id = $1", [documentId]);
   return { ok: true, documentId };
@@ -3036,6 +3258,31 @@ app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
     owners: owners.rows,
     businesses: businessesResult.rows.map((business) => ({ id: String(business.id), name: String(business.name), slug: String(business.slug), websiteUrl: String(business.website_url), updatedAt: nullableIso(business.updated_at) })),
   };
+});
+
+app.post("/api/v1/admin/businesses/:businessId/verification/approve", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { businessId?: string };
+  const businessId = requiredString(params.businessId, "businessId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const result = await pool.query<{ slug: string }>("select slug from businesses where id = $1", [businessId]);
+  if (!result.rowCount) throw httpError(404, "Business not found");
+  await pool.query(
+    `update businesses
+     set ownership_status = 'verified', ownership_verification_method = 'manual',
+         ownership_verification_token_hash = null, ownership_verification_expires_at = null,
+         ownership_verified_at = now(), ownership_verified_by_user_id = $2, updated_at = now()
+     where id = $1`,
+    [businessId, admin.id],
+  );
+  const business = await getBusiness(result.rows[0].slug);
+  business.ownershipStatus = "verified";
+  business.ownershipVerificationMethod = "manual";
+  business.ownershipVerificationTokenHash = null;
+  business.ownershipVerificationExpiresAt = null;
+  business.ownershipVerifiedAt = new Date().toISOString();
+  business.ownershipVerifiedByUserId = admin.id;
+  return { ok: true, businessId, verification: ownershipPayload(business) };
 });
 
 app.post("/api/v1/admin/organizations/:organizationId/trial", async (request) => {
@@ -3638,6 +3885,7 @@ app.post("/api/v1/demo/:slug/knowledge/reindex", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
   if (!pool || !embeddingsConfigured()) throw httpError(503, "Embedding jobs require OPENAI_API_KEY in the API environment");
   const jobId = await enqueueEmbeddingJob(business);
   if (!jobId) return { status: "succeeded", message: "All knowledge chunks already have embeddings" };
@@ -3645,10 +3893,85 @@ app.post("/api/v1/demo/:slug/knowledge/reindex", async (request) => {
   return { status: "queued", jobId, model: embeddingModel() };
 });
 
+app.get("/api/v1/demo/:slug/verification", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  return { verification: ownershipPayload(business), methods: ["email", "meta_tag", "file", "dns_txt", "manual"] };
+});
+
+app.post("/api/v1/demo/:slug/verification/request", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const authUser = await requireFirebaseAuth(request);
+  await requireAuthenticatedBusinessOwner(business, request);
+  const body = asRecord(request.body);
+  const method = body.method as OwnershipVerificationMethod;
+  if (!["email", "meta_tag", "file", "dns_txt", "manual"].includes(method)) throw httpError(400, "Unsupported ownership verification method");
+  const token = randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+  if (method === "email" && authUser.email.split("@").pop()?.toLowerCase() !== verificationHostname(business)) {
+    throw httpError(400, `Your signed-in email must use the ${verificationHostname(business)} domain for email verification`);
+  }
+  if (method === "email") {
+    business.ownershipStatus = "verified";
+    business.ownershipVerificationMethod = "email";
+    business.ownershipVerificationTokenHash = null;
+    business.ownershipVerificationExpiresAt = null;
+    business.ownershipVerifiedAt = new Date().toISOString();
+    business.ownershipVerifiedByUserId = null;
+  } else {
+    business.ownershipStatus = "pending";
+    business.ownershipVerificationMethod = method;
+    business.ownershipVerificationTokenHash = hashAccessToken(token);
+    business.ownershipVerificationExpiresAt = expiresAt;
+    business.ownershipVerifiedAt = null;
+    business.ownershipVerifiedByUserId = null;
+  }
+  await persistBusiness(business);
+  return {
+    verification: ownershipPayload(business),
+    token: method === "email" || method === "manual" ? null : token,
+    instructions: verificationInstructions(method, verificationHostname(business), token),
+    expiresAt: method === "email" || method === "manual" ? null : expiresAt,
+  };
+});
+
+app.post("/api/v1/demo/:slug/verification/check", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const authUser = await requireFirebaseAuth(request);
+  await requireAuthenticatedBusinessOwner(business, request);
+  if (business.ownershipVerificationMethod === "manual") return { verified: false, verification: ownershipPayload(business), message: "Manual verification is waiting for a super-admin review." };
+  const token = requiredString(asRecord(request.body).token, "token", 200);
+  if (!business.ownershipVerificationTokenHash || business.ownershipVerificationTokenHash !== hashAccessToken(token)) {
+    return { verified: false, verification: ownershipPayload(business), message: "That verification token does not match the current request." };
+  }
+  if (!business.ownershipVerificationExpiresAt || Date.parse(business.ownershipVerificationExpiresAt) <= Date.now()) {
+    return { verified: false, verification: ownershipPayload(business), message: "That verification request has expired. Start a new verification request." };
+  }
+  let verified = false;
+  try {
+    verified = await verifyBusinessOwnership(business, business.ownershipVerificationMethod ?? "manual", token, authUser);
+  } catch (error) {
+    return { verified: false, verification: ownershipPayload(business), message: error instanceof Error ? error.message : "The website could not be checked yet." };
+  }
+  if (!verified) return { verified: false, verification: ownershipPayload(business), message: "The verification proof was not found yet." };
+  business.ownershipStatus = "verified";
+  business.ownershipVerificationTokenHash = null;
+  business.ownershipVerificationExpiresAt = null;
+  business.ownershipVerifiedAt = new Date().toISOString();
+  business.ownershipVerifiedByUserId = null;
+  await persistBusiness(business);
+  return { verified: true, verification: ownershipPayload(business), message: "Business ownership verified. Live publishing is enabled." };
+});
+
 app.get("/api/v1/demo/:slug/widget/install", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   const apiOrigin = (process.env.FRONTDESKWISE_PUBLIC_API_ORIGIN ?? `http://localhost:${port}`).replace(/\/$/, "");
   const widgetOrigin = process.env.FRONTDESKWISE_WIDGET_ORIGIN ?? process.env.WEB_ORIGIN ?? "http://localhost:5173";
   const scriptUrl = process.env.FRONTDESKWISE_WIDGET_URL ?? `${widgetOrigin.replace(/\/$/, "")}/widget.js`;
@@ -3687,6 +4010,8 @@ app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
   if (!integrationEncryptionConfigured()) throw httpError(503, "CRM integrations are not configured on this environment yet");
   const body = asRecord(request.body);
@@ -3738,6 +4063,8 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
   const params = request.params as { slug?: string; integrationId?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
   const integration = await pool.query<Record<string, unknown>>(
     `select id, provider, encrypted_credentials from crm_integrations where id = $1 and business_id = $2`,
@@ -3792,6 +4119,8 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/retry", async (request)
   const params = request.params as { slug?: string; integrationId?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
   const integrationId = requiredString(params.integrationId, "integrationId", 80);
   const integration = await pool.query("select id from crm_integrations where id = $1 and business_id = $2", [integrationId, business.id]);
@@ -3848,6 +4177,8 @@ app.get("/api/v1/widget/:siteKey/config", async (request) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   await recordWidgetLoad(business);
   return {
     siteKey: business.widget.siteKey,
@@ -3861,6 +4192,8 @@ app.post("/api/v1/widget/:siteKey/conversations", async (request, reply) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   const body = asRecord(request.body);
   const conversation = await startConversation(business, typeof body.sessionId === "string" ? body.sessionId : null);
   return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId });
@@ -3870,6 +4203,8 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
   const params = request.params as { siteKey?: string; conversationId?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   const result = await recordConversationQuestion(business, conversation, question);
@@ -3880,6 +4215,8 @@ app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   const body = asRecord(request.body);
   const leadInputValue = leadInput(body, "widget", request);
   const conversation = leadInputValue.conversationId ? maybeConversation(business, leadInputValue.conversationId) : null;
@@ -3908,6 +4245,7 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
   const body = asRecord(request.body);
   const question = requiredString(body.question, "question", 1_000);
   const approvedAnswer = requiredString(body.approvedAnswer, "approvedAnswer", 4_000);
@@ -3948,6 +4286,7 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
   const body = asRecord(request.body);
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);
@@ -3962,6 +4301,7 @@ app.post("/api/v1/demo/:slug/conversations", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
   const body = asRecord(request.body);
   const conversation = await startConversation(business, typeof body.sessionId === "string" ? body.sessionId : null);
   return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId });
@@ -3971,6 +4311,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages", async (req
   const params = request.params as { slug?: string; conversationId?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   const result = await recordConversationQuestion(business, conversation, question);
@@ -3981,6 +4322,8 @@ app.post("/api/v1/demo/:slug/leads", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   const body = asRecord(request.body);
   const leadInputValue = leadInput(body, "dashboard", request);
   const conversation = leadInputValue.conversationId ? maybeConversation(business, leadInputValue.conversationId) : null;
@@ -4002,6 +4345,8 @@ app.post("/api/v1/demo/:slug/actions/booking", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
   const conversationId = requiredString(asRecord(request.body).conversationId, "conversationId", 120);
   const conversation = maybeConversation(business, conversationId);
   conversation.actionTaken = "booking";

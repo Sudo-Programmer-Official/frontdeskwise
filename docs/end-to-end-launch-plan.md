@@ -289,7 +289,7 @@ The public site key is not a secret. The widget should load in an iframe or shad
 
 1. Run 5–10 concierge pilots in one vertical, starting with swim schools.
 2. Measure answer correctness, first lead time, demo-to-reply, and owner activation.
-3. Enable Stripe sandbox checkout and webhook reconciliation.
+3. Validate Stripe sandbox checkout and webhook reconciliation.
 4. Convert successful pilots to a founding plan.
 5. Enable live billing only after sandbox events and cancellation/grace handling pass.
 
@@ -311,4 +311,4 @@ The public site key is not a secret. The widget should load in an iframe or shad
 - Cost per resolved conversation: tracked by model tier and tenant.
 - Demo → activation: the primary commercial metric after pilot volume is real.
 
-The next implementation slice is Identity SDK session exchange plus launch hardening: add production session rotation, scheduled recrawls/change detection, usage/model routing, and widget script verification. Live Stripe checkout should wait until those acceptance tests are passing.
+The next implementation slice is launch hardening: scheduled recrawls/change detection, usage/model routing, widget script verification, and additional CRM adapters. Firebase account bootstrap, Stripe checkout/webhooks/portal, private S3 document extraction, SES notifications, and ownership verification are already implemented and should be exercised in the production acceptance pass.

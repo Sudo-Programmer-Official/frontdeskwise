@@ -11,7 +11,7 @@ The remaining intentionally limited areas are:
 - Additional CRM OAuth adapters and provider-specific field mapping beyond the current HubSpot and signed-webhook adapters.
 - Scheduled recrawls, change detection, and production CDN verification.
 
-Firebase authentication, Stripe checkout/webhooks/customer portal, S3 private document storage, SES transactional mail, and the super-admin demo operations are implemented behind their required environment configuration.
+Firebase authentication, Stripe checkout/webhooks/customer portal, S3 private document storage with PDF/DOCX/spreadsheet extraction, SES transactional mail, website ownership verification, and the super-admin demo operations are implemented behind their required environment configuration.
 
 ## High-level architecture
 
@@ -38,8 +38,8 @@ flowchart LR
   outbox --> database
   outbox --> crm
   api -. optional .-> embeddings
-  identity -. future .-> api
-  billing -. future .-> api
+  identity --> api
+  billing --> api
 ```
 
 ## Runtime components
@@ -54,7 +54,7 @@ flowchart LR
 | Embedding client | `apps/api/src/embeddings.ts` | Optional provider calls and vector formatting |
 | Database adapter | `apps/api/src/database.ts` | Database-name guard, SSL normalization, PostgreSQL pool creation |
 | Migration runner | `apps/api/src/migrate.ts` | Ordered, checksum-verified, advisory-locked migrations |
-| Database schema | `infra/db/001_initial.sql` through `013_demo_operations_and_access_audit.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, and audited demo operations |
+| Database schema | `infra/db/001_initial.sql` through `017_document_ingestion.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, and private document processing |
 
 ## Primary flow: URL to demo
 
@@ -302,17 +302,15 @@ The database adapter rejects connection URLs aimed at another database name and 
 - Public site-key widget.
 - Durable lead events and retryable CRM webhook delivery.
 - HubSpot contact upsert adapter with optional capture-note activity.
-- Sandbox billing and plan entitlements.
+- Stripe sandbox/live checkout, Customer Portal, signed webhook reconciliation, and plan entitlements.
 
 ### Planned next
 
-- Identity SDK session exchange and production session rotation.
 - LLM answer generation and cost-aware model routing.
 - Scheduled recrawls and content change detection.
 - Usage and cost metering.
 - Widget script verification and production CDN delivery.
 - Additional native CRM adapters, OAuth, richer field mapping, and provider rate-limit handling.
-- Stripe sandbox checkout and webhook reconciliation.
 
 ## Related documents
 

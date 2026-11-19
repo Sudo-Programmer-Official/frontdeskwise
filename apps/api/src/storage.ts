@@ -103,6 +103,19 @@ export async function inspectDocumentObject(key: string): Promise<HeadObjectComm
   return client().send(new HeadObjectCommand({ Bucket: s3Bucket(), Key: key }));
 }
 
+export async function readDocumentObject(key: string): Promise<Buffer> {
+  const result = await client().send(new GetObjectCommand({ Bucket: s3Bucket(), Key: key }));
+  if (!result.Body) throw new Error("Uploaded document has no readable body");
+  if (typeof result.Body.transformToByteArray === "function") {
+    return Buffer.from(await result.Body.transformToByteArray());
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of result.Body as AsyncIterable<Uint8Array | string>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
 export async function createDocumentDownload(key: string, fileName: string): Promise<{ url: string; expiresAt: string }> {
   const expiresIn = 600;
   const command = new GetObjectCommand({
