@@ -1,0 +1,11 @@
+{
+  "name": "frontdeskwise",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "api:dev": "npm --prefix apps/api run dev"
+  }
+}
+
