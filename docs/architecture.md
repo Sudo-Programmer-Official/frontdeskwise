@@ -6,13 +6,12 @@ This document describes the architecture implemented in the current FrontDeskWis
 
 The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, lead capture, knowledge-gap approval, demo billing state, widget installation, and durable CRM lead delivery.
 
-The following integrations are intentionally not active yet:
+The remaining intentionally limited areas are:
 
-- Identity SDK session exchange and production session rotation.
-- LLM answer generation and model routing.
-- Additional CRM OAuth adapters and provider-specific field mapping.
-- Stripe checkout, verified billing webhooks, and live subscriptions.
+- Additional CRM OAuth adapters and provider-specific field mapping beyond the current HubSpot and signed-webhook adapters.
 - Scheduled recrawls, change detection, and production CDN verification.
+
+Firebase authentication, Stripe checkout/webhooks/customer portal, S3 private document storage, SES transactional mail, and the super-admin demo operations are implemented behind their required environment configuration.
 
 ## High-level architecture
 

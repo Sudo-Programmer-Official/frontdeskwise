@@ -38,7 +38,13 @@ app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const pool = createPoolFromEnv();
-const allowedWebOrigins = (process.env.WEB_ORIGIN ?? "*").split(",").map((origin) => origin.trim()).filter(Boolean);
+const configuredWebOrigins = (process.env.WEB_ORIGIN ?? "*").split(",").map((origin) => origin.trim().replace(/\/$/, "")).filter(Boolean);
+const allowedWebOrigins = Array.from(new Set([
+  ...configuredWebOrigins,
+  ...(configuredWebOrigins.some((origin) => origin.includes("frontdeskwise.com"))
+    ? ["https://frontdeskwise.com", "https://www.frontdeskwise.com", "https://app.frontdeskwise.com"]
+    : []),
+]));
 const apiRateLimiter = new FixedWindowRateLimiter(
   Number(process.env.FRONTDESKWISE_RATE_LIMIT_MAX ?? 120),
   Number(process.env.FRONTDESKWISE_RATE_LIMIT_WINDOW_MS ?? 60_000),
@@ -227,6 +233,15 @@ type Business = {
 const businesses = new Map<string, Business>();
 const memoryDemoAccess = new Map<string, { slug: string; businessId: string; expiresAt: string }>();
 const DEMO_ACCESS_TTL_MS = 48 * 60 * 60 * 1_000;
+const INTERNAL_DEMO_SLUGS = new Set([
+  "british-swim-school-tampa-bay",
+  "munchkin-town",
+  "tampa-bay-family-dental",
+]);
+
+function isInternalDemoSlug(slug: string): boolean {
+  return INTERNAL_DEMO_SLUGS.has(slug);
+}
 
 const defaultConfig = (businessName: string): AgentConfig => ({
   assistantName: `${businessName} Assistant`,
@@ -837,6 +852,38 @@ function seedDefaultBusiness(): Business {
   return business;
 }
 
+function seedInternalBusiness(input: {
+  name: string;
+  slug: string;
+  websiteUrl: string;
+  location: string;
+  content: string;
+}): Business {
+  const now = new Date().toISOString();
+  const page = {
+    url: input.websiteUrl,
+    canonicalUrl: input.websiteUrl,
+    title: input.name,
+    contentHash: contentHash(input.content),
+    pageType: "service",
+    lastCrawledAt: now,
+    chunks: [{
+      content: input.content,
+      contentHash: contentHash(input.content),
+      metadata: { headingPath: [], pageType: "service", tokenCount: input.content.split(/\s+/).length, overlapTokens: 0 },
+    }],
+  } satisfies CrawledPage;
+  const business = makeBusiness({
+    name: input.name,
+    slug: input.slug,
+    websiteUrl: input.websiteUrl,
+    pages: [page],
+    location: input.location,
+  });
+  businesses.set(business.slug, business);
+  return business;
+}
+
 function toIso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   return new Date(String(value)).toISOString();
@@ -975,7 +1022,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
   const client = await pool.connect();
   try {
     await client.query("begin");
-    const isInternalDemo = business.slug === "british-swim-school-tampa-bay";
+    const isInternalDemo = isInternalDemoSlug(business.slug);
     let organizationId = organizationIdOverride;
     if (organizationId) {
       const organization = await client.query<{ id: string }>("select id from organizations where id = $1", [organizationId]);
@@ -2208,8 +2255,44 @@ function integrationPayload(row: Record<string, unknown>) {
 }
 
 function workspacePayload(business: Business) {
+  const conversations = [...business.conversations.values()];
   const leadCount = business.leads.length;
-  const gapCount = [...business.knowledgeGaps.values()].filter((gap) => gap.status === "open").length;
+  const gapList = [...business.knowledgeGaps.values()];
+  const gapCount = gapList.filter((gap) => gap.status === "open").length;
+  const sourceCount = business.sources.length;
+  const chunkCount = business.chunks.length;
+  const readinessScore = sourceCount === 0
+    ? 0
+    : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (chunkCount > 0 ? 30 : 0) + Math.max(0, 30 - gapCount * 5)));
+  const setupSteps = [
+    sourceCount > 0,
+    chunkCount > 0,
+    Boolean(business.agentConfig.assistantName && business.agentConfig.welcomeMessage),
+    Boolean(business.widget.enabled && business.widget.siteKey),
+  ];
+  const questionCounts = new Map<string, { question: string; count: number }>();
+  for (const conversation of conversations) {
+    for (const message of conversation.messages) {
+      if (message.role !== "user" || !message.content.trim()) continue;
+      const key = message.content.toLowerCase().replace(/\s+/g, " ").trim();
+      const existing = questionCounts.get(key);
+      if (existing) existing.count += 1;
+      else questionCounts.set(key, { question: message.content.trim(), count: 1 });
+    }
+  }
+  const topQuestions = [...questionCounts.values()]
+    .sort((left, right) => right.count - left.count || left.question.localeCompare(right.question))
+    .slice(0, 5);
+  const today = new Date();
+  const trend = Array.from({ length: 30 }, (_, index) => {
+    const date = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (29 - index)));
+    const day = date.toISOString().slice(0, 10);
+    return {
+      label: date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
+      conversations: conversations.filter((conversation) => conversation.createdAt.slice(0, 10) === day).length,
+      leads: business.leads.filter((lead) => lead.createdAt.slice(0, 10) === day).length,
+    };
+  });
   return {
     slug: business.slug,
     status: business.billing.mode,
@@ -2232,15 +2315,47 @@ function workspacePayload(business: Business) {
       loadCount: business.widget.loadCount,
     },
     knowledge: {
-      sourceCount: business.sources.length,
-      chunkCount: business.chunks.length,
+      sourceCount,
+      chunkCount,
       openGaps: gapCount,
+      readiness: {
+        score: readinessScore,
+        sources: sourceCount,
+        chunks: chunkCount,
+        openGaps: gapCount,
+      },
     },
     stats: {
-      conversations: business.conversations.size,
+      conversations: conversations.length,
       leads: leadCount,
-      bookingClicks: [...business.conversations.values()].filter((conversation) => conversation.actionTaken === "booking").length,
+      bookingClicks: conversations.filter((conversation) => conversation.actionTaken === "booking").length,
+      unansweredQuestions: gapCount,
+      widgetLoads: business.widget.loadCount,
+      trend,
+      topQuestions,
+      actions: gapList.filter((gap) => gap.status === "open").sort((left, right) => right.occurrenceCount - left.occurrenceCount).slice(0, 5).map((gap) => ({
+        question: gap.question,
+        count: gap.occurrenceCount,
+        status: gap.status,
+      })),
+      setup: {
+        completed: setupSteps.filter(Boolean).length,
+        total: setupSteps.length,
+        percent: Math.round(setupSteps.filter(Boolean).length / setupSteps.length * 100),
+      },
     },
+  };
+}
+
+function publicWorkspacePayload(business: Business) {
+  const payload = workspacePayload(business);
+  return {
+    slug: payload.slug,
+    status: payload.status,
+    business: payload.business,
+    agent: payload.agent,
+    knowledge: payload.knowledge,
+    stats: payload.stats,
   };
 }
 
@@ -2456,11 +2571,29 @@ async function recordConversationQuestion(business: Business, conversation: Conv
   return result;
 }
 
-const seededBusiness = seedDefaultBusiness();
+const seededBusinesses = [
+  seedDefaultBusiness(),
+  seedInternalBusiness({
+    name: "Munchkin Town",
+    slug: "munchkin-town",
+    websiteUrl: "https://munchkintown.com/",
+    location: "Tampa Bay",
+    content: "Munchkin Town offers indoor play, birthday parties, camps, and family activities for young children. Families can review play sessions, party packages, safety policies, and current availability on the website. Contact the team to reserve a visit or ask about private events.",
+  }),
+  seedInternalBusiness({
+    name: "Tampa Bay Family Dental",
+    slug: "tampa-bay-family-dental",
+    websiteUrl: "https://tampabayfamilydental.com/",
+    location: "Tampa Bay",
+    content: "Tampa Bay Family Dental provides preventive care, cleanings, exams, emergency visits, and cosmetic dental consultations for families. New patients can request an appointment, review accepted insurance information, and ask the office about current availability and payment options.",
+  }),
+];
 if (pool) {
-  const persistedSeed = await loadBusinessFromDatabase(seededBusiness.slug);
-  if (persistedSeed) businesses.set(seededBusiness.slug, persistedSeed);
-  else await persistBusiness(seededBusiness);
+  for (const seededBusiness of seededBusinesses) {
+    const persistedSeed = await loadBusinessFromDatabase(seededBusiness.slug);
+    if (persistedSeed) businesses.set(seededBusiness.slug, persistedSeed);
+    else await persistBusiness(seededBusiness);
+  }
 }
 await syncStripePlanPrices();
 await resumeEmbeddingJobs();
@@ -3440,6 +3573,20 @@ app.post("/api/v1/demo-access/exchange", async (request) => {
     user: session.user,
     workspace: workspacePayload(business),
   };
+});
+
+app.get("/api/v1/demo-catalog", async () => ({
+  demos: [...businesses.values()]
+    .filter((business) => isInternalDemoSlug(business.slug))
+    .map(publicWorkspacePayload),
+}));
+
+app.get("/api/v1/demo/:slug/public", async (request) => {
+  const params = request.params as { slug?: string };
+  const slug = requiredString(params.slug, "slug", 120);
+  if (!isInternalDemoSlug(slug)) throw httpError(404, "Public demo workspace not found");
+  const business = await getBusiness(slug);
+  return publicWorkspacePayload(business);
 });
 
 app.get("/api/v1/demo/:slug", async (request) => {

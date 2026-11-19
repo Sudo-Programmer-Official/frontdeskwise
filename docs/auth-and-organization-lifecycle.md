@@ -37,6 +37,18 @@ Roles are intentionally split:
 
 The API never trusts a browser-supplied business ID by itself. Authenticated dashboard requests are authorized through the verified Firebase subject → `app_users` → organization/business membership chain. The existing hashed demo bearer remains supported for temporary demos and backward compatibility.
 
+## Live workspace data and demos
+
+The dashboard does not use customer-facing metric fixtures. Each selected business is loaded from the API and its summary is calculated from the business's persisted sources, chunks, conversations, messages, leads, knowledge gaps, widget loads, and agent configuration. Switching businesses clears the previous workspace state before loading the selected tenant, and question/lead mutations refresh the summary and organization aggregate.
+
+The only intentionally seeded workspaces are the public internal demos:
+
+- `british-swim-school-tampa-bay`
+- `munchkin-town`
+- `tampa-bay-family-dental`
+
+They are exposed through `GET /api/v1/demo-catalog` and `GET /api/v1/demo/:slug/public`. A newly authenticated organization with no businesses shows an empty setup state and must add its first business; it does not inherit demo metrics or another tenant's records. Product pricing and UI example text remain static configuration by design, while customer activity and workspace content are database-backed.
+
 ## Database records
 
 Migration `010_identity_organizations_and_business_membership.sql` adds:
@@ -56,10 +68,10 @@ test-user links, expiry/reset/revoke controls, and validation history.
 
 Existing businesses are backfilled into one organization each. Existing `workspace_users` are copied into the new membership model, but the legacy table remains while demo bearer sessions are being retired.
 
-The seeded internal demo is represented by:
+The seeded internal demos are represented by:
 
 - Organization: `FrontDeskWise Demo`
-- Business: `British Swim School Tampa Bay`
+- Businesses: `British Swim School Tampa Bay`, `Munchkin Town`, and `Tampa Bay Family Dental`
 - Application identity: `demo@frontdeskwise.com`
 
 No password is stored in PostgreSQL. The Firebase account must be created/managed in Firebase Auth; the first verified sign-in binds its Firebase subject to the seeded application user row.
@@ -102,6 +114,8 @@ The API verifies the Firebase ID-token signature and validates `aud`, `iss`, `su
 5. Add the second business through `POST /api/v1/auth/businesses` and verify that the organization membership query returns both businesses.
 6. Confirm Google popup sign-in from both `frontdeskwise.com` and `www.frontdeskwise.com`; Firebase Authorized Domains must include both.
 7. Add organization invitation flows after the core email/password and Google paths are stable.
+
+For production CORS, set Render `WEB_ORIGIN` to the comma-separated canonical origins `https://frontdeskwise.com,https://www.frontdeskwise.com,https://app.frontdeskwise.com` and redeploy the API. The API also expands a configured FrontDeskWise origin to these three approved origins as a deployment safety net.
 
 ## Super-admin demo operations
 

@@ -70,6 +70,33 @@ interface WidgetInstall {
   verification: { lastLoadedAt: string | null; loadCount: number };
 }
 
+interface WorkspaceStats {
+  conversations: number;
+  leads: number;
+  bookingClicks: number;
+  unansweredQuestions: number;
+  widgetLoads: number;
+  trend: Array<{ label: string; conversations: number; leads: number }>;
+  topQuestions: Array<{ question: string; count: number }>;
+  actions: Array<{ question: string; count: number; status: string }>;
+  setup: { completed: number; total: number; percent: number };
+}
+
+interface WorkspacePayload {
+  slug: string;
+  status: string;
+  business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
+  agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean };
+  knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; readiness?: { score: number; sources: number; chunks: number; openGaps: number } };
+  stats?: WorkspaceStats;
+}
+
+interface FeaturedDemo extends WorkspacePayload {
+  business: { id: string; name: string; location: string; websiteUrl: string };
+  knowledge: { sourceCount: number; chunkCount: number; openGaps: number; readiness?: { score: number; sources: number; chunks: number; openGaps: number } };
+  stats: WorkspaceStats;
+}
+
 interface BillingPlan {
   key: string;
   displayName: string;
@@ -163,11 +190,10 @@ const authPassword = ref("");
 const authOrganizationName = ref("");
 const authError = ref("");
 const authLoading = ref(false);
-const businessName = ref("British Swim School");
-const assistantName = ref("Swim Assistant");
-const welcomeMessage = ref(
-  "Hi! 👋 I’m your Swim Assistant. I can answer questions, help you find the right swim program, check locations and schedules, and get you started with enrollment.",
-);
+const businessName = ref("");
+const businessLocation = ref("");
+const assistantName = ref("AI Front Desk");
+const welcomeMessage = ref("Hi! I can answer questions from this business's website and help you get started.");
 const widgetColor = ref("#0d6efd");
 const showLeadCapture = ref(true);
 const showBookingAction = ref(true);
@@ -228,13 +254,14 @@ const adminLoading = ref(false);
 const adminError = ref("");
 const adminEmailTestLoading = ref(false);
 const adminEmailTestMessage = ref("");
+const featuredDemos = ref<FeaturedDemo[]>([]);
+const workspaceStats = ref<WorkspaceStats | null>(null);
+const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
+const workspaceReadiness = ref(0);
+const workspaceLoading = ref(false);
+const workspaceError = ref("");
 
-const leads = ref<Lead[]>([
-  { id: "demo-1", name: "Maya Rodriguez", intent: "Toddler lessons", status: "New", time: "8 min ago" },
-  { id: "demo-2", name: "James Wilson", intent: "Birthday party", status: "Qualified", time: "34 min ago" },
-  { id: "demo-3", name: "Priya Shah", intent: "Adult swim assessment", status: "Booked", time: "1 hr ago" },
-  { id: "demo-4", name: "Noah Bennett", intent: "Summer registration", status: "New", time: "2 hrs ago" },
-]);
+const leads = ref<Lead[]>([]);
 
 const navItems: Array<{ id: View; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
@@ -256,6 +283,11 @@ const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== 
 const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
 const availableBusinesses = computed(() => activeOrganization.value?.businesses ?? []);
 const aggregateMetrics = computed(() => activeOrganization.value?.metrics ?? { conversations: 0, leads: 0, bookings: 0 });
+const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "?").toUpperCase());
+const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
+const readinessScore = computed(() => workspaceReadiness.value);
+const chartMax = computed(() => Math.max(1, ...(workspaceStats.value?.trend ?? []).flatMap((point) => [point.conversations, point.leads])));
+const featuredDemo = computed(() => featuredDemos.value[0] ?? null);
 const workspaceSelection = computed({
   get: () => showAllBusinesses.value ? "__all__" : demoSlug.value,
   set: (value: string) => {
@@ -341,23 +373,99 @@ function requireAccountForPublish() {
   return false;
 }
 
-async function loadBusinessWorkspace(slug: string) {
-  const response = await fetch(apiUrl(`/api/v1/demo/${slug}`), { headers: ownerHeaders() });
-  if (!response.ok) return;
-  const payload = await response.json() as {
-    business?: { name?: string; websiteUrl?: string };
-    agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean };
-  };
-  businessName.value = payload.business?.name ?? businessName.value;
-  websiteUrl.value = payload.business?.websiteUrl ?? websiteUrl.value;
-  assistantName.value = payload.agent?.assistantName ?? assistantName.value;
-  welcomeMessage.value = payload.agent?.welcomeMessage ?? welcomeMessage.value;
-  widgetColor.value = payload.agent?.widgetColor ?? widgetColor.value;
-  showLeadCapture.value = payload.agent?.collectLeads ?? showLeadCapture.value;
-  showBookingAction.value = payload.agent?.showBookingAction ?? showBookingAction.value;
-  conversationId.value = "";
+function clearWorkspaceState() {
+  businessName.value = "";
+  businessLocation.value = "";
+  websiteUrl.value = "";
+  assistantName.value = "AI Front Desk";
+  welcomeMessage.value = "Hi! I can answer questions from this business's website and help you get started.";
+  workspaceStats.value = null;
+  workspaceKnowledge.value = null;
+  workspaceReadiness.value = 0;
   leads.value = [];
-  await loadLeads();
+  knowledgeGaps.value = [];
+  retrievalDiagnostics.value = [];
+  organizationDocuments.value = [];
+  integrations.value = [];
+  widgetInstall.value = null;
+  conversationId.value = "";
+}
+
+function applyWorkspacePayload(payload: WorkspacePayload) {
+  businessName.value = payload.business?.name ?? "";
+  businessLocation.value = payload.business?.location ?? "";
+  websiteUrl.value = payload.business?.websiteUrl ?? "";
+  assistantName.value = payload.agent?.assistantName ?? (businessName.value ? `${businessName.value} Assistant` : "AI Front Desk");
+  welcomeMessage.value = payload.agent?.welcomeMessage ?? "Hi! I can answer questions from this business's website and help you get started.";
+  widgetColor.value = payload.agent?.widgetColor ?? "#0d6efd";
+  showLeadCapture.value = payload.agent?.collectLeads ?? true;
+  showBookingAction.value = payload.agent?.showBookingAction ?? true;
+  workspaceStats.value = payload.stats ?? null;
+  workspaceKnowledge.value = payload.knowledge ?? null;
+  workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
+  conversationId.value = "";
+}
+
+async function loadBusinessWorkspace(slug: string, publicOnly = false) {
+  workspaceLoading.value = true;
+  workspaceError.value = "";
+  clearWorkspaceState();
+  try {
+    const endpoint = publicOnly ? `/api/v1/demo/${slug}/public` : `/api/v1/demo/${slug}`;
+    const response = await fetch(apiUrl(endpoint), { headers: publicOnly ? {} : ownerHeaders() });
+    const payload = await response.json() as WorkspacePayload & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load this workspace.");
+    applyWorkspacePayload(payload);
+    if (!publicOnly) {
+      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadDocuments()]);
+    }
+  } catch (error) {
+    workspaceError.value = error instanceof Error ? error.message : "Could not load this workspace.";
+  } finally {
+    workspaceLoading.value = false;
+  }
+}
+
+async function refreshWorkspaceSummary() {
+  if (!demoSlug.value || (!firebaseToken.value && !demoAccessToken.value)) return;
+  try {
+    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}`), { headers: ownerHeaders() });
+    const payload = await response.json() as WorkspacePayload;
+    if (!response.ok) return;
+    workspaceStats.value = payload.stats ?? null;
+    workspaceKnowledge.value = payload.knowledge ?? null;
+    workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
+  } catch {
+    // The mutation already succeeded; the next view load will reconcile the summary.
+  }
+}
+
+async function refreshAuthenticatedSnapshot() {
+  if (!firebaseToken.value) return;
+  try {
+    const snapshot = await currentAuthSnapshot();
+    if (snapshot) authSnapshot.value = snapshot;
+  } catch {
+    // Summary refresh must not turn a successful question/lead mutation into an error.
+  }
+}
+
+async function loadFeaturedDemos() {
+  try {
+    const response = await fetch(apiUrl("/api/v1/demo-catalog"));
+    const payload = await response.json() as { demos?: FeaturedDemo[] };
+    if (response.ok) featuredDemos.value = payload.demos ?? [];
+  } catch {
+    featuredDemos.value = [];
+  }
+}
+
+async function openPublicDemo(slug = featuredDemo.value?.slug ?? demoSlug.value) {
+  if (!slug) return;
+  demoSlug.value = slug;
+  showAllBusinesses.value = false;
+  view.value = "overview";
+  await loadBusinessWorkspace(slug, true);
 }
 
 async function selectBusiness(slug: string) {
@@ -374,6 +482,10 @@ async function syncAuthenticatedBusiness(snapshot: AuthSnapshot) {
     ?? organization?.businesses[0]
     ?? snapshot.organizations[0]?.businesses[0];
   if (preferred) await selectBusiness(preferred.slug);
+  else {
+    showAllBusinesses.value = false;
+    clearWorkspaceState();
+  }
 }
 
 function openAddBusiness() {
@@ -448,10 +560,7 @@ async function generateDemo() {
       window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.access.accessToken);
     }
     demoSlug.value = payload.slug ?? demoSlug.value;
-    businessName.value = payload.business?.name ?? businessName.value;
-    websiteUrl.value = payload.business?.websiteUrl ?? websiteUrl.value;
-    assistantName.value = payload.agent?.assistantName ?? assistantName.value;
-    welcomeMessage.value = payload.agent?.welcomeMessage ?? welcomeMessage.value;
+    await loadBusinessWorkspace(demoSlug.value);
     view.value = "overview";
   } catch (error) {
     generationError.value = error instanceof Error ? error.message : "We could not create that demo yet.";
@@ -470,15 +579,12 @@ async function consumeDemoLink() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ accessToken: token }),
     });
-    const payload = await response.json() as { error?: string; accessToken?: string; workspace?: { slug?: string; business?: { name?: string; websiteUrl?: string }; agent?: { assistantName?: string; welcomeMessage?: string } } };
+    const payload = await response.json() as { error?: string; accessToken?: string; workspace?: WorkspacePayload };
     if (!response.ok || !payload.accessToken || !payload.workspace) throw new Error(payload.error ?? "This demo link is invalid or expired.");
     demoAccessToken.value = payload.accessToken;
     window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.accessToken);
     demoSlug.value = payload.workspace.slug ?? demoSlug.value;
-    businessName.value = payload.workspace.business?.name ?? businessName.value;
-    websiteUrl.value = payload.workspace.business?.websiteUrl ?? websiteUrl.value;
-    assistantName.value = payload.workspace.agent?.assistantName ?? assistantName.value;
-    welcomeMessage.value = payload.workspace.agent?.welcomeMessage ?? welcomeMessage.value;
+    await loadBusinessWorkspace(demoSlug.value);
     view.value = "overview";
     window.history.replaceState({}, "", window.location.pathname);
   } catch (error) {
@@ -487,7 +593,7 @@ async function consumeDemoLink() {
 }
 
 async function loadKnowledge() {
-  if (!demoAccessToken.value || knowledgeLoading.value) return;
+  if ((!firebaseToken.value && !demoAccessToken.value) || knowledgeLoading.value) return;
   knowledgeLoading.value = true;
   knowledgeError.value = "";
   try {
@@ -630,14 +736,14 @@ async function resolveKnowledgeGap(gap: KnowledgeGap) {
 }
 
 async function loadWidgetInstall() {
-  if (!demoAccessToken.value || !authSnapshot.value) return;
+  if (!firebaseToken.value || !authSnapshot.value) return;
   const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
   if (!response.ok) return;
   widgetInstall.value = await response.json() as WidgetInstall;
 }
 
 async function loadLeads() {
-  if (!demoAccessToken.value) return;
+  if (!firebaseToken.value && !demoAccessToken.value) return;
   const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads`), { headers: ownerHeaders() });
   if (!response.ok) return;
   const payload = await response.json() as { leads?: Array<{ id: string; name?: string | null; intent?: string | null; status?: string; createdAt?: string }> };
@@ -651,7 +757,7 @@ async function loadLeads() {
 }
 
 async function loadIntegrations() {
-  if (!demoAccessToken.value) return;
+  if (!firebaseToken.value && !demoAccessToken.value) return;
   integrationLoading.value = true;
   integrationError.value = "";
   try {
@@ -992,6 +1098,7 @@ async function askQuestion() {
     answerRetrievalMode.value = payload.retrieval?.mode ?? "";
     answerSource.value = payload.citations?.[0]?.url ?? "";
     testQuestion.value = "";
+    await Promise.all([refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
   } catch (error) {
     testAnswer.value = error instanceof Error ? error.message : "Could not answer that question.";
     answerGrounded.value = false;
@@ -1019,7 +1126,7 @@ async function captureLead() {
   leadPhone.value = "";
   leadIntent.value = "";
   leadSavedMessage.value = "Lead captured · visible in Leads";
-  void loadLeads();
+  await Promise.all([loadLeads(), refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
   window.setTimeout(() => (leadSavedMessage.value = ""), 2600);
 }
 
@@ -1066,6 +1173,7 @@ function updateDocumentMetadata() {
 watch(view, updateDocumentMetadata);
 onMounted(() => {
   updateDocumentMetadata();
+  void loadFeaturedDemos();
   void consumeDemoLink();
   if (typeof window !== "undefined") {
     window.addEventListener("popstate", handleRouteChange);
@@ -1110,7 +1218,7 @@ function openHome() {
         </button>
         <div class="nav-actions">
             <button class="text-button" type="button" @click="scrollToPricing">Pricing</button>
-            <button class="text-button" type="button" @click="view = 'overview'">View demo dashboard</button>
+            <button class="text-button" type="button" @click="openPublicDemo()">View demo dashboard</button>
           <button class="dark-button small" type="button" @click="openAuth('signin')">Sign in</button>
         </div>
       </header>
@@ -1139,10 +1247,10 @@ function openHome() {
         </div>
 
         <div class="hero-visual">
-          <div class="floating-label label-one">42 leads captured</div>
-          <div class="floating-label label-two">11 knowledge gaps found</div>
+          <div class="floating-label label-one">{{ featuredDemo ? `${featuredDemo.stats.leads} leads in demo` : 'Live demo workspace' }}</div>
+          <div class="floating-label label-two">{{ featuredDemo ? `${featuredDemo.knowledge.openGaps} open knowledge gaps` : 'Grounded knowledge' }}</div>
           <div class="demo-card">
-            <div class="demo-card-top"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="demo-url">yourbusiness.com</span></div>
+            <div class="demo-card-top"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="demo-url">{{ featuredDemo?.business.websiteUrl || 'yourbusiness.com' }}</span></div>
             <div class="demo-site-hero"><span class="demo-badge">AI FRONT DESK · ONLINE</span><h3>More answers.<br />More bookings.</h3><div class="fake-cta">Get started <span>→</span></div></div>
             <div class="chat-preview">
               <div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div>
@@ -1153,6 +1261,8 @@ function openHome() {
           </div>
         </div>
       </div>
+
+      <div v-if="featuredDemos.length" class="featured-demo-links"><span>Preview a sample workspace:</span><button v-for="demo in featuredDemos" :key="demo.slug" type="button" @click="openPublicDemo(demo.slug)">{{ demo.business.name }}</button></div>
 
       <section class="proof-strip">
         <span>One simple loop:</span><strong>Question</strong><i>→</i><strong>Qualification</strong><i>→</i><strong>Action</strong><i>→</i><strong>Lead</strong><i>→</i><strong>Booking</strong>
@@ -1177,16 +1287,16 @@ function openHome() {
     <section v-else class="product-shell">
       <aside class="sidebar">
         <button class="sidebar-brand" type="button" @click="openHome"><img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
-        <div class="workspace-switcher"><span class="workspace-avatar">{{ businessName.charAt(0).toUpperCase() }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName }}</strong><small>Tampa Bay · Demo</small></span><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" @click="openAddBusiness">+</button><span class="chevron">⌄</span></div>
+        <div class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" @click="openAddBusiness">+</button><span class="chevron">⌄</span></div>
         <nav class="sidebar-nav">
-          <button v-for="item in navItems" :key="item.id" type="button" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'conversations'">24</b></button>
+          <button v-for="item in navItems" :key="item.id" type="button" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'conversations' && conversationCount">{{ conversationCount }}</b></button>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon">⚙</span><span>Admin control plane</span></button>
         </nav>
-        <div class="sidebar-bottom"><div class="setup-card"><div class="setup-row"><span>Setup progress</span><strong>85%</strong></div><div class="progress-bar"><span></span></div><small>3 of 4 steps complete</small></div><button class="sidebar-link" type="button" @click="openHome">← Back to landing page</button></div>
+        <div class="sidebar-bottom"><div class="setup-card"><div class="setup-row"><span>Setup progress</span><strong>{{ workspaceStats?.setup.percent ?? 0 }}%</strong></div><div class="progress-bar"><span :style="{ width: `${workspaceStats?.setup.percent ?? 0}%` }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete</small></div><button class="sidebar-link" type="button" @click="openHome">← Back to landing page</button></div>
       </aside>
 
       <section class="content-area">
-        <header class="content-header"><div><p class="breadcrumb">{{ showAllBusinesses ? 'All businesses' : businessName }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
+        <header class="content-header"><div><p class="breadcrumb">{{ showAllBusinesses ? 'All businesses' : (businessName || 'Workspace') }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
 
         <div v-if="view === 'overview' && showAllBusinesses" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Organization overview</p><h2>All businesses</h2><p>One account, one subscription, and a clear view across every business you manage.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
@@ -1196,24 +1306,28 @@ function openHome() {
         </div>
 
         <div v-else-if="view === 'overview'" class="view-content">
-          <div class="metric-grid">
-            <article class="metric-card blue-tint"><span class="metric-icon blue">♧</span><strong>42</strong><span>Leads captured</span><em>↗ +24%</em></article>
-            <article class="metric-card green-tint"><span class="metric-icon green">▣</span><strong>17</strong><span>Booking clicks</span><em>↗ +31%</em></article>
-            <article class="metric-card orange-tint"><span class="metric-icon orange">?</span><strong>11</strong><span>Unanswered questions</span><em class="negative">↗ +2</em></article>
-            <article class="metric-card purple-tint"><span class="metric-icon purple">▱</span><strong>82%</strong><span>AI readiness</span><div class="metric-progress"><span></span></div></article>
-          </div>
-          <div class="dashboard-grid">
-            <article class="panel chart-panel"><div class="panel-heading"><div><h2>Conversations & leads</h2><p>Last 30 days</p></div><div class="legend"><span><i class="blue-dot"></i> Conversations</span><span><i class="orange-dot"></i> Leads</span></div></div><div class="chart"><svg viewBox="0 0 640 190" preserveAspectRatio="none" aria-label="Conversations and leads trend"><path class="chart-grid" d="M0 25H640 M0 75H640 M0 125H640 M0 175H640"/><path class="area-blue" d="M0 150 C50 135 65 142 90 125 S145 148 180 105 S230 124 260 96 S310 116 345 80 S400 100 435 73 S485 97 520 56 S580 75 640 32 L640 190 L0 190Z"/><path class="line-blue" d="M0 150 C50 135 65 142 90 125 S145 148 180 105 S230 124 260 96 S310 116 345 80 S400 100 435 73 S485 97 520 56 S580 75 640 32"/><path class="line-orange" d="M0 175 C50 168 70 172 100 155 S145 170 185 148 S235 162 265 143 S320 158 350 130 S395 146 430 118 S480 139 520 105 S575 122 640 92"/></svg><div class="chart-labels"><span>Mar 1</span><span>Mar 9</span><span>Mar 17</span><span>Mar 25</span><span>Mar 29</span></div></div></article>
-            <article class="panel readiness-panel"><div class="panel-heading"><div><h2>AI readiness</h2><p>Based on your business knowledge</p></div><strong class="readiness-score">82%</strong></div><div class="readiness-ring"><div><strong>82</strong><span>/100</span></div></div><div class="readiness-list"><div><span class="check">✓</span> Website coverage <strong>91%</strong></div><div><span class="check">✓</span> Services <strong>96%</strong></div><div><span class="warning">!</span> Pricing coverage <strong>72%</strong></div><div><span class="warning">!</span> Policies <strong>64%</strong></div></div></article>
-          </div>
-          <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>What visitors are asking</p></div><button class="text-button" type="button" @click="view = 'conversations'">See all →</button></div><div class="question-list"><div><span>What age can my child start swim lessons?</span><strong>18</strong></div><div><span>How do I register for classes?</span><strong>14</strong></div><div><span>Do you offer a free trial or assessment?</span><strong>9</strong></div><div><span>What locations do you have?</span><strong>7</strong></div><div><span>What is your cancellation policy?</span><strong>6</strong></div></div></article><article class="panel"><div class="panel-heading"><div><h2>Recommended actions</h2><p>Turn gaps into better conversions</p></div></div><div class="action-list"><div><span class="action-check">✓</span><span>Add cancellation policy details</span><button type="button" @click="view = 'knowledge'">Add answer</button></div><div><span class="action-check">✓</span><span>Clarify birthday party options</span><button type="button" @click="view = 'knowledge'">Add answer</button></div><div><span class="action-check done">✓</span><span>Update swim class age requirements</span><button type="button" @click="view = 'knowledge'">View</button></div><div><span class="action-check done">✓</span><span>Add summer program information</span><button type="button" @click="view = 'knowledge'">View</button></div></div></article></div>
+          <div v-if="workspaceError" class="panel workspace-message"><strong>Workspace data unavailable</strong><p>{{ workspaceError }}</p><button class="outline-button small" type="button" @click="loadBusinessWorkspace(demoSlug)">Retry</button></div>
+          <div v-else-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message"><strong>Your organization is ready</strong><p>Add your first business to crawl its website, create the agent, and start collecting real conversations and leads.</p><button class="primary-button small" type="button" @click="openAddBusiness">+ Add your first business</button></div>
+          <template v-else>
+            <div class="metric-grid">
+              <article class="metric-card blue-tint"><span class="metric-icon blue">♧</span><strong>{{ workspaceStats?.leads ?? 0 }}</strong><span>Leads captured</span><em>{{ workspaceStats?.leads ? 'Live records' : 'No leads yet' }}</em></article>
+              <article class="metric-card green-tint"><span class="metric-icon green">▣</span><strong>{{ workspaceStats?.bookingClicks ?? 0 }}</strong><span>Booking clicks</span><em>{{ workspaceStats?.conversations ?? 0 }} conversations</em></article>
+              <article class="metric-card orange-tint"><span class="metric-icon orange">?</span><strong>{{ workspaceStats?.unansweredQuestions ?? 0 }}</strong><span>Open answer gaps</span><em class="negative">From live questions</em></article>
+              <article class="metric-card purple-tint"><span class="metric-icon purple">▱</span><strong>{{ readinessScore }}%</strong><span>Knowledge readiness</span><div class="metric-progress"><span :style="{ width: `${readinessScore}%` }"></span></div></article>
+            </div>
+            <div class="dashboard-grid">
+              <article class="panel chart-panel"><div class="panel-heading"><div><h2>Conversations & leads</h2><p>Last 30 days · live records</p></div><div class="legend"><span><i class="blue-dot"></i> Conversations</span><span><i class="orange-dot"></i> Leads</span></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Conversations and leads trend"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
+              <article class="panel readiness-panel"><div class="panel-heading"><div><h2>Knowledge readiness</h2><p>Calculated from indexed sources and open gaps</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="readiness-ring" :style="{ background: `conic-gradient(#7256c9 0deg ${readinessScore * 3.6}deg, #edf0f6 ${readinessScore * 3.6}deg 360deg)` }"><div><strong>{{ readinessScore }}</strong><span>/100</span></div></div><div class="readiness-list"><div><span class="check">✓</span> Sources indexed <strong>{{ workspaceKnowledge?.sourceCount ?? 0 }}</strong></div><div><span class="check">✓</span> Knowledge chunks <strong>{{ workspaceKnowledge?.chunkCount ?? 0 }}</strong></div><div><span :class="workspaceStats?.unansweredQuestions ? 'warning' : 'check'">{{ workspaceStats?.unansweredQuestions ? '!' : '✓' }}</span> Open answer gaps <strong>{{ workspaceStats?.unansweredQuestions ?? 0 }}</strong></div><div><span class="check">✓</span> Widget loads <strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong></div></div></article>
+            </div>
+            <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>What visitors are asking</p></div><button class="text-button" type="button" @click="view = 'conversations'">See all →</button></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Recommended actions</h2><p>Open gaps from live conversations</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Add answer</button></div></div><div v-else class="diagnostics-empty">No open actions. New low-confidence questions will appear here.</div></article></div>
+          </template>
         </div>
 
         <div v-else-if="view === 'conversations'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Grounded answers</p><h2>Test a conversation</h2><p>Ask what a visitor would ask and verify the source before sharing the demo.</p></div><span v-if="conversationId" class="conversation-status">Conversation active</span></div><div class="conversation-layout"><article class="panel conversation-panel"><div class="conversation-intro"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small>Answers from {{ businessName }} knowledge</small></div></div><div v-if="testAnswer" class="answer-card"><div class="answer-meta"><span :class="['answer-badge', answerGrounded ? 'grounded' : 'fallback']">{{ answerGrounded ? '✓ Grounded in source' : '! Needs an answer' }}</span><span class="answer-diagnostic">{{ Math.round(answerConfidence * 100) }}% · {{ answerConfidenceBand }}<span v-if="answerRetrievalMode"> · {{ answerRetrievalMode }}</span></span><a v-if="answerSource" :href="answerSource" target="_blank" rel="noreferrer">View source ↗</a></div><p>{{ testAnswer }}</p></div><div v-else class="conversation-empty">Ask a question to see the agent’s answer and citation.</div><form class="question-form" @submit.prevent="askQuestion"><input v-model="testQuestion" type="text" placeholder="e.g. What age can my child start?" aria-label="Test question" /><button class="primary-button small" type="submit" :disabled="isAsking">{{ isAsking ? 'Checking…' : 'Ask agent' }}</button></form></article><article class="panel lead-capture-panel"><div class="panel-heading"><div><h2>Capture the next step</h2><p>Send a contact to the owner dashboard.</p></div></div><label>Name<input v-model="leadName" type="text" placeholder="Jamie Rodriguez" /></label><label>Email<input v-model="leadEmail" type="email" placeholder="jamie@example.com" /></label><label>Phone <span class="optional">optional</span><input v-model="leadPhone" type="tel" placeholder="(555) 010-2026" /></label><label>Intent <span class="optional">optional</span><input v-model="leadIntent" type="text" placeholder="Toddler lessons" /></label><button class="primary-button" type="button" :disabled="!leadEmail && !leadPhone" @click="captureLead">Capture lead →</button><span v-if="leadSavedMessage" class="saved-message">✓ {{ leadSavedMessage }}</span></article></div></div>
 
         <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>People FrontDeskWise helped move closer to a booking.</p></div><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!leads.length" class="diagnostics-empty">No leads captured yet.</div><div v-for="lead in leads" :key="lead.id" class="table-row"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0) }}</span><strong>{{ lead.name }}</strong></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></div></div></div>
 
-        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Make it yours</p><h2>Agent & widget</h2><p>Customize the demo, then publish it to a real business website.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'overview'">Test conversation</button><button class="primary-button small" type="button" @click="saveAgent">{{ authSnapshot ? 'Save & publish' : 'Create account to publish' }}</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Agent identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><label class="toggle-row"><span>Offer human handoff when uncertain</span><input type="checkbox" checked /></label></div></article><article class="panel live-preview"><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>https://britishswimschool.com/tampa-bay/</span></div><div class="preview-site"><div class="preview-site-nav"><strong>BRITISH SWIM SCHOOL</strong><span>Programs　Locations　FAQs　About</span><button>Enroll now</button></div><div class="preview-site-hero"><div><h2>Swim lessons<br />for all ages</h2><p>Building safer, stronger, more confident swimmers.</p><button>Find a location →</button></div><div class="fake-swimmer">◉</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><div class="suggested-question">What swim programs do you offer? <span>›</span></div><div class="suggested-question">How do I enroll my child? <span>›</span></div><button v-if="showLeadCapture" class="chat-cta" type="button">Get started / Request information</button><div class="chat-input">Type your question… <span>➤</span></div></div></div></div></article></div><article class="panel install-panel"><div class="panel-heading"><div><p class="eyebrow">Publish anywhere</p><h2>Install your front desk</h2><p>Copy one snippet and paste it before <code>&lt;/body&gt;</code> on the business website.</p></div><span v-if="widgetInstallMessage" class="saved-message">✓ {{ widgetInstallMessage }}</span></div><template v-if="authSnapshot && widgetInstall"><div class="install-snippet"><code>{{ widgetInstall.snippet }}</code><button class="primary-button small" type="button" @click="copyWidgetSnippet">Copy snippet</button></div><small class="install-note">Site key: {{ widgetInstall.siteKey }} · Widget verification: {{ widgetInstall.verification.loadCount }} loads</small></template><div v-else class="install-gate"><p>Sign in to generate a private install snippet for this business. The preview remains available without an account.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to install →</button></div></article></div>
+        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Make it yours</p><h2>Agent & widget</h2><p>Customize the demo, then publish it to a real business website.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'overview'">Test conversation</button><button class="primary-button small" type="button" @click="saveAgent">{{ authSnapshot ? 'Save & publish' : 'Create account to publish' }}</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Agent identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><label class="toggle-row"><span>Offer human handoff when uncertain</span><input type="checkbox" checked /></label></div></article><article class="panel live-preview"><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ websiteUrl || 'https://yourbusiness.com' }}</span></div><div class="preview-site"><div class="preview-site-nav"><strong>{{ businessName || 'YOUR BUSINESS' }}</strong><span>Services　About　FAQs　Contact</span><button>Get started</button></div><div class="preview-site-hero"><div><h2>Help visitors<br />take the next step</h2><p>Grounded answers from {{ businessName || 'your website' }}.</p><button>Explore services →</button></div><div class="fake-swimmer">✦</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><div class="suggested-question">What services do you offer? <span>›</span></div><div class="suggested-question">How do I get started? <span>›</span></div><button v-if="showLeadCapture" class="chat-cta" type="button">Get started / Request information</button><div class="chat-input">Type your question… <span>➤</span></div></div></div></div></article></div><article class="panel install-panel"><div class="panel-heading"><div><p class="eyebrow">Publish anywhere</p><h2>Install your front desk</h2><p>Copy one snippet and paste it before <code>&lt;/body&gt;</code> on the business website.</p></div><span v-if="widgetInstallMessage" class="saved-message">✓ {{ widgetInstallMessage }}</span></div><template v-if="authSnapshot && widgetInstall"><div class="install-snippet"><code>{{ widgetInstall.snippet }}</code><button class="primary-button small" type="button" @click="copyWidgetSnippet">Copy snippet</button></div><small class="install-note">Site key: {{ widgetInstall.siteKey }} · Widget verification: {{ widgetInstall.verification.loadCount }} loads</small></template><div v-else class="install-gate"><p>Sign in to generate a private install snippet for this business. The preview remains available without an account.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to install →</button></div></article></div>
 
         <div v-else-if="view === 'knowledge'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><button class="outline-button small" type="button" @click="loadKnowledge">{{ knowledgeLoading ? 'Refreshing…' : 'Refresh' }}</button></div>

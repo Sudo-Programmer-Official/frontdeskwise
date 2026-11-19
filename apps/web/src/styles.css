@@ -107,6 +107,19 @@ button:disabled { cursor: wait; opacity: .7; }
 @media (max-width: 1060px) { .billing-plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .billing-summary-grid, .billing-plan-grid { grid-template-columns: 1fr; } }
 
+.featured-demo-links { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 9px; max-width: 1240px; margin: -24px auto 0; padding: 0 32px 44px; color: #74839a; font-size: 12px; }
+.featured-demo-links button { padding: 7px 10px; border: 1px solid #cddcf0; border-radius: 999px; color: #245da8; background: #fff; font: inherit; font-weight: 800; }
+.featured-demo-links button:hover { border-color: #7eacf0; background: #f5f9ff; }
+.workspace-message { display: grid; gap: 10px; justify-items: start; margin-bottom: 18px; padding: 22px; }
+.workspace-message strong { color: #233653; font-size: 16px; }
+.workspace-message p { margin: 0; color: #718198; font-size: 12px; line-height: 1.6; }
+.live-chart { display: flex; align-items: flex-end; gap: 5px; height: 210px; margin-top: 22px; padding: 16px 4px 0; border-bottom: 1px solid #edf0f6; }
+.live-chart-column { display: grid; flex: 1 1 0; align-items: end; gap: 8px; min-width: 0; height: 100%; }
+.live-chart-bars { display: flex; align-items: end; justify-content: center; gap: 3px; height: 170px; }
+.live-bar { display: block; width: min(11px, 35%); min-height: 2px; border-radius: 4px 4px 0 0; }
+.live-bar.blue { background: #1c70ee; }.live-bar.orange { background: #f59626; }
+.live-chart-column small { overflow: hidden; color: #9aa7b7; font-size: 9px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+
 .admin-table-panel { padding: 0; }.admin-row { grid-template-columns: 1.4fr 1fr .7fr 1.2fr 1.2fr; }.admin-row > div strong, .admin-row > div small { display: block; }.admin-row > div small { margin-top: 4px; color: #9aa7b7; font-size: 10px; }.admin-actions { display: flex; align-items: center; gap: 8px; }.admin-actions .text-button { color: #b04d48; font-size: 11px; }
 .admin-demo-operations { margin-top: 22px; }
 .admin-demo-summary { display: flex; gap: 8px; flex-wrap: wrap; color: #657793; font-size: 11px; font-weight: 800; }
@@ -164,3 +177,5 @@ button:disabled { cursor: wait; opacity: .7; }
 @media (max-width: 1060px) { .pricing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.pricing-heading { align-items: flex-start; flex-direction: column; }.pricing-card.featured { transform: none; } }
 @media (max-width: 760px) { .marketing-pricing { padding: 55px 18px 72px; }.pricing-grid { grid-template-columns: 1fr; }.aggregate-business-row { grid-template-columns: 1fr auto; }.aggregate-business-row > span:nth-child(2) { display: none; }.install-snippet, .install-gate, .document-row { align-items: stretch; flex-direction: column; } }
 
+/* The inline width on live metric bars is the source of truth. */
+.metric-progress span { width: 0; }
