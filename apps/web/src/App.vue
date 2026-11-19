@@ -62,7 +62,7 @@ interface RetrievalDiagnostic {
   grounded: boolean;
   confidenceScore: number;
   confidenceBand: "high" | "medium" | "low";
-  retrieval?: { mode?: string; candidateCount?: number; topScore?: number };
+  retrieval?: { mode?: string; candidateCount?: number; topScore?: number; route?: string; model?: string | null; reason?: string; latencyMs?: number };
   createdAt: string;
 }
 
@@ -129,7 +129,7 @@ interface BillingSnapshot {
     override: { reason: string } | null;
   };
   plans: BillingPlan[];
-  usageLast30Days: { conversations: number; leads: number; bookings: number; llmRequests: number; llmInputTokens: number; llmOutputTokens: number };
+  usageLast30Days: { conversations: number; leads: number; bookings: number; llmRequests: number; llmInputTokens: number; llmOutputTokens: number; llmEstimatedCostUsd: number };
   stripeConfigured: boolean;
 }
 
@@ -148,6 +148,18 @@ interface AdminOrganization {
   conversationCount: number;
   leadCount: number;
   lastActiveAt: string | null;
+}
+
+interface AdminUser {
+  id: string;
+  email: string;
+  name: string;
+  status: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  organizationSummary: string;
+  organizationCount: number;
+  isSuperAdmin: boolean;
 }
 
 interface AdminDemoRequest {
@@ -255,6 +267,7 @@ const addBusinessError = ref("");
 const addBusinessMessage = ref("");
 const isSuperAdmin = ref(false);
 const adminOrganizations = ref<AdminOrganization[]>([]);
+const adminUsers = ref<AdminUser[]>([]);
 const adminDemoRequests = ref<AdminDemoRequest[]>([]);
 const adminDemoSummary = ref({ total: 0, ready: 0, requested: 0, converted: 0 });
 const adminBusinessSlug = ref("british-swim-school-tampa-bay");
@@ -904,6 +917,10 @@ function formatPlanPrice(plan: BillingPlan): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: plan.currency.toUpperCase(), maximumFractionDigits: 0 }).format(plan.amountCents / 100);
 }
 
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 }).format(value);
+}
+
 function formatBillingDate(value: string | null): string {
   return value ? new Date(value).toLocaleDateString() : "No date set";
 }
@@ -915,6 +932,7 @@ async function loadAdminOrganizations() {
     const response = await fetch(apiUrl("/api/v1/admin/organizations"), { headers: ownerHeaders() });
     if (!response.ok) {
       isSuperAdmin.value = false;
+      adminError.value = "This account is not authorized for the super-admin control plane.";
       return;
     }
     const payload = await response.json() as { organizations?: AdminOrganization[] };
@@ -922,13 +940,26 @@ async function loadAdminOrganizations() {
     isSuperAdmin.value = true;
   } catch {
     isSuperAdmin.value = false;
+    adminError.value = "The super-admin control plane could not be reached.";
   } finally {
     adminLoading.value = false;
   }
 }
 
+async function loadAdminUsers() {
+  if (!authSnapshot.value) return;
+  try {
+    const response = await fetch(apiUrl("/api/v1/admin/users?limit=200"), { headers: ownerHeaders() });
+    if (!response.ok) return;
+    const payload = await response.json() as { users?: AdminUser[] };
+    adminUsers.value = payload.users ?? [];
+  } catch {
+    adminUsers.value = [];
+  }
+}
+
 function isPlatformRoute(): boolean {
-  return typeof window !== "undefined" && window.location.pathname === "/platform";
+  return typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") === "/platform";
 }
 
 function navigateToAdmin() {
@@ -1054,6 +1085,26 @@ async function adminOrganizationAction(organization: AdminOrganization, action: 
     await loadAdminOrganizations();
   } catch (error) {
     adminError.value = error instanceof Error ? error.message : "Admin action failed.";
+  } finally {
+    adminLoading.value = false;
+  }
+}
+
+async function adminUserAction(user: AdminUser, status: "active" | "disabled") {
+  if (adminLoading.value || user.status === status) return;
+  adminLoading.value = true;
+  adminError.value = "";
+  try {
+    const response = await fetch(apiUrl(`/api/v1/admin/users/${user.id}/status`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ status }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "User status update failed.");
+    await loadAdminUsers();
+  } catch (error) {
+    adminError.value = error instanceof Error ? error.message : "User status update failed.";
   } finally {
     adminLoading.value = false;
   }
@@ -1269,6 +1320,7 @@ watch(view, (nextView) => {
   if (nextView === "billing") void loadBilling();
   if (nextView === "admin") {
     void loadAdminOrganizations();
+    void loadAdminUsers();
     void loadAdminDemoRequests();
   }
 });
@@ -1299,7 +1351,10 @@ onMounted(() => {
           await loadAdminOrganizations();
           if (isPlatformRoute()) {
             if (isSuperAdmin.value) view.value = "admin";
-            else openAuth("signin");
+            else {
+              authModalOpen.value = false;
+              openHome();
+            }
           }
         } else {
           isSuperAdmin.value = false;
@@ -1458,7 +1513,7 @@ function openHome() {
           <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon">✓</div><h2>No open knowledge gaps</h2><p>New low-confidence questions will appear here for review.</p></article>
           <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || gap.status === 'resolved'" @click="resolveKnowledgeGap(gap)">{{ gap.status === 'resolved' ? 'Approved' : 'Approve answer' }}</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Explainability</p><h2>Retrieval diagnostics</h2><p>Recent answers with confidence and retrieval mode.</p></div></div>
-          <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Mode</span><span>Grounded</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span>{{ diagnostic.retrieval?.mode ?? 'unknown' }}</span><span>{{ diagnostic.grounded ? 'Yes' : 'Fallback' }}</span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No retrieval diagnostics yet.</div></article>
+          <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Route</span><span>Grounded</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span>{{ diagnostic.retrieval?.route ?? diagnostic.retrieval?.mode ?? 'unknown' }}<small>{{ diagnostic.retrieval?.model ?? diagnostic.retrieval?.reason ?? 'deterministic' }}</small></span><span>{{ diagnostic.grounded ? 'Yes' : 'Fallback' }}</span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No retrieval diagnostics yet.</div></article>
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content">
@@ -1477,6 +1532,7 @@ function openHome() {
         <div v-else-if="view === 'analytics'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ showAllBusinesses ? 'all businesses' : (businessName || 'this business') }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh data</button></div>
           <div class="metric-grid"><article class="metric-card blue-tint"><strong>{{ workspaceStats?.conversations ?? 0 }}</strong><span>Conversations</span><em>Recorded conversations</em></article><article class="metric-card green-tint"><strong>{{ workspaceStats?.leads ?? 0 }}</strong><span>Leads captured</span><em>Durable FrontDeskWise records</em></article><article class="metric-card orange-tint"><strong>{{ workspaceStats?.bookingClicks ?? 0 }}</strong><span>Booking actions</span><em>Visitor next steps</em></article><article class="metric-card purple-tint"><strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong><span>Widget loads</span><em>Verified public installs</em></article></div>
+          <article class="panel model-routing-panel"><div class="panel-heading"><div><p class="eyebrow">Cost-aware answering</p><h2>Model routing</h2><p>FrontDeskWise keeps simple work deterministic, uses the economical model for grounded questions, and escalates ambiguous or multi-part questions only when needed.</p></div><span class="status-pill booked">Live policy</span></div><div class="model-routing-grid"><div><strong>Tier 0</strong><small>Greetings and approved answers · no model cost</small></div><div><strong>Tier 1</strong><small>Standard grounded questions · economical model</small></div><div><strong>Tier 2</strong><small>Complex or ambiguous questions · stronger model</small></div><div><strong>{{ billingSnapshot?.usageLast30Days.llmRequests ?? 0 }}</strong><small>LLM requests · estimated {{ (billingSnapshot?.usageLast30Days.llmEstimatedCostUsd ?? 0) > 0 ? formatUsd(billingSnapshot?.usageLast30Days.llmEstimatedCostUsd ?? 0) : 'configure token rates' }} in the last 30 days</small></div></div></article>
           <article class="panel chart-panel analytics-chart"><div class="panel-heading"><div><h2>Activity by day</h2><p>Last 30 days · live records</p></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Analytics activity by day"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
           <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>Most common visitor questions</p></div></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Knowledge gaps</h2><p>Questions that need a stronger answer</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Review</button></div></div><div v-else class="diagnostics-empty">No open knowledge gaps.</div></article></div>
         </div>
@@ -1516,6 +1572,7 @@ function openHome() {
           <div class="section-toolbar"><div><p class="eyebrow">Internal operations</p><h2>Super-admin control plane</h2><p>Monitor organizations, pilot status, business count, usage outcomes, and account health.</p></div><div class="toolbar-actions"><span v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</span><button class="outline-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Test SES email' }}</button><span v-if="adminLoading" class="conversation-status">Working…</span></div></div>
           <p v-if="adminError" class="form-error">{{ adminError }}</p>
           <article class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
+          <article class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
           <article class="panel admin-demo-operations">
             <div class="panel-heading"><div><p class="eyebrow">Demo operations</p><h2>Requests, test users & access links</h2><p>Every visitor request and operator action is audited. Generated links are copied once and can be reset, extended, revoked, or validated.</p></div><div class="admin-demo-summary"><span>{{ adminDemoSummary.total }} total</span><span>{{ adminDemoSummary.ready }} ready</span><span>{{ adminDemoSummary.converted }} converted</span></div></div>
             <div class="admin-demo-create">

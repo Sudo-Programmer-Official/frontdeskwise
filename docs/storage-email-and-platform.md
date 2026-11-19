@@ -165,4 +165,4 @@ After Render redeploys:
 8. Submit a landing-page demo request and confirm the super-admin notification arrives; a delivery failure must not fail the demo crawl.
 9. Review the API logs and S3 access logs/CloudTrail if enabled.
 
-The database migrations are `infra/db/015_organization_documents.sql` and `infra/db/017_document_ingestion.sql`. Render runs them through the existing `preDeployCommand: npm run db:migrate`.
+The database migrations include `015_organization_documents.sql`, `016_business_ownership_verification.sql`, `017_document_ingestion.sql`, and `018_model_routing_observability.sql`. Render runs the complete forward-only chain through the existing `preDeployCommand: npm run db:migrate`.

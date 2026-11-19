@@ -11,6 +11,7 @@ import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js"
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
+import { generateGroundedAnswer, routeQuestion, type ModelUsage } from "./model-routing.js";
 import {
   allowedDocumentTypeList,
   createDocumentDownload,
@@ -173,7 +174,18 @@ type Message = {
   confidenceScore?: number;
   confidenceBand?: "high" | "medium" | "low";
   citations?: Array<{ title: string; url: string; sourceId?: string; chunkId?: string; pageType?: string }>;
-  retrieval?: { mode: string; candidateCount: number; topScore?: number };
+  retrieval?: {
+    mode: string;
+    candidateCount: number;
+    topScore?: number;
+    route?: string;
+    model?: string | null;
+    reason?: string;
+    latencyMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    estimatedCostUsd?: number | null;
+  };
   createdAt: string;
 };
 
@@ -1476,12 +1488,28 @@ async function recordOrganizationUsage(business: Business, metric: UsageMetric):
   );
 }
 
+async function recordModelUsage(business: Business, usage: ModelUsage): Promise<void> {
+  if (!pool || usage.inputTokens <= 0 && usage.outputTokens <= 0 && usage.estimatedCostUsd === null) return;
+  await pool.query(
+    `insert into organization_usage_daily (organization_id, usage_date, llm_input_tokens, llm_output_tokens, llm_estimated_cost_usd)
+     select organization_id, current_date, $2, $3, coalesce($4, 0) from businesses where id = $1
+     on conflict (organization_id, usage_date) do update set
+       llm_input_tokens = organization_usage_daily.llm_input_tokens + excluded.llm_input_tokens,
+       llm_output_tokens = organization_usage_daily.llm_output_tokens + excluded.llm_output_tokens,
+       llm_estimated_cost_usd = organization_usage_daily.llm_estimated_cost_usd + excluded.llm_estimated_cost_usd,
+       updated_at = now()`,
+    [business.id, usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd],
+  );
+}
+
 async function persistMessage(conversation: Conversation, message: Message): Promise<void> {
   if (!pool) return;
+  const retrieval = message.retrieval;
   await pool.query(
     `insert into conversation_messages
-       (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval, created_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
+        model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
     [
       conversation.id,
       message.role,
@@ -1491,7 +1519,13 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
       message.confidenceScore ?? null,
       message.confidenceBand ?? null,
       JSON.stringify(message.citations ?? []),
-      message.retrieval ?? null,
+      retrieval ?? null,
+      retrieval?.route ?? null,
+      retrieval?.model ?? null,
+      retrieval?.inputTokens ?? 0,
+      retrieval?.outputTokens ?? 0,
+      retrieval?.estimatedCostUsd ?? null,
+      retrieval?.latencyMs ?? null,
       message.createdAt,
     ],
   );
@@ -2115,7 +2149,8 @@ async function billingSnapshotForUser(userId: string, organizationId: string | n
               coalesce(sum(bookings), 0)::integer as bookings,
               coalesce(sum(llm_requests), 0)::integer as llm_requests,
               coalesce(sum(llm_input_tokens), 0)::bigint as llm_input_tokens,
-              coalesce(sum(llm_output_tokens), 0)::bigint as llm_output_tokens
+              coalesce(sum(llm_output_tokens), 0)::bigint as llm_output_tokens,
+              coalesce(sum(llm_estimated_cost_usd), 0)::numeric as llm_estimated_cost_usd
        from organization_usage_daily
        where organization_id = $1 and usage_date >= current_date - 30`,
       [organization.id],
@@ -2141,6 +2176,7 @@ async function billingSnapshotForUser(userId: string, organizationId: string | n
       llmRequests: Number(usage.rows[0]?.llm_requests ?? 0),
       llmInputTokens: Number(usage.rows[0]?.llm_input_tokens ?? 0),
       llmOutputTokens: Number(usage.rows[0]?.llm_output_tokens ?? 0),
+      llmEstimatedCostUsd: Number(usage.rows[0]?.llm_estimated_cost_usd ?? 0),
     },
     stripeConfigured: Boolean(stripe),
   };
@@ -2679,7 +2715,37 @@ async function databaseRetrieval(business: Business, question: string): Promise<
 
 async function answerQuestion(business: Business, question: string) {
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
+  if (/^(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you)\b[.!? ]*$/i.test(question.trim())) {
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "deterministic_greeting",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
+    return {
+      answer: business.agentConfig.welcomeMessage,
+      grounded: false,
+      citations: [],
+      knowledgeGap: null,
+      confidenceScore: 1,
+      confidenceBand: "high" as const,
+      retrieval: { mode: "tier0_greeting", candidateCount: 0, topScore: 1, ...modelUsage },
+      modelUsage,
+    };
+  }
   if (existingGap?.status === "resolved" && existingGap.approvedAnswer) {
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "approved_answer",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
     return {
       answer: existingGap.approvedAnswer,
       grounded: true,
@@ -2687,7 +2753,8 @@ async function answerQuestion(business: Business, question: string) {
       knowledgeGap: null,
       confidenceScore: 0.99,
       confidenceBand: "high" as const,
-      retrieval: { mode: "approved_answer", candidateCount: 0, topScore: 1 },
+      retrieval: { mode: "approved_answer", candidateCount: 0, topScore: 1, ...modelUsage },
+      modelUsage,
     };
   }
   const retrieval = await databaseRetrieval(business, question) ?? memoryRetrieval(business, question);
@@ -2704,6 +2771,35 @@ async function answerQuestion(business: Business, question: string) {
     topScore: match?.score ?? 0,
   };
 
+  const decision = routeQuestion({
+    question,
+    hasMatch: Boolean(match),
+    confidenceScore,
+    candidateCount: retrieval.matches.length,
+  });
+  const context = retrieval.matches.slice(0, 4).map(({ chunk }) => {
+    const source = business.sources.find((item) => item.id === chunk.sourceId);
+    return `[${source?.title ?? "Business source"}] ${chunk.content.slice(0, 1_200)}`;
+  }).join("\n\n");
+  let generated: Awaited<ReturnType<typeof generateGroundedAnswer>> = null;
+  if (match && confidenceBand !== "low" && decision.model) {
+    try {
+      generated = await generateGroundedAnswer({ question, context, decision });
+    } catch (error) {
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown model error", businessId: business.id, route: decision.route }, "Grounded model answer failed; using extractive fallback");
+    }
+  }
+  const modelUsage: ModelUsage = generated?.usage ?? {
+    route: decision.route,
+    model: decision.model,
+    reason: decision.model ? "extractive_fallback_or_unconfigured" : "llm_not_configured",
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: decision.route === "tier0" ? 0 : null,
+    latencyMs: 0,
+  };
+  const enrichedRetrieval = { ...retrievalContract, ...modelUsage };
+
   if (!match || confidenceBand === "low") {
     const gap = rememberGap(business, question);
     return {
@@ -2713,19 +2809,36 @@ async function answerQuestion(business: Business, question: string) {
       knowledgeGap: gap,
       confidenceScore,
       confidenceBand,
-      retrieval: retrievalContract,
+      retrieval: enrichedRetrieval,
+      modelUsage,
+    };
+  }
+
+  const citations = retrieval.matches.slice(0, 3).map(({ chunk }) => {
+    const source = business.sources.find((item) => item.id === chunk.sourceId);
+    return source ? {
+      title: source.title,
+      url: source.url,
+      sourceId: source.id,
+      chunkId: chunk.id,
+      pageType: source.pageType,
+    } : null;
+  }).filter((citation): citation is NonNullable<typeof citation> => Boolean(citation)).filter((citation, index, list) => list.findIndex((item) => item.sourceId === citation.sourceId) === index);
+  if (generated) {
+    return {
+      answer: generated.answer,
+      grounded: true,
+      citations,
+      knowledgeGap: null,
+      confidenceScore,
+      confidenceBand,
+      retrieval: enrichedRetrieval,
+      modelUsage,
     };
   }
 
   const source = business.sources.find((item) => item.id === match.chunk.sourceId);
   const excerpt = match.chunk.content.length > 420 ? `${match.chunk.content.slice(0, 417).trim()}…` : match.chunk.content;
-  const citations = source ? [{
-    title: source.title,
-    url: source.url,
-    sourceId: source.id,
-    chunkId: match.chunk.id,
-    pageType: source.pageType,
-  }] : [];
   return {
     answer: `Based on ${source?.title ?? "the business website"}: ${excerpt}`,
     grounded: true,
@@ -2733,7 +2846,8 @@ async function answerQuestion(business: Business, question: string) {
     knowledgeGap: null,
     confidenceScore,
     confidenceBand,
-    retrieval: retrievalContract,
+    retrieval: enrichedRetrieval,
+    modelUsage,
   };
 }
 
@@ -2781,6 +2895,7 @@ async function recordConversationQuestion(business: Business, conversation: Conv
   await persistMessage(conversation, assistantMessage);
   await persistConversation(business, conversation);
   await recordOrganizationUsage(business, "llm_requests");
+  await recordModelUsage(business, result.modelUsage);
   if (result.knowledgeGap) await persistGap(business, result.knowledgeGap);
   return result;
 }
@@ -3229,6 +3344,58 @@ app.get("/api/v1/admin/organizations", async (request) => {
       lastActiveAt: nullableIso(row.last_active_at),
     })),
   };
+});
+
+app.get("/api/v1/admin/users", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const requestedLimit = Number((request.query as Record<string, unknown> | undefined)?.limit ?? 200);
+  const limit = Math.min(200, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 200));
+  const result = await pool.query<Record<string, unknown>>(
+    `select u.id, u.email, u.name, u.status, u.created_at, u.updated_at,
+            (select string_agg(o.name || ' · ' || om.role, ', ' order by o.name)
+             from organization_members om join organizations o on o.id = om.organization_id
+             where om.user_id = u.id) as organization_summary,
+            (select count(*) from organization_members om where om.user_id = u.id)::integer as organization_count,
+            exists (select 1 from super_admin_users sa where sa.user_id = u.id and sa.status = 'active') as is_super_admin
+     from app_users u
+     order by u.created_at desc
+     limit $1`,
+    [limit],
+  );
+  return {
+    users: result.rows.map((row) => ({
+      id: String(row.id),
+      email: String(row.email),
+      name: String(row.name ?? ""),
+      status: String(row.status),
+      createdAt: nullableIso(row.created_at),
+      updatedAt: nullableIso(row.updated_at),
+      organizationSummary: row.organization_summary ? String(row.organization_summary) : "No organization",
+      organizationCount: Number(row.organization_count ?? 0),
+      isSuperAdmin: Boolean(row.is_super_admin),
+    })),
+  };
+});
+
+app.post("/api/v1/admin/users/:userId/status", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { userId?: string };
+  const userId = requiredString(params.userId, "userId", 80);
+  const body = asRecord(request.body);
+  const status = body.status === "disabled" ? "disabled" : body.status === "active" ? "active" : null;
+  if (!status) throw httpError(400, "status must be active or disabled");
+  if (userId === admin.id) throw httpError(400, "You cannot disable the current super-admin account");
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const result = await pool.query<{ id: string }>(
+    "update app_users set status = $2, updated_at = now() where id = $1 returning id",
+    [userId, status],
+  );
+  if (!result.rowCount) throw httpError(404, "User not found");
+  if (status === "disabled") {
+    await pool.query("update super_admin_users set status = 'disabled', updated_at = now() where user_id = $1", [userId]);
+  }
+  return { ok: true, userId, status };
 });
 
 app.get("/api/v1/admin/organizations/:organizationId", async (request) => {

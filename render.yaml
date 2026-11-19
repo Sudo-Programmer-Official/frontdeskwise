@@ -35,6 +35,16 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: FRONTDESKWISE_LLM_ENABLED
+        value: "true"
+      - key: FRONTDESKWISE_LLM_MODEL_TIER1
+        value: gpt-4o-mini
+      - key: FRONTDESKWISE_LLM_MODEL_TIER2
+        value: gpt-4o
+      - key: FRONTDESKWISE_LLM_TIMEOUT_MS
+        value: "8000"
+      - key: FRONTDESKWISE_LLM_MAX_OUTPUT_TOKENS
+        value: "280"
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET

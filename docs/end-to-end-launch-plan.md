@@ -296,7 +296,7 @@ The public site key is not a secret. The widget should load in an iframe or shad
 ### Phase 4: launch hardening
 
 1. Add scheduled recrawls and change detection.
-2. Add per-tenant usage budgets and model routing dashboards.
+2. Add per-tenant usage budgets and configurable cost alerts on top of the active model-routing diagnostics.
 3. Add email notifications and booking destination integrations.
 4. Publish vertical-specific onboarding and public demos.
 5. Expand channels only after the website loop is repeatable.
@@ -311,4 +311,4 @@ The public site key is not a secret. The widget should load in an iframe or shad
 - Cost per resolved conversation: tracked by model tier and tenant.
 - Demo → activation: the primary commercial metric after pilot volume is real.
 
-The next implementation slice is launch hardening: scheduled recrawls/change detection, usage/model routing, widget script verification, and additional CRM adapters. Firebase account bootstrap, Stripe checkout/webhooks/portal, private S3 document extraction, SES notifications, and ownership verification are already implemented and should be exercised in the production acceptance pass.
+The next implementation slice is launch hardening: scheduled recrawls/change detection, widget script verification, and additional CRM adapters. The customer loop now includes tenant-scoped website/document knowledge, retrieval diagnostics, cost-aware model routing, grounded fallback behavior, lead capture, and CRM delivery. Firebase account bootstrap, Stripe checkout/webhooks/portal, private S3 document extraction, SES notifications, ownership verification, and the `/platform` super-admin control plane should be exercised in the production acceptance pass.

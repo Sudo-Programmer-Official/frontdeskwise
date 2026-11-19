@@ -54,7 +54,7 @@ flowchart LR
 | Embedding client | `apps/api/src/embeddings.ts` | Optional provider calls and vector formatting |
 | Database adapter | `apps/api/src/database.ts` | Database-name guard, SSL normalization, PostgreSQL pool creation |
 | Migration runner | `apps/api/src/migrate.ts` | Ordered, checksum-verified, advisory-locked migrations |
-| Database schema | `infra/db/001_initial.sql` through `017_document_ingestion.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, and private document processing |
+| Database schema | `infra/db/001_initial.sql` through `018_model_routing_observability.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, private document processing, and model usage diagnostics |
 
 ## Primary flow: URL to demo
 
@@ -216,6 +216,16 @@ running
 
 The current worker runs in the API process but uses durable `embedding_jobs` rows. It supports startup recovery, attempt counters, next-attempt timestamps, progress counts, and provider/model metadata. If `OPENAI_API_KEY` is absent, the API reports `not_configured` and continues using full-text retrieval.
 
+## Cost-aware answer routing
+
+After retrieval, the API applies a three-tier policy before answering a visitor question:
+
+- `tier0`: greetings and approved knowledge-gap answers are deterministic and do not call a model.
+- `tier1`: ordinary grounded questions use the economical configured model (`FRONTDESKWISE_LLM_MODEL_TIER1`, default `gpt-4o-mini`).
+- `tier2`: ambiguous, multi-part, or weakly evidenced questions are eligible for the stronger configured model (`FRONTDESKWISE_LLM_MODEL_TIER2`, default `gpt-4o`).
+
+Answers are constrained to retrieved business context. If model generation is unavailable or fails, FrontDeskWise falls back to the existing extractive answer or the configured knowledge-gap response. Route, model, token counts, latency, and optional estimated cost are persisted with the assistant message, while token totals roll up into organization usage. This makes the knowledge loop usable with only PostgreSQL full-text retrieval and progressively better when the OpenAI configuration is present.
+
 ## Widget installation
 
 An authenticated owner receives a site-specific snippet from:
@@ -273,16 +283,24 @@ The runner:
 The current chain is:
 
 ```text
-001_initial
-002_content_hash_constraints
-003_business_location
-003_demo_storage_hardening
-004_ingestion_billing_foundation
-005_billing_plan_entitlements
-006_retrieval_search_fields
-007_grounded_answer_contract
-008_embedding_jobs_widget
-009_crm_integrations_and_lead_events
+001_initial.sql
+002_content_hash_constraints.sql
+003_demo_storage_hardening.sql
+004_ingestion_billing_foundation.sql
+005_billing_plan_entitlements.sql
+006_retrieval_search_fields.sql
+007_grounded_answer_contract.sql
+008_embedding_jobs_widget.sql
+009_crm_integrations_and_lead_events.sql
+010_identity_organizations_and_business_membership.sql
+011_cleanup_empty_backfill_organizations.sql
+012_organization_billing_and_control_plane.sql
+013_demo_operations_and_access_audit.sql
+014_billing_entitlement_catalog.sql
+015_organization_documents.sql
+016_business_ownership_verification.sql
+017_document_ingestion.sql
+018_model_routing_observability.sql
 ```
 
 The database adapter rejects connection URLs aimed at another database name and normalizes the sibling service's `postgresql+asyncpg` format without copying credentials into FrontDeskWise.
@@ -306,9 +324,8 @@ The database adapter rejects connection URLs aimed at another database name and 
 
 ### Planned next
 
-- LLM answer generation and cost-aware model routing.
 - Scheduled recrawls and content change detection.
-- Usage and cost metering.
+- Per-tenant usage budgets and configurable cost alerts.
 - Widget script verification and production CDN delivery.
 - Additional native CRM adapters, OAuth, richer field mapping, and provider rate-limit handling.
 
