@@ -284,6 +284,7 @@ const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
 const workspaceReadiness = ref(0);
 const workspaceLoading = ref(false);
 const workspaceError = ref("");
+let stopFirebaseObserver: (() => void) | null = null;
 
 const leads = ref<Lead[]>([]);
 
@@ -991,6 +992,45 @@ function handleRouteChange() {
   if (view.value === "admin") view.value = authSnapshot.value ? "overview" : "home";
 }
 
+async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string> } | null) {
+  if (!user) {
+    firebaseToken.value = "";
+    authSnapshot.value = null;
+    isSuperAdmin.value = false;
+    if (isPlatformRoute()) openAuth("signin");
+    return;
+  }
+
+  try {
+    firebaseToken.value = await user.getIdToken();
+    const snapshot = await currentAuthSnapshot();
+    if (!snapshot) throw new Error("Could not restore the FrontDeskWise account.");
+    authSnapshot.value = snapshot;
+    await syncAuthenticatedBusiness(snapshot);
+    await loadBilling();
+    await loadAdminOrganizations();
+
+    if (isPlatformRoute()) {
+      if (isSuperAdmin.value) {
+        authModalOpen.value = false;
+        view.value = "admin";
+      } else {
+        authModalOpen.value = false;
+        openHome();
+      }
+    } else if (!publicDemoMode.value && view.value === "home") {
+      // The route remains `/` for the SPA, so restore the signed-in product
+      // surface after a browser refresh instead of showing the landing page.
+      view.value = "overview";
+    }
+  } catch (error) {
+    // Keep Firebase's session intact. A temporary API/CORS/network failure
+    // must not sign the user out or erase their local identity.
+    authError.value = error instanceof Error ? error.message : "Could not restore the FrontDeskWise session.";
+    if (isPlatformRoute()) openAuth("signin");
+  }
+}
+
 async function loadAdminDemoRequests() {
   if (!authSnapshot.value) return;
   try {
@@ -1351,32 +1391,18 @@ onMounted(() => {
   void consumeDemoLink();
   if (typeof window !== "undefined") {
     window.addEventListener("popstate", handleRouteChange);
-    if (isPlatformRoute() && !authSnapshot.value) openAuth("signin");
-    observeFirebaseUser((user) => {
-      void (async () => {
-        firebaseToken.value = user ? await user.getIdToken() : "";
-        authSnapshot.value = user ? await currentAuthSnapshot() : null;
-        if (authSnapshot.value) {
-          await syncAuthenticatedBusiness(authSnapshot.value);
-          await loadBilling();
-          await loadAdminOrganizations();
-          if (isPlatformRoute()) {
-            if (isSuperAdmin.value) view.value = "admin";
-            else {
-              authModalOpen.value = false;
-              openHome();
-            }
-          }
-        } else {
-          isSuperAdmin.value = false;
-          if (isPlatformRoute()) openAuth("signin");
-        }
-      })();
-    });
+    if (!firebaseAuthConfigured()) {
+      if (isPlatformRoute()) openAuth("signin");
+    } else {
+      stopFirebaseObserver = observeFirebaseUser((user) => {
+        void restoreAuthenticatedSession(user);
+      });
+    }
   }
 });
 
 onBeforeUnmount(() => {
+  stopFirebaseObserver?.();
   if (typeof window !== "undefined") window.removeEventListener("popstate", handleRouteChange);
 });
 

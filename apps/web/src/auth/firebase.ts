@@ -139,8 +139,29 @@ export async function sendFrontDeskWisePasswordReset(email: string): Promise<voi
 
 export function observeFirebaseUser(callback: (user: User | null) => void): () => void {
   if (!firebaseAuthConfigured()) return () => undefined;
-  const auth = getAuth(firebaseApp());
-  return onIdTokenChanged(auth, callback);
+  let active = true;
+  let unsubscribe: (() => void) | null = null;
+
+  // Wait for Firebase's browser-local persistence to finish restoring the
+  // previous session before subscribing. Without this, the app can render the
+  // signed-out landing state during a hard refresh even though Firebase is
+  // about to restore a valid user.
+  void firebaseAuth()
+    .then((auth) => {
+      if (!active) return;
+      unsubscribe = onIdTokenChanged(auth, callback);
+    })
+    .catch(() => {
+      // If browser storage is unavailable, still observe Firebase's in-memory
+      // session so sign-in continues to work for the current tab.
+      if (!active) return;
+      unsubscribe = onIdTokenChanged(getAuth(firebaseApp()), callback);
+    });
+
+  return () => {
+    active = false;
+    unsubscribe?.();
+  };
 }
 
 export async function currentAuthSnapshot(): Promise<AuthSnapshot | null> {
@@ -150,6 +171,13 @@ export async function currentAuthSnapshot(): Promise<AuthSnapshot | null> {
   if (!user) return null;
   const token = await user.getIdToken();
   const response = await fetch(`${apiOrigin()}/api/v1/auth/me`, { headers: { authorization: `Bearer ${token}` } });
-  if (!response.ok) return null;
-  return await response.json() as AuthSnapshot;
+  const payload = await response.json().catch(() => ({})) as AuthSnapshot & { error?: string };
+  if (response.status === 404) {
+    // A Firebase user can outlive an interrupted first bootstrap. Repair that
+    // state on the next refresh instead of treating the persisted session as
+    // signed out.
+    return bootstrap(user);
+  }
+  if (!response.ok) throw new Error(payload.error ?? "Could not restore the FrontDeskWise session.");
+  return payload;
 }
