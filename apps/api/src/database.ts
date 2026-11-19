@@ -1,4 +1,5 @@
 import { Pool, type PoolConfig } from "pg";
+import { readFileSync } from "node:fs";
 
 const DEFAULT_DATABASE_NAME = "frontdeskwise";
 const VALID_SSL_MODES = new Set(["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]);
@@ -36,6 +37,18 @@ function envBoolean(value: string | undefined): boolean | undefined {
 }
 
 function sslCertificateFromEnv(): string | undefined {
+  const filePath = process.env.DATABASE_SSL_CA_FILE?.trim();
+  if (filePath) {
+    try {
+      const certificate = readFileSync(filePath, "utf8").trim();
+      if (!certificate || !certificate.includes("BEGIN CERTIFICATE")) throw new Error("invalid certificate");
+      return certificate;
+    } catch (error) {
+      if (error instanceof Error && error.message === "invalid certificate") throw error;
+      throw new Error(`DATABASE_SSL_CA_FILE could not be read: ${filePath}`);
+    }
+  }
+
   const pem = process.env.DATABASE_SSL_CA?.trim();
   if (pem) return pem;
 

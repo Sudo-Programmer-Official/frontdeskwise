@@ -44,9 +44,10 @@ function validateProductionConfiguration(): void {
   if (!pool) throw new Error("Production configuration requires a PostgreSQL DATABASE_URL");
   if (allowedWebOrigins.includes("*")) throw new Error("Production WEB_ORIGIN must be an explicit origin, not *");
   if (process.env.DATABASE_SSL_REJECT_UNAUTHORIZED?.trim().toLowerCase() === "true"
+      && !process.env.DATABASE_SSL_CA_FILE?.trim()
       && !process.env.DATABASE_SSL_CA?.trim()
       && !process.env.DATABASE_SSL_CA_BASE64?.trim()) {
-    throw new Error("Production certificate validation requires DATABASE_SSL_CA or DATABASE_SSL_CA_BASE64");
+    throw new Error("Production certificate validation requires DATABASE_SSL_CA_FILE, DATABASE_SSL_CA, or DATABASE_SSL_CA_BASE64");
   }
 }
 

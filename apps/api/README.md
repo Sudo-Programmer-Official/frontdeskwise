@@ -51,5 +51,5 @@ CRM credentials are encrypted with AES-256-GCM using `FRONTDESKWISE_CREDENTIAL_K
 
 The database config rejects URLs targeting another database name, normalizes the sibling service’s `postgresql+asyncpg` format, and handles RDS SSL explicitly. Credentials should be injected through the environment or a secret manager; do not commit a real `.env` file.
 
-In production, the API fails closed unless PostgreSQL, the CRM encryption key, OpenAI, explicit web/widget origins, and an RDS CA value are configured. `DATABASE_SSL_CA` accepts PEM; `DATABASE_SSL_CA_BASE64` accepts the same certificate encoded as base64. Requests receive a request ID and process-local rate-limit headers; add an edge/WAF limit before horizontal scaling.
+In production, the API fails closed unless PostgreSQL, the CRM encryption key, OpenAI, explicit web/widget origins, and an RDS CA value are configured. `DATABASE_SSL_CA_FILE` reads a PEM bundle from a runtime file such as Render's `/etc/secrets/rds-ca.pem`; `DATABASE_SSL_CA` accepts PEM and `DATABASE_SSL_CA_BASE64` is a local alternative. Requests receive a request ID and process-local rate-limit headers; add an edge/WAF limit before horizontal scaling.
 

@@ -12,7 +12,7 @@ This is a speed-first production launch, not the final general-availability post
 
 - Render is configured as the production API service in `render.yaml`.
 - The API migration runner is forward-only, checksum-verified, advisory-locked, and runs before deployment.
-- Production env templates use the public domains and support RDS CA validation through `DATABASE_SSL_CA_BASE64`.
+- Production env templates use the public domains and support RDS CA validation through a Render Secret File at `DATABASE_SSL_CA_FILE`.
 - The API has `/health` liveness, `/ready` database readiness, request IDs, security headers, and process-local request limits.
 - The public web build generates the production canonical URL, robots file, sitemap, manifest, and structured metadata when built with `VITE_SITE_ORIGIN=https://frontdeskwise.com`.
 - Leads remain durable in FrontDeskWise before CRM delivery. Webhook and HubSpot delivery are idempotent, encrypted, retryable, and observable from the owner dashboard.
@@ -49,11 +49,11 @@ Set these only in Render/Vercel secret settings:
 ```text
 DATABASE_URL=the existing RDS URL, with /frontdeskwise as the database name
 FRONTDESKWISE_CREDENTIAL_KEY=a unique 32-byte production key
-DATABASE_SSL_CA_BASE64=the trusted RDS CA PEM encoded as base64
+DATABASE_SSL_CA_FILE=/etc/secrets/rds-ca.pem
 OPENAI_API_KEY=the production OpenAI key
 ```
 
-Keep `DATABASE_SSL_REJECT_UNAUTHORIZED=true`. If the current RDS certificate chain is not available to Render yet, stop before public traffic and add the CA value; do not silently downgrade certificate validation for the public service.
+Keep `DATABASE_SSL_REJECT_UNAUTHORIZED=true`. In Render, add a Secret File named `rds-ca.pem` containing the AWS RDS PEM bundle. Render exposes it at `/etc/secrets/rds-ca.pem`; do not paste the large base64 bundle into an environment variable. If the current RDS certificate chain is not available to Render yet, stop before public traffic and add the CA file; do not silently downgrade certificate validation for the public service.
 
 ### 4. Complete the owner identity boundary
 

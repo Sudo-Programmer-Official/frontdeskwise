@@ -19,8 +19,8 @@ services:
         sync: false
       - key: DATABASE_SSL_REJECT_UNAUTHORIZED
         value: "true"
-      - key: DATABASE_SSL_CA_BASE64
-        sync: false
+      - key: DATABASE_SSL_CA_FILE
+        value: /etc/secrets/rds-ca.pem
       - key: FRONTDESKWISE_CREDENTIAL_KEY
         sync: false
       - key: WEB_ORIGIN
