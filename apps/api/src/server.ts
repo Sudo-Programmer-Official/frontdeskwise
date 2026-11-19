@@ -104,6 +104,7 @@ type Source = {
   canonicalUrl: string;
   title: string;
   pageType: string;
+  crawlStatus: "queued" | "crawling" | "ready" | "failed";
   contentHash: string;
   lastCrawledAt: string;
 };
@@ -801,6 +802,7 @@ function makeBusiness(input: {
     canonicalUrl: page.canonicalUrl,
     title: page.title,
     pageType: page.pageType,
+    crawlStatus: "ready",
     contentHash: page.contentHash,
     lastCrawledAt: page.lastCrawledAt,
   }));
@@ -1399,6 +1401,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       canonicalUrl: String(source.canonical_url ?? source.source_url),
       title: String(source.title ?? "Website source"),
       pageType: String(source.page_type ?? "web_page"),
+      crawlStatus: source.crawl_status === "queued" || source.crawl_status === "crawling" || source.crawl_status === "failed" ? source.crawl_status : "ready",
       contentHash: String(source.content_hash ?? ""),
       lastCrawledAt: source.last_crawled_at ? toIso(source.last_crawled_at) : toIso(source.created_at),
     })),
@@ -2504,11 +2507,22 @@ function workspacePayload(business: Business) {
   const leadCount = business.leads.length;
   const gapList = [...business.knowledgeGaps.values()];
   const gapCount = gapList.filter((gap) => gap.status === "open").length;
-  const sourceCount = business.sources.length;
-  const chunkCount = business.chunks.length;
+  const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
+  const readySourceIds = new Set(readySources.map((source) => source.id));
+  const sourceCount = readySources.length;
+  const pendingSourceCount = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling").length;
+  const failedSourceCount = business.sources.filter((source) => source.crawlStatus === "failed").length;
+  const chunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId)).length;
   const readinessScore = sourceCount === 0
     ? 0
     : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (chunkCount > 0 ? 30 : 0) + Math.max(0, 30 - gapCount * 5)));
+  const readinessStatus = sourceCount === 0
+    ? "needs_website"
+    : chunkCount === 0 || pendingSourceCount > 0
+      ? "indexing"
+      : gapCount > 0 || failedSourceCount > 0
+        ? "review_recommended"
+        : "ready";
   const setupSteps = [
     sourceCount > 0,
     chunkCount > 0,
@@ -2568,11 +2582,23 @@ function workspacePayload(business: Business) {
       sourceCount,
       chunkCount,
       openGaps: gapCount,
+      pendingSources: pendingSourceCount,
+      failedSources: failedSourceCount,
+      status: readinessStatus,
+      sources: business.sources.map((source) => ({
+        title: source.title,
+        url: source.url,
+        pageType: source.pageType,
+        crawlStatus: source.crawlStatus,
+        lastCrawledAt: source.lastCrawledAt,
+      })),
       readiness: {
         score: readinessScore,
         sources: sourceCount,
         chunks: chunkCount,
         openGaps: gapCount,
+        pendingSources: pendingSourceCount,
+        failedSources: failedSourceCount,
       },
     },
     stats: {

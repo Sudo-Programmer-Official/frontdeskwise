@@ -113,6 +113,8 @@ button:disabled { cursor: wait; opacity: .7; }
 .workspace-message { display: grid; gap: 10px; justify-items: start; margin-bottom: 18px; padding: 22px; }
 .workspace-message strong { color: #233653; font-size: 16px; }
 .workspace-message p { margin: 0; color: #718198; font-size: 12px; line-height: 1.6; }
+.knowledge-start-panel { margin-bottom: 18px; }.knowledge-health-panel { margin-top: 18px; }.knowledge-health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }.knowledge-health-grid > div { padding: 14px; border: 1px solid #e3eaf4; border-radius: 10px; background: #fbfdff; }.knowledge-health-grid strong, .knowledge-health-grid small { display: block; }.knowledge-health-grid strong { color: #223b65; font-size: 22px; }.knowledge-health-grid small { margin-top: 4px; color: #78889f; font-size: 10px; }
+.source-library { margin-top: 18px; }.source-list { display: grid; gap: 0; }.source-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 0; border-top: 1px solid #edf1f6; }.source-row strong, .source-row small { display: block; }.source-row strong { color: #294568; font-size: 12px; }.source-row small { max-width: 760px; margin-top: 4px; overflow: hidden; color: #8190a4; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .live-chart { display: flex; align-items: flex-end; gap: 5px; height: 210px; margin-top: 22px; padding: 16px 4px 0; border-bottom: 1px solid #edf0f6; }
 .live-chart-column { display: grid; flex: 1 1 0; align-items: end; gap: 8px; min-width: 0; height: 100%; }
 .live-chart-bars { display: flex; align-items: end; justify-content: center; gap: 3px; height: 170px; }
@@ -139,6 +141,8 @@ button:disabled { cursor: wait; opacity: .7; }
 .model-routing-panel { margin-top: 18px; }.model-routing-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }.model-routing-grid > div { padding: 14px; border: 1px solid #e3eaf4; border-radius: 10px; background: #fbfdff; }.model-routing-grid strong, .model-routing-grid small { display: block; }.model-routing-grid strong { color: #223b65; font-size: 15px; }.model-routing-grid small { margin-top: 6px; color: #78889f; font-size: 10px; line-height: 1.45; }
 @media (max-width: 1060px) { .model-routing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .model-routing-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .knowledge-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .source-row { align-items: flex-start; }.source-row small { max-width: 220px; } }
 
 .marketing-pricing { max-width: 1240px; margin: 0 auto; padding: 80px 32px 100px; }
 .pricing-heading { display: flex; align-items: end; justify-content: space-between; gap: 28px; margin-bottom: 28px; }

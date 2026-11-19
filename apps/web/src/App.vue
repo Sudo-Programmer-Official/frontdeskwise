@@ -90,13 +90,13 @@ interface WorkspacePayload {
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
   agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean };
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
-  knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; readiness?: { score: number; sources: number; chunks: number; openGaps: number } };
+  knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; sources?: Array<{ title: string; url: string; pageType: string; crawlStatus: string; lastCrawledAt: string }>; readiness?: { score: number; sources: number; chunks: number; openGaps: number; pendingSources?: number; failedSources?: number } };
   stats?: WorkspaceStats;
 }
 
 interface FeaturedDemo extends WorkspacePayload {
   business: { id: string; name: string; location: string; websiteUrl: string };
-  knowledge: { sourceCount: number; chunkCount: number; openGaps: number; readiness?: { score: number; sources: number; chunks: number; openGaps: number } };
+  knowledge: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; sources?: Array<{ title: string; url: string; pageType: string; crawlStatus: string; lastCrawledAt: string }>; readiness?: { score: number; sources: number; chunks: number; openGaps: number; pendingSources?: number; failedSources?: number } };
   stats: WorkspaceStats;
 }
 
@@ -637,6 +637,11 @@ async function consumeDemoLink() {
 
 async function loadKnowledge() {
   if ((!firebaseToken.value && !demoAccessToken.value) || knowledgeLoading.value) return;
+  if (authSnapshot.value && !selectedBusinessId()) {
+    knowledgeGaps.value = [];
+    retrievalDiagnostics.value = [];
+    return;
+  }
   knowledgeLoading.value = true;
   knowledgeError.value = "";
   try {
@@ -671,12 +676,16 @@ function formatDocumentSize(sizeBytes: number): string {
 
 async function loadDocuments() {
   if (!authSnapshot.value || !activeOrganization.value || documentsLoading.value) return;
+  const businessId = selectedBusinessId();
+  if (!businessId) {
+    organizationDocuments.value = [];
+    return;
+  }
   documentsLoading.value = true;
   documentsError.value = "";
   try {
     const params = new URLSearchParams({ organizationId: activeOrganization.value.id });
-    const businessId = selectedBusinessId();
-    if (businessId) params.set("businessId", businessId);
+    params.set("businessId", businessId);
     const response = await fetch(apiUrl(`/api/v1/storage/documents?${params.toString()}`), { headers: ownerHeaders() });
     const payload = await response.json() as { documents?: OrganizationDocument[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load organization documents.");
@@ -695,6 +704,8 @@ async function watchDocumentProcessing(documentId: string): Promise<void> {
     const current = organizationDocuments.value.find((item) => item.id === documentId);
     if (current?.status === "ready") {
       documentsMessage.value = `${current.fileName} is searchable in the private knowledge base.`;
+      await refreshWorkspaceSummary();
+      await loadKnowledge();
       return;
     }
     if (current?.status === "failed") {
@@ -1502,14 +1513,17 @@ function openHome() {
         <div v-else-if="view === 'knowledge'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><button class="outline-button small" type="button" @click="loadKnowledge">{{ knowledgeLoading ? 'Refreshing…' : 'Refresh' }}</button></div>
           <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
-          <article class="panel document-library">
-            <div class="panel-heading"><div><p class="eyebrow">Organization knowledge</p><h2>Private documents</h2><p>Upload policies, menus, service guides, and other business material. Files are private and scoped to {{ businessName }}.</p></div><label class="primary-button small document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot" @change="uploadDocument" /></label></div>
+          <article v-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message knowledge-start-panel"><strong>Start your knowledge base</strong><p>Sign-in is complete. Add your first business website and FrontDeskWise will crawl it, index the readable content, and make it available for questions.</p><button class="primary-button small" type="button" @click="openAddBusiness">Add website / domain →</button></article>
+          <article v-if="!authSnapshot || availableBusinesses.length" class="panel document-library">
+            <div class="panel-heading"><div><p class="eyebrow">Organization knowledge</p><h2>Private documents</h2><p>Upload policies, menus, service guides, and other business material. Files are private and scoped to {{ businessName || 'the selected business' }}.</p></div><label class="primary-button small document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label></div>
             <p v-if="documentsError" class="form-error">{{ documentsError }}</p>
             <p v-if="documentsMessage" class="saved-message">✓ {{ documentsMessage }}</p>
             <div v-if="!authSnapshot" class="install-gate"><p>Sign in to upload organization knowledge. The public demo still uses the crawled website.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to upload →</button></div>
             <div v-else-if="!organizationDocuments.length && !documentsError" class="diagnostics-empty">No private documents uploaded for this business yet.</div>
             <div v-else class="document-list"><div v-for="documentItem in organizationDocuments" :key="documentItem.id" class="document-row"><div><strong>{{ documentItem.fileName }}</strong><small>{{ documentItem.contentType }} · {{ formatDocumentSize(documentItem.sizeBytes) }} · {{ documentItem.status }}</small></div><div class="admin-actions"><button class="outline-button small" type="button" @click="downloadDocument(documentItem)">Download</button><button class="text-button" type="button" :disabled="documentsLoading" @click="deleteDocument(documentItem)">Remove</button></div></div></div>
           </article>
+          <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps—not placeholder metrics.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
+          <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>These are the pages currently available to the assistant. Private uploads appear above after processing.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh sources</button></div><div class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.url" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.pageType }} · {{ source.url }}</small></div><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span></div></div></article>
           <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon">✓</div><h2>No open knowledge gaps</h2><p>New low-confidence questions will appear here for review.</p></article>
           <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || gap.status === 'resolved'" @click="resolveKnowledgeGap(gap)">{{ gap.status === 'resolved' ? 'Approved' : 'Approve answer' }}</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Explainability</p><h2>Retrieval diagnostics</h2><p>Recent answers with confidence and retrieval mode.</p></div></div>
