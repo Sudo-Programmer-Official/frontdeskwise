@@ -11,8 +11,9 @@ import {
   signUpAndBootstrap,
   type AuthSnapshot,
 } from "./auth/firebase";
+import LegalPage from "./LegalPage.vue";
 
-type View = "home" | "overview" | "conversations" | "leads" | "knowledge" | "actions" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin";
+type View = "home" | "privacy" | "terms" | "overview" | "conversations" | "leads" | "knowledge" | "actions" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin";
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 
 interface Lead {
@@ -303,6 +304,8 @@ const navItems: Array<{ id: View; label: string; icon: string }> = [
 
 const pageTitle = computed(() => {
   if (view.value === "home") return "Build your AI front desk";
+  if (view.value === "privacy") return "Privacy Policy";
+  if (view.value === "terms") return "Terms of Service";
   if (view.value === "admin") return "Admin control plane";
   return navItems.find((item) => item.id === view.value)?.label ?? "Overview";
 });
@@ -974,6 +977,12 @@ function isPlatformRoute(): boolean {
   return typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") === "/platform";
 }
 
+function legalRoute(): "privacy" | "terms" | null {
+  if (typeof window === "undefined") return null;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  return path === "/privacy" ? "privacy" : path === "/terms" ? "terms" : null;
+}
+
 function navigateToAdmin() {
   if (typeof window !== "undefined" && window.location.pathname !== "/platform") {
     window.history.pushState({}, "", "/platform");
@@ -988,6 +997,14 @@ function handleRouteChange() {
     else if (authSnapshot.value) void loadAdminOrganizations();
     else openAuth("signin");
     return;
+  }
+  const legal = legalRoute();
+  if (legal) {
+    view.value = legal;
+    return;
+  }
+  if (view.value === "privacy" || view.value === "terms") {
+    view.value = authSnapshot.value ? "overview" : "home";
   }
   if (view.value === "admin") view.value = authSnapshot.value ? "overview" : "home";
 }
@@ -1379,13 +1396,21 @@ watch(view, (nextView) => {
 function updateDocumentMetadata() {
   if (typeof document === "undefined") return;
   const landing = view.value === "home";
+  const legal = view.value === "privacy" || view.value === "terms";
   document.title = landing ? "FrontDeskWise — AI front desk for local businesses" : `${pageTitle.value} · FrontDeskWise`;
   const robots = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]');
-  if (robots) robots.content = landing ? "index,follow" : "noindex,nofollow";
+  if (robots) robots.content = landing || legal ? "index,follow" : "noindex,nofollow";
+  const canonical = document.head.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+  if (canonical && typeof window !== "undefined") {
+    const siteOrigin = String(import.meta.env.VITE_SITE_ORIGIN ?? window.location.origin).replace(/\/$/, "");
+    canonical.href = `${siteOrigin}${legal ? `/${view.value}` : "/"}`;
+  }
 }
 
 watch(view, updateDocumentMetadata);
 onMounted(() => {
+  const initialLegalRoute = legalRoute();
+  if (initialLegalRoute) view.value = initialLegalRoute;
   updateDocumentMetadata();
   void loadFeaturedDemos();
   void consumeDemoLink();
@@ -1486,6 +1511,16 @@ function openHome() {
           </article>
         </div>
       </section>
+
+      <footer class="marketing-footer">
+        <div><strong>FrontDeskWise</strong><span>FrontDeskWise is a product of Sudo Programmer, Inc.</span></div>
+        <nav aria-label="Footer navigation"><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:hello@frontdeskwise.com">Contact</a></nav>
+        <small>© 2026 Sudo Programmer, Inc. · FrontDeskWise. Built for clearer customer conversations.</small>
+      </footer>
+    </section>
+
+    <section v-else-if="view === 'privacy' || view === 'terms'" class="legal-shell">
+      <LegalPage :kind="view === 'privacy' ? 'privacy' : 'terms'" />
     </section>
 
     <section v-else class="product-shell">

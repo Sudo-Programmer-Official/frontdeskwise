@@ -8,6 +8,20 @@ The first public environment will use:
 
 This is a speed-first production launch, not the final general-availability posture. Keep the existing RDS credentials in the deployment secret manager only; do not put them in this repository, the browser bundle, or chat.
 
+## Brand and legal identity
+
+FrontDeskWise is the customer-facing product brand operated by Sudo Programmer, Inc. Use this relationship consistently in the public website, legal pages, billing records, support messages, and OAuth branding:
+
+- Product/app name: `FrontDeskWise`
+- Operator and legal/billing entity: `Sudo Programmer, Inc.`
+- Public positioning: `FrontDeskWise by Sudo Programmer, Inc.`
+- Application home page: `https://frontdeskwise.com`
+- Privacy policy: `https://frontdeskwise.com/privacy`
+- Terms of service: `https://frontdeskwise.com/terms`
+- Developer contact: `hello@frontdeskwise.com`
+
+Configure the app name, home page, privacy policy, terms URL, and developer contact in the Google Cloud OAuth consent-screen/branding settings. This is a Google Cloud configuration step, separate from Firebase Authorized Domains and separate from the web hosting provider. Keep `hello@frontdeskwise.com` monitored because it is the published product and privacy contact.
+
 ## Code-side work completed
 
 - Render is configured as the production API service in `render.yaml`.

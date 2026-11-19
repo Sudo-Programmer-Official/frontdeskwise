@@ -1,5 +1,7 @@
 # FrontDeskWise account and organization lifecycle
 
+FrontDeskWise is the customer-facing product brand operated by Sudo Programmer, Inc. Google OAuth branding should use `FrontDeskWise`, while the home page, privacy policy, terms, and developer contact point to the verified FrontDeskWise domain and `hello@frontdeskwise.com`. Billing and service communications may appear under `Sudo Programmer, Inc.`.
+
 FrontDeskWise keeps the conversion path anonymous until a visitor asks to keep or publish the generated agent:
 
 ```text

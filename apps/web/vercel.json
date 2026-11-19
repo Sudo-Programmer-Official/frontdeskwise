@@ -6,7 +6,9 @@
   "outputDirectory": "dist",
   "rewrites": [
     { "source": "/platform", "destination": "/" },
-    { "source": "/platform/(.*)", "destination": "/" }
+    { "source": "/platform/(.*)", "destination": "/" },
+    { "source": "/privacy", "destination": "/" },
+    { "source": "/terms", "destination": "/" }
   ],
   "headers": [
     {
