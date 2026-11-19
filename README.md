@@ -5,6 +5,7 @@ FrontDeskWise is an AI front desk for local businesses. It answers website quest
 See [docs/architecture.md](docs/architecture.md) for the current high-level and low-level system architecture, request flows, tenant boundaries, and future integration points.
 See [docs/data-and-integrations.md](docs/data-and-integrations.md) for the database inventory, lead fields, CRM delivery contract, and retry model.
 See [docs/production-launch-checklist.md](docs/production-launch-checklist.md) for the first public deployment on `frontdeskwise.com`, Vercel/Render environment setup, SEO checks, acceptance tests, and the remaining account-owned work.
+See [docs/auth-and-organization-lifecycle.md](docs/auth-and-organization-lifecycle.md) for the Firebase account flow, demo claiming, organization/business hierarchy, roles, and rollout sequence.
 
 This repository starts with the product-led growth loop:
 

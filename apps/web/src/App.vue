@@ -1,5 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import {
+  currentAuthSnapshot,
+  firebaseAuthConfigured,
+  observeFirebaseUser,
+  sendFrontDeskWisePasswordReset,
+  signInAndBootstrap,
+  signInWithGoogleAndBootstrap,
+  signOutFrontDeskWise,
+  signUpAndBootstrap,
+  type AuthSnapshot,
+} from "./auth/firebase";
 
 type View = "home" | "overview" | "conversations" | "leads" | "knowledge" | "actions" | "agent";
 
@@ -57,6 +68,15 @@ const isGenerating = ref(false);
 const generationError = ref("");
 const demoSlug = ref("british-swim-school-tampa-bay");
 const demoAccessToken = ref(typeof window !== "undefined" ? window.localStorage.getItem("frontdeskwiseDemoAccessToken") ?? "" : "");
+const firebaseToken = ref("");
+const authSnapshot = ref<AuthSnapshot | null>(null);
+const authModalOpen = ref(false);
+const authMode = ref<"signin" | "signup">("signin");
+const authEmail = ref("");
+const authPassword = ref("");
+const authOrganizationName = ref("");
+const authError = ref("");
+const authLoading = ref(false);
 const businessName = ref("British Swim School");
 const assistantName = ref("Swim Assistant");
 const welcomeMessage = ref(
@@ -119,9 +139,113 @@ const pageTitle = computed(() => {
 });
 
 const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== "Booked").length);
+const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
+const availableBusinesses = computed(() => activeOrganization.value?.businesses ?? []);
 
 function ownerHeaders(): Record<string, string> {
-  return demoAccessToken.value ? { authorization: `Bearer ${demoAccessToken.value}` } : {};
+  const token = firebaseToken.value || demoAccessToken.value;
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+function openAuth(mode: "signin" | "signup" = "signin") {
+  authMode.value = mode;
+  authError.value = "";
+  authPassword.value = "";
+  authModalOpen.value = true;
+}
+
+async function submitAuth() {
+  if (!authEmail.value.trim() || authPassword.value.length < 6 || authLoading.value) return;
+  authLoading.value = true;
+  authError.value = "";
+  try {
+    if (!firebaseAuthConfigured()) throw new Error("Sign-in is not configured yet. Add the Firebase web settings to the Vercel environment.");
+    authSnapshot.value = authMode.value === "signup"
+      ? await signUpAndBootstrap(authEmail.value, authPassword.value, demoAccessToken.value || undefined, authOrganizationName.value)
+      : await signInAndBootstrap(authEmail.value, authPassword.value, demoAccessToken.value || undefined, authOrganizationName.value);
+    await syncAuthenticatedBusiness(authSnapshot.value);
+    authModalOpen.value = false;
+    authPassword.value = "";
+    view.value = "overview";
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : "Could not finish sign-in.";
+  } finally {
+    authLoading.value = false;
+  }
+}
+
+async function submitGoogleAuth() {
+  if (authLoading.value) return;
+  authLoading.value = true;
+  authError.value = "";
+  try {
+    if (!firebaseAuthConfigured()) throw new Error("Sign-in is not configured yet. Add the Firebase web settings to the Vercel environment.");
+    authSnapshot.value = await signInWithGoogleAndBootstrap(demoAccessToken.value || undefined, authOrganizationName.value);
+    await syncAuthenticatedBusiness(authSnapshot.value);
+    authModalOpen.value = false;
+    view.value = "overview";
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : "Could not finish Google sign-in.";
+  } finally {
+    authLoading.value = false;
+  }
+}
+
+async function signOut() {
+  await signOutFrontDeskWise();
+  authSnapshot.value = null;
+  firebaseToken.value = "";
+  openHome();
+}
+
+async function resetPassword() {
+  authError.value = "";
+  try {
+    await sendFrontDeskWisePasswordReset(authEmail.value);
+    authError.value = "Password reset instructions sent. Check your inbox.";
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : "Could not send password reset instructions.";
+  }
+}
+
+function requireAccountForPublish() {
+  if (authSnapshot.value) return true;
+  openAuth("signup");
+  return false;
+}
+
+async function loadBusinessWorkspace(slug: string) {
+  const response = await fetch(apiUrl(`/api/v1/demo/${slug}`), { headers: ownerHeaders() });
+  if (!response.ok) return;
+  const payload = await response.json() as {
+    business?: { name?: string; websiteUrl?: string };
+    agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean };
+  };
+  businessName.value = payload.business?.name ?? businessName.value;
+  websiteUrl.value = payload.business?.websiteUrl ?? websiteUrl.value;
+  assistantName.value = payload.agent?.assistantName ?? assistantName.value;
+  welcomeMessage.value = payload.agent?.welcomeMessage ?? welcomeMessage.value;
+  widgetColor.value = payload.agent?.widgetColor ?? widgetColor.value;
+  showLeadCapture.value = payload.agent?.collectLeads ?? showLeadCapture.value;
+  showBookingAction.value = payload.agent?.showBookingAction ?? showBookingAction.value;
+  conversationId.value = "";
+  leads.value = [];
+  await loadLeads();
+}
+
+async function selectBusiness(slug: string) {
+  if (!slug) return;
+  demoSlug.value = slug;
+  await loadBusinessWorkspace(slug);
+}
+
+async function syncAuthenticatedBusiness(snapshot: AuthSnapshot) {
+  const organization = snapshot.organizations.find((item) => item.id === snapshot.activeOrganizationId) ?? snapshot.organizations[0];
+  const preferred = organization?.businesses.find((business) => business.slug === demoSlug.value)
+    ?? snapshot.organizations.flatMap((item) => item.businesses).find((business) => business.slug === demoSlug.value)
+    ?? organization?.businesses[0]
+    ?? snapshot.organizations[0]?.businesses[0];
+  if (preferred) await selectBusiness(preferred.slug);
 }
 
 async function generateDemo() {
@@ -372,6 +496,7 @@ async function captureLead() {
 }
 
 async function saveAgent() {
+  if (!requireAccountForPublish()) return;
   const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/agent-config`), {
     method: "POST",
     headers: { "content-type": "application/json", ...ownerHeaders() },
@@ -403,7 +528,18 @@ function updateDocumentMetadata() {
 }
 
 watch(view, updateDocumentMetadata);
-onMounted(updateDocumentMetadata);
+onMounted(() => {
+  updateDocumentMetadata();
+  if (typeof window !== "undefined") {
+    observeFirebaseUser((user) => {
+      void (async () => {
+        firebaseToken.value = user ? await user.getIdToken() : "";
+        authSnapshot.value = user ? await currentAuthSnapshot() : null;
+        if (authSnapshot.value) await syncAuthenticatedBusiness(authSnapshot.value);
+      })();
+    });
+  }
+});
 
 function openHome() {
   view.value = "home";
@@ -420,7 +556,7 @@ function openHome() {
         </button>
         <div class="nav-actions">
           <button class="text-button" type="button" @click="view = 'overview'">View demo dashboard</button>
-          <button class="dark-button small" type="button" @click="view = 'overview'">Sign in</button>
+          <button class="dark-button small" type="button" @click="openAuth('signin')">Sign in</button>
         </div>
       </header>
 
@@ -471,7 +607,7 @@ function openHome() {
     <section v-else class="product-shell">
       <aside class="sidebar">
         <button class="sidebar-brand" type="button" @click="openHome"><span class="brand-orb">✦</span><span>FrontDesk<span>Wise</span></span></button>
-        <div class="workspace-switcher"><span class="workspace-avatar">B</span><span><strong>{{ businessName }}</strong><small>Tampa Bay · Demo</small></span><span class="chevron">⌄</span></div>
+        <div class="workspace-switcher"><span class="workspace-avatar">{{ businessName.charAt(0).toUpperCase() }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="demoSlug" aria-label="Switch business" @change="selectBusiness(demoSlug)"><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName }}</strong><small>Tampa Bay · Demo</small></span><span class="chevron">⌄</span></div>
         <nav class="sidebar-nav">
           <button v-for="item in navItems" :key="item.id" type="button" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'conversations'">24</b></button>
         </nav>
@@ -479,7 +615,7 @@ function openHome() {
       </aside>
 
       <section class="content-area">
-        <header class="content-header"><div><p class="breadcrumb">{{ businessName }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="view = 'agent'">Edit agent</button><span class="notification">♧<i></i></span><span class="profile-avatar">SP</span></div></header>
+        <header class="content-header"><div><p class="breadcrumb">{{ businessName }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
 
         <div v-if="view === 'overview'" class="view-content">
           <div class="metric-grid">
@@ -499,7 +635,7 @@ function openHome() {
 
         <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>People FrontDeskWise helped move closer to a booking.</p></div><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!leads.length" class="diagnostics-empty">No leads captured yet.</div><div v-for="lead in leads" :key="lead.id" class="table-row"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0) }}</span><strong>{{ lead.name }}</strong></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></div></div></div>
 
-        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Make it yours</p><h2>Agent & widget</h2><p>Customize the demo, then publish it to a real business website.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'overview'">Test conversation</button><button class="primary-button small" type="button" @click="saveAgent">Save & publish</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Agent identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><label class="toggle-row"><span>Offer human handoff when uncertain</span><input type="checkbox" checked /></label></div></article><article class="panel live-preview"><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>https://britishswimschool.com/tampa-bay/</span></div><div class="preview-site"><div class="preview-site-nav"><strong>BRITISH SWIM SCHOOL</strong><span>Programs　Locations　FAQs　About</span><button>Enroll now</button></div><div class="preview-site-hero"><div><h2>Swim lessons<br />for all ages</h2><p>Building safer, stronger, more confident swimmers.</p><button>Find a location →</button></div><div class="fake-swimmer">◉</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><div class="suggested-question">What swim programs do you offer? <span>›</span></div><div class="suggested-question">How do I enroll my child? <span>›</span></div><button v-if="showLeadCapture" class="chat-cta" type="button">Get started / Request information</button><div class="chat-input">Type your question… <span>➤</span></div></div></div></div></article></div></div>
+        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Make it yours</p><h2>Agent & widget</h2><p>Customize the demo, then publish it to a real business website.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'overview'">Test conversation</button><button class="primary-button small" type="button" @click="saveAgent">{{ authSnapshot ? 'Save & publish' : 'Create account to publish' }}</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Agent identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><label class="toggle-row"><span>Offer human handoff when uncertain</span><input type="checkbox" checked /></label></div></article><article class="panel live-preview"><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>https://britishswimschool.com/tampa-bay/</span></div><div class="preview-site"><div class="preview-site-nav"><strong>BRITISH SWIM SCHOOL</strong><span>Programs　Locations　FAQs　About</span><button>Enroll now</button></div><div class="preview-site-hero"><div><h2>Swim lessons<br />for all ages</h2><p>Building safer, stronger, more confident swimmers.</p><button>Find a location →</button></div><div class="fake-swimmer">◉</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><div class="suggested-question">What swim programs do you offer? <span>›</span></div><div class="suggested-question">How do I enroll my child? <span>›</span></div><button v-if="showLeadCapture" class="chat-cta" type="button">Get started / Request information</button><div class="chat-input">Type your question… <span>➤</span></div></div></div></div></article></div></div>
 
         <div v-else-if="view === 'knowledge'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><button class="outline-button small" type="button" @click="loadKnowledge">{{ knowledgeLoading ? 'Refreshing…' : 'Refresh' }}</button></div>
@@ -526,6 +662,24 @@ function openHome() {
         <div v-else class="view-content empty-view"><div class="empty-icon">ϟ</div><p class="eyebrow">{{ pageTitle }}</p><h2>This surface is ready for the first real business.</h2><p>We’ll connect this view to tenant-scoped data, grounded answers, and real actions next.</p><button class="primary-button small" type="button" @click="view = 'overview'">Back to overview</button></div>
       </section>
     </section>
+
+    <div v-if="authModalOpen" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title" @click.self="authModalOpen = false">
+      <form class="auth-card" @submit.prevent="submitAuth">
+        <button class="auth-close" type="button" aria-label="Close" @click="authModalOpen = false">×</button>
+        <p class="eyebrow">{{ authMode === 'signup' ? 'Save your AI front desk' : 'Welcome back' }}</p>
+        <h2 id="auth-title">{{ authMode === 'signup' ? 'Create your FrontDeskWise account' : 'Sign in to FrontDeskWise' }}</h2>
+        <p class="auth-copy">{{ authMode === 'signup' ? 'Your demo stays attached to your new organization.' : 'Pick up where you left off across all your businesses.' }}</p>
+        <label>Email<input v-model="authEmail" type="email" autocomplete="email" required placeholder="you@business.com" /></label>
+        <label>Password<input v-model="authPassword" type="password" autocomplete="new-password" minlength="6" required placeholder="At least 6 characters" /></label>
+        <label v-if="authMode === 'signup'">Organization name <span class="optional">optional</span><input v-model="authOrganizationName" type="text" placeholder="Dave's Businesses" /></label>
+        <p v-if="authError" class="form-error">{{ authError }}</p>
+        <button class="primary-button auth-submit" type="submit" :disabled="authLoading">{{ authLoading ? 'Working…' : authMode === 'signup' ? 'Create account →' : 'Sign in →' }}</button>
+        <div class="auth-divider"><span>or</span></div>
+        <button class="google-button" type="button" :disabled="authLoading" @click="submitGoogleAuth"><span class="google-mark">G</span> Continue with Google</button>
+        <button v-if="authMode === 'signin'" class="text-button auth-switch" type="button" @click="resetPassword">Forgot password?</button>
+        <button class="text-button auth-switch" type="button" @click="authMode = authMode === 'signup' ? 'signin' : 'signup'; authError = ''">{{ authMode === 'signup' ? 'Already have an account? Sign in' : 'New to FrontDeskWise? Create an account' }}</button>
+      </form>
+    </div>
   </main>
 </template>
 

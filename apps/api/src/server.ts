@@ -1,9 +1,11 @@
 import "dotenv/config";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
 import { createPoolFromEnv } from "./database.js";
 import { crawlWebsite, normalisePublicUrl, type CrawledPage } from "./crawler.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
+import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import {
   decryptIntegrationCredentials,
@@ -95,6 +97,14 @@ type BillingState = {
   providerCustomerId: string | null;
   providerSubscriptionId: string | null;
 };
+
+type FirebaseAuthUser = {
+  identitySubject: string;
+  email: string;
+  name: string;
+};
+
+type AppUser = FirebaseAuthUser & { id: string };
 
 type Message = {
   role: "user" | "assistant";
@@ -223,6 +233,228 @@ function safeLeadMetadata(value: unknown, body: Record<string, unknown>): Record
     if (typeof item === "string" && item.trim()) metadata[key] = item.trim().slice(0, 240);
   }
   return metadata;
+}
+
+function firebaseProjectId(): string {
+  const projectId = process.env.FIREBASE_PROJECT_ID?.trim();
+  if (!projectId) throw httpError(503, "Firebase authentication is not configured on this environment");
+  return projectId;
+}
+
+function firebaseAuthUserFromClaims(claims: Record<string, unknown>): FirebaseAuthUser {
+  const identitySubject = typeof claims.sub === "string" ? claims.sub.trim() : "";
+  const email = typeof claims.email === "string" ? claims.email.trim().toLowerCase() : "";
+  const nameClaim = typeof claims.name === "string" ? claims.name.trim() : "";
+  if (!identitySubject || !email || !email.includes("@")) throw httpError(401, "A verified Firebase email identity is required");
+  return {
+    identitySubject,
+    email,
+    name: nameClaim.slice(0, 160) || email.split("@", 1)[0].slice(0, 160) || "FrontDeskWise user",
+  };
+}
+
+async function requireFirebaseAuth(request: FastifyRequest): Promise<FirebaseAuthUser> {
+  if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
+  const token = bearerToken(request);
+  if (!token) throw httpError(401, "A Firebase bearer token is required");
+  try {
+    const claims = await verifyFirebaseIdToken(token, firebaseProjectId());
+    return firebaseAuthUserFromClaims(claims);
+  } catch (error) {
+    if ((error as { statusCode?: number }).statusCode) throw error;
+    throw httpError(401, error instanceof Error ? error.message : "Firebase token verification failed");
+  }
+}
+
+async function ensureAppUser(client: PoolClient, authUser: FirebaseAuthUser): Promise<AppUser> {
+  const bySubject = await client.query<Record<string, unknown>>(
+    "select id, identity_subject, email, name from app_users where identity_subject = $1 for update",
+    [authUser.identitySubject],
+  );
+  const byEmail = await client.query<Record<string, unknown>>(
+    "select id, identity_subject, email, name from app_users where email_normalized = $1 for update",
+    [authUser.email],
+  );
+  if (bySubject.rowCount && byEmail.rowCount && bySubject.rows[0].id !== byEmail.rows[0].id) {
+    throw httpError(409, "This Firebase identity and email are linked to different FrontDeskWise accounts");
+  }
+
+  const existing = bySubject.rows[0] ?? byEmail.rows[0];
+  if (existing) {
+    if (existing.identity_subject && existing.identity_subject !== authUser.identitySubject) {
+      throw httpError(409, "This email is already linked to another identity");
+    }
+    const updated = await client.query<Record<string, unknown>>(
+      `update app_users
+       set identity_subject = $2, email = $3, email_normalized = $3, name = $4, status = 'active', updated_at = now()
+       where id = $1
+       returning id, identity_subject, email, name`,
+      [existing.id, authUser.identitySubject, authUser.email, authUser.name],
+    );
+    const row = updated.rows[0];
+    return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) };
+  }
+
+  const created = await client.query<Record<string, unknown>>(
+    `insert into app_users (identity_subject, email, email_normalized, name)
+     values ($1, $2, $2, $3)
+     returning id, identity_subject, email, name`,
+    [authUser.identitySubject, authUser.email, authUser.name],
+  );
+  const row = created.rows[0];
+  return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) };
+}
+
+async function authSnapshot(userId: string, activeOrganizationId: string | null = null): Promise<Record<string, unknown>> {
+  if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
+  const [userResult, organizationResult, businessResult] = await Promise.all([
+    pool.query<Record<string, unknown>>("select id, email, name from app_users where id = $1 and status = 'active'", [userId]),
+    pool.query<Record<string, unknown>>(
+      `select o.id, o.name, o.slug, om.role
+       from organization_members om
+       join organizations o on o.id = om.organization_id
+       where om.user_id = $1
+       order by om.created_at`,
+      [userId],
+    ),
+    pool.query<Record<string, unknown>>(
+      `select b.id, b.organization_id, b.name, b.slug, b.website_url, b.is_demo, b.billing_status, b.plan_key,
+              coalesce(bm.role, case when om.role in ('owner', 'admin') then 'admin' else null end) as business_role
+       from businesses b
+       join organization_members om on om.organization_id = b.organization_id and om.user_id = $1
+       left join business_members bm on bm.business_id = b.id and bm.user_id = $1
+       where om.role in ('owner', 'admin') or bm.user_id is not null
+       order by b.created_at`,
+      [userId],
+    ),
+  ]);
+  if (!userResult.rowCount) throw httpError(401, "FrontDeskWise account not found");
+  const businessesByOrganization = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of businessResult.rows) {
+    const organizationId = String(row.organization_id);
+    const list = businessesByOrganization.get(organizationId) ?? [];
+    list.push({
+      id: String(row.id),
+      name: String(row.name),
+      slug: String(row.slug),
+      websiteUrl: typeof row.website_url === "string" ? row.website_url : null,
+      isDemo: row.is_demo !== false,
+      billingStatus: String(row.billing_status ?? "trial"),
+      planKey: String(row.plan_key ?? "demo"),
+      role: typeof row.business_role === "string" ? row.business_role : "viewer",
+    });
+    businessesByOrganization.set(organizationId, list);
+  }
+  const organizations = organizationResult.rows.map((row) => ({
+    id: String(row.id),
+    name: String(row.name),
+    slug: String(row.slug),
+    role: String(row.role),
+    businesses: businessesByOrganization.get(String(row.id)) ?? [],
+  }));
+  return {
+    user: { id: String(userResult.rows[0].id), email: String(userResult.rows[0].email), name: String(userResult.rows[0].name) },
+    organizations,
+    activeOrganizationId: activeOrganizationId && organizations.some((organization) => organization.id === activeOrganizationId)
+      ? activeOrganizationId
+      : (organizations[0]?.id ?? null),
+  };
+}
+
+async function bootstrapAuthenticatedUser(
+  authUser: FirebaseAuthUser,
+  options: { demoToken?: string | null; organizationName?: string | null },
+): Promise<Record<string, unknown>> {
+  if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const user = await ensureAppUser(client, authUser);
+    const existingMembership = await client.query<{ organization_id: string }>(
+      `select organization_id from organization_members
+       where user_id = $1 order by (role = 'owner') desc, created_at asc limit 1`,
+      [user.id],
+    );
+    let organizationId = existingMembership.rows[0]?.organization_id ?? null;
+    let activeBusinessId: string | null = null;
+
+    if (options.demoToken) {
+      const session = await client.query<Record<string, unknown>>(
+        `select s.id, s.business_id, b.organization_id, b.is_internal_demo, b.slug
+         from demo_access_sessions s
+         join businesses b on b.id = s.business_id
+         where s.token_hash = $1 and s.revoked_at is null and s.claimable = true
+           and s.claimed_at is null and s.expires_at > now()
+         for update`,
+        [hashAccessToken(options.demoToken)],
+      );
+      if (!session.rowCount) throw httpError(401, "The demo session is invalid or expired");
+      const demo = session.rows[0];
+      if (demo.is_internal_demo !== true) {
+        if (!organizationId) {
+          const organizationName = options.organizationName || `${authUser.name}'s Businesses`;
+          const organization = await client.query<{ id: string }>(
+            `insert into organizations (name, slug)
+             values ($1, $2)
+             returning id`,
+            [organizationName.slice(0, 160), `org-${randomUUID().replace(/-/g, "").slice(0, 24)}`],
+          );
+          organizationId = organization.rows[0].id;
+        }
+        await client.query(
+          `insert into organization_members (organization_id, user_id, role)
+           values ($1, $2, 'owner')
+           on conflict (organization_id, user_id) do update set role = 'owner', updated_at = now()`,
+          [organizationId, user.id],
+        );
+        const claimed = await client.query<{ id: string }>(
+          `update businesses
+           set organization_id = $2, is_demo = false, billing_mode = 'sandbox', billing_status = 'trial', plan_key = 'starter',
+               trial_ends_at = coalesce(trial_ends_at, now() + interval '14 days'), updated_at = now()
+           where id = $1
+           returning id`,
+          [demo.business_id, organizationId],
+        );
+        activeBusinessId = claimed.rows[0]?.id ?? null;
+        await client.query(
+          `insert into business_members (business_id, user_id, role)
+           values ($1, $2, 'admin')
+           on conflict (business_id, user_id) do update set role = 'admin', updated_at = now()`,
+          [demo.business_id, user.id],
+        );
+        await client.query(
+          `update demo_access_sessions
+           set claimable = false, claimed_at = now(), claimed_by_user_id = $2, updated_at = now()
+           where id = $1`,
+          [demo.id, user.id],
+        );
+      }
+    }
+
+    if (!organizationId) {
+      const organizationName = options.organizationName || `${authUser.name}'s Businesses`;
+      const organization = await client.query<{ id: string }>(
+        `insert into organizations (name, slug)
+         values ($1, $2)
+         returning id`,
+        [organizationName.slice(0, 160), `org-${randomUUID().replace(/-/g, "").slice(0, 24)}`],
+      );
+      organizationId = organization.rows[0].id;
+      await client.query(
+        `insert into organization_members (organization_id, user_id, role)
+         values ($1, $2, 'owner')`,
+        [organizationId, user.id],
+      );
+    }
+
+    await client.query("commit");
+    return await authSnapshot(user.id, organizationId);
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function leadFromRow(row: Record<string, unknown>): Lead {
@@ -531,25 +763,45 @@ async function enqueueAndRunEmbeddingJob(business: Business): Promise<void> {
   if (jobId) void processEmbeddingJob(business, jobId);
 }
 
-async function persistBusiness(business: Business): Promise<void> {
+async function persistBusiness(business: Business, organizationIdOverride?: string): Promise<void> {
   if (!pool) return;
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const isInternalDemo = business.slug === "british-swim-school-tampa-bay";
+    let organizationId = organizationIdOverride;
+    if (organizationId) {
+      const organization = await client.query<{ id: string }>("select id from organizations where id = $1", [organizationId]);
+      if (!organization.rowCount) throw httpError(404, "Organization not found");
+    } else {
+      const organizationSlug = isInternalDemo
+        ? "frontdeskwise-demo"
+        : `business-${contentHash(business.slug).slice(0, 20)}`;
+      const organizationResult = await client.query<{ id: string }>(
+        `insert into organizations (name, slug)
+         values ($1, $2)
+         on conflict (slug) do update set name = excluded.name, updated_at = now()
+         returning id`,
+        [isInternalDemo ? "FrontDeskWise Demo" : `${business.name} Organization`, organizationSlug],
+      );
+      organizationId = organizationResult.rows[0].id;
+    }
     const businessResult = await client.query<{ id: string }>(
       `insert into businesses (id, name, slug, vertical, website_url, timezone, location,
-                              billing_mode, is_demo, billing_status, plan_key, billing_interval,
+                              organization_id, billing_mode, is_demo, is_internal_demo, billing_status, plan_key, billing_interval,
                               trial_ends_at, current_period_ends_at, grace_ends_at, billing_provider,
                               provider_customer_id, provider_subscription_id, public_site_key,
                               widget_enabled, widget_last_loaded_at, widget_load_count)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
        on conflict (slug) do update set
          name = excluded.name,
          vertical = excluded.vertical,
          website_url = excluded.website_url,
          location = excluded.location,
+         organization_id = coalesce(businesses.organization_id, excluded.organization_id),
          billing_mode = excluded.billing_mode,
          is_demo = excluded.is_demo,
+         is_internal_demo = businesses.is_internal_demo or excluded.is_internal_demo,
          billing_status = excluded.billing_status,
          plan_key = excluded.plan_key,
          billing_interval = excluded.billing_interval,
@@ -572,8 +824,10 @@ async function persistBusiness(business: Business): Promise<void> {
         business.websiteUrl,
         "America/New_York",
         business.location,
+        organizationId,
         business.billing.mode,
         business.billing.isDemo,
+        isInternalDemo,
         business.billing.status,
         business.billing.planKey,
         business.billing.interval,
@@ -590,6 +844,27 @@ async function persistBusiness(business: Business): Promise<void> {
       ],
     );
     business.id = businessResult.rows[0].id;
+
+    if (isInternalDemo) {
+      const demoUser = await client.query<{ id: string }>(
+        `insert into app_users (email, email_normalized, name, status)
+         values ('demo@frontdeskwise.com', 'demo@frontdeskwise.com', 'FrontDeskWise Demo Owner', 'active')
+         on conflict (email_normalized) do update set name = excluded.name, status = 'active', updated_at = now()
+         returning id`,
+      );
+      await client.query(
+        `insert into organization_members (organization_id, user_id, role)
+         values ($1, $2, 'owner')
+         on conflict (organization_id, user_id) do update set role = 'owner', updated_at = now()`,
+        [organizationId, demoUser.rows[0].id],
+      );
+      await client.query(
+        `insert into business_members (business_id, user_id, role)
+         values ($1, $2, 'admin')
+         on conflict (business_id, user_id) do update set role = 'admin', updated_at = now()`,
+        [business.id, demoUser.rows[0].id],
+      );
+    }
 
     for (const source of business.sources) {
       const originalSourceId = source.id;
@@ -1025,7 +1300,7 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
     return;
   }
 
-  const result = await pool.query(
+  const demoResult = await pool.query(
     `select 1
      from demo_access_sessions s
      join workspace_users u on u.id = s.user_id
@@ -1033,7 +1308,44 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
        and s.expires_at > now() and u.status = 'active' and u.role in ('owner', 'admin')`,
     [tokenHash, business.id],
   );
-  if (!result.rowCount) throw httpError(401, "Demo owner access token is invalid or expired");
+  if (demoResult.rowCount) return;
+
+  let authUser: FirebaseAuthUser;
+  try {
+    authUser = await requireFirebaseAuth(request);
+  } catch (error) {
+    if ((error as { statusCode?: number }).statusCode === 503) {
+      throw httpError(401, "Demo owner access token is invalid or expired");
+    }
+    throw error;
+  }
+  const result = await pool.query(
+    `select 1
+     from app_users u
+     join business_members bm on bm.user_id = u.id and bm.business_id = $2
+     join businesses b on b.id = bm.business_id
+     join organization_members om on om.organization_id = b.organization_id and om.user_id = u.id
+     where u.identity_subject = $1 and u.status = 'active'
+       and (bm.role = 'admin' or om.role in ('owner', 'admin'))`,
+    [authUser.identitySubject, business.id],
+  );
+  if (!result.rowCount) throw httpError(403, "Your account does not have owner access to this business");
+}
+
+async function requireAuthenticatedBusinessOwner(business: Business, request: FastifyRequest): Promise<void> {
+  if (!pool) throw httpError(503, "Authenticated business access requires PostgreSQL storage");
+  const authUser = await requireFirebaseAuth(request);
+  const result = await pool.query(
+    `select 1
+     from app_users u
+     join business_members bm on bm.user_id = u.id and bm.business_id = $2
+     join businesses b on b.id = bm.business_id
+     join organization_members om on om.organization_id = b.organization_id and om.user_id = u.id
+     where u.identity_subject = $1 and u.status = 'active'
+       and (bm.role = 'admin' or om.role in ('owner', 'admin'))`,
+    [authUser.identitySubject, business.id],
+  );
+  if (!result.rowCount) throw httpError(403, "Your account does not have owner access to this business");
 }
 
 function billingAccess(billing: BillingState): { allowed: boolean; reason: string } {
@@ -1591,6 +1903,66 @@ app.get("/ready", async (_request, reply) => {
   }
 });
 
+app.get("/api/v1/auth/me", async (request) => {
+  const authUser = await requireFirebaseAuth(request);
+  if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
+  const result = await pool.query<{ id: string }>(
+    "select id from app_users where identity_subject = $1 and status = 'active'",
+    [authUser.identitySubject],
+  );
+  if (!result.rowCount) throw httpError(404, "FrontDeskWise account has not been bootstrapped");
+  return authSnapshot(result.rows[0].id);
+});
+
+app.post("/api/v1/auth/bootstrap", async (request) => {
+  const authUser = await requireFirebaseAuth(request);
+  const body = asRecord(request.body);
+  return bootstrapAuthenticatedUser(authUser, {
+    demoToken: optionalString(body.demoToken, 512),
+    organizationName: optionalString(body.organizationName, 160),
+  });
+});
+
+app.post("/api/v1/auth/businesses", async (request, reply) => {
+  const authUser = await requireFirebaseAuth(request);
+  if (!pool) throw httpError(503, "Adding a business requires PostgreSQL storage");
+  const body = asRecord(request.body);
+  const websiteUrl = normalisePublicUrl(body.websiteUrl);
+  const userResult = await pool.query<{ id: string }>(
+    "select id from app_users where identity_subject = $1 and status = 'active'",
+    [authUser.identitySubject],
+  );
+  if (!userResult.rowCount) throw httpError(404, "FrontDeskWise account has not been bootstrapped");
+  const organizationResult = await pool.query<{ id: string }>(
+    `select o.id
+     from organizations o
+     join organization_members om on om.organization_id = o.id
+     where om.user_id = $1 and ($2::uuid is null or o.id = $2::uuid) and om.role in ('owner', 'admin')
+     order by (om.role = 'owner') desc, om.created_at asc
+     limit 1`,
+    [userResult.rows[0].id, optionalString(body.organizationId, 80)],
+  );
+  if (!organizationResult.rowCount) throw httpError(403, "You do not have permission to add a business to that organization");
+
+  const crawled = await crawlWebsite(websiteUrl);
+  const firstPage = crawled.pages[0];
+  const name = businessNameFromTitle(firstPage.title, websiteUrl);
+  const baseSlug = slugify(name);
+  let slug = baseSlug;
+  while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
+  const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
+  business.billing = { ...business.billing, isDemo: false, planKey: "starter", trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1_000).toISOString() };
+  businesses.set(slug, business);
+  await persistBusiness(business, organizationResult.rows[0].id);
+  await pool.query(
+    `insert into business_members (business_id, user_id, role)
+     values ($1, $2, 'admin')
+     on conflict (business_id, user_id) do update set role = 'admin', updated_at = now()`,
+    [business.id, userResult.rows[0].id],
+  );
+  return reply.code(201).send({ business: workspacePayload(business), auth: await authSnapshot(userResult.rows[0].id, organizationResult.rows[0].id) });
+});
+
 app.post("/api/v1/demos", async (request, reply) => {
   const body = asRecord(request.body);
   const websiteUrl = normalisePublicUrl(body.websiteUrl);
@@ -1679,7 +2051,7 @@ app.post("/api/v1/demo/:slug/knowledge/reindex", async (request) => {
 app.get("/api/v1/demo/:slug/widget/install", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  await requireAuthenticatedBusinessOwner(business, request);
   const apiOrigin = (process.env.FRONTDESKWISE_PUBLIC_API_ORIGIN ?? `http://localhost:${port}`).replace(/\/$/, "");
   const widgetOrigin = process.env.FRONTDESKWISE_WIDGET_ORIGIN ?? process.env.WEB_ORIGIN ?? "http://localhost:5173";
   const scriptUrl = process.env.FRONTDESKWISE_WIDGET_URL ?? `${widgetOrigin.replace(/\/$/, "")}/widget.js`;
@@ -1717,7 +2089,7 @@ app.get("/api/v1/demo/:slug/integrations", async (request) => {
 app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  await requireAuthenticatedBusinessOwner(business, request);
   if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
   if (!integrationEncryptionConfigured()) throw httpError(503, "CRM integrations are not configured on this environment yet");
   const body = asRecord(request.body);
@@ -1978,7 +2350,7 @@ app.get("/api/v1/demo/:slug/leads", async (request) => {
 app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  await requireAuthenticatedBusinessOwner(business, request);
   const body = asRecord(request.body);
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);
