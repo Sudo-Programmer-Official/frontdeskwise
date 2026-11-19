@@ -24,7 +24,7 @@ services:
       - key: FRONTDESKWISE_CREDENTIAL_KEY
         sync: false
       - key: WEB_ORIGIN
-        value: https://frontdeskwise.com,https://www.frontdeskwise.com
+        value: https://frontdeskwise.com,https://www.frontdeskwise.com,https://app.frontdeskwise.com
       - key: FRONTDESKWISE_PUBLIC_API_ORIGIN
         value: https://api.frontdeskwise.com
       - key: FRONTDESKWISE_WIDGET_ORIGIN
@@ -34,6 +34,52 @@ services:
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: OPENAI_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_STARTER_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_GROWTH_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_MULTI_BUSINESS_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_PORTFOLIO_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_STARTER_YEARLY
+        sync: false
+      - key: STRIPE_PRICE_GROWTH_YEARLY
+        sync: false
+      - key: STRIPE_PRICE_MULTI_BUSINESS_YEARLY
+        sync: false
+      - key: STRIPE_PRICE_PORTFOLIO_YEARLY
+        sync: false
+      - key: FRONTDESKWISE_STRIPE_SUCCESS_URL
+        value: https://frontdeskwise.com/?billing=success
+      - key: FRONTDESKWISE_STRIPE_CANCEL_URL
+        value: https://frontdeskwise.com/?billing=cancel
+      - key: FRONTDESKWISE_STRIPE_PORTAL_RETURN_URL
+        value: https://frontdeskwise.com/?billing=portal
+      - key: FRONTDESKWISE_DEFAULT_TRIAL_DAYS
+        value: "14"
+      - key: FRONTDESKWISE_SUPER_ADMIN_EMAILS
+        sync: false
+      - key: AWS_REGION
+        value: us-east-1
+      - key: FRONTDESKWISE_S3_BUCKET
+        sync: false
+      - key: FRONTDESKWISE_MAX_DOCUMENT_BYTES
+        value: "26214400"
+      - key: FRONTDESKWISE_SES_FROM_EMAIL
+        value: hello@frontdeskwise.com
+      - key: FRONTDESKWISE_SES_FROM_NAME
+        value: FrontDeskWise
+      - key: FRONTDESKWISE_SES_REPLY_TO
+        value: hello@frontdeskwise.com
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
         sync: false
       - key: FRONTDESKWISE_EMBEDDING_MODEL
         value: text-embedding-3-small

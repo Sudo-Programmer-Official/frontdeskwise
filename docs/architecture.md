@@ -55,7 +55,7 @@ flowchart LR
 | Embedding client | `apps/api/src/embeddings.ts` | Optional provider calls and vector formatting |
 | Database adapter | `apps/api/src/database.ts` | Database-name guard, SSL normalization, PostgreSQL pool creation |
 | Migration runner | `apps/api/src/migrate.ts` | Ordered, checksum-verified, advisory-locked migrations |
-| Database schema | `infra/db/001_initial.sql` through `009_crm_integrations_and_lead_events.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, and CRM job state |
+| Database schema | `infra/db/001_initial.sql` through `013_demo_operations_and_access_audit.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, and audited demo operations |
 
 ## Primary flow: URL to demo
 

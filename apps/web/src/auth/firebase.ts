@@ -24,12 +24,30 @@ export type AuthBusiness = {
   role: string;
 };
 
+export type AuthOrganizationBilling = {
+  mode: "sandbox" | "live";
+  status: string;
+  planKey: string;
+  interval: "month" | "year" | null;
+  trialStartAt: string | null;
+  trialEndAt: string | null;
+  currentPeriodEndAt: string | null;
+  graceEndAt: string | null;
+  amountCents: number | null;
+  currency: string;
+  access: { allowed: boolean; reason: string };
+  plan: { key: string; displayName: string; description: string; amountCents: number | null; currency: string; maxBusinesses: number };
+  override: { reason: string } | null;
+};
+
 export type AuthOrganization = {
   id: string;
   name: string;
   slug: string;
   role: string;
+  billing: AuthOrganizationBilling;
   businesses: AuthBusiness[];
+  metrics: { conversations: number; leads: number; bookings: number };
 };
 
 export type AuthSnapshot = {

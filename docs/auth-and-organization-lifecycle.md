@@ -49,6 +49,11 @@ Migration `010_identity_organizations_and_business_membership.sql` adds:
 - `businesses.is_internal_demo`
 - claim metadata on `demo_access_sessions`
 
+Migration `013_demo_operations_and_access_audit.sql` adds `demo_requests` and
+`demo_access_audit`, plus operator metadata on demo sessions. This keeps the
+visitor path login-free while giving super-admins a durable request catalog,
+test-user links, expiry/reset/revoke controls, and validation history.
+
 Existing businesses are backfilled into one organization each. Existing `workspace_users` are copied into the new membership model, but the legacy table remains while demo bearer sessions are being retired.
 
 The seeded internal demo is represented by:
@@ -92,8 +97,21 @@ The API verifies the Firebase ID-token signature and validates `aud`, `iss`, `su
 
 1. Set the same Firebase project ID in Render and the Firebase web config in Vercel.
 2. Enable Email/Password in Firebase Auth and create the internal `demo@frontdeskwise.com` user if it does not already exist.
-3. Deploy; Render’s `preDeployCommand` applies migration 010 under the existing migration advisory lock.
+3. Deploy; Render’s `preDeployCommand` applies the complete forward-only migration chain under the existing migration advisory lock.
 4. Test URL → demo → signup → claim → dashboard.
 5. Add the second business through `POST /api/v1/auth/businesses` and verify that the organization membership query returns both businesses.
 6. Confirm Google popup sign-in from both `frontdeskwise.com` and `www.frontdeskwise.com`; Firebase Authorized Domains must include both.
 7. Add organization invitation flows after the core email/password and Google paths are stable.
+
+## Super-admin demo operations
+
+The protected control-plane endpoints are:
+
+- `GET /api/v1/admin/demo-requests` and `GET /api/v1/admin/demo-requests/:id` — request catalog and audit history.
+- `POST /api/v1/admin/demo-requests` — generate a scoped test-user link for an existing business.
+- `POST /api/v1/admin/demo-requests/:id/extend` — extend link access for a bounded number of days.
+- `POST /api/v1/admin/demo-requests/:id/reset` — revoke active links and issue a fresh link.
+- `POST /api/v1/admin/demo-requests/:id/revoke` — immediately invalidate active links.
+- `POST /api/v1/admin/demo-requests/:id/validate` — verify sources, chunks, agent configuration, and active access.
+
+These actions are intended for internal validation, pilots, and sales handoff. They do not impersonate a customer or bypass tenant authorization; they create or operate on auditable demo sessions.

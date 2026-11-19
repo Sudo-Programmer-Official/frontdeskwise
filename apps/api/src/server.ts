@@ -1,12 +1,28 @@
 import "dotenv/config";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
+import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
 import { crawlWebsite, normalisePublicUrl, type CrawledPage } from "./crawler.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
+import {
+  allowedDocumentTypeList,
+  createDocumentDownload,
+  createDocumentUpload,
+  deleteDocumentObject,
+  inspectDocumentObject,
+  isAllowedDocumentType,
+  maxDocumentBytes,
+  organizationDocumentKey,
+  safeDocumentFileName,
+  storageConfigured,
+  storageConfigurationMessage,
+} from "./storage.js";
+import { notifySuperAdmins, sendTransactionalEmail, sesConfigured, sesConfigurationMessage, superAdminEmails } from "./email.js";
 import {
   decryptIntegrationCredentials,
   createCrmAdapter,
@@ -18,6 +34,7 @@ import {
 } from "./crm.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
+app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const pool = createPoolFromEnv();
@@ -30,6 +47,13 @@ const demoRateLimiter = new FixedWindowRateLimiter(
   Number(process.env.FRONTDESKWISE_DEMO_RATE_LIMIT_MAX ?? 10),
   Number(process.env.FRONTDESKWISE_DEMO_RATE_LIMIT_WINDOW_MS ?? 3_600_000),
 );
+const stripe = process.env.STRIPE_SECRET_KEY?.trim() ? new Stripe(process.env.STRIPE_SECRET_KEY.trim()) : null;
+const stripeAppMetadata = "frontdeskwise";
+const defaultTrialDays = Math.max(1, Number(process.env.FRONTDESKWISE_DEFAULT_TRIAL_DAYS ?? 14));
+
+function trialEndFromNow(): string {
+  return new Date(Date.now() + defaultTrialDays * 24 * 60 * 60 * 1_000).toISOString();
+}
 
 function validateProductionConfiguration(): void {
   if ((process.env.NODE_ENV ?? "development").trim().toLowerCase() !== "production") return;
@@ -105,6 +129,30 @@ type FirebaseAuthUser = {
 };
 
 type AppUser = FirebaseAuthUser & { id: string };
+
+type DemoAccessType = "public" | "admin" | "internal" | "claim";
+
+type DemoAccessOptions = {
+  demoRequestId?: string | null;
+  createdByUserId?: string | null;
+  accessType?: DemoAccessType;
+  accessLabel?: string | null;
+  email?: string | null;
+  name?: string | null;
+  expiresAt?: string;
+};
+
+type DemoAuditInput = {
+  demoRequestId?: string | null;
+  sessionId?: string | null;
+  businessId?: string | null;
+  eventType: string;
+  actorType?: "anonymous" | "requester" | "user" | "admin" | "system";
+  actorUserId?: string | null;
+  actorEmail?: string | null;
+  request?: FastifyRequest;
+  metadata?: Record<string, unknown>;
+};
 
 type Message = {
   role: "user" | "assistant";
@@ -305,22 +353,153 @@ async function ensureAppUser(client: PoolClient, authUser: FirebaseAuthUser): Pr
   return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) };
 }
 
+function nullableIso(value: unknown): string | null {
+  return value === null || value === undefined ? null : toIso(value);
+}
+
+function organizationBillingAccess(row: Record<string, unknown>): { allowed: boolean; reason: string } {
+  const mode = row.billing_mode === "sandbox" ? "sandbox" : "live";
+  const status = String(row.billing_status ?? "trial");
+  if (mode === "sandbox") return { allowed: true, reason: "sandbox" };
+  if (status === "active") return { allowed: true, reason: "active_subscription" };
+  if (status === "trial" && (!row.trial_end_at || Date.parse(toIso(row.trial_end_at)) > Date.now())) return { allowed: true, reason: "trial" };
+  if (status === "grace" && (!row.grace_end_at || Date.parse(toIso(row.grace_end_at)) > Date.now())) return { allowed: true, reason: "billing_grace" };
+  return { allowed: false, reason: status };
+}
+
+function organizationBillingPayload(row: Record<string, unknown>): Record<string, unknown> {
+  const planKey = String(row.plan_key ?? "starter");
+  const effectiveAmount = row.effective_amount_cents ?? row.billing_amount_cents ?? row.plan_amount_cents;
+  const maxBusinesses = row.effective_max_businesses ?? row.max_businesses ?? 1;
+  return {
+    mode: row.billing_mode === "sandbox" ? "sandbox" : "live",
+    status: String(row.billing_status ?? "trial"),
+    planKey,
+    interval: row.override_interval ?? row.billing_interval ?? "month",
+    trialStartAt: nullableIso(row.trial_start_at),
+    trialEndAt: nullableIso(row.trial_end_at),
+    currentPeriodStartAt: nullableIso(row.current_period_start_at),
+    currentPeriodEndAt: nullableIso(row.current_period_end_at),
+    graceEndAt: nullableIso(row.grace_end_at),
+    provider: typeof row.billing_provider === "string" ? row.billing_provider : null,
+    providerCustomerId: typeof row.stripe_customer_id === "string" ? row.stripe_customer_id : null,
+    providerSubscriptionId: typeof row.stripe_subscription_id === "string" ? row.stripe_subscription_id : null,
+    providerPriceId: typeof row.stripe_price_id === "string" ? row.stripe_price_id : null,
+    amountCents: effectiveAmount === null || effectiveAmount === undefined ? null : Number(effectiveAmount),
+    currency: String(row.billing_currency ?? "usd"),
+    access: organizationBillingAccess(row),
+    plan: {
+      key: planKey,
+      displayName: String(row.plan_display_name ?? planKey),
+      description: String(row.plan_description ?? "FrontDeskWise workspace plan"),
+      amountCents: effectiveAmount === null || effectiveAmount === undefined ? null : Number(effectiveAmount),
+      currency: String(row.billing_currency ?? "usd"),
+      maxBusinesses: Number(maxBusinesses),
+    },
+    override: row.override_reason ? { reason: String(row.override_reason) } : null,
+  };
+}
+
+async function authenticatedAppUser(request: FastifyRequest): Promise<{ authUser: FirebaseAuthUser; appUser: AppUser }> {
+  const authUser = await requireFirebaseAuth(request);
+  if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    "select id, identity_subject, email, name from app_users where identity_subject = $1 and status = 'active'",
+    [authUser.identitySubject],
+  );
+  if (!result.rowCount) throw httpError(404, "FrontDeskWise account has not been bootstrapped");
+  const row = result.rows[0];
+  return {
+    authUser,
+    appUser: { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) },
+  };
+}
+
+async function organizationForUser(userId: string, organizationId: string | null, requiredRoles: string[] = ["owner", "admin"]): Promise<Record<string, unknown>> {
+  if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select o.*, om.role,
+            bp.display_name as plan_display_name, bp.description as plan_description,
+            bp.monthly_amount_cents as plan_amount_cents, bp.max_businesses,
+            coalesce(opo.amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
+            coalesce(opo.max_businesses, bp.max_businesses) as effective_max_businesses,
+            opo.billing_interval as override_interval, opo.reason as override_reason
+     from organizations o
+     join organization_members om on om.organization_id = o.id and om.user_id = $1
+     left join billing_plans bp on bp.plan_key = o.plan_key
+     left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+     where ($2::uuid is null or o.id = $2::uuid)
+       and om.role = any($3::text[])
+     order by (om.role = 'owner') desc, om.created_at asc
+     limit 1`,
+    [userId, organizationId, requiredRoles],
+  );
+  if (!result.rowCount) throw httpError(403, "You do not have permission to access that organization");
+  return result.rows[0];
+}
+
+async function organizationBusinessForUser(userId: string, organizationId: string, businessId: string): Promise<void> {
+  if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
+  const result = await pool.query(
+    `select b.id
+     from businesses b
+     join organization_members om on om.organization_id = b.organization_id and om.user_id = $1
+     where b.organization_id = $2 and b.id = $3 and om.role = any($4::text[])
+     limit 1`,
+    [userId, organizationId, businessId, ["owner", "admin"]],
+  );
+  if (!result.rowCount) throw httpError(403, "You do not have permission to access that business");
+}
+
+function organizationDocumentPayload(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: String(row.id),
+    organizationId: String(row.organization_id),
+    businessId: row.business_id ? String(row.business_id) : null,
+    fileName: String(row.original_file_name),
+    contentType: String(row.content_type),
+    sizeBytes: Number(row.size_bytes ?? 0),
+    etag: typeof row.etag === "string" ? row.etag : null,
+    status: String(row.status),
+    metadata: asRecord(row.metadata),
+    createdAt: nullableIso(row.created_at),
+    updatedAt: nullableIso(row.updated_at),
+  };
+}
+
 async function authSnapshot(userId: string, activeOrganizationId: string | null = null): Promise<Record<string, unknown>> {
   if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
   const [userResult, organizationResult, businessResult] = await Promise.all([
     pool.query<Record<string, unknown>>("select id, email, name from app_users where id = $1 and status = 'active'", [userId]),
     pool.query<Record<string, unknown>>(
-      `select o.id, o.name, o.slug, om.role
+      `select o.id, o.name, o.slug, om.role,
+              o.billing_mode, o.billing_status, o.plan_key, o.billing_interval,
+              o.trial_start_at, o.trial_end_at, o.current_period_start_at,
+              o.current_period_end_at, o.grace_end_at, o.billing_provider,
+              o.stripe_customer_id, o.stripe_subscription_id, o.stripe_price_id,
+              o.billing_amount_cents, o.billing_currency,
+              bp.display_name as plan_display_name, bp.description as plan_description,
+              bp.monthly_amount_cents as plan_amount_cents, bp.max_businesses,
+              coalesce(opo.amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
+              coalesce(opo.max_businesses, bp.max_businesses) as effective_max_businesses,
+              opo.billing_interval as override_interval, opo.reason as override_reason,
+              (select count(*)::integer from conversations c join businesses b on b.id = c.business_id where b.organization_id = o.id) as conversation_count,
+              (select count(*)::integer from leads l join businesses b on b.id = l.business_id where b.organization_id = o.id) as lead_count,
+              (select count(*)::integer from conversations c join businesses b on b.id = c.business_id where b.organization_id = o.id and c.action_taken = 'booking') as booking_count
        from organization_members om
        join organizations o on o.id = om.organization_id
+       left join billing_plans bp on bp.plan_key = o.plan_key
+       left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
        where om.user_id = $1
        order by om.created_at`,
       [userId],
     ),
     pool.query<Record<string, unknown>>(
-      `select b.id, b.organization_id, b.name, b.slug, b.website_url, b.is_demo, b.billing_status, b.plan_key,
+      `select b.id, b.organization_id, b.name, b.slug, b.website_url, b.is_demo,
+              o.billing_status, o.plan_key,
               coalesce(bm.role, case when om.role in ('owner', 'admin') then 'admin' else null end) as business_role
        from businesses b
+       join organizations o on o.id = b.organization_id
        join organization_members om on om.organization_id = b.organization_id and om.user_id = $1
        left join business_members bm on bm.business_id = b.id and bm.user_id = $1
        where om.role in ('owner', 'admin') or bm.user_id is not null
@@ -350,7 +529,13 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
     name: String(row.name),
     slug: String(row.slug),
     role: String(row.role),
+    billing: organizationBillingPayload(row),
     businesses: businessesByOrganization.get(String(row.id)) ?? [],
+    metrics: {
+      conversations: Number(row.conversation_count ?? 0),
+      leads: Number(row.lead_count ?? 0),
+      bookings: Number(row.booking_count ?? 0),
+    },
   }));
   return {
     user: { id: String(userResult.rows[0].id), email: String(userResult.rows[0].email), name: String(userResult.rows[0].name) },
@@ -377,10 +562,11 @@ async function bootstrapAuthenticatedUser(
     );
     let organizationId = existingMembership.rows[0]?.organization_id ?? null;
     let activeBusinessId: string | null = null;
+    let claimedDemoAudit: DemoAuditInput | null = null;
 
     if (options.demoToken) {
       const session = await client.query<Record<string, unknown>>(
-        `select s.id, s.business_id, b.organization_id, b.is_internal_demo, b.slug
+        `select s.id, s.business_id, s.demo_request_id, b.organization_id, b.is_internal_demo, b.slug
          from demo_access_sessions s
          join businesses b on b.id = s.business_id
          where s.token_hash = $1 and s.revoked_at is null and s.claimable = true
@@ -394,10 +580,11 @@ async function bootstrapAuthenticatedUser(
         if (!organizationId) {
           const organizationName = options.organizationName || `${authUser.name}'s Businesses`;
           const organization = await client.query<{ id: string }>(
-            `insert into organizations (name, slug)
-             values ($1, $2)
+            `insert into organizations
+               (name, slug, billing_mode, billing_status, plan_key, billing_interval, trial_start_at, trial_end_at)
+             values ($1, $2, 'live', 'trial', 'starter', 'month', now(), $3)
              returning id`,
-            [organizationName.slice(0, 160), `org-${randomUUID().replace(/-/g, "").slice(0, 24)}`],
+            [organizationName.slice(0, 160), `org-${randomUUID().replace(/-/g, "").slice(0, 24)}`, trialEndFromNow()],
           );
           organizationId = organization.rows[0].id;
         }
@@ -409,8 +596,8 @@ async function bootstrapAuthenticatedUser(
         );
         const claimed = await client.query<{ id: string }>(
           `update businesses
-           set organization_id = $2, is_demo = false, billing_mode = 'sandbox', billing_status = 'trial', plan_key = 'starter',
-               trial_ends_at = coalesce(trial_ends_at, now() + interval '14 days'), updated_at = now()
+           set organization_id = $2, is_demo = false, billing_mode = 'live', billing_status = 'trial', plan_key = 'starter',
+               trial_ends_at = coalesce(trial_ends_at, (select trial_end_at from organizations where id = $2)), updated_at = now()
            where id = $1
            returning id`,
           [demo.business_id, organizationId],
@@ -428,16 +615,35 @@ async function bootstrapAuthenticatedUser(
            where id = $1`,
           [demo.id, user.id],
         );
+        if (demo.demo_request_id) {
+          await client.query(
+            `update demo_requests
+             set status = case when status in ('received', 'ready', 'sent', 'opened') then 'claimed' else status end,
+                 last_claimed_at = now(), updated_at = now()
+             where id = $1`,
+            [demo.demo_request_id],
+          );
+          claimedDemoAudit = {
+            demoRequestId: String(demo.demo_request_id),
+            sessionId: String(demo.id),
+            businessId: String(demo.business_id),
+            eventType: "claimed",
+            actorType: "user",
+            actorUserId: user.id,
+            actorEmail: authUser.email,
+          };
+        }
       }
     }
 
     if (!organizationId) {
       const organizationName = options.organizationName || `${authUser.name}'s Businesses`;
       const organization = await client.query<{ id: string }>(
-        `insert into organizations (name, slug)
-         values ($1, $2)
+        `insert into organizations
+           (name, slug, billing_mode, billing_status, plan_key, billing_interval, trial_start_at, trial_end_at)
+         values ($1, $2, 'live', 'trial', 'starter', 'month', now(), $3)
          returning id`,
-        [organizationName.slice(0, 160), `org-${randomUUID().replace(/-/g, "").slice(0, 24)}`],
+        [organizationName.slice(0, 160), `org-${randomUUID().replace(/-/g, "").slice(0, 24)}`, trialEndFromNow()],
       );
       organizationId = organization.rows[0].id;
       await client.query(
@@ -448,6 +654,7 @@ async function bootstrapAuthenticatedUser(
     }
 
     await client.query("commit");
+    if (claimedDemoAudit) await recordDemoAudit(claimedDemoAudit);
     return await authSnapshot(user.id, organizationId);
   } catch (error) {
     await client.query("rollback");
@@ -932,7 +1139,18 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
 
 async function loadBusinessFromDatabase(slug: string): Promise<Business | null> {
   if (!pool) return null;
-  const businessResult = await pool.query<Record<string, unknown>>("select * from businesses where slug = $1", [slug]);
+  const businessResult = await pool.query<Record<string, unknown>>(
+    `select b.*,
+            o.billing_mode as organization_billing_mode, o.billing_status as organization_billing_status,
+            o.plan_key as organization_plan_key, o.billing_interval as organization_billing_interval,
+            o.trial_end_at as organization_trial_end_at, o.current_period_end_at as organization_current_period_end_at,
+            o.grace_end_at as organization_grace_end_at, o.billing_provider as organization_billing_provider,
+            o.stripe_customer_id as organization_stripe_customer_id, o.stripe_subscription_id as organization_stripe_subscription_id
+     from businesses b
+     join organizations o on o.id = b.organization_id
+     where b.slug = $1`,
+    [slug],
+  );
   if (!businessResult.rowCount) return null;
   const row = businessResult.rows[0];
   const businessId = String(row.id);
@@ -1021,17 +1239,19 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       fallbackMessage: String(config.fallback_message),
     } : defaultConfig(String(row.name)),
     billing: {
-      mode: row.billing_mode === "live" ? "live" : "sandbox",
+      mode: (row.organization_billing_mode ?? row.billing_mode) === "live" ? "live" : "sandbox",
       isDemo: row.is_demo !== false,
-      status: row.billing_status === "active" || row.billing_status === "grace" || row.billing_status === "paused" || row.billing_status === "cancelled" ? row.billing_status : "trial",
-      planKey: String(row.plan_key ?? "demo"),
-      interval: row.billing_interval === "month" || row.billing_interval === "year" ? row.billing_interval : null,
-      trialEndsAt: row.trial_ends_at ? toIso(row.trial_ends_at) : null,
-      currentPeriodEndsAt: row.current_period_ends_at ? toIso(row.current_period_ends_at) : null,
-      graceEndsAt: row.grace_ends_at ? toIso(row.grace_ends_at) : null,
-      provider: typeof row.billing_provider === "string" ? row.billing_provider : null,
-      providerCustomerId: typeof row.provider_customer_id === "string" ? row.provider_customer_id : null,
-      providerSubscriptionId: typeof row.provider_subscription_id === "string" ? row.provider_subscription_id : null,
+      status: ["active", "grace", "paused", "cancelled"].includes(String(row.organization_billing_status ?? row.billing_status))
+        ? String(row.organization_billing_status ?? row.billing_status) as BillingStatus : "trial",
+      planKey: String(row.organization_plan_key ?? row.plan_key ?? "demo"),
+      interval: row.organization_billing_interval === "month" || row.organization_billing_interval === "year"
+        ? row.organization_billing_interval : (row.billing_interval === "month" || row.billing_interval === "year" ? row.billing_interval : null),
+      trialEndsAt: row.organization_trial_end_at ? toIso(row.organization_trial_end_at) : (row.trial_ends_at ? toIso(row.trial_ends_at) : null),
+      currentPeriodEndsAt: row.organization_current_period_end_at ? toIso(row.organization_current_period_end_at) : (row.current_period_ends_at ? toIso(row.current_period_ends_at) : null),
+      graceEndsAt: row.organization_grace_end_at ? toIso(row.organization_grace_end_at) : (row.grace_ends_at ? toIso(row.grace_ends_at) : null),
+      provider: typeof row.organization_billing_provider === "string" ? row.organization_billing_provider : (typeof row.billing_provider === "string" ? row.billing_provider : null),
+      providerCustomerId: typeof row.organization_stripe_customer_id === "string" ? row.organization_stripe_customer_id : (typeof row.provider_customer_id === "string" ? row.provider_customer_id : null),
+      providerSubscriptionId: typeof row.organization_stripe_subscription_id === "string" ? row.organization_stripe_subscription_id : (typeof row.provider_subscription_id === "string" ? row.provider_subscription_id : null),
     },
     widget: {
       siteKey: String(row.public_site_key ?? ""),
@@ -1051,6 +1271,18 @@ async function persistConversation(business: Business, conversation: Conversatio
      values ($1, $2, $3, $4, $5, $6, $7)
      on conflict (id) do update set lead_captured = excluded.lead_captured, action_taken = excluded.action_taken, updated_at = excluded.updated_at`,
     [conversation.id, business.id, conversation.sessionId, conversation.leadCaptured, conversation.actionTaken, conversation.createdAt, conversation.updatedAt],
+  );
+}
+
+type UsageMetric = "conversations" | "leads" | "bookings" | "llm_requests";
+
+async function recordOrganizationUsage(business: Business, metric: UsageMetric): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    `insert into organization_usage_daily (organization_id, usage_date, ${metric})
+     select organization_id, current_date, 1 from businesses where id = $1
+     on conflict (organization_id, usage_date) do update set ${metric} = organization_usage_daily.${metric} + 1, updated_at = now()`,
+    [business.id],
   );
 }
 
@@ -1149,6 +1381,7 @@ async function persistLead(business: Business, lead: Lead): Promise<Lead> {
       );
     }
     await client.query("commit");
+    await recordOrganizationUsage(business, "leads");
     void processIntegrationOutbox();
     return persisted;
   } catch (error) {
@@ -1212,11 +1445,115 @@ function hashAccessToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-async function createDemoAccess(business: Business): Promise<{ accessToken: string; expiresAt: string; user: { email: string; name: string; role: string } }> {
+function auditRequestContext(request?: FastifyRequest): { ipHash: string | null; userAgent: string | null } {
+  const ip = request?.ip?.trim();
+  const userAgent = typeof request?.headers["user-agent"] === "string" ? request.headers["user-agent"].slice(0, 500) : null;
+  return {
+    ipHash: ip ? contentHash(`${process.env.FRONTDESKWISE_CREDENTIAL_KEY ?? "frontdeskwise"}:${ip}`) : null,
+    userAgent,
+  };
+}
+
+async function recordDemoAudit(input: DemoAuditInput): Promise<void> {
+  if (!pool) return;
+  const context = auditRequestContext(input.request);
+  await pool.query(
+    `insert into demo_access_audit
+       (demo_request_id, session_id, business_id, event_type, actor_type, actor_user_id, actor_email, ip_hash, user_agent, metadata)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
+      input.demoRequestId ?? null,
+      input.sessionId ?? null,
+      input.businessId ?? null,
+      input.eventType,
+      input.actorType ?? "system",
+      input.actorUserId ?? null,
+      input.actorEmail ?? null,
+      context.ipHash,
+      context.userAgent,
+      JSON.stringify(input.metadata ?? {}),
+    ],
+  );
+}
+
+async function createDemoRequestRecord(input: {
+  requesterName?: string | null;
+  requesterEmail?: string | null;
+  businessName?: string | null;
+  websiteUrl: string;
+  templateKey?: string | null;
+  source?: string | null;
+  createdByUserId?: string | null;
+  request?: FastifyRequest;
+}): Promise<string | null> {
+  if (!pool) return null;
+  const result = await pool.query<{ id: string }>(
+    `insert into demo_requests
+       (requester_name, requester_email, business_name, website_url, template_key, source, created_by_user_id)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     returning id`,
+    [
+      input.requesterName ?? null,
+      input.requesterEmail?.toLowerCase() ?? null,
+      input.businessName ?? null,
+      input.websiteUrl,
+      input.templateKey ?? "local_business",
+      input.source ?? "landing",
+      input.createdByUserId ?? null,
+    ],
+  );
+  const id = result.rows[0].id;
+  await recordDemoAudit({
+    demoRequestId: id,
+    eventType: "requested",
+    actorType: input.createdByUserId ? "admin" : input.requesterEmail ? "requester" : "anonymous",
+    actorUserId: input.createdByUserId,
+    actorEmail: input.requesterEmail,
+    request: input.request,
+    metadata: { source: input.source ?? "landing", templateKey: input.templateKey ?? "local_business" },
+  });
+  void notifySuperAdmins({
+    subject: `New FrontDeskWise demo request${input.businessName ? ` · ${input.businessName}` : ""}`,
+    text: [
+      "A new demo request was submitted to FrontDeskWise.",
+      `Website: ${input.websiteUrl}`,
+      `Name: ${input.requesterName ?? "Not provided"}`,
+      `Email: ${input.requesterEmail ?? "Not provided"}`,
+      `Request ID: ${id}`,
+    ].join("\n"),
+  }).catch((error) => app.log.warn({ err: error, demoRequestId: id }, "Could not notify super-admins about demo request"));
+  return id;
+}
+
+async function updateDemoRequestForAccess(input: {
+  demoRequestId: string;
+  business: Business;
+  sessionId: string;
+  status?: "ready" | "sent" | "reset";
+}): Promise<void> {
+  if (!pool) return;
+  const organizationId = await getBusinessOrganizationId(input.business);
+  await pool.query(
+    `update demo_requests
+     set business_id = $2, organization_id = $3, latest_session_id = $4,
+         status = case when $5 = 'reset' then 'ready' else $5 end, updated_at = now()
+     where id = $1`,
+    [input.demoRequestId, input.business.id, organizationId, input.sessionId, input.status ?? "ready"],
+  );
+}
+
+async function getBusinessOrganizationId(business: Business): Promise<string | null> {
+  if (!pool) return null;
+  const result = await pool.query<{ organization_id: string }>("select organization_id from businesses where id = $1", [business.id]);
+  return result.rows[0]?.organization_id ?? null;
+}
+
+async function createDemoAccess(business: Business, options: DemoAccessOptions = {}): Promise<{ accessToken: string; expiresAt: string; sessionId: string | null; user: { email: string; name: string; role: string } }> {
   const accessToken = randomBytes(32).toString("base64url");
-  const expiresAt = new Date(Date.now() + DEMO_ACCESS_TTL_MS).toISOString();
-  const email = `${business.slug}@demo.frontdeskwise.local`;
-  const name = `${business.name} Demo Owner`;
+  const expiresAt = options.expiresAt ?? new Date(Date.now() + DEMO_ACCESS_TTL_MS).toISOString();
+  const email = options.email?.trim().toLowerCase() || `${business.slug}@demo.frontdeskwise.local`;
+  const name = options.name?.trim() || `${business.name} Demo Owner`;
+  let sessionId: string | null = null;
 
   if (!pool) {
     memoryDemoAccess.set(hashAccessToken(accessToken), { slug: business.slug, businessId: business.id, expiresAt });
@@ -1231,11 +1568,23 @@ async function createDemoAccess(business: Business): Promise<{ accessToken: stri
          returning id`,
         [business.id, email, name],
       );
-      await client.query(
-        `insert into demo_access_sessions (business_id, user_id, token_hash, expires_at)
-         values ($1, $2, $3, $4)`,
-        [business.id, userResult.rows[0].id, hashAccessToken(accessToken), expiresAt],
+      const sessionResult = await client.query<{ id: string }>(
+        `insert into demo_access_sessions
+           (business_id, user_id, token_hash, expires_at, demo_request_id, created_by_user_id, access_type, access_label)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
+         returning id`,
+        [
+          business.id,
+          userResult.rows[0].id,
+          hashAccessToken(accessToken),
+          expiresAt,
+          options.demoRequestId ?? null,
+          options.createdByUserId ?? null,
+          options.accessType ?? "public",
+          options.accessLabel ?? null,
+        ],
       );
+      sessionId = sessionResult.rows[0].id;
       await client.query("commit");
     } catch (error) {
       await client.query("rollback");
@@ -1245,7 +1594,21 @@ async function createDemoAccess(business: Business): Promise<{ accessToken: stri
     }
   }
 
-  return { accessToken, expiresAt, user: { email, name, role: "owner" } };
+  if (options.demoRequestId && sessionId) {
+    await updateDemoRequestForAccess({ demoRequestId: options.demoRequestId, business, sessionId, status: options.accessType === "admin" ? "sent" : "ready" });
+  }
+  await recordDemoAudit({
+    demoRequestId: options.demoRequestId,
+    sessionId,
+    businessId: business.id,
+    eventType: options.accessType === "admin" ? "sent" : "created",
+    actorType: options.createdByUserId ? "admin" : "system",
+    actorUserId: options.createdByUserId,
+    actorEmail: options.email,
+    metadata: { accessType: options.accessType ?? "public", accessLabel: options.accessLabel ?? null, expiresAt },
+  });
+
+  return { accessToken, expiresAt, sessionId, user: { email, name, role: "owner" } };
 }
 
 async function exchangeDemoAccess(token: string): Promise<{ slug: string; businessId: string; expiresAt: string; user: { email: string; name: string; role: string } }> {
@@ -1257,7 +1620,7 @@ async function exchangeDemoAccess(token: string): Promise<{ slug: string; busine
   }
 
   const result = await pool.query<Record<string, unknown>>(
-    `select s.business_id, s.expires_at, b.slug, u.email, u.name, u.role
+    `select s.id, s.business_id, s.demo_request_id, s.expires_at, b.slug, u.email, u.name, u.role
      from demo_access_sessions s
      join businesses b on b.id = s.business_id
      join workspace_users u on u.id = s.user_id
@@ -1272,6 +1635,25 @@ async function exchangeDemoAccess(token: string): Promise<{ slug: string; busine
     [tokenHash],
   );
   const row = result.rows[0];
+  const sessionId = String(row.id);
+  const demoRequestId = typeof row.demo_request_id === "string" ? row.demo_request_id : null;
+  if (demoRequestId) {
+    await pool.query(
+      `update demo_requests
+       set status = case when status in ('received', 'ready', 'sent') then 'opened' else status end,
+           last_opened_at = now(), access_count = access_count + 1, updated_at = now()
+       where id = $1`,
+      [demoRequestId],
+    );
+  }
+  await recordDemoAudit({
+    demoRequestId,
+    sessionId,
+    businessId: String(row.business_id),
+    eventType: "opened",
+    actorType: "requester",
+    actorEmail: String(row.email),
+  });
   return {
     slug: String(row.slug),
     businessId: String(row.business_id),
@@ -1354,6 +1736,230 @@ function billingAccess(billing: BillingState): { allowed: boolean; reason: strin
   if (billing.status === "trial" && (!billing.trialEndsAt || Date.parse(billing.trialEndsAt) > Date.now())) return { allowed: true, reason: "trial" };
   if (billing.status === "grace" && (!billing.graceEndsAt || Date.parse(billing.graceEndsAt) > Date.now())) return { allowed: true, reason: "billing_grace" };
   return { allowed: false, reason: billing.status };
+}
+
+function billingReturnUrl(kind: "success" | "cancel" | "portal"): string {
+  const configured = kind === "success"
+    ? process.env.FRONTDESKWISE_STRIPE_SUCCESS_URL
+    : kind === "cancel"
+      ? process.env.FRONTDESKWISE_STRIPE_CANCEL_URL
+      : process.env.FRONTDESKWISE_STRIPE_PORTAL_RETURN_URL;
+  if (configured?.trim()) return configured.trim();
+  const origin = (process.env.WEB_ORIGIN ?? "http://localhost:5173").split(",")[0].trim().replace(/\/$/, "");
+  return `${origin}/?billing=${kind}`;
+}
+
+function requireStripe(): Stripe {
+  if (!stripe) throw httpError(503, "Stripe billing is not configured on this environment");
+  return stripe;
+}
+
+function frontDeskWiseStripeMetadata(
+  organizationId: string,
+  planKey?: string,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    app: stripeAppMetadata,
+    billing_model: "subscription",
+    organization_id: organizationId,
+    organizationId,
+    ...(planKey ? { plan_key: planKey, planKey } : {}),
+    ...extra,
+  };
+}
+
+function stripeMetadataString(metadata: Record<string, unknown>, snakeCaseKey: string, camelCaseKey?: string): string {
+  const snakeCaseValue = metadata[snakeCaseKey];
+  if (typeof snakeCaseValue === "string" && snakeCaseValue.trim()) return snakeCaseValue;
+  const camelCaseValue = camelCaseKey ? metadata[camelCaseKey] : undefined;
+  return typeof camelCaseValue === "string" && camelCaseValue.trim() ? camelCaseValue : "";
+}
+
+function stripeObjectId(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  if (value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string") return String((value as { id: string }).id);
+  return null;
+}
+
+function stripeTimestamp(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) ? new Date(value * 1_000).toISOString() : null;
+}
+
+function stripeBillingStatus(status: string): { status: BillingStatus; graceEndAt: string | null } {
+  if (status === "active") return { status: "active", graceEndAt: null };
+  if (status === "trialing") return { status: "trial", graceEndAt: null };
+  if (status === "past_due" || status === "incomplete") {
+    return { status: "grace", graceEndAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString() };
+  }
+  if (status === "paused" || status === "unpaid" || status === "canceled") return { status: status === "paused" ? "paused" : "cancelled", graceEndAt: null };
+  return { status: "grace", graceEndAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString() };
+}
+
+async function syncOrganizationBillingToBusinesses(client: PoolClient, organizationId: string): Promise<void> {
+  await client.query(
+    `update businesses b
+     set billing_mode = o.billing_mode,
+         billing_status = o.billing_status,
+         plan_key = o.plan_key,
+         billing_interval = o.billing_interval,
+         trial_ends_at = o.trial_end_at,
+         current_period_ends_at = o.current_period_end_at,
+         grace_ends_at = o.grace_end_at,
+         billing_provider = o.billing_provider,
+         provider_customer_id = o.stripe_customer_id,
+         provider_subscription_id = o.stripe_subscription_id,
+         updated_at = now()
+     from organizations o
+     where b.organization_id = o.id and o.id = $1`,
+    [organizationId],
+  );
+}
+
+async function syncStripePlanPrices(): Promise<void> {
+  if (!pool) return;
+  const plans = ["starter", "growth", "multi_business", "portfolio"] as const;
+  for (const planKey of plans) {
+    const envPrefix = planKey.toUpperCase();
+    const monthly = process.env[`STRIPE_PRICE_${envPrefix}_MONTHLY`]?.trim();
+    const yearly = process.env[`STRIPE_PRICE_${envPrefix}_YEARLY`]?.trim();
+    if (!monthly && !yearly) continue;
+    await pool.query(
+      `update billing_plans
+       set stripe_monthly_price_id = coalesce($2, stripe_monthly_price_id),
+           stripe_yearly_price_id = coalesce($3, stripe_yearly_price_id),
+           updated_at = now()
+       where plan_key = $1`,
+      [planKey, monthly || null, yearly || null],
+    );
+  }
+}
+
+async function billingSnapshotForUser(userId: string, organizationId: string | null): Promise<Record<string, unknown>> {
+  const organization = await organizationForUser(userId, organizationId);
+  if (!pool) throw httpError(503, "Billing requires PostgreSQL storage");
+  const [plans, usage] = await Promise.all([
+    pool.query<Record<string, unknown>>(
+      `select bp.plan_key, bp.display_name, bp.description, bp.monthly_amount_cents,
+              bp.currency, bp.max_businesses, bp.stripe_monthly_price_id, bp.stripe_yearly_price_id,
+              coalesce(opo.amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
+              coalesce(opo.max_businesses, bp.max_businesses) as effective_max_businesses,
+              coalesce((select jsonb_object_agg(e.entitlement_key, e.entitlement_value)
+                        from billing_plan_entitlements e where e.plan_key = bp.plan_key), '{}'::jsonb) as entitlements
+       from billing_plans bp
+       left join organization_plan_overrides opo
+         on opo.organization_id = $1 and opo.plan_key = bp.plan_key and (opo.ends_at is null or opo.ends_at > now())
+       where bp.public = true and bp.active = true
+       order by bp.monthly_amount_cents`,
+      [organization.id],
+    ),
+    pool.query<Record<string, unknown>>(
+      `select coalesce(sum(conversations), 0)::integer as conversations,
+              coalesce(sum(leads), 0)::integer as leads,
+              coalesce(sum(bookings), 0)::integer as bookings,
+              coalesce(sum(llm_requests), 0)::integer as llm_requests,
+              coalesce(sum(llm_input_tokens), 0)::bigint as llm_input_tokens,
+              coalesce(sum(llm_output_tokens), 0)::bigint as llm_output_tokens
+       from organization_usage_daily
+       where organization_id = $1 and usage_date >= current_date - 30`,
+      [organization.id],
+    ),
+  ]);
+  return {
+    organization: { id: String(organization.id), name: String(organization.name), slug: String(organization.slug), role: String(organization.role) },
+    billing: organizationBillingPayload(organization),
+    plans: plans.rows.map((plan) => ({
+      key: String(plan.plan_key),
+      displayName: String(plan.display_name),
+      description: String(plan.description),
+      amountCents: plan.effective_amount_cents === null ? null : Number(plan.effective_amount_cents),
+      currency: String(plan.currency),
+      maxBusinesses: Number(plan.effective_max_businesses ?? plan.max_businesses ?? 1),
+      entitlements: plan.entitlements && typeof plan.entitlements === "object" ? plan.entitlements : {},
+      checkoutReady: Boolean(plan.stripe_monthly_price_id || plan.stripe_yearly_price_id),
+    })),
+    usageLast30Days: {
+      conversations: Number(usage.rows[0]?.conversations ?? 0),
+      leads: Number(usage.rows[0]?.leads ?? 0),
+      bookings: Number(usage.rows[0]?.bookings ?? 0),
+      llmRequests: Number(usage.rows[0]?.llm_requests ?? 0),
+      llmInputTokens: Number(usage.rows[0]?.llm_input_tokens ?? 0),
+      llmOutputTokens: Number(usage.rows[0]?.llm_output_tokens ?? 0),
+    },
+    stripeConfigured: Boolean(stripe),
+  };
+}
+
+async function resolveStripePrice(organizationId: string, planKey: string, interval: "month" | "year"): Promise<{ priceId: string; amountCents: number | null; currency: string }> {
+  if (!pool) throw httpError(503, "Billing requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select bp.monthly_amount_cents, bp.currency, bp.stripe_monthly_price_id, bp.stripe_yearly_price_id,
+            opo.stripe_price_id as override_price_id, opo.amount_cents as override_amount_cents,
+            opo.currency as override_currency
+     from billing_plans bp
+     left join organization_plan_overrides opo on opo.organization_id = $1 and opo.plan_key = bp.plan_key and (opo.ends_at is null or opo.ends_at > now())
+     where bp.plan_key = $2 and bp.active = true`,
+    [organizationId, planKey],
+  );
+  if (!result.rowCount) throw httpError(404, "That billing plan is not available");
+  const row = result.rows[0];
+  const priceId = typeof row.override_price_id === "string" && row.override_price_id.trim()
+    ? row.override_price_id
+    : (interval === "year" ? row.stripe_yearly_price_id : row.stripe_monthly_price_id);
+  if (typeof priceId !== "string" || !priceId.trim()) throw httpError(503, "This plan is not connected to a Stripe price yet");
+  return {
+    priceId: priceId.trim(),
+    amountCents: row.override_amount_cents === null || row.override_amount_cents === undefined
+      ? (row.monthly_amount_cents === null || row.monthly_amount_cents === undefined ? null : Number(row.monthly_amount_cents))
+      : Number(row.override_amount_cents),
+    currency: String(row.override_currency ?? row.currency ?? "usd"),
+  };
+}
+
+async function updateOrganizationFromStripeSubscription(organizationId: string, subscription: Record<string, unknown>): Promise<void> {
+  if (!pool) return;
+  const price = asRecord(asRecord(subscription.items).data instanceof Array ? (asRecord(subscription.items).data as unknown[])[0] : null);
+  const priceObject = asRecord(price.price);
+  const metadata = asRecord(subscription.metadata);
+  const statusResult = stripeBillingStatus(String(subscription.status ?? "active"));
+  const interval = priceObject.recurring && typeof priceObject.recurring === "object"
+    && (priceObject.recurring as { interval?: unknown }).interval === "year" ? "year" : "month";
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      `update organizations
+       set billing_mode = 'live', billing_status = $2, plan_key = coalesce(nullif($3, ''), plan_key),
+           billing_interval = $4, trial_start_at = coalesce(trial_start_at, $5), trial_end_at = $6,
+           current_period_start_at = $7, current_period_end_at = $8, grace_end_at = $9,
+           billing_provider = 'stripe', stripe_customer_id = $10, stripe_subscription_id = $11,
+           stripe_price_id = $12, billing_amount_cents = $13, billing_currency = $14, updated_at = now()
+       where id = $1`,
+      [
+        organizationId,
+        statusResult.status,
+        stripeMetadataString(metadata, "plan_key", "planKey"),
+        interval,
+        stripeTimestamp(subscription.trial_start),
+        stripeTimestamp(subscription.trial_end),
+        stripeTimestamp(subscription.current_period_start),
+        stripeTimestamp(subscription.current_period_end),
+        statusResult.graceEndAt,
+        stripeObjectId(subscription.customer),
+        stripeObjectId(subscription.id),
+        stripeObjectId(priceObject.id),
+        priceObject.unit_amount === null || priceObject.unit_amount === undefined ? null : Number(priceObject.unit_amount),
+        typeof priceObject.currency === "string" ? priceObject.currency : "usd",
+      ],
+    );
+    await syncOrganizationBillingToBusinesses(client, organizationId);
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function getBusiness(slug: unknown): Promise<Business> {
@@ -1606,7 +2212,7 @@ function workspacePayload(business: Business) {
   const gapCount = [...business.knowledgeGaps.values()].filter((gap) => gap.status === "open").length;
   return {
     slug: business.slug,
-    status: "sandbox",
+    status: business.billing.mode,
     business: {
       id: business.id,
       name: business.name,
@@ -1821,6 +2427,7 @@ async function startConversation(business: Business, sessionId: string | null): 
   };
   business.conversations.set(conversation.id, conversation);
   await persistConversation(business, conversation);
+  await recordOrganizationUsage(business, "conversations");
   return conversation;
 }
 
@@ -1844,6 +2451,7 @@ async function recordConversationQuestion(business: Business, conversation: Conv
   await persistMessage(conversation, userMessage);
   await persistMessage(conversation, assistantMessage);
   await persistConversation(business, conversation);
+  await recordOrganizationUsage(business, "llm_requests");
   if (result.knowledgeGap) await persistGap(business, result.knowledgeGap);
   return result;
 }
@@ -1854,8 +2462,114 @@ if (pool) {
   if (persistedSeed) businesses.set(seededBusiness.slug, persistedSeed);
   else await persistBusiness(seededBusiness);
 }
+await syncStripePlanPrices();
 await resumeEmbeddingJobs();
 void processIntegrationOutbox();
+
+async function requireSuperAdmin(request: FastifyRequest): Promise<AppUser> {
+  const { authUser, appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const existing = await pool.query("select 1 from super_admin_users where user_id = $1 and status = 'active'", [appUser.id]);
+  if (existing.rowCount) return appUser;
+  const allowlisted = superAdminEmails().includes(authUser.email);
+  if (!allowlisted) throw httpError(403, "Super-admin access is not enabled for this account");
+  await pool.query(
+    `insert into super_admin_users (user_id, role, status)
+     values ($1, 'super_admin', 'active')
+     on conflict (user_id) do update set role = 'super_admin', status = 'active', updated_at = now()`,
+    [appUser.id],
+  );
+  return appUser;
+}
+
+async function findOrganizationIdForStripeEvent(object: Record<string, unknown>): Promise<string | null> {
+  if (!pool) return null;
+  const metadata = asRecord(object.metadata);
+  const metadataOrganizationId = stripeMetadataString(metadata, "organization_id", "organizationId") || null;
+  if (metadataOrganizationId) return metadataOrganizationId;
+  const customerId = stripeObjectId(object.customer);
+  const subscriptionId = stripeObjectId(object.subscription) ?? stripeObjectId(object.id);
+  const result = await pool.query<{ id: string }>(
+    `select id from organizations
+     where ($1::text is not null and stripe_customer_id = $1)
+        or ($2::text is not null and stripe_subscription_id = $2)
+     order by created_at limit 1`,
+    [customerId, subscriptionId],
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+async function handleStripeEvent(event: Stripe.Event): Promise<void> {
+  if (!pool) throw httpError(503, "Stripe webhooks require PostgreSQL storage");
+  const object = asRecord(event.data.object);
+  const eventMetadata = asRecord(object.metadata);
+  const eventApp = optionalString(eventMetadata.app, 80);
+  // A Stripe account can host multiple Sudo Programmer products. Ignore events
+  // explicitly tagged for another product before recording them locally.
+  if (eventApp && eventApp !== stripeAppMetadata) return;
+  const organizationId = await findOrganizationIdForStripeEvent(object);
+  const inserted = await pool.query<{ id: string }>(
+    `insert into billing_events (organization_id, provider, event_id, event_type, livemode, payload)
+     values ($1, 'stripe', $2, $3, $4, $5)
+     on conflict (provider, event_id) do nothing
+     returning id`,
+    [organizationId, event.id, event.type, event.livemode, JSON.stringify(event)],
+  );
+  if (!inserted.rowCount) {
+    const existing = await pool.query<{ processed_at: string | null }>(
+      "select processed_at from billing_events where provider = 'stripe' and event_id = $1",
+      [event.id],
+    );
+    if (existing.rows[0]?.processed_at) return;
+  }
+
+  let resolvedOrganizationId = organizationId;
+  if (event.type === "checkout.session.completed") {
+    const customerId = stripeObjectId(object.customer);
+    const subscriptionId = stripeObjectId(object.subscription);
+    const metadata = asRecord(object.metadata);
+    if (resolvedOrganizationId && customerId) {
+      await pool.query(
+        `update organizations
+         set billing_mode = 'live', billing_status = 'active', billing_provider = 'stripe',
+             stripe_customer_id = $2, stripe_subscription_id = $3,
+             plan_key = coalesce(nullif($4, ''), plan_key), updated_at = now()
+         where id = $1`,
+        [resolvedOrganizationId, customerId, subscriptionId, stripeMetadataString(metadata, "plan_key", "planKey")],
+      );
+    }
+    if (subscriptionId && stripe) {
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+      if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription as unknown as Record<string, unknown>);
+    }
+  } else if (event.type.startsWith("customer.subscription.")) {
+    if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, object);
+  } else if (event.type === "invoice.paid") {
+    const subscriptionId = stripeObjectId(object.subscription);
+    if (subscriptionId && stripe) {
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+      resolvedOrganizationId ??= await findOrganizationIdForStripeEvent(subscription as unknown as Record<string, unknown>);
+      if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription as unknown as Record<string, unknown>);
+    } else if (resolvedOrganizationId) {
+      await pool.query("update organizations set billing_status = 'active', grace_end_at = null, updated_at = now() where id = $1", [resolvedOrganizationId]);
+    }
+  } else if (event.type === "invoice.payment_failed" && resolvedOrganizationId) {
+    await pool.query(
+      `update organizations
+       set billing_status = 'grace', grace_end_at = $2, billing_provider = 'stripe', updated_at = now()
+       where id = $1`,
+      [resolvedOrganizationId, new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString()],
+    );
+    const client = await pool.connect();
+    try {
+      await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
+    } finally {
+      client.release();
+    }
+  }
+
+  await pool.query("update billing_events set organization_id = coalesce(organization_id, $2), processed_at = now() where provider = 'stripe' and event_id = $1", [event.id, resolvedOrganizationId]);
+}
 
 app.addHook("onRequest", async (request, reply) => {
   const requestOrigin = typeof request.headers.origin === "string" ? request.headers.origin : null;
@@ -1867,7 +2581,7 @@ app.addHook("onRequest", async (request, reply) => {
   reply.header("Access-Control-Allow-Origin", allowOrigin);
   reply.header("Vary", "Origin");
   reply.header("Access-Control-Allow-Headers", "content-type, authorization, idempotency-key, x-frontdeskwise-demo-token");
-  reply.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  reply.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   reply.header("Access-Control-Expose-Headers", "X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset");
   reply.header("Access-Control-Max-Age", "600");
   reply.header("X-Request-Id", request.id);
@@ -1891,16 +2605,690 @@ app.get("/health", async () => ({
   service: "frontdeskwise-api",
   databaseConfigured: Boolean(pool),
   storage: pool ? "postgres" : "memory",
+  objectStorageConfigured: storageConfigured(),
+  emailConfigured: sesConfigured(),
 }));
 
 app.get("/ready", async (_request, reply) => {
   if (!pool) return reply.code(503).send({ ok: false, service: "frontdeskwise-api", reason: "database_not_configured" });
   try {
     await pool.query("select 1");
-    return { ok: true, service: "frontdeskwise-api", database: "ready" };
+    return {
+      ok: true,
+      service: "frontdeskwise-api",
+      database: "ready",
+      objectStorageConfigured: storageConfigured(),
+      emailConfigured: sesConfigured(),
+    };
   } catch {
     return reply.code(503).send({ ok: false, service: "frontdeskwise-api", reason: "database_unavailable" });
   }
+});
+
+app.get("/api/v1/storage/documents", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
+  if (!storageConfigured()) throw httpError(503, storageConfigurationMessage());
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const organizationId = requiredString(query.organizationId, "organizationId", 80);
+  const businessId = optionalString(query.businessId, 80);
+  await organizationForUser(appUser.id, organizationId);
+  if (businessId) await organizationBusinessForUser(appUser.id, organizationId, businessId);
+  const result = await pool.query<Record<string, unknown>>(
+    `select id, organization_id, business_id, original_file_name, content_type,
+            size_bytes, etag, status, metadata, created_at, updated_at
+     from organization_documents
+     where organization_id = $1 and status <> 'deleted'
+       and ($2::uuid is null or business_id = $2::uuid)
+     order by created_at desc`,
+    [organizationId, businessId],
+  );
+  return { documents: result.rows.map(organizationDocumentPayload), maxDocumentBytes: maxDocumentBytes(), allowedContentTypes: allowedDocumentTypeList() };
+});
+
+app.post("/api/v1/storage/documents/presign", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
+  if (!storageConfigured()) throw httpError(503, storageConfigurationMessage());
+  const body = asRecord(request.body);
+  const organizationId = requiredString(body.organizationId, "organizationId", 80);
+  const businessId = optionalString(body.businessId, 80);
+  const fileName = requiredString(body.fileName, "fileName", 240);
+  const contentType = requiredString(body.contentType, "contentType", 160).toLowerCase();
+  const sizeBytes = Number(body.sizeBytes);
+  await organizationForUser(appUser.id, organizationId);
+  if (businessId) await organizationBusinessForUser(appUser.id, organizationId, businessId);
+  if (!isAllowedDocumentType(contentType)) throw httpError(400, `Unsupported document type. Allowed types: ${allowedDocumentTypeList().join(", ")}`);
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) throw httpError(400, "sizeBytes must be a positive integer");
+  if (sizeBytes > maxDocumentBytes()) throw httpError(413, `Document exceeds the ${Math.round(maxDocumentBytes() / 1024 / 1024)} MB upload limit`);
+  const documentId = randomUUID();
+  const objectKey = organizationDocumentKey({ organizationId, businessId, documentId, fileName });
+  const result = await pool.query<Record<string, unknown>>(
+    `insert into organization_documents
+       (id, organization_id, business_id, uploaded_by_user_id, object_key, original_file_name, content_type, size_bytes, status)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+     returning id, organization_id, business_id, original_file_name, content_type,
+               size_bytes, etag, status, metadata, created_at, updated_at`,
+    [documentId, organizationId, businessId, appUser.id, objectKey, safeDocumentFileName(fileName), contentType, sizeBytes],
+  );
+  let upload;
+  try {
+    upload = await createDocumentUpload({ key: objectKey, contentType, contentLength: sizeBytes });
+  } catch (error) {
+    await pool.query("delete from organization_documents where id = $1", [documentId]);
+    throw error;
+  }
+  return { document: organizationDocumentPayload(result.rows[0]), upload: { ...upload, method: "PUT" } };
+});
+
+app.post("/api/v1/storage/documents/:documentId/complete", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
+  if (!storageConfigured()) throw httpError(503, storageConfigurationMessage());
+  const params = request.params as { documentId?: string };
+  const documentId = requiredString(params.documentId, "documentId", 80);
+  const result = await pool.query<Record<string, unknown>>(
+    `select id, organization_id, business_id, object_key, original_file_name, content_type,
+            size_bytes, etag, status, metadata, created_at, updated_at
+     from organization_documents d
+     where d.id = $1 and d.status <> 'deleted'
+       and exists (select 1 from organization_members om where om.organization_id = d.organization_id and om.user_id = $2 and om.role = any($3::text[]))`,
+    [documentId, appUser.id, ["owner", "admin"]],
+  );
+  if (!result.rowCount) throw httpError(404, "Document not found");
+  const row = result.rows[0];
+  const object = await inspectDocumentObject(String(row.object_key));
+  if (object.ContentLength !== undefined && object.ContentLength !== Number(row.size_bytes)) {
+    await deleteDocumentObject(String(row.object_key));
+    await pool.query("update organization_documents set status = 'failed', updated_at = now() where id = $1", [documentId]);
+    throw httpError(400, "Uploaded document size does not match the presigned upload request");
+  }
+  const updated = await pool.query<Record<string, unknown>>(
+    `update organization_documents
+     set status = 'uploaded', size_bytes = coalesce($2, size_bytes), etag = $3, updated_at = now()
+     where id = $1
+     returning id, organization_id, business_id, original_file_name, content_type,
+               size_bytes, etag, status, metadata, created_at, updated_at`,
+    [documentId, object.ContentLength ?? null, object.ETag?.replace(/^"|"$/g, "") ?? null],
+  );
+  return { document: organizationDocumentPayload(updated.rows[0]) };
+});
+
+app.get("/api/v1/storage/documents/:documentId/download", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
+  if (!storageConfigured()) throw httpError(503, storageConfigurationMessage());
+  const params = request.params as { documentId?: string };
+  const documentId = requiredString(params.documentId, "documentId", 80);
+  const result = await pool.query<Record<string, unknown>>(
+    `select id, organization_id, object_key, original_file_name
+     from organization_documents d
+     where d.id = $1 and d.status <> 'deleted'
+       and exists (select 1 from organization_members om where om.organization_id = d.organization_id and om.user_id = $2 and om.role = any($3::text[]))`,
+    [documentId, appUser.id, ["owner", "admin"]],
+  );
+  if (!result.rowCount) throw httpError(404, "Document not found");
+  const row = result.rows[0];
+  const download = await createDocumentDownload(String(row.object_key), String(row.original_file_name));
+  return { documentId, ...download };
+});
+
+app.delete("/api/v1/storage/documents/:documentId", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
+  if (!storageConfigured()) throw httpError(503, storageConfigurationMessage());
+  const params = request.params as { documentId?: string };
+  const documentId = requiredString(params.documentId, "documentId", 80);
+  const result = await pool.query<Record<string, unknown>>(
+    `select id, organization_id, object_key
+     from organization_documents d
+     where d.id = $1 and d.status <> 'deleted'
+       and exists (select 1 from organization_members om where om.organization_id = d.organization_id and om.user_id = $2 and om.role = any($3::text[]))`,
+    [documentId, appUser.id, ["owner", "admin"]],
+  );
+  if (!result.rowCount) throw httpError(404, "Document not found");
+  await deleteDocumentObject(String(result.rows[0].object_key));
+  await pool.query("update organization_documents set status = 'deleted', updated_at = now() where id = $1", [documentId]);
+  return { ok: true, documentId };
+});
+
+app.get("/api/v1/billing", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  const organizationId = optionalString((request.query as Record<string, unknown> | undefined)?.organizationId, 80);
+  return billingSnapshotForUser(appUser.id, organizationId);
+});
+
+app.post("/api/v1/billing/checkout-session", async (request) => {
+  const client = requireStripe();
+  const { appUser } = await authenticatedAppUser(request);
+  const body = asRecord(request.body);
+  const organizationId = optionalString(body.organizationId, 80);
+  const organization = await organizationForUser(appUser.id, organizationId);
+  const planKey = optionalString(body.planKey, 80) ?? String(organization.plan_key ?? "starter");
+  const interval = body.interval === "year" ? "year" : "month";
+  const price = await resolveStripePrice(String(organization.id), planKey, interval);
+  let customerId = typeof organization.stripe_customer_id === "string" ? organization.stripe_customer_id : null;
+  const customerMetadata = frontDeskWiseStripeMetadata(String(organization.id), planKey);
+  if (!customerId) {
+    const customer = await client.customers.create({
+      email: appUser.email,
+      name: appUser.name,
+      metadata: customerMetadata,
+    });
+    customerId = customer.id;
+    await pool?.query("update organizations set stripe_customer_id = $2, billing_provider = 'stripe', updated_at = now() where id = $1", [organization.id, customerId]);
+  } else {
+    await client.customers.update(customerId, { metadata: customerMetadata });
+  }
+  const checkoutMetadata = frontDeskWiseStripeMetadata(String(organization.id), planKey, { appUserId: appUser.id });
+  const session = await client.checkout.sessions.create({
+    mode: "subscription",
+    customer: customerId,
+    line_items: [{ price: price.priceId, quantity: 1 }],
+    allow_promotion_codes: true,
+    client_reference_id: String(organization.id),
+    success_url: billingReturnUrl("success"),
+    cancel_url: billingReturnUrl("cancel"),
+    metadata: checkoutMetadata,
+    subscription_data: { metadata: frontDeskWiseStripeMetadata(String(organization.id), planKey) },
+  });
+  return { sessionId: session.id, url: session.url, planKey, interval, amountCents: price.amountCents, currency: price.currency };
+});
+
+app.post("/api/v1/billing/portal-session", async (request) => {
+  const client = requireStripe();
+  const { appUser } = await authenticatedAppUser(request);
+  const body = asRecord(request.body);
+  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80));
+  if (typeof organization.stripe_customer_id !== "string" || !organization.stripe_customer_id) {
+    throw httpError(409, "This organization does not have a Stripe customer yet");
+  }
+  const session = await client.billingPortal.sessions.create({
+    customer: organization.stripe_customer_id,
+    return_url: billingReturnUrl("portal"),
+  });
+  return { url: session.url };
+});
+
+app.post("/api/v1/stripe/webhook", { config: { rawBody: true } }, async (request, reply) => {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
+  if (!secret) return reply.code(503).send({ error: "Stripe webhook signing secret is not configured" });
+  const signature = request.headers["stripe-signature"];
+  if (typeof signature !== "string") return reply.code(400).send({ error: "Stripe-Signature header is required" });
+  const raw = typeof request.rawBody === "string" ? request.rawBody : Buffer.isBuffer(request.rawBody) ? request.rawBody.toString("utf8") : null;
+  if (!raw) return reply.code(400).send({ error: "Raw Stripe webhook body is required" });
+  let event: Stripe.Event;
+  try {
+    event = requireStripe().webhooks.constructEvent(raw, signature, secret);
+  } catch {
+    return reply.code(400).send({ error: "Invalid Stripe webhook signature" });
+  }
+  await handleStripeEvent(event);
+  return { received: true };
+});
+
+app.post("/api/v1/admin/email/test", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  if (!sesConfigured()) throw httpError(503, sesConfigurationMessage());
+  const body = asRecord(request.body);
+  const recipient = optionalString(body.recipient, 320) ?? admin.email;
+  await sendTransactionalEmail({
+    to: [recipient],
+    subject: "FrontDeskWise SES test",
+    text: `This is a FrontDeskWise SES delivery test. Sent by ${admin.email} at ${new Date().toISOString()}.`,
+    replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO,
+  });
+  return { ok: true, recipient };
+});
+
+app.get("/api/v1/admin/organizations", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select o.id, o.name, o.slug, o.billing_mode, o.billing_status, o.plan_key,
+            o.trial_end_at, o.current_period_end_at, o.billing_amount_cents, o.billing_currency,
+            bp.display_name as plan_display_name, bp.monthly_amount_cents as plan_amount_cents,
+            coalesce(opo.amount_cents, o.billing_amount_cents, bp.monthly_amount_cents) as mrr_amount_cents,
+            (select string_agg(u.email, ', ' order by u.email)
+             from organization_members om2 join app_users u on u.id = om2.user_id
+             where om2.organization_id = o.id and om2.role = 'owner') as owner_email,
+            (select count(*) from businesses b where b.organization_id = o.id)::integer as business_count,
+            (select count(*) from conversations c join businesses b on b.id = c.business_id where b.organization_id = o.id)::integer as conversation_count,
+            (select count(*) from leads l join businesses b on b.id = l.business_id where b.organization_id = o.id)::integer as lead_count,
+            (select max(b.updated_at) from businesses b where b.organization_id = o.id) as last_active_at
+     from organizations o
+     left join billing_plans bp on bp.plan_key = o.plan_key
+     left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+     order by o.created_at desc`,
+  );
+  return {
+    organizations: result.rows.map((row) => ({
+      id: String(row.id), name: String(row.name), slug: String(row.slug),
+      ownerEmail: row.owner_email ?? null, businessCount: Number(row.business_count ?? 0),
+      planKey: String(row.plan_key), planName: String(row.plan_display_name ?? row.plan_key),
+      status: String(row.billing_status), mode: String(row.billing_mode),
+      mrrAmountCents: row.mrr_amount_cents === null ? null : Number(row.mrr_amount_cents),
+      currency: String(row.billing_currency ?? "usd"),
+      trialEndAt: nullableIso(row.trial_end_at), currentPeriodEndAt: nullableIso(row.current_period_end_at),
+      conversationCount: Number(row.conversation_count ?? 0), leadCount: Number(row.lead_count ?? 0),
+      lastActiveAt: nullableIso(row.last_active_at),
+    })),
+  };
+});
+
+app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
+  await requireSuperAdmin(request);
+  const params = request.params as { organizationId?: string };
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const organizationId = requiredString(params.organizationId, "organizationId", 80);
+  const result = await pool.query<Record<string, unknown>>(
+    `select o.*, bp.display_name as plan_display_name, bp.description as plan_description,
+            bp.max_businesses, coalesce(opo.amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
+            coalesce(opo.max_businesses, bp.max_businesses) as effective_max_businesses,
+            opo.reason as override_reason
+     from organizations o
+     left join billing_plans bp on bp.plan_key = o.plan_key
+     left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+     where o.id = $1`,
+    [organizationId],
+  );
+  if (!result.rowCount) throw httpError(404, "Organization not found");
+  const businessesResult = await pool.query<Record<string, unknown>>("select id, name, slug, website_url, updated_at from businesses where organization_id = $1 order by created_at", [organizationId]);
+  const owners = await pool.query<{ email: string; name: string; role: string }>(
+    `select u.email, u.name, om.role from organization_members om join app_users u on u.id = om.user_id where om.organization_id = $1 order by om.role, u.email`,
+    [organizationId],
+  );
+  return {
+    organization: { id: organizationId, name: String(result.rows[0].name), slug: String(result.rows[0].slug), billing: organizationBillingPayload(result.rows[0]) },
+    owners: owners.rows,
+    businesses: businessesResult.rows.map((business) => ({ id: String(business.id), name: String(business.name), slug: String(business.slug), websiteUrl: String(business.website_url), updatedAt: nullableIso(business.updated_at) })),
+  };
+});
+
+app.post("/api/v1/admin/organizations/:organizationId/trial", async (request) => {
+  await requireSuperAdmin(request);
+  const params = request.params as { organizationId?: string };
+  const body = asRecord(request.body);
+  const days = Math.min(365, Math.max(1, Number(body.days ?? defaultTrialDays)));
+  const organizationId = requiredString(params.organizationId, "organizationId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const result = await pool.query<{ id: string }>(
+    `update organizations
+     set billing_mode = 'live', billing_status = 'trial', trial_start_at = now(),
+         trial_end_at = now() + ($2::text || ' days')::interval, grace_end_at = null, updated_at = now()
+     where id = $1 returning id`,
+    [organizationId, days],
+  );
+  if (!result.rowCount) throw httpError(404, "Organization not found");
+  const client = await pool.connect();
+  try { await syncOrganizationBillingToBusinesses(client, organizationId); } finally { client.release(); }
+  return { ok: true, organizationId, trialDays: days };
+});
+
+app.post("/api/v1/admin/organizations/:organizationId/suspend", async (request) => {
+  await requireSuperAdmin(request);
+  const params = request.params as { organizationId?: string };
+  const organizationId = requiredString(params.organizationId, "organizationId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const result = await pool.query<{ id: string }>("update organizations set billing_status = 'paused', updated_at = now() where id = $1 returning id", [organizationId]);
+  if (!result.rowCount) throw httpError(404, "Organization not found");
+  const client = await pool.connect();
+  try { await syncOrganizationBillingToBusinesses(client, organizationId); } finally { client.release(); }
+  return { ok: true, organizationId, status: "paused" };
+});
+
+app.post("/api/v1/admin/organizations/:organizationId/plan-override", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { organizationId?: string };
+  const organizationId = requiredString(params.organizationId, "organizationId", 80);
+  const body = asRecord(request.body);
+  const planKey = requiredString(body.planKey, "planKey", 80);
+  const interval = body.interval === "year" ? "year" : "month";
+  const amountCents = Number(body.amountCents);
+  const maxBusinesses = body.maxBusinesses === undefined ? null : Number(body.maxBusinesses);
+  const stripePriceId = optionalString(body.stripePriceId, 120);
+  const reason = requiredString(body.reason, "reason", 500);
+  if (!Number.isInteger(amountCents) || amountCents < 0) throw httpError(400, "amountCents must be a non-negative integer");
+  if (maxBusinesses !== null && (!Number.isInteger(maxBusinesses) || maxBusinesses < 1)) throw httpError(400, "maxBusinesses must be a positive integer");
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const [organizationResult, planResult] = await Promise.all([
+    pool.query("select 1 from organizations where id = $1", [organizationId]),
+    pool.query("select 1 from billing_plans where plan_key = $1 and active = true", [planKey]),
+  ]);
+  if (!organizationResult.rowCount) throw httpError(404, "Organization not found");
+  if (!planResult.rowCount) throw httpError(404, "Billing plan not found");
+  const result = await pool.query<{ id: string }>(
+    `insert into organization_plan_overrides
+       (organization_id, plan_key, billing_interval, amount_cents, currency, stripe_price_id, max_businesses, reason, created_by_user_id)
+     values ($1, $2, $3, $4, 'usd', $5, $6, $7, $8)
+     on conflict (organization_id) do update set
+       plan_key = excluded.plan_key, billing_interval = excluded.billing_interval,
+       amount_cents = excluded.amount_cents, currency = excluded.currency,
+       stripe_price_id = excluded.stripe_price_id, max_businesses = excluded.max_businesses,
+       reason = excluded.reason, updated_at = now()
+     returning id`,
+    [organizationId, planKey, interval, amountCents, stripePriceId, maxBusinesses, reason, admin.id],
+  );
+  if (!result.rowCount) throw httpError(404, "Organization not found");
+  await pool.query(
+    `update organizations
+     set plan_key = $2, billing_interval = $3, billing_amount_cents = $4, stripe_price_id = $5, updated_at = now()
+     where id = $1`,
+    [organizationId, planKey, interval, amountCents, stripePriceId],
+  );
+  return { ok: true, organizationId, planKey, interval, amountCents, maxBusinesses, stripePriceId, reason };
+});
+
+app.delete("/api/v1/admin/organizations/:organizationId/plan-override", async (request) => {
+  await requireSuperAdmin(request);
+  const params = request.params as { organizationId?: string };
+  const organizationId = requiredString(params.organizationId, "organizationId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  await pool.query("delete from organization_plan_overrides where organization_id = $1", [organizationId]);
+  await pool.query("update organizations set billing_amount_cents = null, stripe_price_id = null, updated_at = now() where id = $1", [organizationId]);
+  return { ok: true, organizationId };
+});
+
+function publicWebOrigin(): string {
+  return (process.env.WEB_ORIGIN ?? "http://localhost:5173").split(",")[0].trim().replace(/\/$/, "");
+}
+
+function demoAccessLink(accessToken: string): string {
+  return `${publicWebOrigin()}/?demo=${encodeURIComponent(accessToken)}`;
+}
+
+async function adminDemoRequestRow(demoRequestId: string): Promise<Record<string, unknown>> {
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select dr.*, b.name as resolved_business_name, b.slug as business_slug, b.website_url as resolved_website_url,
+            o.name as organization_name,
+            s.id as session_id, s.expires_at as session_expires_at, s.open_count, s.first_opened_at,
+            s.last_opened_at as session_last_opened_at, s.revoked_at as session_revoked_at, s.access_type,
+            (select max(a.created_at) from demo_access_audit a where a.demo_request_id = dr.id and a.event_type = 'validation_passed') as last_validation_passed_at,
+            (select max(a.created_at) from demo_access_audit a where a.demo_request_id = dr.id and a.event_type = 'validation_failed') as last_validation_failed_at
+     from demo_requests dr
+     left join businesses b on b.id = dr.business_id
+     left join organizations o on o.id = dr.organization_id
+     left join demo_access_sessions s on s.id = dr.latest_session_id
+     where dr.id = $1`,
+    [demoRequestId],
+  );
+  if (!result.rowCount) throw httpError(404, "Demo request not found");
+  return result.rows[0];
+}
+
+function adminDemoRequestPayload(row: Record<string, unknown>): Record<string, unknown> {
+  const expiresAt = nullableIso(row.session_expires_at);
+  const sessionExpired = Boolean(expiresAt && Date.parse(expiresAt) <= Date.now());
+  const status = sessionExpired && ["ready", "sent", "opened"].includes(String(row.status)) ? "expired" : String(row.status);
+  return {
+    id: String(row.id),
+    requesterName: row.requester_name ?? null,
+    requesterEmail: row.requester_email ?? null,
+    businessName: row.resolved_business_name ?? row.business_name ?? null,
+    websiteUrl: row.resolved_website_url ?? row.website_url,
+    templateKey: String(row.template_key),
+    source: String(row.source),
+    status,
+    organizationName: row.organization_name ?? null,
+    businessId: row.business_id ?? null,
+    businessSlug: row.business_slug ?? null,
+    requestedAt: nullableIso(row.requested_at),
+    lastOpenedAt: nullableIso(row.last_opened_at ?? row.session_last_opened_at),
+    lastClaimedAt: nullableIso(row.last_claimed_at),
+    accessCount: Number(row.access_count ?? 0),
+    session: row.session_id ? {
+      id: String(row.session_id),
+      expiresAt,
+      openCount: Number(row.open_count ?? 0),
+      firstOpenedAt: nullableIso(row.first_opened_at),
+      lastOpenedAt: nullableIso(row.session_last_opened_at),
+      revokedAt: nullableIso(row.session_revoked_at),
+      accessType: String(row.access_type ?? "public"),
+      active: !row.session_revoked_at && !sessionExpired,
+    } : null,
+    lastValidationPassedAt: nullableIso(row.last_validation_passed_at),
+    lastValidationFailedAt: nullableIso(row.last_validation_failed_at),
+  };
+}
+
+async function businessForAdminRequest(row: Record<string, unknown>): Promise<Business> {
+  const slug = typeof row.business_slug === "string" ? row.business_slug : null;
+  if (!slug) throw httpError(409, "This demo request has not produced a business yet");
+  return getBusiness(slug);
+}
+
+app.get("/api/v1/admin/demo-requests", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const query = request.query as { status?: string; limit?: string };
+  const limit = Math.min(200, Math.max(1, Number(query.limit ?? 100)));
+  const status = optionalString(query.status, 40);
+  const result = await pool.query<Record<string, unknown>>(
+    `select dr.*, b.name as resolved_business_name, b.slug as business_slug, b.website_url as resolved_website_url,
+            o.name as organization_name,
+            s.id as session_id, s.expires_at as session_expires_at, s.open_count, s.first_opened_at,
+            s.last_opened_at as session_last_opened_at, s.revoked_at as session_revoked_at, s.access_type,
+            (select max(a.created_at) from demo_access_audit a where a.demo_request_id = dr.id and a.event_type = 'validation_passed') as last_validation_passed_at,
+            (select max(a.created_at) from demo_access_audit a where a.demo_request_id = dr.id and a.event_type = 'validation_failed') as last_validation_failed_at
+     from demo_requests dr
+     left join businesses b on b.id = dr.business_id
+     left join organizations o on o.id = dr.organization_id
+     left join demo_access_sessions s on s.id = dr.latest_session_id
+     where ($1::text is null or dr.status = $1)
+     order by dr.requested_at desc
+     limit $2`,
+    [status, limit],
+  );
+  const summary = await pool.query<{ total: string; ready: string; requested: string; converted: string }>(
+    `select count(*)::text as total,
+            count(*) filter (where status in ('ready', 'sent', 'opened'))::text as ready,
+            count(*) filter (where status in ('received', 'failed'))::text as requested,
+            count(*) filter (where status in ('claimed', 'converted'))::text as converted
+     from demo_requests`,
+  );
+  return {
+    requests: result.rows.map(adminDemoRequestPayload),
+    summary: {
+      total: Number(summary.rows[0]?.total ?? 0),
+      ready: Number(summary.rows[0]?.ready ?? 0),
+      requested: Number(summary.rows[0]?.requested ?? 0),
+      converted: Number(summary.rows[0]?.converted ?? 0),
+    },
+  };
+});
+
+app.get("/api/v1/admin/demo-requests/:demoRequestId", async (request) => {
+  await requireSuperAdmin(request);
+  const params = request.params as { demoRequestId?: string };
+  const demoRequestId = requiredString(params.demoRequestId, "demoRequestId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const row = await adminDemoRequestRow(demoRequestId);
+  const audit = await pool.query<Record<string, unknown>>(
+    `select id, event_type, actor_type, actor_email, metadata, created_at
+     from demo_access_audit where demo_request_id = $1 order by created_at desc limit 100`,
+    [demoRequestId],
+  );
+  return {
+    request: adminDemoRequestPayload(row),
+    audit: audit.rows.map((event) => ({
+      id: String(event.id), eventType: String(event.event_type), actorType: String(event.actor_type),
+      actorEmail: event.actor_email ?? null, metadata: event.metadata ?? {}, createdAt: toIso(event.created_at),
+    })),
+  };
+});
+
+app.post("/api/v1/admin/demo-requests", async (request, reply) => {
+  const admin = await requireSuperAdmin(request);
+  const body = asRecord(request.body);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const businessId = optionalString(body.businessId, 80);
+  const businessSlug = optionalString(body.businessSlug, 120);
+  const result = await pool.query<Record<string, unknown>>(
+    `select b.id, b.slug, b.name, b.website_url, b.organization_id
+     from businesses b
+     where ($1::uuid is not null and b.id = $1::uuid) or ($2::text is not null and b.slug = $2)
+     limit 1`,
+    [businessId, businessSlug],
+  );
+  if (!result.rowCount) throw httpError(404, "Business not found");
+  const business = await getBusiness(String(result.rows[0].slug));
+  const requesterName = optionalString(body.requesterName ?? body.name, 160);
+  const requesterEmail = optionalString(body.requesterEmail ?? body.email, 240)?.toLowerCase() ?? null;
+  const demoRequestId = optionalString(body.demoRequestId, 80) ?? await createDemoRequestRecord({
+    requesterName,
+    requesterEmail,
+    businessName: business.name,
+    websiteUrl: business.websiteUrl,
+    templateKey: optionalString(body.templateKey, 80),
+    source: "super_admin",
+    createdByUserId: admin.id,
+    request,
+  });
+  if (!demoRequestId) throw httpError(503, "Demo requests require PostgreSQL storage");
+  const access = await createDemoAccess(business, {
+    demoRequestId,
+    createdByUserId: admin.id,
+    accessType: "admin",
+    accessLabel: optionalString(body.accessLabel, 160) ?? "Super-admin test access",
+    email: requesterEmail,
+    name: requesterName,
+  });
+  const { sessionId, ...publicAccess } = access;
+  return reply.code(201).send({
+    ok: true,
+    demoRequestId,
+    sessionId,
+    ...publicAccess,
+    url: demoAccessLink(access.accessToken),
+  });
+});
+
+app.post("/api/v1/admin/demo-requests/:demoRequestId/extend", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { demoRequestId?: string };
+  const demoRequestId = requiredString(params.demoRequestId, "demoRequestId", 80);
+  const body = asRecord(request.body);
+  const days = Math.min(90, Math.max(1, Number(body.days ?? 7)));
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const row = await adminDemoRequestRow(demoRequestId);
+  if (!row.session_id || !row.business_id) throw httpError(409, "This demo request does not have an active business link");
+  const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString();
+  await pool.query(
+    `update demo_access_sessions set expires_at = $2, revoked_at = null, updated_at = now()
+     where id = $1`,
+    [row.session_id, expiresAt],
+  );
+  await pool.query("update demo_requests set status = 'ready', updated_at = now() where id = $1", [demoRequestId]);
+  await recordDemoAudit({
+    demoRequestId,
+    sessionId: String(row.session_id),
+    businessId: String(row.business_id),
+    eventType: "extended",
+    actorType: "admin",
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    request,
+    metadata: { days, expiresAt },
+  });
+  return { ok: true, demoRequestId, expiresAt };
+});
+
+app.post("/api/v1/admin/demo-requests/:demoRequestId/reset", async (request, reply) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { demoRequestId?: string };
+  const demoRequestId = requiredString(params.demoRequestId, "demoRequestId", 80);
+  const body = asRecord(request.body);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const row = await adminDemoRequestRow(demoRequestId);
+  const business = await businessForAdminRequest(row);
+  await pool.query("update demo_access_sessions set revoked_at = now(), updated_at = now() where demo_request_id = $1 and revoked_at is null", [demoRequestId]);
+  const access = await createDemoAccess(business, {
+    demoRequestId,
+    createdByUserId: admin.id,
+    accessType: "admin",
+    accessLabel: optionalString(body.accessLabel, 160) ?? "Reset super-admin test access",
+    email: typeof row.requester_email === "string" ? row.requester_email : null,
+    name: typeof row.requester_name === "string" ? row.requester_name : null,
+  });
+  await recordDemoAudit({
+    demoRequestId,
+    sessionId: access.sessionId,
+    businessId: business.id,
+    eventType: "reset",
+    actorType: "admin",
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    request,
+  });
+  const { sessionId, ...publicAccess } = access;
+  return reply.send({ ok: true, demoRequestId, sessionId, ...publicAccess, url: demoAccessLink(access.accessToken) });
+});
+
+app.post("/api/v1/admin/demo-requests/:demoRequestId/revoke", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { demoRequestId?: string };
+  const demoRequestId = requiredString(params.demoRequestId, "demoRequestId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const row = await adminDemoRequestRow(demoRequestId);
+  await pool.query("update demo_access_sessions set revoked_at = now(), updated_at = now() where demo_request_id = $1 and revoked_at is null", [demoRequestId]);
+  await pool.query("update demo_requests set status = 'revoked', updated_at = now() where id = $1", [demoRequestId]);
+  await recordDemoAudit({
+    demoRequestId,
+    sessionId: row.session_id ? String(row.session_id) : null,
+    businessId: row.business_id ? String(row.business_id) : null,
+    eventType: "revoked",
+    actorType: "admin",
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    request,
+  });
+  return { ok: true, demoRequestId, status: "revoked" };
+});
+
+app.post("/api/v1/admin/demo-requests/:demoRequestId/validate", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { demoRequestId?: string };
+  const demoRequestId = requiredString(params.demoRequestId, "demoRequestId", 80);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const row = await adminDemoRequestRow(demoRequestId);
+  const business = await businessForAdminRequest(row);
+  await recordDemoAudit({
+    demoRequestId,
+    sessionId: row.session_id ? String(row.session_id) : null,
+    businessId: business.id,
+    eventType: "validation_started",
+    actorType: "admin",
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    request,
+  });
+  const [sourceResult, chunkResult, configResult, sessionResult] = await Promise.all([
+    pool.query<{ count: string }>("select count(*)::text as count from business_sources where business_id = $1 and crawl_status = 'ready'", [business.id]),
+    pool.query<{ count: string }>("select count(*)::text as count from knowledge_chunks where business_id = $1", [business.id]),
+    pool.query<{ count: string }>("select count(*)::text as count from agent_configs where business_id = $1", [business.id]),
+    pool.query<{ count: string }>("select count(*)::text as count from demo_access_sessions where demo_request_id = $1 and revoked_at is null and expires_at > now()", [demoRequestId]),
+  ]);
+  const checks = {
+    business: true,
+    readySources: Number(sourceResult.rows[0]?.count ?? 0),
+    knowledgeChunks: Number(chunkResult.rows[0]?.count ?? 0),
+    agentConfig: Number(configResult.rows[0]?.count ?? 0) > 0,
+    activeAccess: Number(sessionResult.rows[0]?.count ?? 0) > 0,
+  };
+  const passed = checks.readySources > 0 && checks.knowledgeChunks > 0 && checks.agentConfig && checks.activeAccess;
+  await recordDemoAudit({
+    demoRequestId,
+    sessionId: row.session_id ? String(row.session_id) : null,
+    businessId: business.id,
+    eventType: passed ? "validation_passed" : "validation_failed",
+    actorType: "admin",
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    request,
+    metadata: checks,
+  });
+  return { ok: passed, demoRequestId, checks };
 });
 
 app.get("/api/v1/auth/me", async (request) => {
@@ -1943,6 +3331,25 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
     [userResult.rows[0].id, optionalString(body.organizationId, 80)],
   );
   if (!organizationResult.rowCount) throw httpError(403, "You do not have permission to add a business to that organization");
+  const businessLimit = await pool.query<{ max_businesses: number; billing_status: BillingStatus; trial_end_at: string | null }>(
+    `select coalesce(opo.max_businesses, bp.max_businesses, 1)::integer as max_businesses,
+            o.billing_status, o.trial_end_at
+     from organizations o
+     left join billing_plans bp on bp.plan_key = o.plan_key
+     left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+     where o.id = $1`,
+    [organizationResult.rows[0].id],
+  );
+  if (!businessLimit.rowCount) throw httpError(404, "Organization not found");
+  const organizationBilling = businessLimit.rows[0];
+  const access = organizationBilling.billing_status === "active"
+    || organizationBilling.billing_status === "grace"
+    || (organizationBilling.billing_status === "trial" && (!organizationBilling.trial_end_at || Date.parse(toIso(organizationBilling.trial_end_at)) > Date.now()));
+  if (!access) throw httpError(402, "This organization needs an active subscription before adding another business");
+  const businessCount = await pool.query<{ count: string }>("select count(*)::text as count from businesses where organization_id = $1", [organizationResult.rows[0].id]);
+  if (Number(businessCount.rows[0].count) >= Number(organizationBilling.max_businesses ?? 1)) {
+    throw httpError(402, "Your current plan has reached its business limit. Upgrade to add another business.");
+  }
 
   const crawled = await crawlWebsite(websiteUrl);
   const firstPage = crawled.pages[0];
@@ -1951,7 +3358,7 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   let slug = baseSlug;
   while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
   const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
-  business.billing = { ...business.billing, isDemo: false, planKey: "starter", trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1_000).toISOString() };
+  business.billing = { ...business.billing, mode: "live", isDemo: false, status: "trial", planKey: "starter", trialEndsAt: trialEndFromNow() };
   businesses.set(slug, business);
   await persistBusiness(business, organizationResult.rows[0].id);
   await pool.query(
@@ -1963,22 +3370,65 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   return reply.code(201).send({ business: workspacePayload(business), auth: await authSnapshot(userResult.rows[0].id, organizationResult.rows[0].id) });
 });
 
-app.post("/api/v1/demos", async (request, reply) => {
+async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<string, unknown>> {
   const body = asRecord(request.body);
   const websiteUrl = normalisePublicUrl(body.websiteUrl);
-  const crawled = await crawlWebsite(websiteUrl);
-  const firstPage = crawled.pages[0];
-  const name = businessNameFromTitle(firstPage.title, websiteUrl);
-  const baseSlug = slugify(name);
-  let slug = baseSlug;
-  while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
+  const requesterName = optionalString(body.requesterName ?? body.name, 160);
+  const requesterEmail = optionalString(body.requesterEmail ?? body.email, 240)?.toLowerCase() ?? null;
+  if (requesterEmail && (!requesterEmail.includes("@") || requesterEmail.length < 5)) {
+    throw httpError(400, "requesterEmail must be a valid email address");
+  }
+  const requestId = await createDemoRequestRecord({
+    requesterName,
+    requesterEmail,
+    businessName: optionalString(body.businessName, 160),
+    websiteUrl,
+    templateKey: optionalString(body.templateKey, 80),
+    source: optionalString(body.source, 80) ?? "landing",
+    request,
+  });
 
-  const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
-  businesses.set(slug, business);
-  await persistBusiness(business);
-  const access = await createDemoAccess(business);
-  return reply.code(201).send({ ...workspacePayload(business), access });
-});
+  try {
+    const crawled = await crawlWebsite(websiteUrl);
+    const firstPage = crawled.pages[0];
+    const name = businessNameFromTitle(firstPage.title, websiteUrl);
+    const baseSlug = slugify(name);
+    let slug = baseSlug;
+    while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
+    businesses.set(slug, business);
+    await persistBusiness(business);
+    const access = await createDemoAccess(business, {
+      demoRequestId: requestId,
+      email: requesterEmail,
+      name: requesterName,
+      accessType: "public",
+    });
+    const { sessionId: _sessionId, ...publicAccess } = access;
+    return {
+      ...workspacePayload(business),
+      access: publicAccess,
+      demoRequest: requestId ? { id: requestId, status: "ready" } : null,
+    };
+  } catch (error) {
+    if (requestId && pool) {
+      await pool.query("update demo_requests set status = 'failed', updated_at = now() where id = $1", [requestId]);
+      await recordDemoAudit({
+        demoRequestId: requestId,
+        eventType: "validation_failed",
+        actorType: requesterEmail ? "requester" : "anonymous",
+        actorEmail: requesterEmail,
+        request,
+        metadata: { stage: "crawl_or_provision", error: error instanceof Error ? error.message.slice(0, 240) : "unknown" },
+      });
+    }
+    throw error;
+  }
+}
+
+app.post("/api/v1/demos", async (request, reply) => reply.code(201).send(await generateDemoFromRequest(request)));
+app.post("/api/v1/demo-requests", async (request, reply) => reply.code(201).send(await generateDemoFromRequest(request)));
 
 app.post("/api/v1/demo-access/exchange", async (request) => {
   const token = requiredString(asRecord(request.body).accessToken, "accessToken", 512);
@@ -2410,6 +3860,7 @@ app.post("/api/v1/demo/:slug/actions/booking", async (request) => {
   conversation.actionTaken = "booking";
   conversation.updatedAt = new Date().toISOString();
   await persistConversation(business, conversation);
+  await recordOrganizationUsage(business, "bookings");
   return { ok: true, action: "booking", conversationId };
 });
 
