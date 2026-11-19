@@ -1,0 +1,9 @@
+{
+  "name": "FrontDeskWise",
+  "short_name": "FrontDeskWise",
+  "description": "AI front desk for local businesses",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#102b64",
+  "background_color": "#f8fafc"
+}

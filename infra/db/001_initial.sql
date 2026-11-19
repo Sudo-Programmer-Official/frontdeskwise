@@ -24,6 +24,10 @@ create table if not exists business_sources (
   created_at timestamptz not null default now()
 );
 
+create unique index if not exists business_sources_business_hash_idx
+  on business_sources (business_id, content_hash)
+  where content_hash is not null;
+
 create table if not exists knowledge_chunks (
   id uuid primary key default gen_random_uuid(),
   business_id uuid not null references businesses(id) on delete cascade,
@@ -36,6 +40,8 @@ create table if not exists knowledge_chunks (
 );
 
 create index if not exists knowledge_chunks_business_idx on knowledge_chunks (business_id);
+create unique index if not exists knowledge_chunks_business_hash_idx
+  on knowledge_chunks (business_id, content_hash);
 
 create table if not exists conversations (
   id uuid primary key default gen_random_uuid(),
@@ -49,6 +55,19 @@ create table if not exists conversations (
 );
 
 create index if not exists conversations_business_idx on conversations (business_id, created_at desc);
+
+create table if not exists conversation_messages (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  role text not null check (role in ('user', 'assistant')),
+  content text not null,
+  grounded boolean,
+  source_url text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists conversation_messages_conversation_idx
+  on conversation_messages (conversation_id, created_at);
 
 create table if not exists leads (
   id uuid primary key default gen_random_uuid(),

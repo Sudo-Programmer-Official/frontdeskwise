@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: frontdeskwise-api
+    runtime: node
+    region: virginia
+    rootDir: apps/api
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run db:migrate
+    startCommand: npm run start
+    healthCheckPath: /ready
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: FRONTDESKWISE_DATABASE_NAME
+        value: frontdeskwise
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL_REJECT_UNAUTHORIZED
+        value: "true"
+      - key: DATABASE_SSL_CA_BASE64
+        sync: false
+      - key: FRONTDESKWISE_CREDENTIAL_KEY
+        sync: false
+      - key: WEB_ORIGIN
+        value: https://frontdeskwise.com
+      - key: FRONTDESKWISE_PUBLIC_API_ORIGIN
+        value: https://api.frontdeskwise.com
+      - key: FRONTDESKWISE_WIDGET_ORIGIN
+        value: https://frontdeskwise.com
+      - key: FRONTDESKWISE_WIDGET_URL
+        value: https://frontdeskwise.com/widget.js
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: FRONTDESKWISE_EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: FRONTDESKWISE_RATE_LIMIT_MAX
+        value: "120"
+      - key: FRONTDESKWISE_RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: FRONTDESKWISE_DEMO_RATE_LIMIT_MAX
+        value: "10"
+      - key: FRONTDESKWISE_DEMO_RATE_LIMIT_WINDOW_MS
+        value: "3600000"
