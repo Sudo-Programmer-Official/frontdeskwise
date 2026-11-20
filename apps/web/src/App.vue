@@ -24,7 +24,6 @@ import {
   House,
   Inbox,
   LayoutDashboard,
-  LoaderCircle,
   Mail,
   MessageSquare,
   MoreHorizontal,
@@ -4306,7 +4305,7 @@ function startMarketingDemo() {
 <template>
   <main class="app-shell" :aria-busy="globalLoading || authLoading">
     <section v-if="authInitializing" class="auth-initializing" role="status" aria-live="polite">
-      <div class="auth-initializing-card"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><LoaderCircle :size="22" :stroke-width="1.8" class="auth-initializing-spinner" aria-hidden="true" /><p>Restoring your workspace…</p></div>
+      <div class="auth-initializing-card"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><p>Restoring your workspace…</p></div>
     </section>
     <template v-else>
     <section v-if="routeIsNotFound" class="not-found-shell">

@@ -139,6 +139,7 @@ test("invalid sessions refresh once and preserve the deep return route", () => {
   assert.match(app, /refreshRetryCompleted/);
   assert.match(app, /function redirectToSignIn/);
   assert.match(app, /const authInitializing = ref/);
+  assert.doesNotMatch(app, /auth-initializing-spinner|<LoaderCircle/);
   assert.doesNotMatch(app, /Your session may have expired/);
 });
 
