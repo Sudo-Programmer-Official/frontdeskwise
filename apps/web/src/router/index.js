@@ -1,3 +1,4 @@
+import { marketingRoutePaths } from "../marketing.js";
 const workspaceViews = new Set([
     "overview", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
@@ -22,6 +23,8 @@ export function parseRoute(location = window.location) {
         return { kind: "legal", page: "privacy" };
     if (path === "/terms")
         return { kind: "legal", page: "terms" };
+    if (marketingRoutePaths.includes(path))
+        return { kind: "marketing", page: marketingRoutePaths.find((candidate) => candidate === path)?.slice(1) ?? "" };
     if (segments[0] === "auth") {
         if (segments[1] === "callback")
             return { kind: "auth-callback" };
@@ -62,6 +65,8 @@ export function parseRoute(location = window.location) {
             return { kind: "platform", section: "demos" };
         if (segments[1] === "messaging")
             return { kind: "platform", section: "messaging" };
+        if (segments[1] === "installation-support")
+            return { kind: "platform", section: "installation-support" };
         if (segments[1] === "operations")
             return { kind: "platform", section: "operations" };
         return { kind: "platform", section: "overview" };
@@ -85,6 +90,8 @@ export function parseRoute(location = window.location) {
     return { kind: "not-found", path };
 }
 export function routeView(route) {
+    if (route.kind === "marketing")
+        return "marketing";
     if (route.kind === "legal")
         return route.page;
     if (route.kind === "demo")
@@ -102,6 +109,8 @@ export function routeView(route) {
 export function routePath(route) {
     if (route.kind === "landing")
         return "/";
+    if (route.kind === "marketing")
+        return `/${route.page}`;
     if (route.kind === "legal")
         return `/${route.page}`;
     if (route.kind === "auth")

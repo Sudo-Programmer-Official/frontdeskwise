@@ -1,3 +1,5 @@
+import { marketingRoutePaths } from "../marketing.js";
+
 export type WorkspaceView =
   | "overview"
   | "inbox"
@@ -15,11 +17,12 @@ export type WorkspaceView =
 
 export type SettingsRouteTab = "general" | "team" | "integrations" | "verification" | "notifications" | "billing";
 export type AgentRouteTab = "behavior" | "appearance" | "quick-actions" | "test" | "install";
-export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "users" | "demos" | "messaging" | "operations";
+export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "users" | "demos" | "messaging" | "installation-support" | "operations";
 export type OnboardingRouteStep = "index" | "business" | "knowledge" | "agent" | "install";
 
 export type AppRoute =
   | { kind: "landing" }
+  | { kind: "marketing"; page: string }
   | { kind: "legal"; page: "privacy" | "terms" }
   | { kind: "auth"; mode: "signin" | "signup" | "forgot" }
   | { kind: "auth-callback" }
@@ -57,6 +60,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
   }
   if (path === "/privacy") return { kind: "legal", page: "privacy" };
   if (path === "/terms") return { kind: "legal", page: "terms" };
+  if (marketingRoutePaths.includes(path)) return { kind: "marketing", page: marketingRoutePaths.find((candidate) => candidate === path)?.slice(1) ?? "" };
   if (segments[0] === "auth") {
     if (segments[1] === "callback") return { kind: "auth-callback" };
     if (segments[1] === "sign-up") return { kind: "auth", mode: "signup" };
@@ -87,6 +91,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     if (segments[1] === "users") return { kind: "platform", section: "users" };
     if (segments[1] === "demos") return { kind: "platform", section: "demos" };
     if (segments[1] === "messaging") return { kind: "platform", section: "messaging" };
+    if (segments[1] === "installation-support") return { kind: "platform", section: "installation-support" };
     if (segments[1] === "operations") return { kind: "platform", section: "operations" };
     return { kind: "platform", section: "overview" };
   }
@@ -108,7 +113,8 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
   return { kind: "not-found", path };
 }
 
-export function routeView(route: AppRoute): "home" | "privacy" | "terms" | "overview" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
+export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
+  if (route.kind === "marketing") return "marketing";
   if (route.kind === "legal") return route.page;
   if (route.kind === "demo") return route.view === "agent" || route.view === "conversations" ? "agent" : route.view;
   if (route.kind === "workspace") return route.view === "agent" || route.view === "conversations" ? "agent" : route.view;
@@ -120,6 +126,7 @@ export function routeView(route: AppRoute): "home" | "privacy" | "terms" | "over
 
 export function routePath(route: AppRoute): string {
   if (route.kind === "landing") return "/";
+  if (route.kind === "marketing") return `/${route.page}`;
   if (route.kind === "legal") return `/${route.page}`;
   if (route.kind === "auth") return `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
   if (route.kind === "auth-callback") return "/auth/callback";

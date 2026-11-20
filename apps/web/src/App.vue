@@ -15,6 +15,8 @@ import {
 import LegalPage from "./LegalPage.vue";
 import AgentExperience from "./AgentExperience.vue";
 import AppFeedback, { type AppToast, type AppToastKind } from "./AppFeedback.vue";
+import MarketingPage from "./MarketingPage.vue";
+import { getMarketingPageByPath } from "./marketing";
 import {
   demoRoute,
   parseRoute,
@@ -30,7 +32,7 @@ import {
   type WorkspaceView,
 } from "./router";
 
-type View = "home" | "privacy" | "terms" | WorkspaceView | "admin";
+type View = "home" | "marketing" | "privacy" | "terms" | WorkspaceView | "admin";
 type SettingsTab = SettingsRouteTab;
 type AgentTab = AgentRouteTab;
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
@@ -328,12 +330,6 @@ interface WorkspacePayload {
   stats?: WorkspaceStats;
 }
 
-interface FeaturedDemo extends WorkspacePayload {
-  business: { id: string; name: string; location: string; websiteUrl: string };
-  knowledge: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; openGaps: number; pendingSources?: number; failedSources?: number } };
-  stats: WorkspaceStats;
-}
-
 interface BillingPlan {
   key: string;
   displayName: string;
@@ -474,6 +470,52 @@ interface AdminDemoRequest {
   session: { expiresAt: string | null; openCount: number; active: boolean; accessType: string } | null;
   lastValidationPassedAt: string | null;
   lastValidationFailedAt: string | null;
+}
+
+type InstallationSupportPlatform = "wordpress" | "wix" | "shopify" | "squarespace" | "custom" | "not_sure";
+type InstallationSupportStatus = "new" | "in_progress" | "resolved";
+
+interface InstallationSupportFormPayload {
+  name: string;
+  platform: InstallationSupportPlatform;
+  helpRequest: string;
+  preferredContactMethod: "email" | "phone";
+  contactValue: string;
+  message: string;
+  screenshotUrl: string;
+}
+
+interface InstallationSupportRequest {
+  id: string;
+  businessId: string;
+  businessName: string;
+  websiteUrl: string;
+  organizationName: string | null;
+  requesterName: string;
+  requesterEmail: string;
+  platform: InstallationSupportPlatform;
+  helpRequest: string;
+  preferredContactMethod: "email" | "phone";
+  contactValue: string;
+  message: string | null;
+  screenshotUrl: string | null;
+  ownershipStatus: string;
+  widgetDetected: boolean;
+  widgetLastLoadedAt: string | null;
+  widgetLoadCount: number;
+  assignedUserId: string | null;
+  assignedUserName: string | null;
+  assignedUserEmail: string | null;
+  status: InstallationSupportStatus;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface InstallationSupportAssignee {
+  id: string;
+  name: string;
+  email: string;
 }
 
 interface MessagingTemplate {
@@ -802,6 +844,16 @@ const adminEmailTestLoading = ref(false);
 const adminEmailTestMessage = ref("");
 const adminSection = ref<AdminSection>("overview");
 const adminHealth = ref<AdminHealthSnapshot | null>(null);
+const installationSupportRequests = ref<InstallationSupportRequest[]>([]);
+const installationSupportAssignees = ref<InstallationSupportAssignee[]>([]);
+const installationSupportSummary = ref({ new: 0, inProgress: 0, resolved: 0 });
+const installationSupportLoading = ref(false);
+const installationSupportError = ref("");
+const installationSupportMessage = ref("");
+const installationSupportOwnerLoading = ref(false);
+const installationSupportOwnerError = ref("");
+const installationSupportOwnerMessage = ref("");
+const openSupportRequest = ref(0);
 const adminOrganizationDetail = ref<AdminOrganizationDetail | null>(null);
 const adminOrganizationDetailLoading = ref(false);
 const adminBusinessDetail = ref<AdminBusinessDetail | null>(null);
@@ -825,13 +877,13 @@ const messagingDeliveryFilter = ref("all");
 const messagingTestRecipient = ref("");
 const messagingTestLoading = ref(false);
 const messagingTab = ref<"templates" | "automations" | "delivery" | "settings">("templates");
-const featuredDemos = ref<FeaturedDemo[]>([]);
 const workspaceStats = ref<WorkspaceStats | null>(null);
 const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
 const workspaceReadiness = ref(0);
 const workspaceLoading = ref(false);
 const workspaceError = ref("");
 let stopFirebaseObserver: (() => void) | null = null;
+let landingHeroTimer: number | null = null;
 
 const leads = ref<Lead[]>([]);
 const leadsLoading = ref(false);
@@ -918,6 +970,7 @@ const adminNavItems: Array<{ id: AdminSection; label: string; icon: string }> = 
   { id: "users", label: "Users & access", icon: "♧" },
   { id: "demos", label: "Demo operations", icon: "✦" },
   { id: "messaging", label: "Messaging", icon: "✉" },
+  { id: "installation-support", label: "Installation support", icon: "⌁" },
   { id: "operations", label: "System health", icon: "◒" },
 ];
 
@@ -930,6 +983,7 @@ const messagingTabs: Array<{ id: "templates" | "automations" | "delivery" | "set
 
 const pageTitle = computed(() => {
   if (view.value === "home") return "Build your AI front desk";
+  if (route.value.kind === "marketing") return getMarketingPageByPath(`/${route.value.page}`)?.title ?? "FrontDeskWise";
   if (view.value === "privacy") return "Privacy Policy";
   if (view.value === "terms") return "Terms of Service";
   if (view.value === "admin") return "Admin control plane";
@@ -961,7 +1015,6 @@ const conversationCount = computed(() => workspaceStats.value?.conversations ?? 
 const inboxUnreadCount = computed(() => inboxConversations.value.reduce((total, conversation) => total + (conversation.unreadCount ?? 0), 0));
 const readinessScore = computed(() => workspaceReadiness.value);
 const chartMax = computed(() => Math.max(1, ...(workspaceStats.value?.trend ?? []).flatMap((point) => [point.conversations, point.leads])));
-const featuredDemo = computed(() => featuredDemos.value[0] ?? null);
 const trialDaysRemaining = computed(() => {
   const end = billingSnapshot.value?.billing.trialEndAt;
   if (!end || billingSnapshot.value?.billing.status !== "trial") return 0;
@@ -1108,7 +1161,7 @@ async function applyRouteState(nextRoute: AppRoute) {
     if (!authSnapshot.value) openAuth("signin", false);
     return;
   }
-  if (nextRoute.kind === "legal" || nextRoute.kind === "landing") {
+  if (nextRoute.kind === "legal" || nextRoute.kind === "landing" || nextRoute.kind === "marketing") {
     publicDemoMode.value = false;
     return;
   }
@@ -1147,6 +1200,7 @@ async function applyRouteState(nextRoute: AppRoute) {
       void loadAdminOrganizations();
       void loadAdminUsers();
       void loadAdminDemoRequests();
+      void loadAdminInstallationSupport();
       void loadAdminMessaging();
       void loadAdminHealth();
     }
@@ -1204,6 +1258,14 @@ function selectAgentTab(tab: AgentTab) {
   agentTab.value = tab;
   commitRoute(routeForView("agent"));
   if (tab === "install") void loadWidgetInstall();
+}
+
+function openHelpAndSupport() {
+  sidebarAccountMenuOpen.value = false;
+  profileMenuOpen.value = false;
+  notificationMenuOpen.value = false;
+  selectAgentTab("install");
+  openSupportRequest.value += 1;
 }
 
 function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = true) {
@@ -1533,24 +1595,6 @@ async function refreshAuthenticatedSnapshot() {
   }
 }
 
-async function loadFeaturedDemos() {
-  try {
-    const response = await trackedFetch(apiUrl("/api/v1/demo-catalog"));
-    const payload = await response.json() as { demos?: FeaturedDemo[] };
-    if (response.ok) featuredDemos.value = payload.demos ?? [];
-  } catch {
-    featuredDemos.value = [];
-  }
-}
-
-async function openPublicDemo(slug = featuredDemo.value?.slug ?? demoSlug.value) {
-  if (!slug) return;
-  demoSlug.value = slug;
-  showAllBusinesses.value = false;
-  commitRoute(demoRoute(slug), false, false);
-  await loadBusinessWorkspace(slug, true);
-}
-
 async function selectBusiness(slug: string) {
   if (!slug) return;
   const nextView = view.value;
@@ -1662,17 +1706,43 @@ function scrollLandingTo(id: string) {
   requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
 
-const heroDemoStep = ref(2);
+const heroDemoStep = ref(0);
 const landingDemoSteps = [
-  { label: "Visitor asks", title: "Do you have swim lessons for a 4-year-old?", body: "A real question gets a clear, grounded answer from the business website." },
-  { label: "AI qualifies", title: "Yes — which location works best?", body: "FrontDeskWise asks the next useful question instead of ending the conversation." },
-  { label: "Lead captured", title: "Enrollment request sent to the team", body: "Name, phone, and email are captured while intent is still high." },
+  { label: "Visitor asks", title: "Do you have a Saturday appointment?", body: "A real question gets a clear, grounded answer from the business knowledge you approve." },
+  { label: "AI qualifies", title: "Yes — which service do you need?", body: "FrontDeskWise asks the next useful question instead of ending the conversation." },
+  { label: "Next step complete", title: "Lead and intent sent to the team", body: "Contact details, context, and the requested next step stay together." },
 ];
 
 const landingIndustries = [
   { icon: "🏊", name: "Swim school", question: "What class is right for my 5-year-old?", steps: ["Answers from program details", "Asks for location", "Starts enrollment"] },
   { icon: "✂️", name: "Salon", question: "Can I book a haircut Saturday?", steps: ["Understands service", "Guides to booking", "Captures preference"] },
   { icon: "❄️", name: "HVAC", question: "My AC stopped working.", steps: ["Qualifies urgency", "Captures ZIP + contact", "Sends service lead"] },
+  { icon: "🦷", name: "Dental", question: "Do you take new patients?", steps: ["Shares accepted services", "Finds a location", "Requests an appointment"] },
+  { icon: "⚖️", name: "Law firm", question: "Can someone review my situation?", steps: ["Sets expectations", "Collects case context", "Routes a qualified inquiry"] },
+  { icon: "🏠", name: "Home services", question: "How soon can someone come out?", steps: ["Checks service area", "Qualifies urgency", "Creates a dispatch-ready lead"] },
+];
+
+const landingFlowSteps = [
+  { label: "Question", title: "A visitor asks", body: "The conversation starts with the question already on their mind." },
+  { label: "Answer", title: "Your knowledge responds", body: "The agent gives a grounded answer with a clear source and next step." },
+  { label: "Qualify", title: "Intent becomes useful", body: "A short follow-up captures the details your team actually needs." },
+  { label: "Convert", title: "The next action happens", body: "Book, request a quote, enroll, or send the lead to your team." },
+  { label: "Handoff", title: "A human can step in", body: "When judgment matters, the full context moves with the conversation." },
+];
+
+const landingSampleMetrics = [
+  { value: "248", label: "conversations", trend: "+18% this week" },
+  { value: "61", label: "leads captured", trend: "with intent attached" },
+  { value: "24", label: "actions completed", trend: "bookings + requests" },
+  { value: "91%", label: "answered from knowledge", trend: "illustrative rate" },
+];
+
+const landingFaqs = [
+  { question: "Does FrontDeskWise use my website?", answer: "Yes. Start with a website URL, then review the services, pricing, policies, locations, and documents the agent can use before publishing." },
+  { question: "What happens when the answer is not in my knowledge?", answer: "The agent should say when it cannot verify an answer, collect useful context, and offer a human handoff instead of guessing." },
+  { question: "Can it capture leads and bookings?", answer: "Yes. Configure forms, booking actions, and follow-up steps so the next action stays connected to the conversation that created it." },
+  { question: "Can I customize the widget?", answer: "You can set the assistant name, greeting, brand colors, logo, quick actions, lead fields, position, and responsive display mode." },
+  { question: "Does it work for more than one business?", answer: "Yes. Multi-business workspaces keep each business's knowledge, agent, widget, and analytics organized under one owner login." },
 ];
 
 const landingCapabilities = [
@@ -1683,14 +1753,24 @@ const landingCapabilities = [
 ];
 
 const landingPlans = [
-  { key: "starter", name: "Starter", price: "$99", description: "A grounded AI front desk for one business.", businesses: "1 business", featured: false, badge: "", bullets: ["AI answers from your website", "Lead capture", "Basic analytics", "Website widget"] },
-  { key: "growth", name: "Growth", price: "$199", description: "More volume, routing, and operating visibility.", businesses: "1 business", featured: false, badge: "", bullets: ["Everything in Starter", "Higher conversation volume", "Advanced actions", "Integrations + team handoff"] },
+  { key: "starter", name: "Starter", price: "$99", description: "A grounded AI front desk for one business.", businesses: "1 business", featured: false, badge: "", bullets: ["AI answers from your website", "Lead capture", "Basic analytics", "Website widget", "Free setup help included"] },
+  { key: "growth", name: "Growth", price: "$199", description: "More volume, routing, and operating visibility.", businesses: "1 business", featured: false, badge: "", bullets: ["Everything in Starter", "Higher conversation volume", "Advanced actions", "Integrations + team handoff", "Guided setup assistance"] },
   { key: "multi_business", name: "Multi-Business", price: "$349", description: "One organization for up to two businesses.", businesses: "Up to 2 businesses", featured: true, badge: "Built for multi-business owners", bullets: ["Everything in Growth", "Shared team workspace", "Cross-business analytics", "Shared integrations and actions"] },
   { key: "portfolio", name: "Portfolio", price: "$499", description: "A higher-capacity operating layer for your portfolio.", businesses: "Up to 5 businesses", featured: false, badge: "", bullets: ["Everything in Multi-Business", "Higher usage limits", "Priority support", "Advanced integrations"] },
 ];
 
+function normalizeWebsiteUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("//")) return `https:${trimmed}`;
+  if (/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
 async function generateDemo() {
-  if (!websiteUrl.value.trim()) return;
+  const normalizedWebsiteUrl = normalizeWebsiteUrl(websiteUrl.value);
+  if (!normalizedWebsiteUrl) return;
+  websiteUrl.value = normalizedWebsiteUrl;
   isGenerating.value = true;
   generationError.value = "";
   try {
@@ -1698,7 +1778,7 @@ async function generateDemo() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        websiteUrl: websiteUrl.value,
+        websiteUrl: normalizedWebsiteUrl,
         requesterName: demoRequesterName.value || undefined,
         requesterEmail: demoRequesterEmail.value || undefined,
       }),
@@ -1925,6 +2005,36 @@ async function loadWidgetInstall() {
   const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
   if (!response.ok) return;
   widgetInstall.value = await response.json() as WidgetInstall;
+}
+
+async function requestInstallationHelp(payload: InstallationSupportFormPayload) {
+  if (!firebaseToken.value || !authSnapshot.value) {
+    openAuth("signup");
+    return;
+  }
+  installationSupportOwnerLoading.value = true;
+  installationSupportOwnerError.value = "";
+  installationSupportOwnerMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/installation-support`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json() as { request?: InstallationSupportRequest; error?: string };
+    if (!response.ok) throw new Error(result.error ?? "Could not send your installation help request.");
+    installationSupportOwnerMessage.value = "Your request is with our team. We’ll be in touch soon.";
+    notifySuccess("Installation help requested. Our team will be in touch soon.");
+  } catch (error) {
+    installationSupportOwnerError.value = error instanceof Error ? error.message : "Could not send your installation help request.";
+  } finally {
+    installationSupportOwnerLoading.value = false;
+  }
+}
+
+function clearInstallationSupportOwnerState() {
+  installationSupportOwnerMessage.value = "";
+  installationSupportOwnerError.value = "";
 }
 
 async function loadOwnershipVerification() {
@@ -2836,6 +2946,53 @@ function formatPlanLabel(value: string): string {
 
 function formatBillingDate(value: string | null): string {
   return value ? new Date(value).toLocaleDateString() : "No date set";
+}
+
+async function loadAdminInstallationSupport() {
+  if (!authSnapshot.value || installationSupportLoading.value) return;
+  installationSupportLoading.value = true;
+  installationSupportError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/installation-support?limit=200"), { headers: ownerHeaders() });
+    const payload = await response.json() as { requests?: InstallationSupportRequest[]; assignees?: InstallationSupportAssignee[]; summary?: { new?: number; inProgress?: number; resolved?: number }; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load installation support requests.");
+    installationSupportRequests.value = payload.requests ?? [];
+    installationSupportAssignees.value = payload.assignees ?? [];
+    installationSupportSummary.value = {
+      new: payload.summary?.new ?? 0,
+      inProgress: payload.summary?.inProgress ?? 0,
+      resolved: payload.summary?.resolved ?? 0,
+    };
+  } catch (error) {
+    installationSupportError.value = error instanceof Error ? error.message : "Could not load installation support requests.";
+  } finally {
+    installationSupportLoading.value = false;
+  }
+}
+
+async function updateAdminInstallationSupport(item: InstallationSupportRequest) {
+  if (installationSupportLoading.value) return;
+  installationSupportLoading.value = true;
+  installationSupportError.value = "";
+  installationSupportMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/installation-support/${encodeURIComponent(item.id)}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ status: item.status, assignedUserId: item.assignedUserId }),
+    });
+    const payload = await response.json() as { request?: InstallationSupportRequest; error?: string };
+    if (!response.ok || !payload.request) throw new Error(payload.error ?? "Could not update the installation support request.");
+    const index = installationSupportRequests.value.findIndex((request) => request.id === item.id);
+    if (index >= 0) installationSupportRequests.value.splice(index, 1, payload.request);
+    installationSupportMessage.value = "Installation support request updated.";
+  } catch (error) {
+    installationSupportError.value = error instanceof Error ? error.message : "Could not update the installation support request.";
+    installationSupportLoading.value = false;
+    await loadAdminInstallationSupport();
+  } finally {
+    installationSupportLoading.value = false;
+  }
 }
 
 async function loadAdminOrganizations() {
@@ -3783,6 +3940,7 @@ watch(view, (nextView, previousView) => {
     void loadAdminOrganizations();
     void loadAdminUsers();
     void loadAdminDemoRequests();
+    void loadAdminInstallationSupport();
     void loadAdminMessaging();
     void loadAdminHealth();
   }
@@ -3799,24 +3957,42 @@ function updateDocumentMetadata() {
   if (typeof document === "undefined") return;
   const landing = view.value === "home";
   const legal = view.value === "privacy" || view.value === "terms";
-  document.title = landing ? "FrontDeskWise — AI front desk for local businesses" : `${pageTitle.value} · FrontDeskWise`;
+  const marketingPage = route.value.kind === "marketing" ? getMarketingPageByPath(`/${route.value.page}`) : undefined;
+  const description = marketingPage?.description ?? "FrontDeskWise turns a local business website into an AI front desk that answers questions, captures leads, and moves visitors toward booking.";
+  document.title = landing ? "FrontDeskWise — AI front desk for local businesses" : marketingPage ? `${marketingPage.title} · FrontDeskWise` : `${pageTitle.value} · FrontDeskWise`;
   const robots = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]');
-  if (robots) robots.content = landing || legal ? "index,follow" : "noindex,nofollow";
+  if (robots) robots.content = landing || legal || Boolean(marketingPage) ? "index,follow" : "noindex,nofollow";
   const canonical = document.head.querySelector<HTMLLinkElement>('link[rel="canonical"]');
   if (canonical && typeof window !== "undefined") {
     const siteOrigin = String(import.meta.env.VITE_SITE_ORIGIN ?? window.location.origin).replace(/\/$/, "");
-    canonical.href = `${siteOrigin}${landing || legal ? window.location.pathname : "/"}`;
+    canonical.href = `${siteOrigin}${landing || legal || marketingPage ? window.location.pathname : "/"}`;
   }
+  const descriptionMeta = document.head.querySelector<HTMLMetaElement>('meta[name="description"]');
+  if (descriptionMeta) descriptionMeta.content = description;
+  for (const selector of ['meta[property="og:title"]', 'meta[name="twitter:title"]']) {
+    const meta = document.head.querySelector<HTMLMetaElement>(selector);
+    if (meta) meta.content = document.title;
+  }
+  for (const selector of ['meta[property="og:description"]', 'meta[name="twitter:description"]']) {
+    const meta = document.head.querySelector<HTMLMetaElement>(selector);
+    if (meta) meta.content = description;
+  }
+  const ogUrl = document.head.querySelector<HTMLMetaElement>('meta[property="og:url"]');
+  if (ogUrl && typeof window !== "undefined") ogUrl.content = `${String(import.meta.env.VITE_SITE_ORIGIN ?? window.location.origin).replace(/\/$/, "")}${window.location.pathname}`;
 }
 
 watch(view, updateDocumentMetadata);
 onMounted(() => {
   void runWithGlobalLoading(() => applyRouteState(route.value));
   updateDocumentMetadata();
-  void loadFeaturedDemos();
   void consumeDemoLink();
   if (typeof window !== "undefined") {
     window.addEventListener("popstate", handleRouteChange);
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      landingHeroTimer = window.setInterval(() => {
+        if (view.value === "home") heroDemoStep.value = (heroDemoStep.value + 1) % landingDemoSteps.length;
+      }, 4200);
+    }
     if (!firebaseAuthConfigured()) {
       if (isPlatformRoute()) openAuth("signin");
     } else {
@@ -3829,11 +4005,17 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopFirebaseObserver?.();
+  if (landingHeroTimer !== null) window.clearInterval(landingHeroTimer);
   if (typeof window !== "undefined") window.removeEventListener("popstate", handleRouteChange);
 });
 
 function openHome() {
   commitRoute({ kind: "landing" });
+}
+
+function startMarketingDemo() {
+  commitRoute({ kind: "landing" });
+  window.setTimeout(() => document.getElementById("final-cta")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
 }
 </script>
 
@@ -3842,6 +4024,7 @@ function openHome() {
     <section v-if="routeIsNotFound" class="not-found-shell">
       <div class="not-found-card"><p class="eyebrow">404</p><h1>That page is not available.</h1><p>Check the address or return to FrontDeskWise.</p><button class="primary-button" type="button" @click="openHome">Back to home</button></div>
     </section>
+    <MarketingPage v-else-if="route.kind === 'marketing'" :page-path="`/${route.page}`" @start-demo="startMarketingDemo" />
     <section v-else-if="view === 'home'" class="marketing-shell landing-page">
       <header class="marketing-nav landing-nav">
         <button class="brand-mark" type="button" @click="openHome">
@@ -3850,11 +4033,12 @@ function openHome() {
         </button>
         <nav class="landing-nav-links" aria-label="Main navigation">
           <button class="text-button" type="button" @click="scrollLandingTo('how-it-works')">How it works</button>
-          <button class="text-button" type="button" @click="scrollLandingTo('industries')">Use cases</button>
-          <button class="text-button" type="button" @click="scrollToPricing">Pricing</button>
+          <a class="text-button" href="/features">Features</a>
+          <a class="text-button" href="/industries">Industries</a>
+          <a class="text-button" href="/resources">Resources</a>
+          <a class="text-button" href="/pricing">Pricing</a>
         </nav>
         <div class="nav-actions">
-          <button class="text-button landing-demo-nav" type="button" @click="openPublicDemo()">View demo</button>
           <button class="dark-button small" type="button" @click="openAuth('signin')">Sign in</button>
         </div>
       </header>
@@ -3880,22 +4064,23 @@ function openHome() {
           <div class="trust-row landing-trust-row"><span>✓ No credit card</span><span>✓ Built from your website</span><span>✓ Ready in minutes</span></div>
         </div>
 
-        <div class="landing-hero-visual">
-          <div class="landing-metric-chip landing-metric-chip-top"><strong>{{ featuredDemo ? featuredDemo.stats.leads : "—" }}</strong><span>leads in sample workspace</span></div>
-          <div class="landing-metric-chip landing-metric-chip-bottom"><strong>{{ featuredDemo ? featuredDemo.stats.bookingClicks : "—" }}</strong><span>booking actions</span></div>
+        <div class="landing-hero-visual" aria-label="Illustrative FrontDeskWise conversation flow">
+          <div class="landing-hero-signal landing-hero-signal-top"><span class="landing-signal-dot"></span><strong>Agent is working</strong><small>Answering, qualifying, and routing</small></div>
+          <div class="landing-hero-signal landing-hero-signal-bottom"><strong>61</strong><span>illustrative leads captured</span></div>
           <div class="landing-browser">
-            <div class="landing-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="landing-browser-url">{{ featuredDemo?.business.websiteUrl || "yourbusiness.com" }}</span></div>
+            <div class="landing-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="landing-browser-url">yourbusiness.com · sample workspace</span></div>
             <div class="landing-site-preview">
-              <div class="landing-site-nav"><strong>{{ featuredDemo?.business.name || "Your Business" }}</strong><span>Services &nbsp; About &nbsp; Contact</span></div>
-              <div class="landing-site-content"><span class="landing-site-kicker">WELCOME IN</span><h2>More answers.<br />More bookings.</h2><span>Make it easier for customers to take the next step.</span></div>
+              <div class="landing-site-nav"><strong>Harbor &amp; Home</strong><span>Services &nbsp; About &nbsp; Contact</span></div>
+              <div class="landing-site-content"><span class="landing-site-kicker">YOUR BUSINESS, ALWAYS OPEN</span><h2>Useful answers.<br />Clear next steps.</h2><span>A calmer way for customers to get help and take action.</span><div class="landing-site-proof"><span>Knowledge synced</span><span>Human handoff ready</span></div></div>
               <div class="landing-widget">
-                <div class="landing-widget-head"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small><span class="online-dot"></span> Online now</small></div><span class="landing-widget-close">×</span></div>
+                <div class="landing-widget-head"><span class="mini-orb">✦</span><div><strong>Harbor assistant</strong><small><span class="online-dot"></span> Online now</small></div><span class="landing-widget-close">×</span></div>
                 <div class="landing-widget-body">
                   <div class="landing-widget-tabs"><button v-for="(step, index) in landingDemoSteps" :key="step.label" type="button" :class="{ active: heroDemoStep === index }" @click="heroDemoStep = index">{{ index + 1 }}</button></div>
                   <p class="landing-step-label">{{ landingDemoSteps[heroDemoStep].label }}</p>
-                  <div v-if="heroDemoStep === 0" class="landing-chat-stack"><div class="landing-chat-question">Do you have swim lessons for a 4-year-old?</div><div class="landing-chat-answer">Yes — I can help you find the right class. Which location works best?</div></div>
-                  <div v-else-if="heroDemoStep === 1" class="landing-chat-stack"><div class="landing-chat-question">Tampa Bay. What do I need to get started?</div><div class="landing-chat-answer">I can send an enrollment request to the team. What’s the best way to reach you?</div><div class="landing-choice-row"><span>Tampa Bay</span><span>Weekend classes</span></div></div>
-                  <div v-else class="landing-lead-captured"><div class="landing-check">✓</div><div><strong>Lead captured</strong><span>Enrollment request sent to the team.</span></div></div>
+                  <div v-if="heroDemoStep === 0" class="landing-chat-stack"><div class="landing-chat-question">Do you have a Saturday appointment?</div><div class="landing-chat-answer">Yes — I can help with that. What service would you like to book?</div><div class="landing-choice-row"><span>Book a service</span><span>See availability</span></div></div>
+                  <div v-else-if="heroDemoStep === 1" class="landing-chat-stack"><div class="landing-chat-question">A repair visit. How soon can someone come out?</div><div class="landing-chat-answer">I can check your service area and send the team the right details.</div><div class="landing-choice-row"><span>Service area</span><span>Urgent request</span></div></div>
+                  <div v-else class="landing-lead-captured"><div class="landing-check">✓</div><div><strong>Next step completed</strong><span>Lead, intent, and context sent to the team.</span></div></div>
+                  <div class="landing-source-chip"><span>✓</span> Answer grounded in approved knowledge</div>
                   <div class="landing-widget-caption">{{ landingDemoSteps[heroDemoStep].body }}</div>
                 </div>
               </div>
@@ -3904,12 +4089,13 @@ function openHome() {
         </div>
       </div>
 
-      <div v-if="featuredDemos.length" class="featured-demo-links landing-featured-links"><span>Explore a sample workspace:</span><button v-for="demo in featuredDemos" :key="demo.slug" type="button" @click="openPublicDemo(demo.slug)">{{ demo.business.name }} dashboard →</button></div>
+      <div class="landing-hero-note"><span>Illustrative sample flow</span><span>Use your own website to build a real workspace</span><button class="landing-text-link" type="button" @click="scrollLandingTo('how-it-works')">See the flow</button></div>
 
       <section id="how-it-works" class="landing-section landing-conversion-section">
-        <div class="landing-section-heading"><p class="eyebrow">The commercial story</p><h2>See what happens after someone visits your website.</h2><p>FrontDeskWise keeps the conversation moving until the visitor gets an answer, takes an action, or reaches your team.</p></div>
-        <div class="landing-conversion-track">
-          <article v-for="(step, index) in ['Question', 'Answer', 'Qualify', 'Capture', 'Book', 'Handoff']" :key="step" class="landing-conversion-step"><span>{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ step }}</strong><small>{{ ['Visitor starts the conversation', 'Grounded reply from your knowledge', 'AI asks the useful next question', 'Contact details stay attached to intent', 'Booking or next step begins', 'A human joins when needed'][index] }}</small></article>
+        <div class="landing-section-heading landing-section-heading-centered"><p class="eyebrow">The commercial story</p><h2>See the conversation turn into a next step.</h2><p>FrontDeskWise connects the moment a visitor asks a question to the outcome your business needs.</p></div>
+        <div class="landing-flow-shell" aria-label="Illustrative customer conversion flow">
+          <div class="landing-flow-rail"><span class="landing-flow-progress"></span><article v-for="(step, index) in landingFlowSteps" :key="step.label" class="landing-flow-step"><span class="landing-flow-index">0{{ index + 1 }}</span><strong>{{ step.label }}</strong><small>{{ step.title }}</small><p>{{ step.body }}</p></article></div>
+          <div class="landing-flow-live-card"><span class="landing-flow-live-label"><i></i> Live illustrative flow</span><strong>Visitor intent stays attached to the conversation.</strong><div class="landing-flow-live-path"><span>Question</span><b>→</b><span>Answer</span><b>→</b><span>Action</span><b>→</b><span>Outcome</span></div><small>Every step can be reviewed, tested, and improved before it reaches customers.</small></div>
         </div>
       </section>
 
@@ -3920,7 +4106,7 @@ function openHome() {
             <div class="landing-industry-top"><span class="landing-industry-icon">{{ industry.icon }}</span><span class="landing-industry-tag">{{ industry.name }}</span></div>
             <p class="landing-industry-question">“{{ industry.question }}”</p>
             <div class="landing-industry-flow"><span v-for="(step, index) in industry.steps" :key="step"><b>{{ index + 1 }}</b>{{ step }}</span></div>
-            <button class="landing-text-link" type="button" @click="websiteUrl = ''; scrollLandingTo('final-cta')">Build this workflow <span>→</span></button>
+            <button class="landing-text-link" type="button" @click="websiteUrl = ''; scrollLandingTo('final-cta')">Build this workflow</button>
           </article>
         </div>
       </section>
@@ -3931,34 +4117,34 @@ function openHome() {
       </section>
 
       <section class="landing-section landing-dashboard-section">
-        <div class="landing-dashboard-copy"><p class="eyebrow">A clearer owner view</p><h2>Know what your AI front desk is doing for the business.</h2><p>See conversations, leads, booking actions, handoffs, and the questions worth adding to your knowledge base.</p><button class="outline-button" type="button" @click="openPublicDemo()">View sample dashboard →</button></div>
+        <div class="landing-dashboard-copy"><p class="eyebrow">A clearer owner view</p><h2>Know what your AI front desk is doing for the business.</h2><p>See conversations, leads, booking actions, handoffs, and the questions worth adding to your knowledge base.</p><span class="landing-illustrative-note">Illustrative sample workspace · not customer data</span><button class="outline-button" type="button" @click="openAuth('signup')">Create your workspace</button></div>
         <div class="landing-dashboard-card">
-          <div class="landing-dashboard-header"><div><span class="landing-dashboard-kicker">OWNER DASHBOARD · SAMPLE WORKSPACE</span><h3>Today</h3></div><span class="landing-live-pill"><i></i> Live view</span></div>
-          <div class="landing-dashboard-metrics"><div><strong>{{ featuredDemo ? featuredDemo.stats.conversations : "—" }}</strong><span>Conversations</span></div><div><strong>{{ featuredDemo ? featuredDemo.stats.leads : "—" }}</strong><span>Leads</span></div><div><strong>{{ featuredDemo ? featuredDemo.stats.bookingClicks : "—" }}</strong><span>Booking actions</span></div><div><strong>{{ featuredDemo ? featuredDemo.stats.handoffs ?? 0 : "—" }}</strong><span>Need your team</span></div></div>
-          <div class="landing-dashboard-bottom"><div class="landing-mini-chart"><div class="landing-mini-chart-head"><strong>Conversation activity</strong><span>Last 7 days</span></div><div class="landing-bars"><i v-for="height in [32, 48, 41, 67, 54, 79, 88]" :key="height" :style="{ height: `${height}%` }"></i></div><div class="landing-chart-labels"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div></div><div class="landing-opportunity"><span class="landing-opportunity-label">TOP OPPORTUNITY</span><strong>17 visitors asked about weekend availability.</strong><p>Add weekend hours to your knowledge.</p><span class="landing-opportunity-action">Knowledge gap →</span></div></div>
+          <div class="landing-dashboard-header"><div><span class="landing-dashboard-kicker">OWNER DASHBOARD · ILLUSTRATIVE SAMPLE</span><h3>Today</h3></div><span class="landing-live-pill"><i></i> Live view</span></div>
+          <div class="landing-dashboard-metrics"><div v-for="metric in landingSampleMetrics.slice(0, 4)" :key="metric.label"><strong>{{ metric.value }}</strong><span>{{ metric.label }}</span><small>{{ metric.trend }}</small></div></div>
+          <div class="landing-dashboard-bottom"><div class="landing-mini-chart"><div class="landing-mini-chart-head"><strong>Conversation activity</strong><span>Illustrative last 7 days</span></div><div class="landing-bars"><i v-for="(height, index) in [32, 48, 41, 67, 54, 79, 88]" :key="index" :style="{ height: `${height}%` }"></i></div><div class="landing-chart-labels"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div></div><div class="landing-opportunity"><span class="landing-opportunity-label">TOP OPPORTUNITY</span><strong>17 visitors asked about weekend availability.</strong><p>Add weekend hours to your knowledge and turn a repeated question into a better answer.</p><span class="landing-opportunity-action">Knowledge gap</span></div></div>
         </div>
       </section>
 
       <section class="landing-section landing-setup-section">
         <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">From website to working agent</p><h2>Built from your website. Ready for your review.</h2></div><p>One URL gives you a starting point. You decide what the AI can say, do, and hand off.</p></div>
-        <div class="landing-setup-grid"><div class="landing-setup-steps"><article><span>01</span><div><h3>Paste your URL</h3><p><code>yourbusiness.com</code></p></div></article><article><span>02</span><div><h3>FrontDeskWise learns your business</h3><p>Services, pricing, locations, and policies are organized for review.</p></div></article><article><span>03</span><div><h3>Review and test</h3><p>Ask real questions before anything goes live.</p></div></article><article><span>04</span><div><h3>Add it to your website</h3><p>Install the widget and start capturing the next opportunity.</p></div></article></div><div class="landing-knowledge-card"><div class="landing-knowledge-url">{{ featuredDemo?.business.websiteUrl || "https://yourbusiness.com" }} <span>✓</span></div><div class="landing-knowledge-summary"><strong>Business knowledge ready</strong><span>{{ featuredDemo ? `${featuredDemo.knowledge.sourceCount} sources analyzed` : "Review your sources" }}</span></div><div class="landing-knowledge-list"><span>✓ Services found</span><span>✓ Pricing found</span><span>✓ Locations found</span><span>✓ Policies found</span></div><div class="landing-knowledge-footer"><span>Readiness <strong>{{ featuredDemo?.knowledge.readiness ? `${featuredDemo.knowledge.readiness.score}%` : "Review needed" }}</strong></span><span class="landing-readiness-bar"><i :style="{ width: `${featuredDemo?.knowledge.readiness?.score ?? 0}%` }"></i></span></div></div></div>
+        <div class="landing-setup-grid"><div class="landing-setup-steps"><article><span>01</span><div><h3>Paste your URL</h3><p><code>yourbusiness.com</code></p></div></article><article><span>02</span><div><h3>FrontDeskWise learns your business</h3><p>Services, pricing, locations, and policies are organized for review.</p></div></article><article><span>03</span><div><h3>Review and test</h3><p>Ask real questions before anything goes live.</p></div></article><article><span>04</span><div><h3>Add it to your website</h3><p>Install the widget and start capturing the next opportunity.</p></div></article></div><div class="landing-knowledge-card"><div class="landing-knowledge-url">https://yourbusiness.com <span>✓</span></div><div class="landing-knowledge-summary"><strong>Business knowledge ready</strong><span>Illustrative review</span></div><div class="landing-knowledge-list"><span>✓ Services found</span><span>✓ Pricing found</span><span>✓ Locations found</span><span>✓ Policies found</span></div><div class="landing-knowledge-footer"><span>Readiness <strong>91%</strong></span><span class="landing-readiness-bar"><i style="width: 91%"></i></span></div><span class="landing-illustrative-note">Example workspace preview · your score comes from your sources</span></div></div>
       </section>
 
-      <section class="landing-section landing-handoff-section"><div class="landing-handoff-card"><div class="landing-handoff-conversation"><span class="landing-dashboard-kicker">SAFE HUMAN HANDOFF</span><div class="landing-handoff-message customer"><strong>Customer</strong><p>Can I talk to someone about a custom request?</p></div><div class="landing-handoff-message ai"><strong>AI front desk</strong><p>Absolutely. I’ve notified the team and kept your details with the conversation.</p></div><div class="landing-human-joined"><span>●</span><strong>Sarah joined the conversation</strong><small>Team notified · AI can assist</small></div></div><div class="landing-handoff-copy"><p class="eyebrow">AI + your team</p><h2>Automation should feel helpful, not risky.</h2><p>Let AI handle the routine work while your team keeps the context, the customer, and the final say.</p><button class="landing-text-link" type="button" @click="openAuth('signup')">Start with a safer front desk <span>→</span></button></div></div></section>
+      <section class="landing-section landing-handoff-section"><div class="landing-handoff-card"><div class="landing-handoff-conversation"><span class="landing-dashboard-kicker">SAFE HUMAN HANDOFF</span><div class="landing-handoff-message customer"><strong>Customer</strong><p>Can I talk to someone about a custom request?</p></div><div class="landing-handoff-message ai"><strong>AI front desk</strong><p>Absolutely. I’ve notified the team and kept your details with the conversation.</p></div><div class="landing-human-joined"><span>●</span><strong>Sarah joined the conversation</strong><small>Team notified · AI can assist</small></div></div><div class="landing-handoff-copy"><p class="eyebrow">AI + your team</p><h2>Automation should feel helpful, not risky.</h2><p>Let AI handle the routine work while your team keeps the context, the customer, and the final say.</p><button class="landing-text-link" type="button" @click="openAuth('signup')">Start with a safer front desk</button></div></div></section>
 
       <section class="landing-section landing-integrations-section"><div class="landing-section-heading"><p class="eyebrow">Fits your existing workflow</p><h2>Works with the tools your business already uses.</h2><p>Capture the lead first, then send it into the systems your team already trusts.</p></div><div class="landing-integration-row"><span>CRM</span><span>Booking</span><span>Calendar</span><span>Email</span><span>Zapier</span><span>Make</span><span>HubSpot</span><span>Custom API / MCP</span></div></section>
 
-      <section class="landing-multi-business"><div><p class="eyebrow">One login. Multiple businesses.</p><h2>Grow your portfolio without adding another tool to manage.</h2><p>Keep businesses, teams, actions, and analytics organized in one shared operating layer.</p></div><div class="landing-portfolio-card"><div><span class="landing-portfolio-avatar blue">B</span><strong>British Swim School</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar orange">S</span><strong>Sunset Salon</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar green">A</span><strong>AC Pro Services</strong><small>Connected workspace · shared team</small></div></div></section>
+      <section class="landing-multi-business"><div><p class="eyebrow">One login. Multiple businesses.</p><h2>Grow your portfolio without adding another tool to manage.</h2><p>Keep businesses, teams, actions, and analytics organized in one shared operating layer.</p></div><div class="landing-portfolio-card"><div><span class="landing-portfolio-avatar blue">H</span><strong>Harbor &amp; Home</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar orange">N</span><strong>Northstar Studio</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar green">C</span><strong>ClearAir Services</strong><small>Connected workspace · shared team</small></div></div></section>
 
-      <section class="landing-section landing-proof-section"><div class="landing-proof-card"><div><p class="eyebrow">Proof that compounds</p><h2>Make the numbers that matter visible.</h2><p>FrontDeskWise is built to show the conversations handled, leads captured, actions completed, and questions your team should improve next.</p></div><div class="landing-proof-stats"><span><strong>{{ featuredDemo ? featuredDemo.stats.conversations : "—" }}</strong><small>conversations</small></span><span><strong>{{ featuredDemo ? featuredDemo.stats.leads : "—" }}</strong><small>leads captured</small></span><span><strong>{{ featuredDemo ? featuredDemo.stats.bookingClicks : "—" }}</strong><small>actions completed</small></span></div></div></section>
+      <section class="landing-section landing-proof-section"><div class="landing-proof-card"><div><p class="eyebrow">Proof that compounds</p><h2>Make the numbers that matter visible.</h2><p>FrontDeskWise is built to show the conversations handled, leads captured, actions completed, and questions your team should improve next.</p><span class="landing-illustrative-note">The figures below show the kind of operating view owners get once their own workspace is live.</span></div><div class="landing-proof-stats"><span v-for="metric in landingSampleMetrics.slice(0, 3)" :key="metric.label"><strong>{{ metric.value }}</strong><small>{{ metric.label }}</small></span></div></div></section>
 
       <section id="pricing" class="marketing-pricing landing-pricing"><div class="pricing-heading"><div><p class="eyebrow">Simple organization pricing</p><h2>Start with one business. Grow without another login.</h2></div><p>Every plan includes grounded answers, lead capture, and a shared path to booking. Start with a trial — no card required.</p></div><div class="pricing-grid"><article v-for="plan in landingPlans" :key="plan.key" :class="['pricing-card landing-pricing-card', { featured: plan.featured }]" tabindex="0"><span v-if="plan.badge" class="pricing-badge">{{ plan.badge }}</span><h3>{{ plan.name }}</h3><p>{{ plan.description }}</p><strong class="pricing-price">{{ plan.price }}<small>/month</small></strong><span class="pricing-businesses">{{ plan.businesses }}</span><ul class="landing-plan-bullets"><li v-for="bullet in plan.bullets" :key="bullet">✓ {{ bullet }}</li></ul><button class="primary-button small" type="button" @click="openAuth('signup')">Start free trial →</button></article></div></section>
 
-      <section class="landing-section landing-faq-section"><div class="landing-section-heading"><p class="eyebrow">Questions owners ask</p><h2>A front desk that is easy to understand.</h2></div><div class="landing-faq-list"><details><summary>Does FrontDeskWise make up answers?</summary><p>It answers from the business knowledge you review and can use a fallback or human handoff when the answer is not grounded.</p></details><details><summary>Can my team take over a conversation?</summary><p>Yes. Human handoff keeps the conversation context and notifies the team when a customer needs a person.</p></details><details><summary>Do I need to replace my booking or CRM tools?</summary><p>No. FrontDeskWise is designed to connect to existing booking, CRM, email, webhook, and MCP-powered workflows.</p></details><details><summary>How quickly can I see my own demo?</summary><p>Paste a website URL to generate a starting workspace from your services, policies, locations, and other approved business information.</p></details></div></section>
+      <section class="landing-section landing-faq-section"><div class="landing-section-heading landing-section-heading-centered"><p class="eyebrow">Questions owners ask</p><h2>A front desk that is easy to understand.</h2><p>Clear answers before you hand over your website, your customers, or your team’s time.</p></div><div class="landing-faq-list"> <details v-for="(faq, index) in landingFaqs" :key="faq.question" :open="index === 0"><summary>{{ faq.question }}</summary><p>{{ faq.answer }}</p></details></div></section>
 
       <section id="final-cta" class="landing-final-cta"><div><p class="eyebrow">See your own version</p><h2>See what FrontDeskWise can build from your website.</h2><p>Your next customer may already be on the page. Give them a useful next step.</p></div><div class="url-form landing-final-form"><input v-model="websiteUrl" type="url" placeholder="https://yourbusiness.com" aria-label="Business website URL" @keyup.enter="generateDemo" /><button class="primary-button" type="button" :disabled="isGenerating" @click="generateDemo">{{ isGenerating ? "Building…" : "Generate my AI front desk" }} <span aria-hidden="true">→</span></button></div></section>
 
-      <footer class="marketing-footer landing-footer"><div><strong>FrontDeskWise</strong><span>FrontDeskWise is a product of Sudo Programmer, Inc.</span></div><nav aria-label="Footer navigation"><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:hello@frontdeskwise.com">Contact</a></nav><small>© 2026 Sudo Programmer, Inc. · FrontDeskWise. Built for clearer customer conversations.</small></footer>
+      <footer class="marketing-footer landing-footer"><div><strong>FrontDeskWise</strong><span>FrontDeskWise is a product of Sudo Programmer, Inc.</span></div><nav aria-label="Footer navigation"><a href="/features">Features</a><a href="/industries">Industries</a><a href="/use-cases">Use cases</a><a href="/integrations">Integrations</a><a href="/resources">Resources</a><a href="/pricing">Pricing</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:hello@frontdeskwise.com">Contact</a></nav><small>© 2026 Sudo Programmer, Inc. · FrontDeskWise. Built for clearer customer conversations.</small></footer>
     </section>
 
     <section v-else-if="view === 'privacy' || view === 'terms'" class="legal-shell">
@@ -3981,7 +4167,7 @@ function openHome() {
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon">⚙</span><span>Admin control plane</span></button>
         </nav>
         <div v-if="adminSurfaceMode" class="sidebar-bottom"><div class="admin-sidebar-note"><strong>Operations access</strong><small>Manage platform health, organizations, users, and demos from one place.</small></div><button v-if="!adminOnlyMode" class="sidebar-link" type="button" @click="view = 'overview'">← Back to workspace</button><button class="sidebar-link" type="button" @click="signOut">Sign out</button></div>
-        <div v-else class="sidebar-bottom"><div v-if="showSetupCard" class="setup-card"><template v-if="setupComplete"><div class="setup-row"><strong>Your AI front desk is ready ✓</strong><button class="sidebar-setup-dismiss" type="button" @click="dismissSetup">Dismiss</button></div><small>Everything is ready to test, publish, and install.</small></template><template v-else><div class="setup-row"><span>Setup progress</span><strong>{{ setupPercent }}%</strong></div><div class="progress-bar"><span :style="{ width: String(setupPercent) + '%' }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete · {{ setupNextAction }}</small><button class="sidebar-setup-action" type="button" @click="continueSetup">Continue setup</button></template></div><button v-if="workspaceAttention" class="sidebar-attention" type="button" @click="openWorkspaceAttention"><span>!</span><span><strong>Needs attention</strong><small>{{ workspaceAttention.label }}</small></span></button><div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div></div>
+        <div v-else class="sidebar-bottom"><div v-if="showSetupCard" class="setup-card"><template v-if="setupComplete"><div class="setup-row"><strong>Your AI front desk is ready ✓</strong><button class="sidebar-setup-dismiss" type="button" @click="dismissSetup">Dismiss</button></div><small>Everything is ready to test, publish, and install.</small></template><template v-else><div class="setup-row"><span>Setup progress</span><strong>{{ setupPercent }}%</strong></div><div class="progress-bar"><span :style="{ width: String(setupPercent) + '%' }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete · {{ setupNextAction }}</small><button class="sidebar-setup-action" type="button" @click="continueSetup">Continue setup</button></template></div><button v-if="workspaceAttention" class="sidebar-attention" type="button" @click="openWorkspaceAttention"><span>!</span><span><strong>Needs attention</strong><small>{{ workspaceAttention.label }}</small></span></button><div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div></div>
       </aside>
 
       <section class="content-area">
@@ -4007,6 +4193,8 @@ function openHome() {
             :model="agentModel"
             :saved-message="savedMessage"
             :auth-ready="Boolean(authSnapshot)"
+            :auth-user-name="authSnapshot?.user.name ?? ''"
+            :auth-user-email="authSnapshot?.user.email ?? ''"
             :public-demo-mode="publicDemoMode"
             :billing-read-only="billingReadOnly"
             :ownership-status="ownershipVerification?.status ?? null"
@@ -4019,6 +4207,10 @@ function openHome() {
             :verification-token="verificationToken"
             :ownership-message="verificationMessage"
             :ownership-error="verificationError"
+            :installation-support-loading="installationSupportOwnerLoading"
+            :installation-support-message="installationSupportOwnerMessage"
+            :installation-support-error="installationSupportOwnerError"
+            :open-support-request="openSupportRequest"
             :test="agentTestModel"
             @select-tab="selectAgentTab"
             @save="saveAgent"
@@ -4032,6 +4224,8 @@ function openHome() {
             @submit-action="submitAgentAction"
             @reset-conversation="resetAgentConversation"
             @view-leads="view = 'leads'"
+            @request-install-help="requestInstallationHelp"
+            @clear-install-help-message="clearInstallationSupportOwnerState"
           />
         </div>
 
@@ -4253,7 +4447,7 @@ function openHome() {
           <p v-if="adminError" class="form-error">{{ adminError }}</p>
           <template v-if="adminSection === 'overview'">
             <div class="ds-stat-grid admin-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue">▦</span><strong>{{ adminOrganizations.length }}</strong><small>Organizations</small><em>{{ adminTrialCount }} on trial</em></article><article class="ds-stat-card"><span class="ds-stat-icon green">♧</span><strong>{{ adminLeadTotal }}</strong><small>Leads captured</small><em>Across all tenants</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange">◌</span><strong>{{ adminConversationTotal }}</strong><small>Conversations</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple">⚡</span><strong>{{ adminPausedCount + adminFailedDemoCount }}</strong><small>Needs attention</small><em>{{ adminDisabledUserCount }} disabled users</em></article></div>
-            <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
+            <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'installation-support'"><span>New installation requests</span><strong>{{ installationSupportSummary.new }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
           </template>
           <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
           <template v-if="adminSection === 'business-detail'">
@@ -4289,6 +4483,20 @@ function openHome() {
               <div><span :class="['status-pill', item.status === 'converted' || item.status === 'claimed' ? 'booked' : item.status === 'expired' || item.status === 'revoked' || item.status === 'failed' ? 'new' : 'qualified']">{{ item.status }}</span><small>{{ item.accessCount }} access{{ item.accessCount === 1 ? '' : 'es' }} · {{ item.session?.openCount ?? 0 }} opens</small></div>
               <div><small>Requested {{ item.requestedAt ? new Date(item.requestedAt).toLocaleString() : '—' }}</small><small>Expires {{ item.session?.expiresAt ? new Date(item.session.expiresAt).toLocaleString() : '—' }}</small></div>
               <div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'validate')">Validate</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'extend')">Extend 7d</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'reset')">New link</button><button class="text-button" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'revoke')">Revoke</button></div>
+            </div>
+          </article>
+          <article v-if="adminSection === 'installation-support'" class="panel installation-support-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Customer onboarding</p><h2>Installation support requests</h2><p>Self-service first, human help one click away. Every request includes the website and widget context your team needs.</p></div><div class="toolbar-actions"><span v-if="installationSupportMessage" class="saved-message">✓ {{ installationSupportMessage }}</span><button class="outline-button small" type="button" :disabled="installationSupportLoading" @click="loadAdminInstallationSupport">{{ installationSupportLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+            <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon orange">!</span><strong>{{ installationSupportSummary.new }}</strong><small>New</small><em>Needs first response</em></article><article class="ds-stat-card"><span class="ds-stat-icon blue">↗</span><strong>{{ installationSupportSummary.inProgress }}</strong><small>In progress</small><em>Assigned or being handled</em></article><article class="ds-stat-card"><span class="ds-stat-icon green">✓</span><strong>{{ installationSupportSummary.resolved }}</strong><small>Resolved</small><em>Closed requests</em></article></div>
+            <p v-if="installationSupportError" class="form-error">{{ installationSupportError }}</p>
+            <div class="table-heading installation-support-row"><span>Business / owner</span><span>Platform / request</span><span>Install context</span><span>Owner</span><span>Status</span></div>
+            <div v-if="!installationSupportRequests.length" class="diagnostics-empty">No installation support requests yet.</div>
+            <div v-for="item in installationSupportRequests" :key="item.id" class="table-row installation-support-row">
+              <div><strong>{{ item.businessName }}</strong><small>{{ item.websiteUrl }}</small><small>{{ item.requesterName }} · {{ item.requesterEmail }}</small></div>
+              <div><span class="status-pill qualified">{{ formatLabel(item.platform) }}</span><small>{{ item.helpRequest }}</small><small v-if="item.message">{{ item.message }}</small><a v-if="item.screenshotUrl" :href="item.screenshotUrl" target="_blank" rel="noreferrer">View screenshot ↗</a></div>
+              <div><small>Verification: {{ item.ownershipStatus }}</small><small>Widget: {{ item.widgetDetected ? `Detected · ${item.widgetLoadCount} load${item.widgetLoadCount === 1 ? '' : 's'}` : 'Not detected' }}</small><small v-if="item.widgetLastLoadedAt">Last seen {{ new Date(item.widgetLastLoadedAt).toLocaleString() }}</small></div>
+              <select v-model="item.assignedUserId" aria-label="Assign installation support request" :disabled="installationSupportLoading" @change="updateAdminInstallationSupport(item)"><option :value="null">Unassigned</option><option v-for="assignee in installationSupportAssignees" :key="assignee.id" :value="assignee.id">{{ assignee.name || assignee.email }}</option></select>
+              <select v-model="item.status" aria-label="Update installation support status" :disabled="installationSupportLoading" @change="updateAdminInstallationSupport(item)"><option value="new">New</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select>
             </div>
           </article>
           <article v-if="adminSection === 'messaging'" class="panel messaging-admin-panel">

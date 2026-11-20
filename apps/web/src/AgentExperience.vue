@@ -7,7 +7,18 @@ type FallbackBehavior = "contact_form" | "human" | "unavailable";
 type WidgetTheme = "light" | "dark" | "auto";
 type WidgetPosition = "bottom-right" | "bottom-left";
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
-type InstallPlatform = "html" | "wordpress" | "wix" | "squarespace" | "shopify";
+type InstallPlatform = "wordpress" | "wix" | "shopify" | "squarespace" | "custom" | "not_sure";
+type SupportContactMethod = "email" | "phone";
+
+interface InstallationSupportPayload {
+  name: string;
+  platform: InstallPlatform;
+  helpRequest: string;
+  preferredContactMethod: SupportContactMethod;
+  contactValue: string;
+  message: string;
+  screenshotUrl: string;
+}
 
 interface QuickAction {
   label: string;
@@ -76,6 +87,8 @@ const props = defineProps<{
   model: AgentModel;
   savedMessage: string;
   authReady: boolean;
+  authUserName: string;
+  authUserEmail: string;
   publicDemoMode: boolean;
   billingReadOnly: boolean;
   ownershipStatus: "pending" | "verified" | "rejected" | null;
@@ -88,6 +101,10 @@ const props = defineProps<{
   verificationToken: string;
   ownershipMessage: string;
   ownershipError: string;
+  installationSupportLoading: boolean;
+  installationSupportMessage: string;
+  installationSupportError: string;
+  openSupportRequest: number;
   test: TestModel;
 }>();
 
@@ -104,6 +121,8 @@ const emit = defineEmits<{
   (event: "submit-action", values: Record<string, string>): void;
   (event: "reset-conversation"): void;
   (event: "view-leads"): void;
+  (event: "request-install-help", payload: InstallationSupportPayload): void;
+  (event: "clear-install-help-message"): void;
 }>();
 
 function cloneModel(model: AgentModel): AgentModel {
@@ -119,15 +138,27 @@ const logoPreview = ref(props.model.widgetLogoUrl);
 const logoFileName = ref("");
 const testPrompt = ref(props.test.question);
 const localSaved = ref(false);
-const installPlatform = ref<InstallPlatform>("html");
+const installPlatform = ref<InstallPlatform>("custom");
 const verificationMethodDraft = ref<VerificationMethod>(props.verificationMethod);
 const installInstructions = computed(() => ({
-  html: "Paste this snippet before </body> on your website.",
   wordpress: "Add this snippet to a Custom HTML block or your theme footer.",
   wix: "Add an Embed Code element and paste this snippet into the page body.",
   squarespace: "Add a Code Block or paste this snippet in Footer Code Injection.",
   shopify: "Add this snippet to your theme.liquid file before </body>.",
+  custom: "Paste this snippet before </body> on your website.",
+  not_sure: "We can identify the right place to add this snippet with you.",
 }[installPlatform.value]));
+const supportDrawerOpen = ref(false);
+const supportSubmitted = ref(false);
+const supportForm = reactive<InstallationSupportPayload>({
+  name: props.authUserName,
+  platform: "custom",
+  helpRequest: "Help me install FrontDeskWise",
+  preferredContactMethod: "email",
+  contactValue: props.authUserEmail,
+  message: "",
+  screenshotUrl: "",
+});
 
 function syncModel(model: AgentModel): void {
   Object.assign(draft, cloneModel(model));
@@ -142,6 +173,15 @@ watch(() => props.verificationMethod, (method) => {
 });
 watch(() => props.test.question, (question) => {
   if (!testPrompt.value.trim()) testPrompt.value = question;
+});
+watch(() => props.openSupportRequest, (signal) => {
+  if (signal > 0) openSupportDrawer();
+}, { immediate: true });
+watch(() => props.authUserName, (name) => {
+  if (!supportForm.name) supportForm.name = name;
+});
+watch(() => props.authUserEmail, (email) => {
+  if (supportForm.preferredContactMethod === "email") supportForm.contactValue = email;
 });
 
 function saveChanges(): void {
@@ -211,6 +251,40 @@ function submitAction(): void {
 
 function statusClass(ready: boolean): string {
   return ready ? "status-ready" : "status-pending";
+}
+
+function openSupportDrawer(): void {
+  supportDrawerOpen.value = true;
+  supportSubmitted.value = false;
+  emit("clear-install-help-message");
+  supportForm.name = props.authUserName;
+  supportForm.platform = installPlatform.value;
+  supportForm.contactValue = supportForm.preferredContactMethod === "email" ? props.authUserEmail : supportForm.contactValue;
+}
+
+function scrollToInstallInstructions(): void {
+  document.getElementById("install-code-step")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function submitInstallationSupport(): void {
+  if (!supportForm.name.trim() || !supportForm.helpRequest.trim() || !supportForm.contactValue.trim()) return;
+  supportSubmitted.value = false;
+  emit("request-install-help", { ...supportForm, name: supportForm.name.trim(), helpRequest: supportForm.helpRequest.trim(), contactValue: supportForm.contactValue.trim(), message: supportForm.message.trim(), screenshotUrl: supportForm.screenshotUrl.trim() });
+}
+
+function sendDeveloperInstructions(): void {
+  const snippet = props.install?.snippet ?? "Complete website verification in FrontDeskWise first to generate the private install snippet.";
+  const body = [
+    `Hi,`,
+    `Please add the FrontDeskWise widget to ${props.websiteUrl || "our website"}.`,
+    `Platform: ${installPlatform.value === "not_sure" ? "Not sure" : installPlatform.value}`,
+    installInstructions.value,
+    "",
+    snippet,
+    "",
+    "Please let me know when it is live so I can check the installation.",
+  ].join("\n");
+  window.location.href = `mailto:?subject=${encodeURIComponent(`FrontDeskWise installation for ${props.businessName || "our website"}`)}&body=${encodeURIComponent(body)}`;
 }
 </script>
 
@@ -295,12 +369,36 @@ function statusClass(ready: boolean): string {
       <div class="install-status-card panel"><div><p class="section-kicker">Website status</p><h3>Know what is live</h3></div><div class="install-status-list"><span :class="statusClass(ownershipStatus === 'verified')">✓ <strong>Domain verified</strong></span><span :class="statusClass(Boolean(install?.verification.loadCount))">✓ <strong>Widget installed</strong></span><span :class="statusClass(authReady && !billingReadOnly)">✓ <strong>Agent published</strong></span></div></div>
       <div class="install-step-grid">
         <article class="install-step panel"><span class="step-number">1</span><div><p class="section-kicker">Verify website</p><h3>{{ ownershipStatus === 'verified' ? 'Website verified' : 'Protect your website' }}</h3><p>{{ ownershipStatus === 'verified' ? 'Ownership is verified for this business.' : 'Complete ownership verification before publishing the live widget.' }}</p><span v-if="ownershipStatus === 'verified'" class="status-text success">✓ Ready to publish</span><template v-else><div class="install-verification-controls"><label>Method<select v-model="verificationMethodDraft"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><div class="drawer-actions"><button class="outline-button small" type="button" :disabled="verificationLoading" @click="emit('start-verification', verificationMethodDraft)">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethodDraft !== 'email' && verificationMethodDraft !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="emit('check-verification')">Check now</button></div></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="ownershipMessage" class="status-text success">✓ {{ ownershipMessage }}</p><p v-if="ownershipError" class="form-error">{{ ownershipError }}</p></template></div></article>
-        <article class="install-step panel"><span class="step-number">2</span><div><p class="section-kicker">Install widget</p><h3>Choose your platform</h3><div class="install-platform-tabs"><button v-for="platform in ([['html', 'HTML'], ['wordpress', 'WordPress'], ['wix', 'Wix'], ['squarespace', 'Squarespace'], ['shopify', 'Shopify']] as Array<[InstallPlatform, string]>)" :key="platform[0]" :class="{ active: installPlatform === platform[0] }" type="button" @click="installPlatform = platform[0]">{{ platform[1] }}</button></div><p v-if="install" class="install-help">{{ installInstructions }} {{ businessName || 'your website' }}.</p><div v-if="install" class="snippet-box"><code>{{ install.snippet }}</code><button class="primary-button small" type="button" @click="emit('copy-snippet')">Copy code</button></div><div v-else class="install-gate"><p>{{ authReady ? 'Your private install snippet is loading.' : 'Sign in to generate a private install snippet.' }}</p><button class="outline-button small" type="button" @click="authReady ? emit('refresh-install') : emit('require-auth')">{{ authReady ? 'Refresh install details' : 'Create account to install' }}</button></div></div></article>
-        <article class="install-step panel"><span class="step-number">3</span><div><p class="section-kicker">Test installation</p><h3>Check the live widget</h3><p>Confirm the widget is on the right business and the agent is online.</p><button class="outline-button small" type="button" :disabled="verificationLoading || !install" @click="emit('verify-install')">{{ verificationLoading ? 'Checking…' : 'Check installation' }}</button><p v-if="verificationMessage" class="status-text success">✓ {{ verificationMessage }}</p><div v-if="install" class="install-check-results"><span :class="statusClass(Boolean(install.verification.loadCount))">✓ Widget detected</span><span :class="statusClass(Boolean(install.siteKey))">✓ Correct business ID</span><span :class="statusClass(authReady && !billingReadOnly)">✓ Agent online</span></div></div></article>
+        <article class="install-step panel"><span class="step-number">2</span><div><p class="section-kicker">Install widget</p><h3>Choose your platform</h3><div class="install-platform-tabs"><button v-for="platform in ([['wordpress', 'WordPress'], ['wix', 'Wix'], ['shopify', 'Shopify'], ['squarespace', 'Squarespace'], ['custom', 'Custom'], ['not_sure', 'Not sure']] as Array<[InstallPlatform, string]>)" :key="platform[0]" :class="{ active: installPlatform === platform[0] }" type="button" @click="installPlatform = platform[0]">{{ platform[1] }}</button></div><p v-if="install" class="install-help">{{ installInstructions }} {{ businessName || 'your website' }}.</p><div v-if="install" class="snippet-box"><code>{{ install.snippet }}</code><button class="primary-button small" type="button" @click="emit('copy-snippet')">Copy code</button></div><div v-else class="install-gate"><p>{{ authReady ? 'Your private install snippet is loading.' : 'Sign in to generate a private install snippet.' }}</p><button class="outline-button small" type="button" @click="authReady ? emit('refresh-install') : emit('require-auth')">{{ authReady ? 'Refresh install details' : 'Create account to install' }}</button></div></div></article>
+        <article class="install-step panel"><span class="step-number">3</span><div><p class="section-kicker">Test installation</p><h3>Check the live widget</h3><p>Confirm the widget is on the right business and the agent is online.</p><button class="outline-button small" type="button" :disabled="verificationLoading || !install" @click="emit('verify-install')">{{ verificationLoading ? 'Checking…' : 'Check installation' }}</button><p v-if="verificationMessage" :class="['status-text', install?.verification.loadCount ? 'success' : 'error']">{{ install?.verification.loadCount ? '✓' : '!' }} {{ verificationMessage }}</p><div v-if="verificationMessage && install && !install.verification.loadCount" class="install-detection-help"><strong>We couldn't detect FrontDeskWise yet.</strong><span>Check the instructions, try again, or let us help you get live.</span><div class="drawer-actions"><button class="text-button" type="button" @click="openSupportDrawer">Check instructions</button><button class="primary-button small" type="button" @click="openSupportDrawer">Get help installing</button></div></div><div v-if="install" class="install-check-results"><span :class="statusClass(Boolean(install.verification.loadCount))">✓ Widget detected</span><span :class="statusClass(Boolean(install.siteKey))">✓ Correct business ID</span><span :class="statusClass(authReady && !billingReadOnly)">✓ Agent online</span></div></div></article>
         <article class="install-step publish-step panel"><span class="step-number">4</span><div><p class="section-kicker">Publish</p><h3>Make the front desk live</h3><p>Save the current Agent configuration and publish it to this business.</p><button class="primary-button small" type="button" :disabled="!authReady || billingReadOnly || ownershipStatus !== 'verified'" @click="saveChanges">{{ billingReadOnly ? 'Billing needs attention' : ownershipStatus !== 'verified' ? 'Verify website first' : 'Publish AI front desk' }}</button><p v-if="installMessage" class="status-text success">✓ {{ installMessage }}</p></div></article>
       </div>
+      <section class="install-support panel"><div class="install-support-copy"><p class="section-kicker">Free setup help included</p><h3>Need help installing?</h3><p>You can do this yourself in minutes, or we can help you get FrontDeskWise live on your website.</p></div><div class="install-support-actions"><button class="primary-button small" type="button" @click="openSupportDrawer">Contact support</button><button class="outline-button small" type="button" @click="sendDeveloperInstructions">Send instructions to my developer</button></div></section>
       <p v-if="publicDemoMode" class="install-note">This is a public sample workspace. Create an account to verify, install, and publish your own Agent.</p>
     </div>
+  </div>
+
+  <div v-if="supportDrawerOpen" class="install-support-overlay" role="dialog" aria-modal="true" aria-labelledby="installation-support-title" @click.self="supportDrawerOpen = false">
+    <aside class="install-support-drawer">
+      <button class="auth-close" type="button" aria-label="Close" @click="supportDrawerOpen = false">×</button>
+      <p class="eyebrow">Installation help</p>
+      <h2 id="installation-support-title">We’ll help you get live</h2>
+      <p class="support-drawer-copy">Tell us where you’re stuck and our team will reply with the next step.</p>
+      <div v-if="supportSubmitted || installationSupportMessage" class="support-success"><strong>Request sent ✓</strong><p>{{ installationSupportMessage || 'We’ll be in touch soon with installation help.' }}</p><button class="primary-button small" type="button" @click="supportDrawerOpen = false">Done</button></div>
+      <form v-else class="support-form" @submit.prevent="submitInstallationSupport">
+        <label>Name<input v-model="supportForm.name" type="text" autocomplete="name" required /></label>
+        <label>Business<input :value="businessName" type="text" readonly /></label>
+        <label>Website<input :value="websiteUrl" type="url" readonly /></label>
+        <label>Platform<select v-model="supportForm.platform"><option value="wordpress">WordPress</option><option value="wix">Wix</option><option value="shopify">Shopify</option><option value="squarespace">Squarespace</option><option value="custom">Custom</option><option value="not_sure">Not sure</option></select></label>
+        <label>What do you need help with?<input v-model="supportForm.helpRequest" type="text" maxlength="240" required placeholder="e.g. I’m not sure where to paste the code" /></label>
+        <label>Preferred contact method<select v-model="supportForm.preferredContactMethod"><option value="email">Email</option><option value="phone">Phone</option></select></label>
+        <label>{{ supportForm.preferredContactMethod === 'email' ? 'Email address' : 'Phone number' }}<input v-model="supportForm.contactValue" :type="supportForm.preferredContactMethod === 'email' ? 'email' : 'tel'" required /></label>
+        <label>Message <span class="optional">optional</span><textarea v-model="supportForm.message" rows="4" maxlength="4000" placeholder="Add any details that would help us understand where you’re stuck."></textarea></label>
+        <label>Screenshot link <span class="optional">optional</span><input v-model="supportForm.screenshotUrl" type="url" placeholder="https://…" /></label>
+        <p v-if="installationSupportError" class="form-error">{{ installationSupportError }}</p>
+        <div class="drawer-actions"><button class="outline-button small" type="button" @click="supportDrawerOpen = false">Cancel</button><button class="primary-button small" type="submit" :disabled="installationSupportLoading">{{ installationSupportLoading ? 'Sending…' : 'Request installation help' }}</button></div>
+      </form>
+    </aside>
   </div>
 </template>
 
@@ -460,8 +558,31 @@ function statusClass(ready: boolean): string {
 .verification-token { display: block; margin-top: 8px; padding: 9px; color: var(--agent-ink); background: #f3f6fa; font-size: 10px; word-break: break-all; }
 .status-text { display: block; margin-top: 12px; font-size: 11px; font-weight: 700; }
 .status-text.success { color: #08785d; }
+.status-text.error { color: #b44343; }
 .install-check-results { display: grid; gap: 7px; margin-top: 14px; }
+.install-detection-help { display: grid; gap: 5px; margin-top: 14px; padding: 13px; border: 1px solid #f1d5a1; border-radius: 10px; color: #7d5c20; background: #fffaf0; font-size: 11px; line-height: 1.45; }
+.install-detection-help strong { color: #5f4518; font-size: 12px; }
+.install-detection-help .drawer-actions { justify-content: flex-start; margin-top: 8px; }
+.install-support { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 22px; border-color: #cfe0f3; background: linear-gradient(135deg, #f8fbff, #f1f8ff); }
+.install-support h3 { margin: 0; color: var(--agent-ink); font-size: 17px; }
+.install-support p:not(.section-kicker) { margin: 6px 0 0; color: var(--agent-muted); font-size: 12px; line-height: 1.5; }
+.install-support-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.install-support-overlay { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: flex-end; background: rgba(20, 35, 61, .28); }
+.install-support-drawer { position: relative; width: min(470px, 100%); height: 100%; overflow: auto; padding: 30px; background: #fff; box-shadow: -18px 0 50px rgba(20, 42, 74, .18); }
+.install-support-drawer h2 { margin: 0; color: var(--agent-ink); font-size: 25px; letter-spacing: -.04em; }
+.support-drawer-copy { margin: 8px 0 22px; color: var(--agent-muted); font-size: 12px; line-height: 1.5; }
+.support-form { display: grid; gap: 14px; }
+.support-form label { display: grid; gap: 6px; color: #586b86; font-size: 11px; font-weight: 750; }
+.support-form input, .support-form select, .support-form textarea { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cfd9e7; border-radius: 8px; color: var(--agent-ink); background: #fff; font: inherit; font-size: 13px; }
+.support-form textarea { resize: vertical; }
+.support-form input[readonly] { color: #687892; background: #f7f9fc; }
+.support-form .optional { color: #8795a8; font-size: 10px; font-weight: 500; }
+.support-success { margin-top: 22px; padding: 16px; border: 1px solid #b9e8d9; border-radius: 10px; color: #08785d; background: #edfaf5; }
+.support-success strong { font-size: 13px; }
+.support-success p { margin: 6px 0 13px; color: #386e60; font-size: 12px; line-height: 1.5; }
+.install-support-drawer > .auth-close { position: absolute; top: 17px; right: 20px; border: 0; color: var(--agent-muted); background: transparent; font-size: 25px; }
 .publish-step { background: #f8fbff; }
 @media (max-width: 980px) { .agent-config-layout, .agent-test-layout { grid-template-columns: 1fr; } .preview-sticky { position: static; } .agent-preview-column { order: -1; } .install-step-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .install-support { display: block; } .install-support-actions { justify-content: flex-start; margin-top: 16px; } .install-support-drawer { padding: 24px 18px; } }
 @media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer { display: block; } .agent-header-actions { margin-top: 16px; } .field-grid { grid-template-columns: 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .test-composer { display: grid; } .test-composer .primary-button { width: 100%; } .install-status-list { margin-top: 15px; } }
 </style>

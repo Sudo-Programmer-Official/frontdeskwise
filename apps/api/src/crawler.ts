@@ -31,9 +31,15 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 
 export function normalisePublicUrl(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) throw new CrawlError("websiteUrl is required");
+  const trimmed = value.trim();
+  const candidate = trimmed.startsWith("//")
+    ? `https:${trimmed}`
+    : /^[a-z][a-z\d+.-]*:/i.test(trimmed)
+      ? trimmed
+      : `https://${trimmed}`;
   let url: URL;
   try {
-    url = new URL(value.trim());
+    url = new URL(candidate);
   } catch {
     throw new CrawlError("websiteUrl must be a valid URL");
   }

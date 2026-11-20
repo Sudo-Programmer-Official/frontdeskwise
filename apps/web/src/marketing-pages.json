@@ -1,0 +1,708 @@
+[
+  {
+    "key": "pricing",
+    "path": "/pricing",
+    "type": "commercial",
+    "eyebrow": "Pricing",
+    "title": "Simple AI front desk pricing for local businesses",
+    "description": "Start with one business, capture more website leads, and grow into a shared AI front desk for your team.",
+    "intro": "Every plan is built around the same useful loop: answer the question, capture the opportunity, and make the next step easy for the customer. Install it yourself in minutes, or we’ll help you get it live.",
+    "primaryCta": "Start your free trial",
+    "secondaryCta": "See how it works",
+    "sections": [
+      { "heading": "Start with the work that matters", "body": "FrontDeskWise includes grounded answers from your website, lead capture, conversion actions, analytics, and a website widget. You can review the assistant before it goes live.", "bullets": ["One business workspace", "Website and document knowledge", "Lead capture and booking actions", "Human handoff when your team should step in"] },
+      { "heading": "Grow without another login", "body": "Add businesses and teammates as your operation expands. Keep each business's knowledge, actions, conversations, and analytics organized while sharing one operating layer.", "bullets": ["Business-level workspaces", "Role-based team access", "Shared connections and notifications", "Portfolio-ready reporting"] }
+    ],
+    "faqs": [
+      { "question": "Do I need a credit card to start?", "answer": "No. You can generate a starting workspace from a website and review the experience before publishing." },
+      { "question": "Can I use my existing CRM or booking system?", "answer": "Yes. FrontDeskWise can save the lead first and connect completion actions to supported integrations, webhooks, email, or MCP-powered workflows." },
+      { "question": "Can a human take over?", "answer": "Yes. Human handoff keeps the conversation context and notifies the team when a customer needs a person." }
+    ],
+    "related": ["features", "ai-front-desk", "tools-ai-front-desk-readiness"]
+  },
+  {
+    "key": "features",
+    "path": "/features",
+    "type": "commercial",
+    "eyebrow": "Product capabilities",
+    "title": "A website AI front desk that can answer, capture, and act",
+    "description": "FrontDeskWise turns the information your business already has into a helpful customer-facing front desk.",
+    "intro": "Visitors rarely arrive with one neat question. They ask about fit, availability, pricing, location, and what to do next. FrontDeskWise keeps that conversation moving while your team stays in control.",
+    "primaryCta": "Build from your website",
+    "secondaryCta": "Explore AI front desk",
+    "sections": [
+      { "heading": "Grounded answers", "body": "The assistant learns from your website, documents, policies, services, pricing, and locations. You can review the knowledge sources and see when an answer needs attention.", "bullets": ["Website crawling with source context", "Knowledge gaps for unanswered questions", "Citations and confidence in testing", "Clear fallback behavior"] },
+      { "heading": "Conversion actions", "body": "Turn a conversation into a useful next step. Capture contact details, qualify intent, link to booking, notify staff, or deliver a saved action through a connected workflow.", "bullets": ["Lead capture with intent", "Appointment and enrollment flows", "CRM, email, webhook, and MCP paths", "Durable delivery and retry history"] },
+      { "heading": "Safe human handoff", "body": "Automation should preserve context, not hide it. When a visitor needs judgment or asks for a person, your team can join the conversation with the details already attached.", "bullets": ["Explicit handoff states", "Staff notifications", "Conversation ownership", "AI-assisted human replies"] }
+    ],
+    "related": ["ai-front-desk", "lead-capture-chatbot", "human-handoff", "integrations"]
+  },
+  {
+    "key": "ai-front-desk",
+    "path": "/ai-front-desk",
+    "type": "commercial",
+    "eyebrow": "AI front desk",
+    "title": "An AI front desk for the questions your website gets every day",
+    "description": "Give website visitors useful answers, capture qualified leads, and route the conversations that need your team.",
+    "intro": "FrontDeskWise is the first response layer for a local business website. It uses approved business knowledge, asks the next useful question, and helps the visitor take action without pretending to be your staff.",
+    "primaryCta": "See your website as an AI front desk",
+    "secondaryCta": "View product features",
+    "sections": [
+      { "heading": "The job of a modern front desk", "body": "A front desk does more than answer a phone. It helps people decide whether they are in the right place, gathers the details a team needs, and makes the next step clear. Your website can do that work after hours too.", "bullets": ["Answer service and policy questions", "Clarify fit, location, timing, and availability", "Collect contact details with context", "Offer booking or a human conversation"] },
+      { "heading": "Built for the messy middle", "body": "FrontDeskWise is useful between a static FAQ and a fully staffed conversation. It handles repeat questions consistently and shows your team where the knowledge or workflow needs improvement.", "bullets": ["Test real questions before publishing", "Review knowledge gaps", "Measure conversations, leads, actions, and handoffs", "Keep the final say with your team"] }
+    ],
+    "faqs": [
+      { "question": "Is this a replacement for my team?", "answer": "No. It handles routine questions and prepares context so your team can focus on judgment, service, and the conversations that matter most." },
+      { "question": "Where does it get its answers?", "answer": "From the website and business information you connect and review. When it cannot ground an answer, you can configure a fallback or handoff." }
+    ],
+    "related": ["features", "ai-receptionist-for-small-business", "website-ai-chatbot", "human-handoff"]
+  },
+  {
+    "key": "ai-receptionist-for-small-business",
+    "path": "/ai-receptionist-for-small-business",
+    "type": "commercial",
+    "eyebrow": "For small businesses",
+    "title": "AI receptionist software for small businesses",
+    "description": "Help small-business websites answer questions, capture leads, and guide customers to booking without adding another full-time shift.",
+    "intro": "Small teams need an assistant that knows the business, respects the limits of its knowledge, and leaves a clean handoff when a person should take over.",
+    "primaryCta": "Create your starting workspace",
+    "secondaryCta": "See the AI front desk",
+    "sections": [
+      { "heading": "Useful when nobody is watching the inbox", "body": "After-hours visitors should not have to wait until tomorrow to understand your services or ask for the next step. Give them a grounded response and a clear way to leave their details.", "bullets": ["Answer common questions 24/7", "Capture service, location, and contact context", "Send staff a notification when needed", "Link visitors to your real booking path"] },
+      { "heading": "Simple enough to review", "body": "Start from your website, inspect the sources, test realistic questions, and decide what the assistant can say, do, and hand off before publishing it.", "bullets": ["No complex bot-building required", "Reviewable knowledge and fallback behavior", "A widget you can install on your site", "Analytics that connect activity to outcomes"] }
+    ],
+    "related": ["ai-front-desk", "after-hours-lead-capture", "capture-website-leads", "pricing"]
+  },
+  {
+    "key": "website-ai-chatbot",
+    "path": "/website-ai-chatbot",
+    "type": "commercial",
+    "eyebrow": "Website AI chatbot",
+    "title": "A website AI chatbot that knows your business",
+    "description": "Add a customer-facing AI assistant that answers from your website, captures intent, and helps visitors take the next step.",
+    "intro": "A generic chat bubble is not enough. FrontDeskWise is designed around the information, decisions, and conversion paths that make a local business different from every other business.",
+    "primaryCta": "Try a website-generated demo",
+    "secondaryCta": "Explore lead capture",
+    "sections": [
+      { "heading": "Answer from the source", "body": "The assistant uses your site and approved documents as its working knowledge. That gives visitors a better answer than a generic script and gives your team a place to improve missing information.", "bullets": ["Crawled website sources", "Business-specific answers", "Fallbacks for uncertain questions", "Test conversations with citations"] },
+      { "heading": "Make chat useful to the business", "body": "The conversation can end in more than a thumbs-up. Configure lead capture, booking links, staff alerts, CRM delivery, and human handoff around the actions your visitors actually need.", "bullets": ["Qualify before asking for contact details", "Keep intent attached to the lead", "Deliver actions through existing tools", "See conversion activity in analytics"] }
+    ],
+    "related": ["lead-capture-chatbot", "ai-booking-assistant", "integrations", "features"]
+  },
+  {
+    "key": "lead-capture-chatbot",
+    "path": "/lead-capture-chatbot",
+    "type": "commercial",
+    "eyebrow": "Lead capture",
+    "title": "A lead capture chatbot that understands why someone reached out",
+    "description": "Capture more than a name and email. Keep the visitor's question, intent, and requested next step attached to the lead.",
+    "intro": "A lead is more useful when the team knows what the person wanted. FrontDeskWise turns a website conversation into structured context your staff can act on.",
+    "primaryCta": "Build a lead capture flow",
+    "secondaryCta": "See after-hours capture",
+    "sections": [
+      { "heading": "From question to qualified context", "body": "Ask only the next useful question. Capture the service, location, timing, and contact detail that helps a real person respond well.", "bullets": ["Conversation-aware lead fields", "Conditional questions", "Email and phone capture", "Lead status and notes for the team"] },
+      { "heading": "Keep the lead moving", "body": "Once saved, a lead can trigger a booking link, notification, CRM delivery, email, webhook, or a human handoff depending on the flow you configure.", "bullets": ["Save first, deliver second", "Retryable connector delivery", "Staff notification targets", "Action and funnel analytics"] }
+    ],
+    "related": ["capture-website-leads", "qualify-leads-with-ai", "after-hours-lead-capture", "integrations"]
+  },
+  {
+    "key": "ai-booking-assistant",
+    "path": "/ai-booking-assistant",
+    "type": "commercial",
+    "eyebrow": "Booking assistant",
+    "title": "An AI booking assistant for the questions before the appointment",
+    "description": "Help website visitors understand the service, choose the right next step, and reach your booking flow with context.",
+    "intro": "Booking friction often starts before someone sees a calendar. FrontDeskWise answers the questions that make a visitor hesitate and routes them toward your real scheduling or enrollment process.",
+    "primaryCta": "Create a booking workflow",
+    "secondaryCta": "See website chat for bookings",
+    "sections": [
+      { "heading": "Clarify before you schedule", "body": "Use grounded answers to explain who a service is for, what to bring, where to go, how long it takes, and what happens next.", "bullets": ["Service-fit questions", "Location and availability guidance", "Policy and preparation answers", "Booking links that match the business"] },
+      { "heading": "Preserve the handoff", "body": "When the visitor needs a recommendation or exception, keep the conversation and contact details available to the team instead of forcing an uncertain booking.", "bullets": ["Human escalation for custom requests", "Action-specific staff alerts", "Lead context attached to the conversation", "Booking clicks visible in analytics"] }
+    ],
+    "related": ["book-appointments-from-website", "website-ai-chatbot", "human-handoff", "features"]
+  },
+  {
+    "key": "human-handoff",
+    "path": "/human-handoff",
+    "type": "commercial",
+    "eyebrow": "Human handoff",
+    "title": "AI human handoff that keeps the customer context intact",
+    "description": "Let AI handle routine questions while your team takes over with the conversation, lead details, and reason for escalation already attached.",
+    "intro": "Trust is part of the conversion path. FrontDeskWise makes the boundary between automation and human judgment visible to the visitor and useful to the staff member joining the conversation.",
+    "primaryCta": "See safe handoff in action",
+    "secondaryCta": "Explore the AI front desk",
+    "sections": [
+      { "heading": "Know when a person should join", "body": "Configure human handoff for uncertainty, custom requests, sensitive questions, or any action that should stay with a member of your team.", "bullets": ["Explicit handoff request", "Fallback when knowledge is missing", "Action flows that require staff", "Conversation status and assignment"] },
+      { "heading": "Give your team the whole thread", "body": "A handoff is more useful when staff can see what the visitor asked, what the assistant answered, and what information the visitor already shared.", "bullets": ["Lead and conversation context", "Staff notifications", "Human reply and AI-assisted modes", "Resolution tracking"] }
+    ],
+    "related": ["ai-front-desk", "features", "qualify-leads-with-ai", "integrations"]
+  },
+  {
+    "key": "industries",
+    "path": "/industries",
+    "type": "hub",
+    "eyebrow": "Industries",
+    "title": "AI front desk workflows for local-service businesses",
+    "description": "Explore industry-specific ways to answer customer questions, capture the right lead details, and guide visitors to the next step.",
+    "intro": "The best AI front desk is specific about the work. Start with the customer questions, lead fields, booking path, and escalation rules that make your industry different.",
+    "primaryCta": "Build from your website",
+    "secondaryCta": "Explore use cases",
+    "children": [
+      { "key": "industry-hvac", "title": "AI receptionist for HVAC", "description": "Qualify service requests, capture ZIP codes and urgency, and route emergencies to the right human path.", "path": "/industries/hvac" },
+      { "key": "industry-plumbers", "title": "AI receptionist for plumbers", "description": "Answer service-area questions and collect the details a plumbing team needs before calling back.", "path": "/industries/plumbers" },
+      { "key": "industry-salons", "title": "AI receptionist for salons", "description": "Help guests choose a service, understand preparation, and reach the booking flow with fewer questions.", "path": "/industries/salons" },
+      { "key": "industry-dentists", "title": "AI receptionist for dentists", "description": "Handle routine office questions while routing symptoms, insurance questions, and urgent needs carefully.", "path": "/industries/dentists" },
+      { "key": "industry-daycare", "title": "AI receptionist for daycare", "description": "Answer enrollment and schedule questions while collecting age, location, and tour interest.", "path": "/industries/daycare" },
+      { "key": "industry-swim-schools", "title": "AI receptionist for swim schools", "description": "Guide families through class fit, age groups, locations, and enrollment requests.", "path": "/industries/swim-schools" },
+      { "key": "industry-med-spas", "title": "AI receptionist for med spas", "description": "Explain services and preparation at a high level while keeping treatment-specific judgment with staff.", "path": "/industries/med-spas" },
+      { "key": "industry-auto-repair", "title": "AI receptionist for auto repair", "description": "Capture vehicle, service, and timing details so the shop can respond with useful context.", "path": "/industries/auto-repair" }
+    ],
+    "sections": [
+      { "heading": "A repeatable page pattern with real differences", "body": "Each workflow starts with the questions customers actually ask, the information a staff member needs, and the handoff rules that keep the interaction safe. It is not a keyword-swapped chatbot page.", "bullets": ["Industry-specific customer questions", "Relevant lead fields", "Booking or enrollment path", "Escalation and handoff behavior"] }
+    ],
+    "related": ["use-cases", "ai-front-desk", "tools-ai-front-desk-readiness"]
+  },
+  {
+    "key": "industry-hvac",
+    "path": "/industries/hvac",
+    "type": "industry",
+    "eyebrow": "For HVAC companies",
+    "title": "AI receptionist for HVAC companies",
+    "description": "Capture HVAC website leads with service type, location, urgency, and contact details while routing emergencies to a human path.",
+    "intro": "HVAC visitors often need a fast answer: do you service my area, what kind of job is this, and how soon can someone help? A useful front desk can collect that context without guessing at a diagnosis.",
+    "primaryCta": "Build an HVAC workflow",
+    "secondaryCta": "See after-hours capture",
+    "customerQuestions": ["Do you service my ZIP code?", "Can someone help with an emergency?", "Do you repair or replace this system?", "How do I request an estimate?"],
+    "captures": ["Service address or ZIP code", "Repair, maintenance, or replacement intent", "Urgency and preferred timing", "Name, phone, and email"],
+    "flow": ["Identify the service and location", "Separate urgent requests from routine work", "Capture contact details and preferred timing", "Notify the team or link to the approved next step"],
+    "handoff": "Avoid diagnosing equipment or promising arrival times. Escalate emergencies, safety concerns, and uncertain requests to the team with the conversation attached.",
+    "integrations": ["Email notifications", "CRM webhook", "HubSpot", "Custom booking or dispatch endpoint"],
+    "sections": [
+      { "heading": "Turn a vague request into a useful callback", "body": "Instead of a generic contact form, ask the visitor what they need help with and where the job is located. The team receives intent before the first reply.", "bullets": ["Service-area qualification", "Emergency-aware routing", "Estimate request capture", "Conversation context for staff"] }
+    ],
+    "related": ["after-hours-lead-capture", "capture-website-leads", "human-handoff", "integrations"]
+  },
+  {
+    "key": "industry-plumbers",
+    "path": "/industries/plumbers",
+    "type": "industry",
+    "eyebrow": "For plumbing companies",
+    "title": "AI receptionist for plumbers",
+    "description": "Help plumbing websites capture service area, issue type, urgency, and callback details without pretending to diagnose the problem.",
+    "intro": "A plumbing lead often arrives as one sentence: a leak, a clogged drain, or no hot water. FrontDeskWise can clarify the request, identify urgency, and give the team a better starting point.",
+    "primaryCta": "Build a plumbing workflow",
+    "secondaryCta": "See the lead capture flow",
+    "customerQuestions": ["Do you handle this type of plumbing job?", "Is my address in your service area?", "What should I do while I wait?", "Can I request an estimate?"],
+    "captures": ["Issue category", "Service address or ZIP code", "Urgency and access notes", "Preferred callback method"],
+    "flow": ["Classify the request at a high level", "Ask for location and urgency", "Share only approved immediate guidance", "Create a lead or escalate to staff"],
+    "handoff": "Escalate active leaks, gas concerns, flooding, or anything that could create immediate danger. Keep safety language approved by the business.",
+    "integrations": ["Email notifications", "CRM webhook", "HubSpot", "Dispatch or booking link"],
+    "sections": [
+      { "heading": "Make the first response more actionable", "body": "The goal is not a remote diagnosis. It is a clear, safe intake that helps a plumber understand the job and respond faster.", "bullets": ["Intent-aware intake", "Service-area checks", "After-hours lead capture", "Human escalation for urgent requests"] }
+    ],
+    "related": ["after-hours-lead-capture", "qualify-leads-with-ai", "human-handoff", "integrations"]
+  },
+  {
+    "key": "industry-salons",
+    "path": "/industries/salons",
+    "type": "industry",
+    "eyebrow": "For salons",
+    "title": "AI receptionist for salons",
+    "description": "Help salon guests choose services, understand preparation, and reach booking with the details your team needs.",
+    "intro": "Salon websites receive questions about services, timing, availability, pricing, and what to book. A conversational front desk can answer from your service menu and make the booking path clearer.",
+    "primaryCta": "Build a salon workflow",
+    "secondaryCta": "See the booking assistant",
+    "customerQuestions": ["Which service should I book?", "How long does this appointment take?", "Do you have a stylist for this request?", "What should I do before my visit?"],
+    "captures": ["Requested service", "Preferred stylist or location", "Timing and availability", "Name and contact details"],
+    "flow": ["Understand the service request", "Answer preparation and policy questions", "Offer the booking path", "Capture a callback request when the guest is unsure"],
+    "handoff": "Keep treatment recommendations, corrections, and unusual requests with the salon team. The assistant should explain the service menu, not make a professional judgment.",
+    "integrations": ["Booking link", "Email notifications", "Square", "Mindbody or custom endpoint"],
+    "sections": [
+      { "heading": "Reduce the back-and-forth before booking", "body": "Give guests enough context to choose a service confidently, then make it easy to book or ask the team for help.", "bullets": ["Service-menu answers", "Preparation guidance", "Booking links", "Human follow-up for custom requests"] }
+    ],
+    "related": ["ai-booking-assistant", "book-appointments-from-website", "website-ai-chatbot", "integrations"]
+  },
+  {
+    "key": "industry-dentists",
+    "path": "/industries/dentists",
+    "type": "industry",
+    "eyebrow": "For dental practices",
+    "title": "AI receptionist for dentists",
+    "description": "Answer routine dental office questions, capture appointment intent, and route urgent or sensitive requests to the practice team.",
+    "intro": "Dental visitors want clarity about services, insurance, new-patient steps, and availability. FrontDeskWise keeps routine answers grounded and makes the boundary for clinical or urgent questions explicit.",
+    "primaryCta": "Build a dental workflow",
+    "secondaryCta": "See safe human handoff",
+    "customerQuestions": ["Are you accepting new patients?", "Do you take my insurance?", "How do I request an appointment?", "What should I do about an urgent issue?"],
+    "captures": ["New or existing patient", "Requested service", "Insurance question", "Preferred contact and timing"],
+    "flow": ["Answer office and service questions", "Separate appointment requests from urgent concerns", "Capture contact details and intent", "Notify staff or link to the approved scheduler"],
+    "handoff": "Do not provide clinical diagnosis or emergency treatment advice. Route symptoms, urgent concerns, and privacy-sensitive questions to the practice's approved human process.",
+    "integrations": ["Email notifications", "Booking link", "CRM webhook", "Custom practice workflow"],
+    "sections": [
+      { "heading": "Helpful without crossing the clinical line", "body": "A dental front desk can save staff time on hours, services, insurance process, and appointment requests while keeping clinical judgment with the practice.", "bullets": ["New-patient intake", "Office policy answers", "Appointment request capture", "Clear escalation behavior"] }
+    ],
+    "related": ["human-handoff", "capture-website-leads", "ai-booking-assistant", "security"]
+  },
+  {
+    "key": "industry-daycare",
+    "path": "/industries/daycare",
+    "type": "industry",
+    "eyebrow": "For daycare providers",
+    "title": "AI receptionist for daycare and childcare",
+    "description": "Help families understand programs, locations, enrollment steps, and tour requests while keeping sensitive questions with your team.",
+    "intro": "Families need practical answers before they are ready to schedule a tour: age groups, hours, availability, enrollment requirements, and location. A front desk can organize that first conversation.",
+    "primaryCta": "Build a daycare workflow",
+    "secondaryCta": "Explore lead capture",
+    "customerQuestions": ["What ages do you serve?", "Do you have current availability?", "What are your hours and locations?", "How do I schedule a tour?"],
+    "captures": ["Child age or age group", "Preferred location", "Start timing", "Parent or guardian contact details"],
+    "flow": ["Match the family to a program", "Explain enrollment and tour steps", "Capture timing and location", "Send the request to staff"],
+    "handoff": "Route availability, accommodation, safety, and family-specific questions to the childcare team rather than making a promise on its own.",
+    "integrations": ["Email notifications", "Tour booking link", "CRM webhook", "Custom enrollment endpoint"],
+    "sections": [
+      { "heading": "Make the first family conversation easier", "body": "Give families a clear overview and collect the details the enrollment team needs for a helpful follow-up.", "bullets": ["Program and age-group answers", "Tour request capture", "Location and start-date context", "Human follow-up for sensitive questions"] }
+    ],
+    "related": ["capture-website-leads", "book-appointments-from-website", "after-hours-lead-capture", "human-handoff"]
+  },
+  {
+    "key": "industry-swim-schools",
+    "path": "/industries/swim-schools",
+    "type": "industry",
+    "eyebrow": "For swim schools",
+    "title": "AI receptionist for swim schools",
+    "description": "Guide families through class fit, age groups, locations, schedules, and enrollment requests from the swim school website.",
+    "intro": "A family may know they want lessons but not know which class, location, or schedule fits. FrontDeskWise can answer the common questions and capture the context needed for enrollment.",
+    "primaryCta": "Build a swim-school workflow",
+    "secondaryCta": "See the sample workspace",
+    "customerQuestions": ["Which class is right for my child?", "Where are lessons offered?", "When do new sessions start?", "How do I begin enrollment?"],
+    "captures": ["Child age and experience", "Preferred location", "Schedule preference", "Parent contact details"],
+    "flow": ["Understand age and experience", "Narrow the location or class path", "Answer session and policy questions", "Capture an enrollment request or link to booking"],
+    "handoff": "Escalate placement exceptions, accessibility questions, schedule conflicts, and any family-specific request to staff with the conversation attached.",
+    "integrations": ["Enrollment request email", "Jackrabbit or custom endpoint", "Booking link", "CRM webhook"],
+    "sections": [
+      { "heading": "From “which class?” to a useful next step", "body": "A swim-school front desk can handle the first layer of fit and enrollment questions while staff stays available for exceptions and family-specific needs.", "bullets": ["Age and experience intake", "Location and schedule guidance", "Enrollment lead capture", "Handoff with family context"] }
+    ],
+    "related": ["ai-booking-assistant", "capture-website-leads", "after-hours-lead-capture", "integrations"]
+  },
+  {
+    "key": "industry-med-spas",
+    "path": "/industries/med-spas",
+    "type": "industry",
+    "eyebrow": "For med spas",
+    "title": "AI receptionist for med spas",
+    "description": "Answer high-level service and preparation questions, capture consultation interest, and keep treatment-specific judgment with the team.",
+    "intro": "Med-spa visitors often research before they are ready to book. A grounded assistant can explain approved service information and help a guest request a consultation without overstepping.",
+    "primaryCta": "Build a med-spa workflow",
+    "secondaryCta": "See safe handoff",
+    "customerQuestions": ["Which service should I learn about?", "How do I request a consultation?", "What preparation information is available?", "Who can answer a treatment-specific question?"],
+    "captures": ["Service or consultation interest", "Preferred location", "Timing", "Name and preferred contact method"],
+    "flow": ["Share approved high-level information", "Invite a consultation or callback", "Capture intent and contact details", "Notify staff for treatment-specific questions"],
+    "handoff": "Avoid diagnosis, eligibility decisions, or individualized treatment advice. Route those questions to qualified staff through the approved process.",
+    "integrations": ["Consultation booking link", "Email notifications", "CRM webhook", "Square or custom workflow"],
+    "sections": [
+      { "heading": "Inform first, escalate thoughtfully", "body": "FrontDeskWise can help a visitor understand the next step while keeping professional advice and treatment decisions with the med-spa team.", "bullets": ["Approved service information", "Consultation requests", "Lead intent and timing", "Explicit escalation for sensitive questions"] }
+    ],
+    "related": ["human-handoff", "ai-booking-assistant", "lead-capture-chatbot", "security"]
+  },
+  {
+    "key": "industry-auto-repair",
+    "path": "/industries/auto-repair",
+    "type": "industry",
+    "eyebrow": "For auto-repair shops",
+    "title": "AI receptionist for auto-repair shops",
+    "description": "Capture vehicle, service, timing, and contact details from auto-repair website visitors before the shop calls back.",
+    "intro": "Auto-repair customers want to know whether a shop handles their vehicle or service, how soon they can be seen, and what information to bring. A website front desk can structure that request.",
+    "primaryCta": "Build an auto-repair workflow",
+    "secondaryCta": "Explore lead capture",
+    "customerQuestions": ["Do you service my vehicle?", "Can I request an inspection?", "How soon can I get an appointment?", "What information should I provide?"],
+    "captures": ["Vehicle make, model, and year", "Service or symptom category", "Preferred timing", "Name, phone, and email"],
+    "flow": ["Identify vehicle and service intent", "Answer approved shop and policy questions", "Capture timing and contact details", "Link to booking or notify the shop"],
+    "handoff": "Do not promise a diagnosis, price, or repair time unless the information is explicitly approved. Route safety concerns and unusual requests to staff.",
+    "integrations": ["Booking link", "Email notifications", "CRM webhook", "Custom shop-management endpoint"],
+    "sections": [
+      { "heading": "Give the shop a better first look at the request", "body": "Structured intake helps the team decide how to respond before the vehicle arrives, while the assistant stays within the shop's approved knowledge.", "bullets": ["Vehicle-aware lead fields", "Service and timing context", "Booking links", "Human review for uncertain requests"] }
+    ],
+    "related": ["qualify-leads-with-ai", "capture-website-leads", "ai-booking-assistant", "integrations"]
+  },
+  {
+    "key": "use-cases",
+    "path": "/use-cases",
+    "type": "hub",
+    "eyebrow": "Use cases",
+    "title": "Website AI use cases tied to business outcomes",
+    "description": "Explore focused workflows for capturing website leads, booking appointments, qualifying intent, and bringing in a human when needed.",
+    "intro": "Buyers search for the problem they need solved. These pages focus on one outcome at a time and show how the workflow should behave in a real business.",
+    "primaryCta": "Build your first workflow",
+    "secondaryCta": "Explore industries",
+    "children": [
+      { "key": "capture-website-leads", "title": "Capture website leads", "description": "Turn a visitor question into structured contact and intent context.", "path": "/use-cases/capture-website-leads" },
+      { "key": "after-hours-lead-capture", "title": "After-hours lead capture", "description": "Give visitors a useful next step when your team is offline.", "path": "/use-cases/after-hours-lead-capture" },
+      { "key": "book-appointments-from-website", "title": "Book appointments from your website", "description": "Answer pre-booking questions and guide visitors to the right scheduling path.", "path": "/use-cases/book-appointments-from-website" },
+      { "key": "qualify-leads-with-ai", "title": "Qualify leads with AI", "description": "Ask the next useful question and keep the answer attached to the lead.", "path": "/use-cases/qualify-leads-with-ai" },
+      { "key": "human-handoff-use-case", "title": "AI human handoff", "description": "Let a human take over with the conversation context intact.", "path": "/use-cases/human-handoff" }
+    ],
+    "sections": [
+      { "heading": "One outcome, one workflow", "body": "Each use case can be configured around your approved knowledge, required fields, completion action, and handoff behavior. That makes the assistant easier to test and improve.", "bullets": ["Define the visitor intent", "Collect only useful fields", "Choose the completion path", "Measure completion and drop-off"] }
+    ],
+    "related": ["industries", "features", "resources"]
+  },
+  {
+    "key": "capture-website-leads",
+    "path": "/use-cases/capture-website-leads",
+    "type": "use-case",
+    "eyebrow": "Lead capture workflow",
+    "title": "Capture website leads without losing the question behind the form",
+    "description": "Turn website conversations into leads with contact details, service intent, timing, and the context your team needs to respond.",
+    "intro": "A form can tell you who submitted it. A conversational flow can also tell you what they need, whether they are a fit, and what the next step should be.",
+    "primaryCta": "Build a lead capture flow",
+    "secondaryCta": "See industry workflows",
+    "workflow": ["Visitor asks a question", "AI answers from approved knowledge", "AI asks for the next useful detail", "Lead is saved with intent", "Team is notified or action is delivered"],
+    "sections": [
+      { "heading": "Make the lead useful before it reaches the team", "body": "Ask for context in the same conversation instead of sending every visitor to a blank contact form. Keep the question, answer, and requested next step with the record.", "bullets": ["Service or product interest", "Location and timing", "Name, email, or phone", "Notes and conversation context"] },
+      { "heading": "Measure where visitors stop", "body": "Conversion telemetry can show which flow started, which field was displayed, whether the form was submitted, and whether the final action succeeded.", "bullets": ["Flow starts", "Field drop-offs", "Submissions", "Action outcomes"] }
+    ],
+    "related": ["lead-capture-chatbot", "qualify-leads-with-ai", "after-hours-lead-capture", "tools-ai-front-desk-readiness"]
+  },
+  {
+    "key": "after-hours-lead-capture",
+    "path": "/use-cases/after-hours-lead-capture",
+    "type": "use-case",
+    "eyebrow": "After-hours capture",
+    "title": "Capture after-hours website leads while the team is offline",
+    "description": "Give visitors a grounded answer, capture their request, and set a clear expectation for what happens next after business hours.",
+    "intro": "Being closed should not mean the website is silent. After-hours capture lets a visitor explain what they need and gives your team a prioritized starting point for the next working day.",
+    "primaryCta": "Create an after-hours flow",
+    "secondaryCta": "Explore human handoff",
+    "workflow": ["Visitor arrives outside business hours", "AI explains what it can answer now", "AI captures service and contact context", "Team receives a notification or queued lead", "Visitor sees a clear follow-up expectation"],
+    "sections": [
+      { "heading": "Set the right expectation", "body": "The assistant should say what it can do now, what the team will do later, and which urgent situations need a different approved channel.", "bullets": ["Business-hours awareness", "Clear callback expectations", "Lead capture with timing", "Emergency or sensitive-question escalation"] },
+      { "heading": "Use the overnight queue as insight", "body": "After-hours questions can show which pages, policies, and booking paths need better coverage. Review the themes instead of treating them as isolated messages.", "bullets": ["Top after-hours questions", "Knowledge gaps", "Lead intent patterns", "Conversion opportunities"] }
+    ],
+    "related": ["capture-website-leads", "ai-receptionist-for-small-business", "human-handoff", "resources-why-website-visitors-leave"]
+  },
+  {
+    "key": "book-appointments-from-website",
+    "path": "/use-cases/book-appointments-from-website",
+    "type": "use-case",
+    "eyebrow": "Booking workflow",
+    "title": "Book appointments from your website with better pre-booking answers",
+    "description": "Help visitors choose the right service, answer practical questions, and reach your real booking flow with context.",
+    "intro": "Many booking drop-offs happen before a visitor opens a calendar. Answer the questions that create hesitation, then make the next step obvious.",
+    "primaryCta": "Build a booking workflow",
+    "secondaryCta": "See the AI booking assistant",
+    "workflow": ["Visitor asks about a service", "AI clarifies fit and preparation", "AI explains the approved next step", "Visitor clicks booking or requests help", "Action and outcome are visible to the team"],
+    "sections": [
+      { "heading": "Answer what the calendar cannot", "body": "Use your website knowledge for service details, location, policies, preparation, and who the appointment is for. Keep scheduling itself in the system your business already trusts.", "bullets": ["Service-fit guidance", "Location and hours", "Preparation and policy answers", "Booking links or requests"] },
+      { "heading": "Keep exceptions human", "body": "When a visitor has a custom request, the assistant should collect the details and hand off rather than forcing them into a generic appointment type.", "bullets": ["Custom-request capture", "Staff notifications", "Conversation context", "Booking click analytics"] }
+    ],
+    "related": ["ai-booking-assistant", "website-ai-chatbot", "capture-website-leads", "integrations"]
+  },
+  {
+    "key": "qualify-leads-with-ai",
+    "path": "/use-cases/qualify-leads-with-ai",
+    "type": "use-case",
+    "eyebrow": "Lead qualification",
+    "title": "Qualify website leads with AI questions your team actually needs",
+    "description": "Ask a small number of useful questions, keep the answers attached to intent, and help staff prioritize the next response.",
+    "intro": "Qualification is not a long questionnaire. It is the shortest path to enough context for a person to decide what to do next.",
+    "primaryCta": "Design a qualification flow",
+    "secondaryCta": "See lead capture",
+    "workflow": ["Detect the visitor's intent", "Ask the next useful question", "Branch only when the answer changes the path", "Save structured context", "Route to booking, staff, or follow-up"],
+    "sections": [
+      { "heading": "Ask fewer, better questions", "body": "Configure fields around the decision your team needs to make. A service area, age group, vehicle, timing, or urgency field can be more useful than a long form.", "bullets": ["Conditional fields", "Visible and hidden context", "Required contact details", "Intent-specific completion actions"] },
+      { "heading": "Make qualification observable", "body": "See which questions create drop-off and which action outcomes follow. Improve the flow based on real visitor behavior instead of assumptions.", "bullets": ["Field-level drop-off", "Completion rate", "Lead status", "Action delivery history"] }
+    ],
+    "related": ["lead-capture-chatbot", "capture-website-leads", "human-handoff", "features"]
+  },
+  {
+    "key": "human-handoff-use-case",
+    "path": "/use-cases/human-handoff",
+    "type": "use-case",
+    "eyebrow": "AI + human workflow",
+    "title": "Give website visitors a human handoff when the answer needs judgment",
+    "description": "Route custom, sensitive, or uncertain requests to your team with the conversation and lead context already attached.",
+    "intro": "The best escalation is clear to the visitor and useful to the staff member. Keep the automation boundary visible and the customer context intact.",
+    "primaryCta": "Design a handoff workflow",
+    "secondaryCta": "Explore human handoff",
+    "workflow": ["AI handles the routine question", "Visitor asks for a person or reaches a boundary", "Conversation is marked for handoff", "Staff receives context and joins", "Team resolves or closes the conversation"],
+    "sections": [
+      { "heading": "Define the boundary", "body": "Choose when a handoff is required: a direct request for staff, missing knowledge, a custom action, a sensitive topic, or an escalation rule specific to your industry.", "bullets": ["Direct human request", "Unanswered knowledge gap", "Staff-required action", "Sensitive or urgent topic"] },
+      { "heading": "Let AI assist without taking over", "body": "After staff joins, the system can preserve the context and support the conversation without hiding who is responding or removing human control.", "bullets": ["Assigned conversation state", "Human reply mode", "AI-assisted mode", "Resolution visibility"] }
+    ],
+    "related": ["human-handoff", "ai-front-desk", "after-hours-lead-capture", "security"]
+  },
+  {
+    "key": "integrations",
+    "path": "/integrations",
+    "type": "hub",
+    "eyebrow": "Integrations",
+    "title": "Connect website conversations to the tools your team already uses",
+    "description": "Explore CRM, booking, automation, email, webhook, and MCP paths for delivering the next step after a visitor converts.",
+    "intro": "FrontDeskWise saves the lead first, then delivers the configured action. That separation keeps a temporary integration failure from erasing a customer request.",
+    "primaryCta": "Explore integrations",
+    "secondaryCta": "See product features",
+    "children": [
+      { "key": "integration-hubspot", "title": "HubSpot integration", "description": "Send captured lead context into a HubSpot contact workflow.", "path": "/integrations/hubspot" },
+      { "key": "integration-zapier", "title": "Zapier integration", "description": "Use a signed webhook path to connect actions to the tools in your Zapier workflow.", "path": "/integrations/zapier" },
+      { "key": "integration-square", "title": "Square integration", "description": "Route supported booking or completion actions toward Square-connected workflows.", "path": "/integrations/square" },
+      { "key": "integration-calendly", "title": "Calendly integration", "description": "Guide visitors to Calendly after answering the questions that come before booking.", "path": "/integrations/calendly" },
+      { "key": "integration-webhooks", "title": "Webhooks integration", "description": "Deliver signed action payloads to your own endpoint or automation layer.", "path": "/integrations/webhooks" }
+    ],
+    "sections": [
+      { "heading": "Designed for durable delivery", "body": "A conversion should remain visible even when an external system is unavailable. FrontDeskWise keeps delivery status, attempts, and errors available for review.", "bullets": ["Lead saved before delivery", "Idempotent delivery paths", "Retry history", "Owner-visible connection status"] }
+    ],
+    "related": ["features", "capture-website-leads", "ai-booking-assistant", "security"]
+  },
+  {
+    "key": "integration-hubspot",
+    "path": "/integrations/hubspot",
+    "type": "integration",
+    "eyebrow": "HubSpot integration",
+    "title": "Send FrontDeskWise leads to HubSpot with conversation context",
+    "description": "Connect website lead capture to a HubSpot workflow while keeping the original lead record and delivery state in FrontDeskWise.",
+    "intro": "A HubSpot connection is most useful when the CRM receives more than a contact detail. Pass the visitor's intent, requested service, and relevant conversation context so follow-up starts with the right information.",
+    "primaryCta": "Connect HubSpot",
+    "secondaryCta": "Explore lead capture",
+    "sections": [
+      { "heading": "What the workflow carries", "body": "When a configured action completes, FrontDeskWise can sync the saved lead to HubSpot through the connected integration path.", "bullets": ["Name, email, and phone", "Intent and source context", "Lead status", "Delivery status and last error"] },
+      { "heading": "Keep ownership clear", "body": "Owners can test the connection and review its state. If delivery fails, the saved lead remains available while the action can be retried.", "bullets": ["Explicit connection status", "Test before publishing", "Retryable delivery", "No provider secret in the widget"] }
+    ],
+    "related": ["integrations", "lead-capture-chatbot", "qualify-leads-with-ai", "security"]
+  },
+  {
+    "key": "integration-zapier",
+    "path": "/integrations/zapier",
+    "type": "integration",
+    "eyebrow": "Zapier integration",
+    "title": "Connect FrontDeskWise actions to Zapier workflows",
+    "description": "Use a signed webhook action to send captured lead and conversion context into the Zapier workflows your business already runs.",
+    "intro": "Zapier is useful when the final destination varies by business. FrontDeskWise can deliver a structured action payload while the automation layer handles the downstream steps.",
+    "primaryCta": "Design a connected action",
+    "secondaryCta": "Explore webhooks",
+    "sections": [
+      { "heading": "A flexible completion path", "body": "Use a configured webhook for lead capture, booking requests, staff notifications, or another action that belongs in an existing Zapier workflow.", "bullets": ["Signed payload delivery", "Lead and conversation context", "Action-specific fields", "Retryable outbox delivery"] },
+      { "heading": "Keep the workflow observable", "body": "Owners can see whether the connection is active, what failed, and which deliveries need attention instead of debugging an invisible handoff.", "bullets": ["Connection tests", "Delivery status", "Last error visibility", "Explicit owner configuration"] }
+    ],
+    "related": ["integrations", "integration-webhooks", "capture-website-leads", "features"]
+  },
+  {
+    "key": "integration-square",
+    "path": "/integrations/square",
+    "type": "integration",
+    "eyebrow": "Square integration",
+    "title": "Guide Square-connected customers from website questions to booking",
+    "description": "Answer service questions, capture intent, and route visitors toward the Square booking workflow your business already uses.",
+    "intro": "The assistant's job is to remove uncertainty before the calendar. Keep scheduling in the tool your team trusts and use FrontDeskWise to make the path clearer.",
+    "primaryCta": "Build a Square booking flow",
+    "secondaryCta": "Explore the booking assistant",
+    "sections": [
+      { "heading": "Use chat for the questions before booking", "body": "Explain services, timing, location, preparation, and policies from approved business knowledge before a visitor opens the Square booking path.", "bullets": ["Service-fit answers", "Booking link action", "Lead capture for visitors not ready", "Staff handoff for custom requests"] },
+      { "heading": "Keep the source of truth where it belongs", "body": "FrontDeskWise can guide the visitor and measure booking actions without pretending to replace the scheduling system that owns availability.", "bullets": ["Approved booking URL", "Action completion tracking", "Conversation context", "Human escalation"] }
+    ],
+    "related": ["integrations", "ai-booking-assistant", "book-appointments-from-website", "human-handoff"]
+  },
+  {
+    "key": "integration-calendly",
+    "path": "/integrations/calendly",
+    "type": "integration",
+    "eyebrow": "Calendly integration",
+    "title": "Answer the question before sending a visitor to Calendly",
+    "description": "Use a website AI front desk to explain the service and route qualified visitors to your Calendly booking path.",
+    "intro": "A scheduling link works best when the visitor already understands what they are booking. FrontDeskWise handles the pre-booking conversation and makes the link the natural next step.",
+    "primaryCta": "Create a Calendly flow",
+    "secondaryCta": "Explore booking use cases",
+    "sections": [
+      { "heading": "Reduce calendar confusion", "body": "Answer who the meeting is for, what to prepare, which service to choose, and when a human should help before presenting the booking link.", "bullets": ["Pre-booking FAQ answers", "Intent-specific booking links", "Contact capture for undecided visitors", "Custom-request handoff"] },
+      { "heading": "See the action, not just the click", "body": "Connect booking actions to the rest of the conversion path so the team can understand the conversation that led to the scheduling step.", "bullets": ["Booking click telemetry", "Lead context", "Action outcomes", "Follow-up visibility"] }
+    ],
+    "related": ["integrations", "ai-booking-assistant", "website-ai-chatbot", "capture-website-leads"]
+  },
+  {
+    "key": "integration-webhooks",
+    "path": "/integrations/webhooks",
+    "type": "integration",
+    "eyebrow": "Webhook integration",
+    "title": "Deliver FrontDeskWise conversion actions to your own endpoint",
+    "description": "Connect lead capture and booking actions to a business-owned endpoint, automation layer, Zapier, Make, or another supported system.",
+    "intro": "Webhooks are the flexible path when your workflow does not fit a packaged integration. FrontDeskWise keeps the payload structured, signed, and tied to a durable action delivery record.",
+    "primaryCta": "Configure a webhook action",
+    "secondaryCta": "Explore integrations",
+    "sections": [
+      { "heading": "Send the context your endpoint needs", "body": "Configure action-specific fields and deliver the saved lead, visitor intent, business context, and completion details to the endpoint you control.", "bullets": ["Signed requests", "Action and lead identifiers", "Conversation context", "Connector-specific recipients"] },
+      { "heading": "Build for failure", "body": "The lead is saved before external delivery. Owners can inspect attempts, last errors, and retry state so a downstream outage does not become a lost opportunity.", "bullets": ["Durable action outbox", "Retry history", "Explicit status", "Business-owned endpoint option"] }
+    ],
+    "related": ["integrations", "integration-zapier", "capture-website-leads", "security"]
+  },
+  {
+    "key": "resources",
+    "path": "/resources",
+    "type": "hub",
+    "eyebrow": "Resources",
+    "title": "Practical guides for better website conversations",
+    "description": "Learn how AI front desks, lead capture, booking flows, knowledge coverage, and human handoff fit together for local businesses.",
+    "intro": "The resource library is organized around real buyer questions: what the product is, where visitors drop off, how to implement it, and how to measure the outcome.",
+    "primaryCta": "Check your website readiness",
+    "secondaryCta": "Explore use cases",
+    "children": [
+      { "key": "resource-what-is-ai-front-desk", "title": "What is an AI front desk?", "description": "Understand the job an AI front desk should do for a local business.", "path": "/resources/what-is-an-ai-front-desk" },
+      { "key": "resource-ai-front-desk-vs-live-chat", "title": "AI front desk vs. live chat", "description": "Compare automation, coverage, handoff, and ownership.", "path": "/resources/ai-front-desk-vs-live-chat" },
+      { "key": "resource-why-website-visitors-leave", "title": "Why website visitors leave without contacting you", "description": "Find the friction between a question and a useful next step.", "path": "/resources/why-website-visitors-leave" },
+      { "key": "resource-form-vs-conversational", "title": "Form vs. conversational lead capture", "description": "Choose the right intake pattern for the information your team needs.", "path": "/resources/form-vs-conversational-lead-capture" },
+      { "key": "resource-add-ai-assistant", "title": "How to add an AI assistant to a website", "description": "A practical implementation path from website content to review and install.", "path": "/resources/how-to-add-ai-assistant-to-website" }
+    ],
+    "sections": [
+      { "heading": "Read by buyer intent", "body": "Start with the question closest to your current decision, then follow the internal links to the workflow, industry, or readiness tool that makes the next step concrete.", "bullets": ["AI front desk basics", "Lead conversion", "Industry workflows", "Implementation guidance"] }
+    ],
+    "related": ["industries", "use-cases", "tools-ai-front-desk-readiness"]
+  },
+  {
+    "key": "resource-what-is-ai-front-desk",
+    "path": "/resources/what-is-an-ai-front-desk",
+    "type": "resource",
+    "eyebrow": "AI front desk guide",
+    "title": "What is an AI front desk?",
+    "description": "An AI front desk is a customer-facing assistant that answers routine questions, captures context, and helps visitors take the next step.",
+    "intro": "The useful comparison is not AI versus people. It is an always-available first response layer that knows its approved information and knows when a person should take over.",
+    "primaryCta": "See FrontDeskWise in action",
+    "secondaryCta": "Explore the product",
+    "articleSections": [
+      { "heading": "It answers from business knowledge", "body": "A useful AI front desk should work from the information the business has reviewed: services, pricing, locations, policies, and other approved sources. When that knowledge is missing, the system should say so or escalate." },
+      { "heading": "It helps a visitor decide what to do next", "body": "The outcome is not only an answer. It may be a lead, a booking click, an enrollment request, a callback, or a human conversation with context attached." },
+      { "heading": "It gives the team a feedback loop", "body": "Questions, handoffs, and incomplete flows show where the website or workflow needs improvement. That makes the front desk a learning surface for the business." }
+    ],
+    "related": ["ai-front-desk", "ai-receptionist-for-small-business", "features", "resource-why-website-visitors-leave"]
+  },
+  {
+    "key": "resource-ai-front-desk-vs-live-chat",
+    "path": "/resources/ai-front-desk-vs-live-chat",
+    "type": "resource",
+    "eyebrow": "Comparison guide",
+    "title": "AI front desk vs. live chat: what is the difference?",
+    "description": "Compare AI front desks and live chat across coverage, response time, knowledge, handoff, and team ownership.",
+    "intro": "Live chat and an AI front desk can work together. The key difference is who handles the first response, how the answer is grounded, and what happens when a person needs to join.",
+    "primaryCta": "Explore human handoff",
+    "secondaryCta": "See product features",
+    "articleSections": [
+      { "heading": "Coverage", "body": "Live chat depends on a person being available. An AI front desk can handle routine questions around the clock and surface the conversations that need human attention." },
+      { "heading": "Knowledge and consistency", "body": "Live staff bring judgment and nuance. An AI front desk brings consistent answers from the approved knowledge base and an explicit fallback when that knowledge is insufficient." },
+      { "heading": "Handoff is the bridge", "body": "The choice does not have to be either-or. A strong workflow answers what it can, captures context, and gives a human the thread when the customer needs judgment." }
+    ],
+    "related": ["human-handoff", "ai-front-desk", "lead-capture-chatbot", "resource-add-ai-assistant"]
+  },
+  {
+    "key": "resource-why-website-visitors-leave",
+    "path": "/resources/why-website-visitors-leave",
+    "type": "resource",
+    "eyebrow": "Lead conversion guide",
+    "title": "Why website visitors leave without contacting your business",
+    "description": "Find the common gaps between a visitor's question and the next step your business wants them to take.",
+    "intro": "Visitors do not always leave because they are not interested. They may be unsure about fit, pricing, location, timing, trust, or what happens after they submit a form.",
+    "primaryCta": "Check your website readiness",
+    "secondaryCta": "Explore lead capture",
+    "articleSections": [
+      { "heading": "The answer is hard to find", "body": "If services, hours, locations, policies, or pricing are scattered across pages, a visitor has to do the navigation work alone. A front desk can bring the relevant information into the conversation." },
+      { "heading": "The next step is unclear", "body": "A page can explain the service and still leave the visitor wondering whether to call, book, request an estimate, or ask a question. Make the action explicit and contextual." },
+      { "heading": "The form asks for too much or too little", "body": "A blank form creates work for the visitor and the team. A conversational flow can ask a few useful questions, keep the intent attached, and stop when it has enough context." },
+      { "heading": "Nobody is available after hours", "body": "Visitors who arrive outside business hours need a safe, honest next step. Capture their request and set a clear follow-up expectation instead of leaving them at a dead end." }
+    ],
+    "related": ["capture-website-leads", "after-hours-lead-capture", "tools-ai-front-desk-readiness", "resource-form-vs-conversational"]
+  },
+  {
+    "key": "resource-form-vs-conversational",
+    "path": "/resources/form-vs-conversational-lead-capture",
+    "type": "resource",
+    "eyebrow": "Lead capture guide",
+    "title": "Form vs. conversational lead capture: when to use each",
+    "description": "Choose between a traditional form and conversational intake based on the complexity of the visitor's decision and the context your team needs.",
+    "intro": "Forms are efficient when the visitor knows what they want and the fields are stable. Conversation helps when the visitor needs guidance or the right fields depend on the first answer.",
+    "primaryCta": "Build a capture flow",
+    "secondaryCta": "See qualification use cases",
+    "articleSections": [
+      { "heading": "Use a form when the request is clear", "body": "A form can be the fastest path for a known request with a short, predictable set of fields such as a quote request or a simple callback." },
+      { "heading": "Use conversation when fit matters", "body": "If the visitor needs help choosing a service, location, class, or appointment type, asking one useful question at a time can reduce confusion and improve context." },
+      { "heading": "Use a hybrid when you need both", "body": "A conversational flow can answer questions and then display a compact form for the final required fields. The visitor gets guidance without losing the efficiency of structured capture." }
+    ],
+    "related": ["lead-capture-chatbot", "qualify-leads-with-ai", "capture-website-leads", "features"]
+  },
+  {
+    "key": "resource-add-ai-assistant",
+    "path": "/resources/how-to-add-ai-assistant-to-website",
+    "type": "resource",
+    "eyebrow": "Implementation guide",
+    "title": "How to add an AI assistant to a website",
+    "description": "A practical path from website content to an AI assistant you can review, test, install, and improve.",
+    "intro": "Adding a widget is the easy part. The durable implementation is the knowledge, workflow, handoff, and measurement around it.",
+    "primaryCta": "Generate your starting workspace",
+    "secondaryCta": "Explore integrations",
+    "articleSections": [
+      { "heading": "Start with the website and source of truth", "body": "Identify the pages, documents, services, policies, locations, and booking paths the assistant should use. Remove or correct information that should not be repeated." },
+      { "heading": "Define what the assistant can do", "body": "Choose the actions that matter: lead capture, booking, enrollment, callback requests, notifications, or CRM delivery. Keep each action narrow enough to test." },
+      { "heading": "Set the handoff boundary", "body": "Decide when the assistant must ask for a person, when it should fall back, and what context staff should receive. This matters even more for regulated or safety-sensitive businesses." },
+      { "heading": "Test before publishing", "body": "Ask real customer questions, check citations or source context, review missing answers, and verify the completion path. Then install the widget and monitor the first conversations." }
+    ],
+    "related": ["ai-front-desk", "features", "human-handoff", "tools-ai-front-desk-readiness"]
+  },
+  {
+    "key": "tools-ai-front-desk-readiness",
+    "path": "/tools/ai-front-desk-readiness",
+    "type": "tool",
+    "eyebrow": "Free self-assessment",
+    "title": "AI front desk readiness checker for your website",
+    "description": "Score the content and conversion signals that make a website ready for an AI front desk, then see the next improvement to make.",
+    "intro": "This quick self-assessment is a starting point, not a crawl report. Answer four questions about your site to get a practical readiness score and a next step you can act on today.",
+    "primaryCta": "Calculate my readiness score",
+    "secondaryCta": "Read the implementation guide",
+    "tool": true,
+    "sections": [
+      { "heading": "What a ready website usually has", "body": "An AI front desk can only be as useful as the business information and next steps it is allowed to use. Clear source material makes review, testing, and handoff safer.", "bullets": ["Services and locations are easy to find", "Hours, policies, and contact details are current", "The booking or inquiry path is clear", "Common questions have useful answers"] }
+    ],
+    "related": ["resource-why-website-visitors-leave", "resource-add-ai-assistant", "capture-website-leads", "ai-front-desk"]
+  },
+  {
+    "key": "security",
+    "path": "/security",
+    "type": "commercial",
+    "eyebrow": "Security and trust",
+    "title": "A website AI front desk with clear control boundaries",
+    "description": "Keep business knowledge, lead data, integrations, retention, and human handoff visible and reviewable as you add AI to your website.",
+    "intro": "Trust comes from knowing what the assistant can access, what it can do, when it must stop, and how your team can inspect the result.",
+    "primaryCta": "Review the AI front desk",
+    "secondaryCta": "See human handoff",
+    "sections": [
+      { "heading": "Tenant-scoped business knowledge", "body": "Business workspaces keep their sources, conversations, leads, actions, and analytics separated. The assistant works from the knowledge and configuration connected to that business.", "bullets": ["Explicit organization and business boundaries", "Owner-visible source management", "Role-based workspace access", "Reviewable knowledge coverage"] },
+      { "heading": "Controlled actions and integrations", "body": "Owners decide which actions are enabled and which integrations can receive a completion. Provider secrets stay in the server-side connection path, not in the public widget.", "bullets": ["Explicit action configuration", "Lead saved before external delivery", "Retryable delivery records", "Permission-aware MCP connections"] },
+      { "heading": "Privacy and human control", "body": "Configure lead consent, privacy notices, retention settings, fallback behavior, and human handoff so the experience matches how your business wants to operate.", "bullets": ["Consent and privacy controls", "Configurable retention", "Human handoff states", "Clear AI disclosure options"] }
+    ],
+    "related": ["human-handoff", "features", "integrations", "ai-front-desk"]
+  },
+  {
+    "key": "about",
+    "path": "/about",
+    "type": "commercial",
+    "eyebrow": "About FrontDeskWise",
+    "title": "Build a more useful first response for every customer",
+    "description": "FrontDeskWise is building the operating layer between a local business website and the people who need an answer.",
+    "intro": "The product starts with a simple belief: a website should do more than publish information. It should help a visitor understand, decide, and take the next step while keeping the business in control.",
+    "primaryCta": "See the product",
+    "secondaryCta": "Contact the team",
+    "sections": [
+      { "heading": "A product principle: URL → answer → lead → booking", "body": "Every feature is evaluated against that loop. Knowledge matters because the answer needs to be right. Actions matter because the conversation should lead somewhere. Analytics matter because the team needs to improve the system.", "bullets": ["Useful before impressive", "Grounded before speculative", "Human when judgment matters", "Measurable after the conversation"] },
+      { "heading": "Built for teams that already have a way of working", "body": "FrontDeskWise is designed to connect to the business's existing website, CRM, booking, email, webhook, and team workflows instead of asking every business to start over.", "bullets": ["Website-first onboarding", "Owner-configured actions", "Human handoff", "Portfolio-ready workspaces"] }
+    ],
+    "related": ["ai-front-desk", "features", "integrations", "contact"]
+  },
+  {
+    "key": "contact",
+    "path": "/contact",
+    "type": "commercial",
+    "eyebrow": "Contact",
+    "title": "Talk with the FrontDeskWise team",
+    "description": "Have a question about an AI front desk, a business workflow, or a connection to your existing tools? We would like to understand the work.",
+    "intro": "Send a note to hello@frontdeskwise.com or start by generating a workspace from your website. The fastest way to make the conversation concrete is to bring the customer questions and next steps you care about.",
+    "primaryCta": "Generate your workspace",
+    "secondaryCta": "Email the team",
+    "sections": [
+      { "heading": "Useful things to include", "body": "A little context helps us give a better answer and point you to the right workflow.", "bullets": ["Your business website", "The questions your team answers repeatedly", "The action you want visitors to take", "The system you use for leads or booking"] },
+      { "heading": "Start with the product surface", "body": "You can explore the public guides, check your website readiness, or create a sample workspace before reaching out.", "bullets": ["Explore the AI front desk", "Review industry workflows", "Check your website readiness", "See available integrations"] }
+    ],
+    "related": ["ai-front-desk", "tools-ai-front-desk-readiness", "integrations", "about"]
+  }
+]

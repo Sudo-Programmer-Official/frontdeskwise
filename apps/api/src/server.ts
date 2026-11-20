@@ -5956,6 +5956,89 @@ app.get("/api/v1/admin/organizations", async (request) => {
   };
 });
 
+app.get("/api/v1/admin/installation-support", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Installation support administration requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const requestedStatus = typeof query.status === "string" ? query.status : null;
+  const status = requestedStatus && ["new", "in_progress", "resolved"].includes(requestedStatus) ? requestedStatus : null;
+  const requestedLimit = Number(query.limit ?? 100);
+  const limit = Math.min(200, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 100));
+  const result = await pool.query<Record<string, unknown>>(
+    `select r.*, b.name as business_name, b.website_url, b.ownership_status,
+            o.name as organization_name, u.name as assigned_user_name, u.email as assigned_user_email
+     from installation_support_requests r
+     join businesses b on b.id = r.business_id
+     left join organizations o on o.id = r.organization_id
+     left join app_users u on u.id = r.assigned_user_id
+     where ($1::text is null or r.status = $1)
+     order by case when r.status = 'new' then 0 when r.status = 'in_progress' then 1 else 2 end, r.created_at desc
+     limit $2`,
+    [status, limit],
+  );
+  const summary = await pool.query<{ new_count: string; in_progress_count: string; resolved_count: string }>(
+    `select count(*) filter (where status = 'new')::text as new_count,
+            count(*) filter (where status = 'in_progress')::text as in_progress_count,
+            count(*) filter (where status = 'resolved')::text as resolved_count
+     from installation_support_requests`,
+  );
+  const assignees = await pool.query<{ id: string; name: string; email: string }>(
+    `select u.id, u.name, u.email
+     from app_users u
+     where u.status = 'active'
+       and (exists (select 1 from super_admin_users sa where sa.user_id = u.id and sa.status = 'active')
+         or exists (select 1 from organization_members om where om.user_id = u.id and om.role in ('owner', 'admin'))
+         or exists (select 1 from business_members bm where bm.user_id = u.id and bm.role in ('admin', 'staff')))
+     order by u.name, u.email`,
+  );
+  return {
+    requests: result.rows.map(installationSupportRequestPayload),
+    summary: {
+      new: Number(summary.rows[0]?.new_count ?? 0),
+      inProgress: Number(summary.rows[0]?.in_progress_count ?? 0),
+      resolved: Number(summary.rows[0]?.resolved_count ?? 0),
+    },
+    assignees: assignees.rows,
+  };
+});
+
+app.patch("/api/v1/admin/installation-support/:requestId", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Installation support administration requires PostgreSQL storage");
+  const params = request.params as { requestId?: string };
+  const requestId = requiredString(params.requestId, "requestId", 80);
+  const body = asRecord(request.body);
+  const status = body.status === "new" || body.status === "in_progress" || body.status === "resolved" ? body.status : null;
+  const assignedUserId = body.assignedUserId === null || body.assignedUserId === "" ? null : optionalString(body.assignedUserId, 80);
+  if (!status && body.assignedUserId === undefined) throw httpError(400, "Provide a valid status or assignedUserId");
+  if (assignedUserId) {
+    const assignee = await pool.query("select 1 from app_users where id = $1 and status = 'active'", [assignedUserId]);
+    if (!assignee.rowCount) throw httpError(400, "That assignee is not an active application user");
+  }
+  const result = await pool.query<Record<string, unknown>>(
+    `update installation_support_requests
+     set status = coalesce($2, status),
+         assigned_user_id = case when $3::boolean then $4 else assigned_user_id end,
+         resolved_at = case when coalesce($2, status) = 'resolved' then coalesce(resolved_at, now()) else null end,
+         updated_at = now()
+     where id = $1
+     returning *`,
+    [requestId, status, body.assignedUserId !== undefined, assignedUserId],
+  );
+  if (!result.rowCount) throw httpError(404, "Installation support request not found");
+  const enriched = await pool.query<Record<string, unknown>>(
+    `select r.*, b.name as business_name, b.website_url, o.name as organization_name,
+            u.name as assigned_user_name, u.email as assigned_user_email
+     from installation_support_requests r
+     join businesses b on b.id = r.business_id
+     left join organizations o on o.id = r.organization_id
+     left join app_users u on u.id = r.assigned_user_id
+     where r.id = $1`,
+    [requestId],
+  );
+  return { request: installationSupportRequestPayload(enriched.rows[0]) };
+});
+
 app.get("/api/v1/admin/users", async (request) => {
   await requireSuperAdmin(request);
   if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
@@ -6920,6 +7003,112 @@ app.post("/api/v1/demo/:slug/verification/check", async (request) => {
   business.ownershipVerifiedByUserId = null;
   await persistBusiness(business);
   return { verified: true, verification: ownershipPayload(business), message: "Business ownership verified. Live publishing is enabled." };
+});
+
+function installationSupportRequestPayload(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: String(row.id),
+    businessId: String(row.business_id),
+    businessName: String(row.business_name ?? ""),
+    websiteUrl: String(row.website_url ?? ""),
+    organizationName: row.organization_name ? String(row.organization_name) : null,
+    requesterName: String(row.requester_name ?? ""),
+    requesterEmail: String(row.requester_email ?? ""),
+    platform: String(row.platform),
+    helpRequest: String(row.help_request),
+    preferredContactMethod: String(row.preferred_contact_method),
+    contactValue: String(row.contact_value),
+    message: typeof row.message === "string" ? row.message : null,
+    screenshotUrl: typeof row.screenshot_url === "string" ? row.screenshot_url : null,
+    ownershipStatus: String(row.ownership_status ?? "pending"),
+    widgetDetected: Boolean(row.widget_detected),
+    widgetLastLoadedAt: nullableIso(row.widget_last_loaded_at),
+    widgetLoadCount: Number(row.widget_load_count ?? 0),
+    assignedUserId: typeof row.assigned_user_id === "string" ? row.assigned_user_id : null,
+    assignedUserName: typeof row.assigned_user_name === "string" ? row.assigned_user_name : null,
+    assignedUserEmail: typeof row.assigned_user_email === "string" ? row.assigned_user_email : null,
+    status: String(row.status),
+    resolvedAt: nullableIso(row.resolved_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+  };
+}
+
+app.post("/api/v1/demo/:slug/installation-support", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const authUser = await requireFirebaseAuth(request);
+  await requireAuthenticatedBusinessOwner(business, request);
+  if (!pool) throw httpError(503, "Installation support requires PostgreSQL storage");
+
+  const body = asRecord(request.body);
+  const platform = body.platform === "html" ? "custom" : body.platform;
+  if (!["wordpress", "wix", "shopify", "squarespace", "custom", "not_sure"].includes(String(platform))) {
+    throw httpError(400, "Choose a supported website platform");
+  }
+  const preferredContactMethod = body.preferredContactMethod === "phone" ? "phone" : body.preferredContactMethod === "email" ? "email" : null;
+  if (!preferredContactMethod) throw httpError(400, "preferredContactMethod must be email or phone");
+  const requesterName = requiredString(body.name, "name", 120);
+  const helpRequest = requiredString(body.helpRequest, "helpRequest", 240);
+  const contactValue = requiredString(body.contactValue, "contactValue", 240);
+  const message = optionalString(body.message, 4_000);
+  const screenshotUrl = optionalString(body.screenshotUrl, 2_000);
+  if (screenshotUrl) {
+    try {
+      const parsed = new URL(screenshotUrl);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported protocol");
+    } catch {
+      throw httpError(400, "screenshotUrl must be an HTTP or HTTPS URL");
+    }
+  }
+
+  const organizationId = await businessOrganizationId(business);
+  if (!organizationId) throw httpError(409, "This business is not connected to an organization yet");
+  const appUser = await pool.query<{ id: string }>("select id from app_users where identity_subject = $1 and status = 'active'", [authUser.identitySubject]);
+  const inserted = await pool.query<Record<string, unknown>>(
+    `insert into installation_support_requests
+       (organization_id, business_id, requester_user_id, requester_name, requester_email, business_name, website_url,
+        platform, help_request, preferred_contact_method, contact_value, message, screenshot_url, ownership_status,
+        widget_detected, widget_last_loaded_at, widget_load_count)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     returning *`,
+    [
+      organizationId,
+      business.id,
+      appUser.rows[0]?.id ?? null,
+      requesterName,
+      authUser.email,
+      business.name,
+      business.websiteUrl,
+      platform,
+      helpRequest,
+      preferredContactMethod,
+      contactValue,
+      message,
+      screenshotUrl,
+      business.ownershipStatus,
+      business.widget.loadCount > 0,
+      business.widget.lastLoadedAt,
+      business.widget.loadCount,
+    ],
+  );
+  const supportRequest = { ...inserted.rows[0], business_name: business.name, website_url: business.websiteUrl, organization_name: null };
+  void notifySuperAdmins({
+    subject: `Installation help requested · ${business.name}`,
+    text: [
+      `A customer requested help installing FrontDeskWise for ${business.name}.`,
+      `Website: ${business.websiteUrl}`,
+      `Platform: ${platform}`,
+      `Requester: ${requesterName} <${authUser.email}>`,
+      `Preferred contact: ${preferredContactMethod} · ${contactValue}`,
+      `Help needed: ${helpRequest}`,
+      message ? `Message: ${message}` : "",
+      screenshotUrl ? `Screenshot: ${screenshotUrl}` : "",
+      `Open the installation support queue: ${lifecycleAppUrl("/platform/installation-support")}`,
+    ].filter(Boolean).join("\n"),
+  }).catch((error) => app.log.warn({ error: error instanceof Error ? error.message : "unknown notification error", businessId: business.id }, "Could not notify super-admins about installation support request"));
+
+  return reply.code(201).send({ request: installationSupportRequestPayload(supportRequest) });
 });
 
 app.get("/api/v1/demo/:slug/widget/install", async (request) => {

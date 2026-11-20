@@ -12,6 +12,9 @@ const styles = await readFile(resolve(here, "../src/styles.css"), "utf8");
 const feedback = await readFile(resolve(here, "../src/AppFeedback.vue"), "utf8");
 const widget = await readFile(resolve(here, "../public/widget.js"), "utf8");
 const router = await readFile(resolve(here, "../src/router/index.ts"), "utf8");
+const marketing = JSON.parse(await readFile(resolve(here, "../src/marketing-pages.json"), "utf8"));
+const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vue"), "utf8");
+const metadataScript = await readFile(resolve(here, "../scripts/generate-site-metadata.mjs"), "utf8");
 
 test("owner production controls remain present", () => {
   const ownerSurface = `${app}\n${agent}`;
@@ -49,6 +52,23 @@ test("owner UI uses the shared product design language", () => {
   assert.match(styles, /select option\s*\{/);
   assert.match(styles, /mobile-preview/);
   assert.match(agent, /aria-label="Widget preview"|Customer view/);
+});
+
+test("landing page presents an honest, conversion-ready product story", () => {
+  for (const marker of [
+    "Illustrative sample flow",
+    "landing-flow-shell",
+    "landingSampleMetrics",
+    "landingFaqs",
+    "Answer grounded in approved knowledge",
+    "Create your workspace",
+  ]) {
+    assert.ok(app.includes(marker), `missing landing experience marker: ${marker}`);
+  }
+  assert.doesNotMatch(app, /featured-demo-links/);
+  assert.doesNotMatch(app, /0 leads in sample workspace|0 booking actions/);
+  assert.match(styles, /landing-industry-drift/);
+  assert.match(styles, /prefers-reduced-motion: reduce/);
 });
 
 test("unfinished internal implementation language is not rendered in owner UI", () => {
@@ -92,6 +112,24 @@ test("application navigation is route-driven and refresh-safe", () => {
   assert.match(app, /window\.history\[replace \? "replaceState" : "pushState"\]/);
   assert.match(app, /window\.addEventListener\("popstate", handleRouteChange\)/);
   assert.match(app, /Keep control-plane and onboarding deep links stable/);
+});
+
+test("public SEO routes are unique, indexable, and statically packaged", () => {
+  assert.ok(marketing.length >= 25, "expected a meaningful first SEO content cluster");
+  const paths = new Set();
+  for (const page of marketing) {
+    assert.ok(page.path.startsWith("/"), `invalid marketing path: ${page.path}`);
+    assert.ok(!paths.has(page.path), `duplicate marketing path: ${page.path}`);
+    paths.add(page.path);
+    const parsed = parseRoute({ pathname: page.path, search: "" });
+    assert.equal(parsed.kind, "marketing");
+    assert.equal(routePath(parsed), page.path);
+    assert.ok(page.title && page.description && page.intro, `missing SEO content for ${page.path}`);
+  }
+  assert.match(marketingComponent, /marketing-page-faq-list/);
+  assert.match(marketingComponent, /Calculate readiness score/);
+  assert.match(metadataScript, /sitemap\.xml/);
+  assert.match(metadataScript, /Disallow: \/app\//);
 });
 
 test("application feedback is visible for async work and notifications", () => {
