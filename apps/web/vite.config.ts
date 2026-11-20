@@ -8,7 +8,7 @@ export default defineConfig({
       name: "frontdeskwise-site-origin",
       transformIndexHtml(html) {
         const configuredOrigin = process.env.VITE_SITE_ORIGIN ?? (process.env.NODE_ENV === "production" ? "https://www.frontdeskwise.com" : "http://localhost:5174");
-        const siteOrigin = configuredOrigin.replace(/\/$/, "");
+        const siteOrigin = configuredOrigin.replace(/\/$/, "").replace(/^https:\/\/frontdeskwise\.com$/i, "https://www.frontdeskwise.com");
         return html.replaceAll("https://frontdeskwise.invalid", siteOrigin);
       },
     },
