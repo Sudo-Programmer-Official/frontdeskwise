@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   currentAuthSnapshot,
+  currentFirebaseToken,
   firebaseAuthConfigured,
   observeFirebaseUser,
   sendFrontDeskWisePasswordReset,
@@ -216,6 +217,16 @@ interface AdminDemoRequest {
   lastValidationFailedAt: string | null;
 }
 
+type AdminSection = "overview" | "organizations" | "users" | "demos" | "operations";
+
+interface AdminHealthSnapshot {
+  api: "healthy" | "degraded" | "down";
+  database: string;
+  objectStorageConfigured: boolean;
+  emailConfigured: boolean;
+  checkedAt: string;
+}
+
 const view = ref<View>("home");
 const apiOrigin = String(import.meta.env.VITE_API_ORIGIN ?? "").replace(/\/$/, "");
 function apiUrl(path: string): string {
@@ -317,6 +328,8 @@ const adminLoading = ref(false);
 const adminError = ref("");
 const adminEmailTestLoading = ref(false);
 const adminEmailTestMessage = ref("");
+const adminSection = ref<AdminSection>("overview");
+const adminHealth = ref<AdminHealthSnapshot | null>(null);
 const featuredDemos = ref<FeaturedDemo[]>([]);
 const workspaceStats = ref<WorkspaceStats | null>(null);
 const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
@@ -340,6 +353,14 @@ const navItems: Array<{ id: View; label: string; icon: string }> = [
   { id: "billing", label: "Billing", icon: "$" },
 ];
 
+const adminNavItems: Array<{ id: AdminSection; label: string; icon: string }> = [
+  { id: "overview", label: "Command center", icon: "⌂" },
+  { id: "organizations", label: "Organizations", icon: "▦" },
+  { id: "users", label: "Users & access", icon: "♧" },
+  { id: "demos", label: "Demo operations", icon: "✦" },
+  { id: "operations", label: "System health", icon: "◒" },
+];
+
 const pageTitle = computed(() => {
   if (view.value === "home") return "Build your AI front desk";
   if (view.value === "privacy") return "Privacy Policy";
@@ -347,6 +368,16 @@ const pageTitle = computed(() => {
   if (view.value === "admin") return "Admin control plane";
   return navItems.find((item) => item.id === view.value)?.label ?? "Overview";
 });
+
+const adminOnlyMode = computed(() => Boolean(isSuperAdmin.value && authSnapshot.value && !availableBusinesses.value.length));
+const adminSurfaceMode = computed(() => Boolean(isSuperAdmin.value && authSnapshot.value && view.value === "admin"));
+const adminSectionTitle = computed(() => adminNavItems.find((item) => item.id === adminSection.value)?.label ?? "Command center");
+const adminLeadTotal = computed(() => adminOrganizations.value.reduce((total, organization) => total + organization.leadCount, 0));
+const adminConversationTotal = computed(() => adminOrganizations.value.reduce((total, organization) => total + organization.conversationCount, 0));
+const adminTrialCount = computed(() => adminOrganizations.value.filter((organization) => organization.status === "trial").length);
+const adminPausedCount = computed(() => adminOrganizations.value.filter((organization) => organization.status === "paused" || organization.status === "cancelled").length);
+const adminFailedDemoCount = computed(() => adminDemoRequests.value.filter((item) => item.status === "failed" || item.status === "expired").length);
+const adminDisabledUserCount = computed(() => adminUsers.value.filter((user) => user.status !== "active").length);
 
 const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== "Booked").length);
 const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
@@ -388,20 +419,43 @@ function openAuth(mode: "signin" | "signup" = "signin") {
   authModalOpen.value = true;
 }
 
+function isExpiredDemoSessionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /demo (?:access )?session|demo access token/i.test(message) && /invalid|expired/i.test(message);
+}
+
+function forgetDemoAccessToken() {
+  demoAccessToken.value = "";
+  if (typeof window !== "undefined") window.localStorage.removeItem("frontdeskwiseDemoAccessToken");
+}
+
+async function bootstrapAccountWithDemoRecovery(start: (demoToken?: string) => Promise<AuthSnapshot>): Promise<AuthSnapshot> {
+  const demoToken = demoAccessToken.value.trim() || undefined;
+  try {
+    return await start(demoToken);
+  } catch (error) {
+    if (!demoToken || !isExpiredDemoSessionError(error)) throw error;
+    forgetDemoAccessToken();
+    const snapshot = await currentAuthSnapshot(authOrganizationName.value);
+    if (!snapshot) throw error;
+    firebaseToken.value = await currentFirebaseToken();
+    return snapshot;
+  }
+}
+
 async function submitAuth() {
   if (!authEmail.value.trim() || authPassword.value.length < 6 || authLoading.value) return;
   authLoading.value = true;
   authError.value = "";
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in is not configured yet. Add the Firebase web settings to the Vercel environment.");
-    authSnapshot.value = authMode.value === "signup"
-      ? await signUpAndBootstrap(authEmail.value, authPassword.value, demoAccessToken.value || undefined, authOrganizationName.value)
-      : await signInAndBootstrap(authEmail.value, authPassword.value, demoAccessToken.value || undefined, authOrganizationName.value);
-    await syncAuthenticatedBusiness(authSnapshot.value);
-    await loadBilling();
+    const mode = authMode.value;
+    authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => mode === "signup"
+      ? signUpAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value)
+      : signInAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value));
+    await settleAuthenticatedSession();
     authModalOpen.value = false;
     authPassword.value = "";
-    view.value = "overview";
   } catch (error) {
     authError.value = error instanceof Error ? error.message : "Could not finish sign-in.";
   } finally {
@@ -415,11 +469,9 @@ async function submitGoogleAuth() {
   authError.value = "";
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in is not configured yet. Add the Firebase web settings to the Vercel environment.");
-    authSnapshot.value = await signInWithGoogleAndBootstrap(demoAccessToken.value || undefined, authOrganizationName.value);
-    await syncAuthenticatedBusiness(authSnapshot.value);
-    await loadBilling();
+    authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => signInWithGoogleAndBootstrap(demoToken, authOrganizationName.value));
+    await settleAuthenticatedSession();
     authModalOpen.value = false;
-    view.value = "overview";
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     authError.value = message.includes("auth/popup-closed-by-user")
@@ -432,6 +484,7 @@ async function submitGoogleAuth() {
 
 async function signOut() {
   await signOutFrontDeskWise();
+  forgetDemoAccessToken();
   authSnapshot.value = null;
   firebaseToken.value = "";
   openHome();
@@ -569,16 +622,41 @@ async function selectBusiness(slug: string) {
   await loadBusinessWorkspace(slug);
 }
 
-async function syncAuthenticatedBusiness(snapshot: AuthSnapshot) {
+async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolean> {
   const organization = snapshot.organizations.find((item) => item.id === snapshot.activeOrganizationId) ?? snapshot.organizations[0];
   const preferred = organization?.businesses.find((business) => business.slug === demoSlug.value)
     ?? snapshot.organizations.flatMap((item) => item.businesses).find((business) => business.slug === demoSlug.value)
     ?? organization?.businesses[0]
     ?? snapshot.organizations[0]?.businesses[0];
-  if (preferred) await selectBusiness(preferred.slug);
-  else {
+  if (preferred) {
+    await selectBusiness(preferred.slug);
+    return true;
+  } else {
     showAllBusinesses.value = false;
     clearWorkspaceState();
+    return false;
+  }
+}
+
+async function settleAuthenticatedSession(): Promise<void> {
+  if (!authSnapshot.value) return;
+  const hasBusiness = await syncAuthenticatedBusiness(authSnapshot.value);
+  if (hasBusiness) await loadBilling();
+  await loadAdminOrganizations();
+  if (isSuperAdmin.value && !hasBusiness) {
+    adminSection.value = "overview";
+    view.value = "admin";
+    return;
+  }
+  if (isPlatformRoute()) {
+    if (isSuperAdmin.value) {
+      adminSection.value = "overview";
+      view.value = "admin";
+    } else {
+      openHome();
+    }
+  } else if (!publicDemoMode.value && view.value === "home") {
+    view.value = "overview";
   }
 }
 
@@ -682,6 +760,7 @@ async function consumeDemoLink() {
     view.value = "overview";
     window.history.replaceState({}, "", window.location.pathname);
   } catch (error) {
+    if (token === demoAccessToken.value) forgetDemoAccessToken();
     generationError.value = error instanceof Error ? error.message : "This demo link is invalid or expired.";
   }
 }
@@ -1008,6 +1087,33 @@ async function loadAdminOrganizations() {
   }
 }
 
+async function loadAdminHealth() {
+  if (!authSnapshot.value) return;
+  try {
+    const [healthResponse, readyResponse] = await Promise.all([
+      fetch(apiUrl("/health")),
+      fetch(apiUrl("/ready")),
+    ]);
+    const health = await healthResponse.json() as { objectStorageConfigured?: boolean; emailConfigured?: boolean; storage?: string };
+    const ready = await readyResponse.json() as { ok?: boolean; database?: string; objectStorageConfigured?: boolean; emailConfigured?: boolean };
+    adminHealth.value = {
+      api: healthResponse.ok && readyResponse.ok ? "healthy" : "degraded",
+      database: ready.database ?? (readyResponse.ok ? health.storage ?? "ready" : "unavailable"),
+      objectStorageConfigured: Boolean(ready.objectStorageConfigured ?? health.objectStorageConfigured),
+      emailConfigured: Boolean(ready.emailConfigured ?? health.emailConfigured),
+      checkedAt: new Date().toISOString(),
+    };
+  } catch {
+    adminHealth.value = {
+      api: "down",
+      database: "unavailable",
+      objectStorageConfigured: false,
+      emailConfigured: false,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+}
+
 async function loadAdminUsers() {
   if (!authSnapshot.value) return;
   try {
@@ -1034,7 +1140,10 @@ function navigateToAdmin() {
   if (typeof window !== "undefined" && window.location.pathname !== "/platform") {
     window.history.pushState({}, "", "/platform");
   }
-  if (isSuperAdmin.value) view.value = "admin";
+  if (isSuperAdmin.value) {
+    adminSection.value = "overview";
+    view.value = "admin";
+  }
   else openAuth("signin");
 }
 
@@ -1070,23 +1179,8 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     const snapshot = await currentAuthSnapshot();
     if (!snapshot) throw new Error("Could not restore the FrontDeskWise account.");
     authSnapshot.value = snapshot;
-    await syncAuthenticatedBusiness(snapshot);
-    await loadBilling();
-    await loadAdminOrganizations();
-
-    if (isPlatformRoute()) {
-      if (isSuperAdmin.value) {
-        authModalOpen.value = false;
-        view.value = "admin";
-      } else {
-        authModalOpen.value = false;
-        openHome();
-      }
-    } else if (!publicDemoMode.value && view.value === "home") {
-      // The route remains `/` for the SPA, so restore the signed-in product
-      // surface after a browser refresh instead of showing the landing page.
-      view.value = "overview";
-    }
+    await settleAuthenticatedSession();
+    authModalOpen.value = false;
   } catch (error) {
     // Keep Firebase's session intact. A temporary API/CORS/network failure
     // must not sign the user out or erase their local identity.
@@ -1462,6 +1556,7 @@ watch(view, (nextView) => {
     void loadAdminOrganizations();
     void loadAdminUsers();
     void loadAdminDemoRequests();
+    void loadAdminHealth();
   }
 });
 
@@ -1595,22 +1690,27 @@ function openHome() {
       <LegalPage :kind="view === 'privacy' ? 'privacy' : 'terms'" />
     </section>
 
-    <section v-else class="product-shell">
+    <section v-else :class="['product-shell', { 'admin-only-mode': adminSurfaceMode }]">
       <aside class="sidebar">
         <button class="sidebar-brand" type="button" @click="openHome"><img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
-        <div class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" @click="openAddBusiness">+</button><span class="chevron">⌄</span></div>
-          <nav class="sidebar-nav">
+        <div v-if="adminSurfaceMode" class="admin-identity-card"><span class="admin-identity-mark">SP</span><span><strong>Operations</strong><small>Super-admin access</small></span><span class="admin-identity-check">✓</span></div>
+        <div v-else class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" @click="openAddBusiness">+</button><span class="chevron">⌄</span></div>
+        <nav v-if="adminSurfaceMode" class="sidebar-nav admin-sidebar-nav" aria-label="Super-admin navigation">
+          <button v-for="item in adminNavItems" :key="item.id" type="button" :class="['nav-item', { active: view === 'admin' && adminSection === item.id }]" @click="adminSection = item.id; view = 'admin'"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span></button>
+        </nav>
+        <nav v-else class="sidebar-nav" aria-label="Workspace navigation">
           <button v-for="item in navItems" :key="item.id" type="button" :disabled="publicDemoMode && item.id !== 'overview'" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'conversations' && conversationCount">{{ conversationCount }}</b></button>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon">⚙</span><span>Admin control plane</span></button>
         </nav>
-        <div class="sidebar-bottom"><div class="setup-card"><div class="setup-row"><span>Setup progress</span><strong>{{ workspaceStats?.setup.percent ?? 0 }}%</strong></div><div class="progress-bar"><span :style="{ width: `${workspaceStats?.setup.percent ?? 0}%` }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete</small></div><button class="sidebar-link" type="button" @click="openHome">← Back to landing page</button></div>
+        <div v-if="adminSurfaceMode" class="sidebar-bottom"><div class="admin-sidebar-note"><strong>Operations access</strong><small>Manage platform health, organizations, users, and demos from one place.</small></div><button v-if="!adminOnlyMode" class="sidebar-link" type="button" @click="view = 'overview'">← Back to workspace</button><button class="sidebar-link" type="button" @click="signOut">Sign out</button></div>
+        <div v-else class="sidebar-bottom"><div class="setup-card"><div class="setup-row"><span>Setup progress</span><strong>{{ workspaceStats?.setup.percent ?? 0 }}%</strong></div><div class="progress-bar"><span :style="{ width: `${workspaceStats?.setup.percent ?? 0}%` }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete</small></div><button class="sidebar-link" type="button" @click="openHome">← Back to landing page</button></div>
       </aside>
 
       <section class="content-area">
-        <header class="content-header"><div><p class="breadcrumb">{{ showAllBusinesses ? 'All businesses' : (businessName || 'Workspace') }} / FrontDeskWise</p><h1>{{ pageTitle }}</h1></div><div class="header-actions"><button class="outline-button" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Preview on website ↗</button><button class="primary-button small" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
-        <div v-if="publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
-        <div v-else-if="billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>Keep your workspace, knowledge, and leads active by choosing a plan.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Upgrade →</button></div>
-        <div v-else-if="billingReadOnly" class="trial-banner danger"><span><strong>Your workspace is read-only</strong><small>Existing data is preserved. Restore billing to resume publishing and production lead capture.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Restore billing →</button></div>
+        <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="!adminSurfaceMode" class="outline-button" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Preview on website ↗</button><button v-if="!adminSurfaceMode" class="primary-button small" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span v-if="!adminSurfaceMode" class="notification">♧<i></i></span><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div></header>
+        <div v-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
+        <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>Keep your workspace, knowledge, and leads active by choosing a plan.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Upgrade →</button></div>
+        <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger"><span><strong>Your workspace is read-only</strong><small>Existing data is preserved. Restore billing to resume publishing and production lead capture.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Restore billing →</button></div>
 
         <div v-if="view === 'overview' && showAllBusinesses" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Organization overview</p><h2>All businesses</h2><p>One account, one subscription, and a clear view across every business you manage.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
@@ -1682,7 +1782,7 @@ function openHome() {
           <p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p>
           <div class="agent-layout">
             <article class="panel form-panel">
-              <div class="form-section"><h3>Connect a CRM</h3><p>Use a signed webhook for Zapier, Make, or an internal endpoint, or connect a HubSpot private-app token. Secrets stay server-side.</p><label>Provider<select v-model="integrationProvider"><option value="webhook">Webhook / automation tool</option><option value="hubspot">HubSpot</option></select></label><label>Display name<input v-model="integrationDisplayName" type="text" placeholder="Sales CRM" /></label><template v-if="integrationProvider === 'webhook'"><label>Webhook URL<input v-model="integrationWebhookUrl" type="url" placeholder="https://hooks.example.com/frontdeskwise" /></label><label>Signing secret <span class="optional">optional · never shown again</span><input v-model="integrationSigningSecret" type="password" placeholder="Secret stored server-side" /></label></template><label v-else>HubSpot private-app token <span class="optional">never shown again</span><input v-model="integrationAccessToken" type="password" placeholder="pat-na1-…" /></label><button class="primary-button" type="button" :disabled="integrationLoading || (integrationProvider === 'webhook' ? !integrationWebhookUrl.trim() : !integrationAccessToken.trim())" @click="connectIntegration">Save integration →</button></div>
+              <div class="form-section"><h3>Connect a CRM</h3><p>Use a signed webhook for Zapier, Make, or an internal endpoint, or connect a HubSpot private-app token. Secrets stay server-side.</p><label>Provider<select v-model="integrationProvider"><option value="webhook">Webhook / automation tool</option><option value="hubspot">HubSpot</option></select></label><label>Display name<input v-model="integrationDisplayName" type="text" autocomplete="organization" placeholder="Sales CRM" /></label><template v-if="integrationProvider === 'webhook'"><label>Webhook URL<input v-model="integrationWebhookUrl" name="webhookUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://hooks.example.com/frontdeskwise" /></label><label>Signing secret <span class="optional">optional · never shown again</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Secret stored server-side" /></label></template><label v-else>HubSpot private-app token <span class="optional">never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="pat-na1-…" /></label><button class="primary-button" type="button" :disabled="integrationLoading || (integrationProvider === 'webhook' ? !integrationWebhookUrl.trim() : !integrationAccessToken.trim())" @click="connectIntegration">Save integration →</button></div>
               <div class="form-section"><h3>Delivery contract</h3><p>Every lead is saved first, then queued for delivery. Temporary failures retry with backoff; permanent failures stay visible for a manual retry.</p></div>
             </article>
             <article class="panel form-panel"><div class="form-section"><h3>Connected systems</h3><p v-if="!integrations.length">No CRM connected yet.</p><div v-for="integration in integrations" :key="integration.id" class="integration-card"><div class="setup-row"><strong>{{ integration.displayName }}</strong><span :class="['status-pill', integration.connectionStatus === 'active' ? 'booked' : integration.connectionStatus === 'error' ? 'new' : 'qualified']">{{ integration.connectionStatus }}</span></div><small>{{ integration.provider }} · {{ integration.sync.synced }}/{{ integration.sync.total }} leads synced</small><small v-if="integration.sync.pending">{{ integration.sync.pending }} pending delivery</small><small v-if="integration.sync.failed" class="form-error">{{ integration.sync.failed }} failed delivery</small><small v-if="integration.lastError" class="form-error">{{ integration.lastError }}</small><div class="toolbar-actions"><button class="outline-button small" type="button" :disabled="integrationLoading" @click="testIntegration(integration)">Test connection</button><button v-if="integration.sync.failed" class="text-button" type="button" :disabled="integrationLoading" @click="retryIntegration(integration)">Retry failed</button></div></div></div></article>
@@ -1729,11 +1829,16 @@ function openHome() {
         </div>
 
         <div v-else-if="view === 'admin' && isSuperAdmin" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Internal operations</p><h2>Super-admin control plane</h2><p>Monitor organizations, pilot status, business count, usage outcomes, and account health.</p></div><div class="toolbar-actions"><span v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</span><button class="outline-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Test SES email' }}</button><span v-if="adminLoading" class="conversation-status">Working…</span></div></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Internal operations</p><h2>{{ adminSectionTitle }}</h2><p>Run the platform with a consistent view of organizations, access, demos, and system health.</p></div><div class="toolbar-actions"><span v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</span><button class="outline-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Test SES email' }}</button><span v-if="adminLoading" class="conversation-status">Working…</span></div></div>
+          <nav class="admin-section-tabs" aria-label="Admin sections"><button v-for="item in adminNavItems" :key="item.id" type="button" :class="{ active: adminSection === item.id }" @click="adminSection = item.id">{{ item.label }}</button></nav>
           <p v-if="adminError" class="form-error">{{ adminError }}</p>
-          <article class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
-          <article class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
-          <article class="panel admin-demo-operations">
+          <template v-if="adminSection === 'overview'">
+            <div class="ds-stat-grid admin-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue">▦</span><strong>{{ adminOrganizations.length }}</strong><small>Organizations</small><em>{{ adminTrialCount }} on trial</em></article><article class="ds-stat-card"><span class="ds-stat-icon green">♧</span><strong>{{ adminLeadTotal }}</strong><small>Leads captured</small><em>Across all tenants</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange">◌</span><strong>{{ adminConversationTotal }}</strong><small>Conversations</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple">⚡</span><strong>{{ adminPausedCount + adminFailedDemoCount }}</strong><small>Needs attention</small><em>{{ adminDisabledUserCount }} disabled users</em></article></div>
+            <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
+          </template>
+          <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
+          <article v-if="adminSection === 'users'" class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users & access</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
+          <article v-if="adminSection === 'demos'" class="panel admin-demo-operations">
             <div class="panel-heading"><div><p class="eyebrow">Demo operations</p><h2>Requests, test users & access links</h2><p>Every visitor request and operator action is audited. Generated links are copied once and can be reset, extended, revoked, or validated.</p></div><div class="admin-demo-summary"><span>{{ adminDemoSummary.total }} total</span><span>{{ adminDemoSummary.ready }} ready</span><span>{{ adminDemoSummary.converted }} converted</span></div></div>
             <div class="admin-demo-create">
               <input v-model="adminBusinessSlug" type="text" placeholder="Business slug" aria-label="Business slug for test link" />
@@ -1750,6 +1855,7 @@ function openHome() {
               <div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'validate')">Validate</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'extend')">Extend 7d</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'reset')">New link</button><button class="text-button" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'revoke')">Revoke</button></div>
             </div>
           </article>
+          <div v-if="adminSection === 'operations'" class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">System health</p><h2>Infrastructure readiness</h2><p>Refresh this page after changing Render, storage, email, or model configuration.</p></div><button class="outline-button small" type="button" @click="loadAdminHealth">Refresh checks</button></div><div class="health-list health-list-large"><div><span>API</span><strong :class="`health-${adminHealth?.api ?? 'degraded'}`">{{ adminHealth?.api ?? 'Checking…' }}</strong></div><div><span>Database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Object storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Transactional email</span><strong>{{ adminHealth?.emailConfigured ? 'Ready' : 'Not configured' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Delivery test</p><h2>Email operations</h2><p>Send a controlled SES test to the authenticated super-admin address.</p></div></div><button class="primary-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Send test email →' }}</button><p v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</p></article></div>
         </div>
 
         <div v-else class="view-content empty-view"><div class="empty-icon">ϟ</div><p class="eyebrow">{{ pageTitle }}</p><h2>This surface is ready for the first real business.</h2><p>We’ll connect this view to tenant-scoped data, grounded answers, and real actions next.</p><button class="primary-button small" type="button" @click="view = 'overview'">Back to overview</button></div>

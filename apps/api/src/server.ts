@@ -1515,44 +1515,86 @@ async function recordOrganizationUsage(business: Business, metric: UsageMetric):
 
 async function recordModelUsage(business: Business, usage: ModelUsage): Promise<void> {
   if (!pool || usage.inputTokens <= 0 && usage.outputTokens <= 0 && usage.estimatedCostUsd === null) return;
-  await pool.query(
-    `insert into organization_usage_daily (organization_id, usage_date, llm_input_tokens, llm_output_tokens, llm_estimated_cost_usd)
-     select organization_id, current_date, $2, $3, coalesce($4, 0) from businesses where id = $1
-     on conflict (organization_id, usage_date) do update set
-       llm_input_tokens = organization_usage_daily.llm_input_tokens + excluded.llm_input_tokens,
-       llm_output_tokens = organization_usage_daily.llm_output_tokens + excluded.llm_output_tokens,
-       llm_estimated_cost_usd = organization_usage_daily.llm_estimated_cost_usd + excluded.llm_estimated_cost_usd,
-       updated_at = now()`,
-    [business.id, usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd],
-  );
+  try {
+    await pool.query(
+      `insert into organization_usage_daily (organization_id, usage_date, llm_input_tokens, llm_output_tokens, llm_estimated_cost_usd)
+       select organization_id, current_date, $2, $3, coalesce($4, 0) from businesses where id = $1
+       on conflict (organization_id, usage_date) do update set
+         llm_input_tokens = organization_usage_daily.llm_input_tokens + excluded.llm_input_tokens,
+         llm_output_tokens = organization_usage_daily.llm_output_tokens + excluded.llm_output_tokens,
+         llm_estimated_cost_usd = organization_usage_daily.llm_estimated_cost_usd + excluded.llm_estimated_cost_usd,
+         updated_at = now()`,
+      [business.id, usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd],
+    );
+  } catch (error) {
+    // The model-cost columns are optional during a rolling deploy. Do not turn
+    // an otherwise successful answer into a 500 while the migration catches up.
+    if (!isMissingDatabaseColumn(error)) throw error;
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error", businessId: business.id }, "Model usage columns are not available yet");
+  }
+}
+
+function isMissingDatabaseColumn(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "42703";
 }
 
 async function persistMessage(conversation: Conversation, message: Message): Promise<void> {
   if (!pool) return;
   const retrieval = message.retrieval;
+  const params = [
+    conversation.id,
+    message.role,
+    message.content,
+    message.grounded ?? null,
+    message.sourceUrl ?? null,
+    message.confidenceScore ?? null,
+    message.confidenceBand ?? null,
+    JSON.stringify(message.citations ?? []),
+    retrieval ?? null,
+    retrieval?.route ?? null,
+    retrieval?.model ?? null,
+    retrieval?.inputTokens ?? 0,
+    retrieval?.outputTokens ?? 0,
+    retrieval?.estimatedCostUsd ?? null,
+    retrieval?.latencyMs ?? null,
+    message.createdAt,
+  ];
+
+  try {
+    await pool.query(
+      `insert into conversation_messages
+         (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
+          model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      params,
+    );
+    return;
+  } catch (error) {
+    if (!isMissingDatabaseColumn(error)) throw error;
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error", conversationId: conversation.id }, "Conversation observability columns are not available yet");
+  }
+
+  // Keep message persistence compatible with a rolling deployment where the
+  // API has been updated before migrations 007/018 have reached the database.
+  try {
+    await pool.query(
+      `insert into conversation_messages
+         (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      params.slice(0, 9).concat(params[15]),
+    );
+    return;
+  } catch (error) {
+    if (!isMissingDatabaseColumn(error)) throw error;
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error", conversationId: conversation.id }, "Grounded-answer columns are not available yet");
+  }
+
   await pool.query(
-    `insert into conversation_messages
-       (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
-        model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, created_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-    [
-      conversation.id,
-      message.role,
-      message.content,
-      message.grounded ?? null,
-      message.sourceUrl ?? null,
-      message.confidenceScore ?? null,
-      message.confidenceBand ?? null,
-      JSON.stringify(message.citations ?? []),
-      retrieval ?? null,
-      retrieval?.route ?? null,
-      retrieval?.model ?? null,
-      retrieval?.inputTokens ?? 0,
-      retrieval?.outputTokens ?? 0,
-      retrieval?.estimatedCostUsd ?? null,
-      retrieval?.latencyMs ?? null,
-      message.createdAt,
-    ],
+    `insert into conversation_messages (conversation_id, role, content, created_at)
+     values ($1, $2, $3, $4)`,
+    [conversation.id, message.role, message.content, message.createdAt],
   );
 }
 

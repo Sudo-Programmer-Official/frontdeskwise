@@ -94,7 +94,7 @@ export function observeFirebaseUser(callback) {
         unsubscribe?.();
     };
 }
-export async function currentAuthSnapshot() {
+export async function currentAuthSnapshot(organizationName) {
     if (!firebaseAuthConfigured())
         return null;
     const auth = await firebaseAuth();
@@ -108,9 +108,15 @@ export async function currentAuthSnapshot() {
         // A Firebase user can outlive an interrupted first bootstrap. Repair that
         // state on the next refresh instead of treating the persisted session as
         // signed out.
-        return bootstrap(user);
+        return bootstrap(user, undefined, organizationName);
     }
     if (!response.ok)
         throw new Error(payload.error ?? "Could not restore the FrontDeskWise session.");
     return payload;
+}
+export async function currentFirebaseToken() {
+    if (!firebaseAuthConfigured())
+        return "";
+    const user = (await firebaseAuth()).currentUser;
+    return user ? user.getIdToken() : "";
 }
