@@ -21,6 +21,20 @@
       .panel.open { display: flex; }
       .panel.mode-expanded { width: min(760px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); }
       .panel.mode-fullscreen { right: 0; bottom: 0; width: min(920px, 100vw); height: 100dvh; border-radius: 0; }
+      .launcher.position-bottom-left { right: auto; left: 22px; }
+      .panel.position-bottom-left { right: auto; left: 22px; }
+      .panel.theme-dark { color: #eef5ff; background: #182a43; border-color: #2f4768; }
+      .panel.theme-dark .messages, .panel.theme-dark .quick-actions { background: #122238; }
+      .panel.theme-dark .message { color: #e4edf9; background: #243b5c; border-color: #385578; }
+      .panel.theme-dark .composer { background: #182a43; border-color: #2f4768; }
+      .panel.theme-dark .composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+      @media (prefers-color-scheme: dark) {
+        .panel.theme-auto { color: #eef5ff; background: #182a43; border-color: #2f4768; }
+        .panel.theme-auto .messages, .panel.theme-auto .quick-actions { background: #122238; }
+        .panel.theme-auto .message { color: #e4edf9; background: #243b5c; border-color: #385578; }
+        .panel.theme-auto .composer { background: #182a43; border-color: #2f4768; }
+        .panel.theme-auto .composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+      }
       .header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: #fff; background: var(--accent, #0d6efd); }
       .identity { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
       .logo, .orb { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.2); }
@@ -321,6 +335,10 @@
     var agent = payload.agent || {};
     panel.style.setProperty("--accent", agent.widgetColor || "#0d6efd");
     launcher.style.setProperty("--accent", agent.widgetColor || "#0d6efd");
+    panel.classList.remove("theme-light", "theme-dark", "theme-auto", "position-bottom-right", "position-bottom-left");
+    launcher.classList.remove("position-bottom-right", "position-bottom-left");
+    panel.classList.add("theme-" + (agent.widgetTheme || "auto"), "position-" + (agent.widgetPosition || "bottom-right"));
+    launcher.classList.add("position-" + (agent.widgetPosition || "bottom-right"));
     title.textContent = agent.assistantName || "AI front desk";
     if (agent.widgetLogoUrl) {
       var image = document.createElement("img");

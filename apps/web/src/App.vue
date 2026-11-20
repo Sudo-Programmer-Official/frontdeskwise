@@ -13,10 +13,26 @@ import {
   type AuthSnapshot,
 } from "./auth/firebase";
 import LegalPage from "./LegalPage.vue";
+import AgentExperience from "./AgentExperience.vue";
+import AppFeedback, { type AppToast, type AppToastKind } from "./AppFeedback.vue";
+import {
+  demoRoute,
+  parseRoute,
+  platformRoute,
+  routePath,
+  routeView,
+  settingsRoute,
+  workspaceRoute,
+  type AgentRouteTab,
+  type AppRoute,
+  type PlatformRouteSection,
+  type SettingsRouteTab,
+  type WorkspaceView,
+} from "./router";
 
-type View = "home" | "privacy" | "terms" | "overview" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin";
-type SettingsTab = "general" | "team" | "integrations" | "verification" | "billing";
-type AgentTab = "behavior" | "appearance" | "quick-actions" | "test" | "install";
+type View = "home" | "privacy" | "terms" | WorkspaceView | "admin";
+type SettingsTab = SettingsRouteTab;
+type AgentTab = AgentRouteTab;
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 
 interface Lead {
@@ -110,6 +126,7 @@ interface StaffNotification {
 }
 
 type ActionFieldType = "text" | "email" | "phone" | "select" | "date" | "number";
+type ActionEditorStage = "trigger" | "qualify" | "contact" | "complete" | "deliver";
 
 interface ActionField {
   id: string;
@@ -242,6 +259,28 @@ interface WidgetQuickAction {
   question: string;
 }
 
+interface AgentSaveModel {
+  assistantName: string;
+  welcomeMessage: string;
+  tone: "friendly" | "professional" | "concise" | "custom";
+  primaryLanguage: string;
+  fallbackBehavior: "contact_form" | "human" | "unavailable";
+  humanHandoffEnabled: boolean;
+  widgetColor: string;
+  widgetDefaultMode: "compact" | "expanded" | "fullscreen";
+  widgetAllowExpand: boolean;
+  widgetLogoUrl: string;
+  widgetTheme: "light" | "dark" | "auto";
+  widgetPosition: "bottom-right" | "bottom-left";
+  widgetQuickActions: WidgetQuickAction[];
+  showLeadCapture: boolean;
+  showBookingAction: boolean;
+  showAiDisclosure: boolean;
+  requireLeadConsent: boolean;
+  privacyNoticeUrl: string;
+  retentionDays: number;
+}
+
 interface WorkspaceStats {
   conversations: number;
   leads: number;
@@ -282,7 +321,7 @@ interface WorkspacePayload {
   slug: string;
   status: string;
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
-  agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean };
+  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean };
   suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; openGaps: number; pendingSources?: number; failedSources?: number } };
@@ -384,6 +423,26 @@ interface AdminOrganizationDetail {
   }>;
 }
 
+interface AdminBusinessDetail {
+  organization: AdminOrganizationDetail["organization"];
+  business: {
+    id: string;
+    name: string;
+    slug: string;
+    websiteUrl: string;
+    location: string;
+    ownershipStatus: string;
+    billingStatus: string;
+    planKey: string;
+    sourceCount: number;
+    chunkCount: number;
+    conversationCount: number;
+    leadCount: number;
+    updatedAt: string | null;
+  };
+  owners: Array<{ email: string; name: string; role: string }>;
+}
+
 interface AdminUser {
   id: string;
   email: string;
@@ -417,7 +476,64 @@ interface AdminDemoRequest {
   lastValidationFailedAt: string | null;
 }
 
-type AdminSection = "overview" | "organizations" | "organization-detail" | "users" | "demos" | "operations";
+interface MessagingTemplate {
+  templateKey: string;
+  name: string;
+  description: string;
+  category: "transactional" | "operational" | "account";
+  subject: string;
+  previewText: string;
+  heading: string;
+  body: string;
+  ctaLabel: string | null;
+  ctaUrl: string | null;
+  footer: string;
+  variables: string[];
+  status: "draft" | "active" | "disabled";
+  version: number;
+  updatedByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface MessagingAutomation {
+  id: string;
+  automationKey: string;
+  templateKey: string;
+  templateName: string;
+  eventType: string;
+  delaySeconds: number;
+  recipientScope: string;
+  conditions: Record<string, unknown>;
+  mandatory: boolean;
+  enabled: boolean;
+  updatedAt: string | null;
+}
+
+interface MessagingDelivery {
+  id: string;
+  templateKey: string;
+  templateName: string;
+  eventType: string;
+  businessName: string | null;
+  recipientEmail: string;
+  status: string;
+  attempts: number;
+  scheduledAt: string | null;
+  sentAt: string | null;
+  deliveredAt: string | null;
+  failedAt: string | null;
+  failureReason: string | null;
+  providerMessageId: string | null;
+}
+
+interface MessagingSummary {
+  last24Hours: { queued: number; sent: number; deferred: number; failed: number };
+  templates: { active: number; total: number };
+  provider: { name: string; configured: boolean };
+}
+
+type AdminSection = PlatformRouteSection;
 
 interface AdminHealthSnapshot {
   api: "healthy" | "degraded" | "down";
@@ -428,10 +544,93 @@ interface AdminHealthSnapshot {
   checkedAt: string;
 }
 
-const view = ref<View>("home");
+const route = ref<AppRoute>(parseRoute());
+const view = computed<View>({
+  get: () => routeView(route.value) as View,
+  set: (nextView) => navigateToView(nextView),
+});
 const apiOrigin = String(import.meta.env.VITE_API_ORIGIN ?? "").replace(/\/$/, "");
 function apiUrl(path: string): string {
   return `${apiOrigin}${path}`;
+}
+
+const feedbackToasts = ref<AppToast[]>([]);
+const globalLoading = ref(false);
+let nextToastId = 0;
+let loadingDepth = 0;
+let loadingStartedAt = 0;
+let loadingHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+function dismissToast(id: number) {
+  feedbackToasts.value = feedbackToasts.value.filter((toast) => toast.id !== id);
+}
+
+function notify(kind: AppToastKind, message: string, title = kind === "error" ? "Something went wrong" : "FrontDeskWise") {
+  const toast: AppToast = { id: ++nextToastId, kind, title, message };
+  feedbackToasts.value = [...feedbackToasts.value.slice(-3), toast];
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => dismissToast(toast.id), kind === "error" ? 6_500 : 4_200);
+  }
+}
+
+function notifySuccess(message: string, title = "Done") {
+  notify("success", message, title);
+}
+
+function notifyError(error: unknown, fallback = "We couldn't complete that request.") {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  notify("error", message || fallback);
+}
+
+function startGlobalLoading() {
+  if (loadingHideTimer) {
+    clearTimeout(loadingHideTimer);
+    loadingHideTimer = null;
+  }
+  loadingDepth += 1;
+  if (loadingDepth === 1) {
+    loadingStartedAt = Date.now();
+    globalLoading.value = true;
+  }
+}
+
+function stopGlobalLoading() {
+  loadingDepth = Math.max(0, loadingDepth - 1);
+  if (loadingDepth || !globalLoading.value) return;
+  const remaining = Math.max(0, 220 - (Date.now() - loadingStartedAt));
+  const hide = () => {
+    loadingHideTimer = null;
+    if (!loadingDepth) globalLoading.value = false;
+  };
+  if (remaining) loadingHideTimer = setTimeout(hide, remaining);
+  else hide();
+}
+
+async function runWithGlobalLoading<T>(task: () => Promise<T>): Promise<T> {
+  startGlobalLoading();
+  try {
+    return await task();
+  } finally {
+    stopGlobalLoading();
+  }
+}
+
+async function trackedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  startGlobalLoading();
+  try {
+    const response = await globalThis.fetch(input, init);
+    if (response.status === 401) {
+      notify("error", "Your session may have expired. Please sign in again.", "Session expired");
+    } else if (response.status >= 500) {
+      notify("error", "The service couldn't complete that request. Please try again.");
+    }
+    return response;
+  } catch (error) {
+    notifyError(error, "We couldn't reach FrontDeskWise. Check your connection and try again.");
+    throw error;
+  } finally {
+    stopGlobalLoading();
+  }
 }
 
 const websiteUrl = ref("");
@@ -445,7 +644,7 @@ const publicDemoMode = ref(false);
 const firebaseToken = ref("");
 const authSnapshot = ref<AuthSnapshot | null>(null);
 const authModalOpen = ref(false);
-const authMode = ref<"signin" | "signup">("signin");
+const authMode = ref<"signin" | "signup" | "forgot">("signin");
 const authEmail = ref("");
 const authPassword = ref("");
 const authOrganizationName = ref("");
@@ -455,12 +654,18 @@ const businessName = ref("");
 const businessLocation = ref("");
 const assistantName = ref("AI Front Desk");
 const welcomeMessage = ref("Hi! I can answer questions from this business's website and help you get started.");
+const agentTone = ref<"friendly" | "professional" | "concise" | "custom">("friendly");
+const primaryLanguage = ref("English");
+const fallbackBehavior = ref<"contact_form" | "human" | "unavailable">("contact_form");
+const humanHandoffEnabled = ref(true);
 const widgetColor = ref("#0d6efd");
 const showLeadCapture = ref(true);
 const showBookingAction = ref(true);
 const widgetDefaultMode = ref<"compact" | "expanded" | "fullscreen">("compact");
 const widgetAllowExpand = ref(true);
 const widgetLogoUrl = ref("");
+const widgetTheme = ref<"light" | "dark" | "auto">("auto");
+const widgetPosition = ref<"bottom-right" | "bottom-left">("bottom-right");
 const widgetQuickActions = ref<WidgetQuickAction[]>([
   { label: "Explore services", question: "What services do you offer?" },
   { label: "Pricing", question: "What does pricing look like?" },
@@ -556,7 +761,17 @@ const actionsError = ref("");
 const actionsMessage = ref("");
 const selectedActionId = ref("");
 const actionDraft = ref<ActionFlow | null>(null);
+const actionConnectorProvider = computed(() => actionDraft.value?.completion.connector?.provider ?? "none");
+const activeActionIntegrations = computed(() => integrations.value.filter((integration) => integration.connectionStatus === "active"
+  && ((actionConnectorProvider.value === "generic_webhook" && integration.provider === "webhook")
+    || (actionConnectorProvider.value === "hubspot" && integration.provider === "hubspot"))));
 const actionTriggerText = ref("");
+const actionTriggerPhraseInput = ref("");
+const actionEditorStage = ref<ActionEditorStage>("trigger");
+const actionTemplateChooserOpen = ref(false);
+const actionFieldDrawerIndex = ref<number | null>(null);
+const actionAdvancedOpen = ref(false);
+const draggedActionFieldIndex = ref<number | null>(null);
 const billingSnapshot = ref<BillingSnapshot | null>(null);
 const billingLoading = ref(false);
 const billingError = ref("");
@@ -589,12 +804,27 @@ const adminSection = ref<AdminSection>("overview");
 const adminHealth = ref<AdminHealthSnapshot | null>(null);
 const adminOrganizationDetail = ref<AdminOrganizationDetail | null>(null);
 const adminOrganizationDetailLoading = ref(false);
+const adminBusinessDetail = ref<AdminBusinessDetail | null>(null);
+const adminBusinessDetailLoading = ref(false);
 const adminBillingMessage = ref("");
 const adminOverridePlanKey = ref("starter");
 const adminOverrideInterval = ref<"month" | "year">("month");
 const adminOverrideAmountCents = ref("9900");
 const adminOverrideMaxBusinesses = ref("1");
 const adminOverrideReason = ref("");
+const messagingTemplates = ref<MessagingTemplate[]>([]);
+const messagingAutomations = ref<MessagingAutomation[]>([]);
+const messagingDeliveries = ref<MessagingDelivery[]>([]);
+const messagingSummary = ref<MessagingSummary | null>(null);
+const messagingLoading = ref(false);
+const messagingError = ref("");
+const messagingMessage = ref("");
+const selectedMessagingTemplateKey = ref("");
+const messagingTemplateDraft = ref<MessagingTemplate | null>(null);
+const messagingDeliveryFilter = ref("all");
+const messagingTestRecipient = ref("");
+const messagingTestLoading = ref(false);
+const messagingTab = ref<"templates" | "automations" | "delivery" | "settings">("templates");
 const featuredDemos = ref<FeaturedDemo[]>([]);
 const workspaceStats = ref<WorkspaceStats | null>(null);
 const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
@@ -638,6 +868,10 @@ const teamInviteRole = ref<"staff" | "viewer" | "admin">("staff");
 const staffNotifications = ref<StaffNotification[]>([]);
 const notificationUnreadCount = ref(0);
 const notificationMenuOpen = ref(false);
+const notificationPreferences = ref({ newLead: true, humanHandoff: true, integrationFailure: true });
+const notificationPreferencesLoading = ref(false);
+const notificationPreferencesMessage = ref("");
+const notificationPreferencesError = ref("");
 const embeddingLoading = ref(false);
 const embeddingMessage = ref("");
 
@@ -666,6 +900,7 @@ const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
   { id: "team", label: "Team" },
   { id: "integrations", label: "Integrations" },
   { id: "verification", label: "Verification" },
+  { id: "notifications", label: "Notifications" },
   { id: "billing", label: "Billing" },
 ];
 
@@ -682,7 +917,15 @@ const adminNavItems: Array<{ id: AdminSection; label: string; icon: string }> = 
   { id: "organizations", label: "Organizations", icon: "▦" },
   { id: "users", label: "Users & access", icon: "♧" },
   { id: "demos", label: "Demo operations", icon: "✦" },
+  { id: "messaging", label: "Messaging", icon: "✉" },
   { id: "operations", label: "System health", icon: "◒" },
+];
+
+const messagingTabs: Array<{ id: "templates" | "automations" | "delivery" | "settings"; label: string }> = [
+  { id: "templates", label: "Templates" },
+  { id: "automations", label: "Automations" },
+  { id: "delivery", label: "Delivery" },
+  { id: "settings", label: "Settings" },
 ];
 
 const pageTitle = computed(() => {
@@ -690,15 +933,18 @@ const pageTitle = computed(() => {
   if (view.value === "privacy") return "Privacy Policy";
   if (view.value === "terms") return "Terms of Service";
   if (view.value === "admin") return "Admin control plane";
-  if (view.value === "conversations") return "Test Agent";
+  if (view.value === "conversations" || view.value === "agent") return "Agent";
   if (view.value === "team" || view.value === "connections" || view.value === "billing") return "Settings";
   return navItems.find((item) => item.id === view.value)?.label ?? "Overview";
 });
 
 const adminOnlyMode = computed(() => Boolean(isSuperAdmin.value && authSnapshot.value && !availableBusinesses.value.length));
 const adminSurfaceMode = computed(() => Boolean(isSuperAdmin.value && authSnapshot.value && view.value === "admin"));
+const routeIsNotFound = computed(() => route.value.kind === "not-found");
 const adminSectionTitle = computed(() => adminSection.value === "organization-detail"
   ? adminOrganizationDetail.value?.organization.name ?? "Organization detail"
+  : adminSection.value === "business-detail"
+    ? adminBusinessDetail.value?.business.name ?? "Business detail"
   : adminNavItems.find((item) => item.id === adminSection.value)?.label ?? "Command center");
 const adminLeadTotal = computed(() => adminOrganizations.value.reduce((total, organization) => total + organization.leadCount, 0));
 const adminConversationTotal = computed(() => adminOrganizations.value.reduce((total, organization) => total + organization.conversationCount, 0));
@@ -710,7 +956,6 @@ const adminDisabledUserCount = computed(() => adminUsers.value.filter((user) => 
 const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== "Booked").length);
 const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
 const availableBusinesses = computed(() => activeOrganization.value?.businesses ?? []);
-const aggregateMetrics = computed(() => activeOrganization.value?.metrics ?? { conversations: 0, leads: 0, bookings: 0 });
 const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "?").toUpperCase());
 const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
 const inboxUnreadCount = computed(() => inboxConversations.value.reduce((total, conversation) => total + (conversation.unreadCount ?? 0), 0));
@@ -752,7 +997,7 @@ const workspaceSelection = computed({
   set: (value: string) => {
     if (value === "__all__") {
       showAllBusinesses.value = true;
-      view.value = "overview";
+      view.value = "businesses";
       return;
     }
     showAllBusinesses.value = false;
@@ -760,9 +1005,174 @@ const workspaceSelection = computed({
   },
 });
 
+const agentModel = computed<AgentSaveModel>(() => ({
+  assistantName: assistantName.value,
+  welcomeMessage: welcomeMessage.value,
+  tone: agentTone.value,
+  primaryLanguage: primaryLanguage.value,
+  fallbackBehavior: fallbackBehavior.value,
+  humanHandoffEnabled: humanHandoffEnabled.value,
+  widgetColor: widgetColor.value,
+  widgetDefaultMode: widgetDefaultMode.value,
+  widgetAllowExpand: widgetAllowExpand.value,
+  widgetLogoUrl: widgetLogoUrl.value,
+  widgetTheme: widgetTheme.value,
+  widgetPosition: widgetPosition.value,
+  widgetQuickActions: widgetQuickActions.value,
+  showLeadCapture: showLeadCapture.value,
+  showBookingAction: showBookingAction.value,
+  showAiDisclosure: showAiDisclosure.value,
+  requireLeadConsent: requireLeadConsent.value,
+  privacyNoticeUrl: privacyNoticeUrl.value,
+  retentionDays: retentionDays.value,
+}));
+
+const agentTestModel = computed(() => ({
+  conversationId: conversationId.value,
+  question: testQuestion.value,
+  answer: testAnswer.value,
+  grounded: answerGrounded.value,
+  citations: answerCitations.value,
+  action: answerAction.value ? {
+    status: answerAction.value.status,
+    form: answerAction.value.form ? {
+      submitLabel: answerAction.value.form.submitLabel,
+      fields: answerAction.value.form.fields,
+    } : undefined,
+  } : null,
+  formValues: answerFormValues.value,
+  suggestedQuestions: suggestedQuestions.value,
+  isAsking: isAsking.value,
+}));
+
 function ownerHeaders(): Record<string, string> {
   const token = firebaseToken.value || demoAccessToken.value;
   return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+function workspaceSlugForRoute(): string {
+  return demoSlug.value || activeOrganization.value?.businesses[0]?.slug || "workspace";
+}
+
+function routeForView(nextView: View): AppRoute {
+  if (nextView === "home") return { kind: "landing" };
+  if (nextView === "privacy" || nextView === "terms") return { kind: "legal", page: nextView };
+  if (nextView === "admin") return platformRoute(
+    adminSection.value,
+    adminSection.value === "organization-detail"
+      ? { organizationId: adminOrganizationDetail.value?.organization.id }
+      : adminSection.value === "business-detail"
+        ? { businessId: adminBusinessDetail.value?.business.id }
+        : {},
+  );
+  if (nextView === "team") return settingsRoute("team");
+  if (nextView === "connections") return settingsRoute("integrations");
+  if (nextView === "billing") return settingsRoute("billing");
+  if (nextView === "settings") return settingsRoute(settingsTab.value);
+  const isAgentSurface = nextView === "agent";
+  const nextAgentTab = nextView === "conversations" ? "test" : isAgentSurface ? agentTab.value : undefined;
+  const canonicalView: WorkspaceView = nextView === "conversations" || isAgentSurface ? "agent" : nextView as WorkspaceView;
+  if (route.value.kind === "demo") return demoRoute(workspaceSlugForRoute(), canonicalView, nextAgentTab ? { agentTab: nextAgentTab } : {});
+  return workspaceRoute(workspaceSlugForRoute(), canonicalView, nextAgentTab ? { agentTab: nextAgentTab } : {});
+}
+
+function commitRoute(nextRoute: AppRoute, replace = false, apply = true) {
+  const nextPath = routePath(nextRoute);
+  if (typeof window !== "undefined") {
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    if (currentPath !== nextPath) {
+      window.history[replace ? "replaceState" : "pushState"]({}, "", nextPath);
+    }
+  }
+  route.value = nextRoute;
+  if (apply) void runWithGlobalLoading(() => applyRouteState(nextRoute));
+}
+
+function navigateToView(nextView: View) {
+  commitRoute(routeForView(nextView));
+}
+
+function navigateToAdminSection(section: AdminSection, ids: { organizationId?: string; businessId?: string } = {}) {
+  adminSection.value = section;
+  commitRoute(platformRoute(section, ids));
+}
+
+async function applyRouteState(nextRoute: AppRoute) {
+  if (nextRoute.kind === "auth") {
+    publicDemoMode.value = false;
+    openAuth(nextRoute.mode, false);
+    return;
+  }
+  if (nextRoute.kind === "auth-callback") {
+    publicDemoMode.value = false;
+    if (!authSnapshot.value) openAuth("signin", false);
+    return;
+  }
+  if (nextRoute.kind === "legal" || nextRoute.kind === "landing") {
+    publicDemoMode.value = false;
+    return;
+  }
+  if (nextRoute.kind === "demo-access") return;
+  if (nextRoute.kind === "not-found") {
+    publicDemoMode.value = false;
+    return;
+  }
+  if (nextRoute.kind === "onboarding") {
+    if (!authSnapshot.value) {
+      openAuth("signin", false);
+      return;
+    }
+    publicDemoMode.value = false;
+    if (nextRoute.step === "business" && !availableBusinesses.value.length) openAddBusiness();
+    if (availableBusinesses.value.length && nextRoute.step !== "business" && demoSlug.value !== availableBusinesses.value[0].slug) {
+      demoSlug.value = availableBusinesses.value[0].slug;
+      await loadBusinessWorkspace(demoSlug.value);
+    }
+    return;
+  }
+  if (nextRoute.kind === "platform") {
+    publicDemoMode.value = false;
+    adminSection.value = nextRoute.section;
+    if (!authSnapshot.value) {
+      openAuth("signin", false);
+      return;
+    }
+    if (!isSuperAdmin.value) {
+      commitRoute(routeForView("overview"), true);
+      return;
+    }
+    if (nextRoute.section === "organization-detail" && nextRoute.organizationId) await loadAdminOrganizationDetail(nextRoute.organizationId, false);
+    else if (nextRoute.section === "business-detail" && nextRoute.businessId) await loadAdminBusinessDetail(nextRoute.businessId, false);
+    else {
+      void loadAdminOrganizations();
+      void loadAdminUsers();
+      void loadAdminDemoRequests();
+      void loadAdminMessaging();
+      void loadAdminHealth();
+    }
+    return;
+  }
+  if (nextRoute.kind === "workspace-settings") {
+    publicDemoMode.value = false;
+    settingsTab.value = nextRoute.tab;
+    return;
+  }
+  if (nextRoute.kind === "demo" || nextRoute.kind === "workspace") {
+    const isPublic = nextRoute.kind === "demo";
+    const nextSlug = nextRoute.kind === "demo" ? nextRoute.demoId : nextRoute.businessSlug;
+    if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
+    if (!isPublic && !authSnapshot.value && !demoAccessToken.value) {
+      openAuth("signin", false);
+      return;
+    }
+    const needsReload = demoSlug.value !== nextSlug || publicDemoMode.value !== isPublic || !workspaceStats.value;
+    publicDemoMode.value = isPublic;
+    showAllBusinesses.value = false;
+    demoSlug.value = nextSlug;
+    if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
+    if (needsReload) await loadBusinessWorkspace(nextSlug, isPublic);
+    if (nextRoute.agentTab) void loadWidgetInstall();
+  }
 }
 
 function hydrateSetupDismissal() {
@@ -792,23 +1202,16 @@ function openWorkspaceAttention() {
 
 function selectAgentTab(tab: AgentTab) {
   agentTab.value = tab;
-  if (tab === "test") {
-    view.value = "conversations";
-    return;
-  }
-  if (typeof document === "undefined") return;
-  const formSections = Array.from(document.querySelectorAll<HTMLElement>(".agent-layout .form-section"));
-  const target = tab === "install"
-    ? document.querySelector<HTMLElement>(".install-panel")
-    : formSections[tab === "quick-actions" ? 2 : 0];
-  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  commitRoute(routeForView("agent"));
+  if (tab === "install") void loadWidgetInstall();
 }
 
-function openAuth(mode: "signin" | "signup" = "signin") {
+function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = true) {
   authMode.value = mode;
   authError.value = "";
   authPassword.value = "";
   authModalOpen.value = true;
+  if (syncRoute && (route.value.kind !== "auth" || route.value.mode !== mode)) commitRoute({ kind: "auth", mode });
 }
 
 function openSettingsTab(tab: SettingsTab) {
@@ -864,8 +1267,13 @@ async function bootstrapAccountWithDemoRecovery(start: (demoToken?: string) => P
 
 async function submitAuth() {
   if (!authEmail.value.trim() || authPassword.value.length < 6 || authLoading.value) return;
+  if (authMode.value === "forgot") {
+    await resetPassword();
+    return;
+  }
   authLoading.value = true;
   authError.value = "";
+  startGlobalLoading();
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
     const mode = authMode.value;
@@ -875,10 +1283,14 @@ async function submitAuth() {
     await settleAuthenticatedSession();
     authModalOpen.value = false;
     authPassword.value = "";
+    notifySuccess(mode === "signup" ? "Your workspace is ready." : "You're signed in.", mode === "signup" ? "Account created" : "Welcome back");
   } catch (error) {
-    authError.value = friendlyAuthError(error, "Could not finish sign-in.");
+    const message = friendlyAuthError(error, "Could not finish sign-in.");
+    authError.value = message;
+    notify("error", message, "Sign-in failed");
   } finally {
     authLoading.value = false;
+    stopGlobalLoading();
   }
 }
 
@@ -886,39 +1298,61 @@ async function submitGoogleAuth() {
   if (authLoading.value) return;
   authLoading.value = true;
   authError.value = "";
+  startGlobalLoading();
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
     authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => signInWithGoogleAndBootstrap(demoToken, authOrganizationName.value));
     await settleAuthenticatedSession();
     authModalOpen.value = false;
+    notifySuccess("You're signed in with Google.", "Welcome back");
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    authError.value = message.includes("auth/popup-closed-by-user")
+    const friendlyMessage = message.includes("auth/popup-closed-by-user")
       ? "Google sign-in was cancelled. Try again or use email and password."
       : friendlyAuthError(error, "Could not finish Google sign-in.");
+    authError.value = friendlyMessage;
+    notify("error", friendlyMessage, "Google sign-in failed");
   } finally {
     authLoading.value = false;
+    stopGlobalLoading();
   }
 }
 
 async function signOut() {
-  await signOutFrontDeskWise();
-  forgetDemoAccessToken();
-  authSnapshot.value = null;
-  firebaseToken.value = "";
-  profileMenuOpen.value = false;
-  sidebarAccountMenuOpen.value = false;
-  notificationMenuOpen.value = false;
-  openHome();
+  startGlobalLoading();
+  try {
+    await signOutFrontDeskWise();
+    forgetDemoAccessToken();
+    authSnapshot.value = null;
+    firebaseToken.value = "";
+    profileMenuOpen.value = false;
+    sidebarAccountMenuOpen.value = false;
+    notificationMenuOpen.value = false;
+    openHome();
+    notifySuccess("You have been signed out.", "Signed out");
+  } catch (error) {
+    notify("error", error instanceof Error ? error.message : "Could not sign you out. Please try again.", "Sign-out failed");
+  } finally {
+    stopGlobalLoading();
+  }
 }
 
 async function resetPassword() {
+  if (authLoading.value) return;
+  authLoading.value = true;
   authError.value = "";
+  startGlobalLoading();
   try {
     await sendFrontDeskWisePasswordReset(authEmail.value);
     authError.value = "Password reset instructions sent. Check your inbox.";
+    notifySuccess("Check your inbox for password recovery instructions.", "Email sent");
   } catch (error) {
-    authError.value = error instanceof Error ? error.message : "Could not send password reset instructions.";
+    const message = error instanceof Error ? error.message : "Could not send password reset instructions.";
+    authError.value = message;
+    notify("error", message, "Password reset failed");
+  } finally {
+    authLoading.value = false;
+    stopGlobalLoading();
   }
 }
 
@@ -934,9 +1368,15 @@ function clearWorkspaceState() {
   websiteUrl.value = "";
   assistantName.value = "AI Front Desk";
   welcomeMessage.value = "Hi! I can answer questions from this business's website and help you get started.";
+  agentTone.value = "friendly";
+  primaryLanguage.value = "English";
+  fallbackBehavior.value = "contact_form";
+  humanHandoffEnabled.value = true;
   widgetDefaultMode.value = "compact";
   widgetAllowExpand.value = true;
   widgetLogoUrl.value = "";
+  widgetTheme.value = "auto";
+  widgetPosition.value = "bottom-right";
   widgetQuickActions.value = [
     { label: "Explore services", question: "What services do you offer?" },
     { label: "Pricing", question: "What does pricing look like?" },
@@ -983,8 +1423,14 @@ function clearWorkspaceState() {
   actionTemplates.value = [];
   actionDeliveries.value = [];
   selectedActionId.value = "";
-  actionDraft.value = null;
+  actionDraft.value = null as unknown as ActionFlow;
   actionTriggerText.value = "";
+  actionTriggerPhraseInput.value = "";
+  actionEditorStage.value = "trigger";
+  actionTemplateChooserOpen.value = false;
+  actionFieldDrawerIndex.value = null;
+  actionAdvancedOpen.value = false;
+  draggedActionFieldIndex.value = null;
   actionsError.value = "";
   actionsMessage.value = "";
   widgetInstall.value = null;
@@ -1010,12 +1456,18 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   websiteUrl.value = payload.business?.websiteUrl ?? "";
   assistantName.value = payload.agent?.assistantName ?? (businessName.value ? `${businessName.value} Assistant` : "AI Front Desk");
   welcomeMessage.value = payload.agent?.welcomeMessage ?? "Hi! I can answer questions from this business's website and help you get started.";
+  agentTone.value = payload.agent?.tone ?? "friendly";
+  primaryLanguage.value = payload.agent?.primaryLanguage ?? "English";
+  fallbackBehavior.value = payload.agent?.fallbackBehavior ?? "contact_form";
+  humanHandoffEnabled.value = payload.agent?.humanHandoffEnabled ?? true;
   widgetColor.value = payload.agent?.widgetColor ?? "#0d6efd";
   showLeadCapture.value = payload.agent?.collectLeads ?? true;
   showBookingAction.value = payload.agent?.showBookingAction ?? true;
   widgetDefaultMode.value = payload.agent?.widgetDefaultMode ?? "compact";
   widgetAllowExpand.value = payload.agent?.widgetAllowExpand ?? true;
   widgetLogoUrl.value = payload.agent?.widgetLogoUrl ?? "";
+  widgetTheme.value = payload.agent?.widgetTheme ?? "auto";
+  widgetPosition.value = payload.agent?.widgetPosition ?? "bottom-right";
   widgetQuickActions.value = payload.agent?.widgetQuickActions?.length
     ? payload.agent.widgetQuickActions.map((action) => ({ label: action.label, question: action.question }))
     : (payload.suggestedQuestions ?? []).slice(0, 4).map((question) => ({ label: question.slice(0, 48), question }));
@@ -1043,7 +1495,7 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
   clearWorkspaceState();
   try {
     const endpoint = publicOnly ? `/api/v1/demo/${slug}/public` : `/api/v1/demo/${slug}`;
-    const response = await fetch(apiUrl(endpoint), { headers: publicOnly ? {} : ownerHeaders() });
+    const response = await trackedFetch(apiUrl(endpoint), { headers: publicOnly ? {} : ownerHeaders() });
     const payload = await response.json() as WorkspacePayload & { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load this workspace.");
     applyWorkspacePayload(payload);
@@ -1060,7 +1512,7 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
 async function refreshWorkspaceSummary() {
   if (!demoSlug.value || (!firebaseToken.value && !demoAccessToken.value)) return;
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}`), { headers: ownerHeaders() });
     const payload = await response.json() as WorkspacePayload;
     if (!response.ok) return;
     workspaceStats.value = payload.stats ?? null;
@@ -1083,7 +1535,7 @@ async function refreshAuthenticatedSnapshot() {
 
 async function loadFeaturedDemos() {
   try {
-    const response = await fetch(apiUrl("/api/v1/demo-catalog"));
+    const response = await trackedFetch(apiUrl("/api/v1/demo-catalog"));
     const payload = await response.json() as { demos?: FeaturedDemo[] };
     if (response.ok) featuredDemos.value = payload.demos ?? [];
   } catch {
@@ -1095,21 +1547,34 @@ async function openPublicDemo(slug = featuredDemo.value?.slug ?? demoSlug.value)
   if (!slug) return;
   demoSlug.value = slug;
   showAllBusinesses.value = false;
-  view.value = "overview";
+  commitRoute(demoRoute(slug), false, false);
   await loadBusinessWorkspace(slug, true);
 }
 
 async function selectBusiness(slug: string) {
   if (!slug) return;
+  const nextView = view.value;
   publicDemoMode.value = false;
   showAllBusinesses.value = false;
   demoSlug.value = slug;
+  // Keep control-plane and onboarding deep links stable while the session
+  // hydrates. Workspace selection should only rewrite a workspace route.
+  if (!["workspace-settings", "platform", "onboarding"].includes(route.value.kind)) {
+    const nextWorkspaceView: WorkspaceView = nextView === "conversations"
+      ? "agent"
+      : nextView === "admin" || nextView === "home" || nextView === "privacy" || nextView === "terms"
+        ? "overview"
+        : nextView as WorkspaceView;
+    const options = nextWorkspaceView === "agent" ? { agentTab: agentTab.value } : {};
+    commitRoute(workspaceRoute(slug, nextWorkspaceView, options), false, false);
+  }
   await loadBusinessWorkspace(slug);
 }
 
 async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolean> {
   const organization = snapshot.organizations.find((item) => item.id === snapshot.activeOrganizationId) ?? snapshot.organizations[0];
-  const preferred = organization?.businesses.find((business) => business.slug === demoSlug.value)
+  const requestedSlug = route.value.kind === "workspace" ? route.value.businessSlug : demoSlug.value;
+  const preferred = organization?.businesses.find((business) => business.slug === requestedSlug)
     ?? snapshot.organizations.flatMap((item) => item.businesses).find((business) => business.slug === demoSlug.value)
     ?? organization?.businesses[0]
     ?? snapshot.organizations[0]?.businesses[0];
@@ -1130,14 +1595,16 @@ async function settleAuthenticatedSession(): Promise<void> {
   if (hasBusiness) await loadBilling();
   if (isSuperAdmin.value && (isPlatformRoute() || !hasBusiness)) await loadAdminOrganizations();
   if (isSuperAdmin.value && !hasBusiness) {
-    adminSection.value = "overview";
-    view.value = "admin";
+    navigateToAdminSection("overview");
+    return;
+  }
+  if (!hasBusiness) {
+    commitRoute({ kind: "onboarding", step: "business" }, true);
     return;
   }
   if (isPlatformRoute()) {
     if (isSuperAdmin.value) {
-      adminSection.value = "overview";
-      view.value = "admin";
+      navigateToAdminSection("overview");
     } else {
       openHome();
     }
@@ -1163,7 +1630,7 @@ async function createBusiness() {
   addBusinessError.value = "";
   addBusinessMessage.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/auth/businesses"), {
+    const response = await trackedFetch(apiUrl("/api/v1/auth/businesses"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ websiteUrl: addBusinessUrl.value.trim(), organizationId: authSnapshot.value.activeOrganizationId }),
@@ -1190,11 +1657,36 @@ function scrollToPricing() {
   requestAnimationFrame(() => document.getElementById("pricing")?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
 
+function scrollLandingTo(id: string) {
+  if (view.value !== "home") openHome();
+  requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+}
+
+const heroDemoStep = ref(2);
+const landingDemoSteps = [
+  { label: "Visitor asks", title: "Do you have swim lessons for a 4-year-old?", body: "A real question gets a clear, grounded answer from the business website." },
+  { label: "AI qualifies", title: "Yes — which location works best?", body: "FrontDeskWise asks the next useful question instead of ending the conversation." },
+  { label: "Lead captured", title: "Enrollment request sent to the team", body: "Name, phone, and email are captured while intent is still high." },
+];
+
+const landingIndustries = [
+  { icon: "🏊", name: "Swim school", question: "What class is right for my 5-year-old?", steps: ["Answers from program details", "Asks for location", "Starts enrollment"] },
+  { icon: "✂️", name: "Salon", question: "Can I book a haircut Saturday?", steps: ["Understands service", "Guides to booking", "Captures preference"] },
+  { icon: "❄️", name: "HVAC", question: "My AC stopped working.", steps: ["Qualifies urgency", "Captures ZIP + contact", "Sends service lead"] },
+];
+
+const landingCapabilities = [
+  { icon: "◎", tone: "blue", title: "Answers customers can trust", body: "Uses your website, documents, pricing, policies, and approved business knowledge — and knows when to hand off." },
+  { icon: "↗", tone: "orange", title: "Turns conversations into customers", body: "Captures leads, starts bookings, registrations, quotes, and appointments while visitors are ready to act." },
+  { icon: "◌", tone: "green", title: "Your team stays in control", body: "AI handles routine conversations. Staff can join whenever a customer needs a human." },
+  { icon: "ϟ", tone: "purple", title: "Works with your existing systems", body: "Connect your CRM, booking tools, calendar, email, webhooks, or MCP-powered tools." },
+];
+
 const landingPlans = [
-  { key: "starter", name: "Starter", price: "$99", description: "A grounded AI front desk for one business.", businesses: "1 business", featured: false },
-  { key: "growth", name: "Growth", price: "$199", description: "More volume, routing, and operating visibility.", businesses: "1 business", featured: false },
-  { key: "multi_business", name: "Multi-Business", price: "$349", description: "One organization for up to two businesses.", businesses: "Up to 2 businesses", featured: true },
-  { key: "portfolio", name: "Portfolio", price: "$499", description: "A higher-capacity operating layer for your portfolio.", businesses: "Up to 5 businesses", featured: false },
+  { key: "starter", name: "Starter", price: "$99", description: "A grounded AI front desk for one business.", businesses: "1 business", featured: false, badge: "", bullets: ["AI answers from your website", "Lead capture", "Basic analytics", "Website widget"] },
+  { key: "growth", name: "Growth", price: "$199", description: "More volume, routing, and operating visibility.", businesses: "1 business", featured: false, badge: "", bullets: ["Everything in Starter", "Higher conversation volume", "Advanced actions", "Integrations + team handoff"] },
+  { key: "multi_business", name: "Multi-Business", price: "$349", description: "One organization for up to two businesses.", businesses: "Up to 2 businesses", featured: true, badge: "Built for multi-business owners", bullets: ["Everything in Growth", "Shared team workspace", "Cross-business analytics", "Shared integrations and actions"] },
+  { key: "portfolio", name: "Portfolio", price: "$499", description: "A higher-capacity operating layer for your portfolio.", businesses: "Up to 5 businesses", featured: false, badge: "", bullets: ["Everything in Multi-Business", "Higher usage limits", "Priority support", "Advanced integrations"] },
 ];
 
 async function generateDemo() {
@@ -1202,7 +1694,7 @@ async function generateDemo() {
   isGenerating.value = true;
   generationError.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/demos"), {
+    const response = await trackedFetch(apiUrl("/api/v1/demos"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -1218,8 +1710,9 @@ async function generateDemo() {
       window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.access.accessToken);
     }
     demoSlug.value = payload.slug ?? demoSlug.value;
-    await loadBusinessWorkspace(demoSlug.value);
-    view.value = "overview";
+    const generatedSlug = demoSlug.value;
+    commitRoute(demoRoute(generatedSlug), false, false);
+    await loadBusinessWorkspace(generatedSlug, true);
   } catch (error) {
     generationError.value = error instanceof Error ? error.message : "We could not create that demo yet.";
   } finally {
@@ -1232,7 +1725,7 @@ async function consumeDemoLink() {
   const token = new URLSearchParams(window.location.search).get("demo");
   if (!token) return;
   try {
-    const response = await fetch(apiUrl("/api/v1/demo-access/exchange"), {
+    const response = await trackedFetch(apiUrl("/api/v1/demo-access/exchange"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ accessToken: token }),
@@ -1242,9 +1735,9 @@ async function consumeDemoLink() {
     demoAccessToken.value = payload.accessToken;
     window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.accessToken);
     demoSlug.value = payload.workspace.slug ?? demoSlug.value;
-    await loadBusinessWorkspace(demoSlug.value);
-    view.value = "overview";
-    window.history.replaceState({}, "", window.location.pathname);
+    const exchangedSlug = demoSlug.value;
+    commitRoute(demoRoute(exchangedSlug), true, false);
+    await loadBusinessWorkspace(exchangedSlug, true);
   } catch (error) {
     if (token === demoAccessToken.value) forgetDemoAccessToken();
     generationError.value = error instanceof Error ? error.message : "This demo link is invalid or expired.";
@@ -1262,8 +1755,8 @@ async function loadKnowledge() {
   knowledgeError.value = "";
   try {
     const [gapsResponse, diagnosticsResponse] = await Promise.all([
-      fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps`), { headers: ownerHeaders() }),
-      fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/retrieval-diagnostics`), { headers: ownerHeaders() }),
+      trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps`), { headers: ownerHeaders() }),
+      trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/retrieval-diagnostics`), { headers: ownerHeaders() }),
     ]);
     if (!gapsResponse.ok || !diagnosticsResponse.ok) throw new Error("We could not load the knowledge review. Refresh the page and try again.");
     const gapsPayload = await gapsResponse.json() as { gaps?: KnowledgeGap[] };
@@ -1302,7 +1795,7 @@ async function loadDocuments() {
   try {
     const params = new URLSearchParams({ organizationId: activeOrganization.value.id });
     params.set("businessId", businessId);
-    const response = await fetch(apiUrl(`/api/v1/storage/documents?${params.toString()}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/storage/documents?${params.toString()}`), { headers: ownerHeaders() });
     const payload = await response.json() as { documents?: OrganizationDocument[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load organization documents.");
     organizationDocuments.value = payload.documents ?? [];
@@ -1342,7 +1835,7 @@ async function uploadDocument(event: Event) {
   documentsMessage.value = "";
   try {
     const businessId = selectedBusinessId();
-    const presignResponse = await fetch(apiUrl("/api/v1/storage/documents/presign"), {
+    const presignResponse = await trackedFetch(apiUrl("/api/v1/storage/documents/presign"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -1355,13 +1848,13 @@ async function uploadDocument(event: Event) {
     });
     const presignPayload = await presignResponse.json() as { error?: string; document?: OrganizationDocument; upload?: { url: string; headers: Record<string, string> } };
     if (!presignResponse.ok || !presignPayload.document || !presignPayload.upload) throw new Error(presignPayload.error ?? "Could not prepare this upload.");
-    const uploadResponse = await fetch(presignPayload.upload.url, {
+    const uploadResponse = await trackedFetch(presignPayload.upload.url, {
       method: "PUT",
       headers: presignPayload.upload.headers,
       body: file,
     });
     if (!uploadResponse.ok) throw new Error("The file could not be uploaded to secure storage.");
-    const completeResponse = await fetch(apiUrl(`/api/v1/storage/documents/${presignPayload.document.id}/complete`), {
+    const completeResponse = await trackedFetch(apiUrl(`/api/v1/storage/documents/${presignPayload.document.id}/complete`), {
       method: "POST",
       headers: ownerHeaders(),
     });
@@ -1380,7 +1873,7 @@ async function uploadDocument(event: Event) {
 
 async function downloadDocument(documentItem: OrganizationDocument) {
   try {
-    const response = await fetch(apiUrl(`/api/v1/storage/documents/${documentItem.id}/download`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/storage/documents/${documentItem.id}/download`), { headers: ownerHeaders() });
     const payload = await response.json() as { url?: string; error?: string };
     if (!response.ok || !payload.url) throw new Error(payload.error ?? "Could not prepare the download.");
     window.open(payload.url, "_blank", "noopener,noreferrer");
@@ -1394,7 +1887,7 @@ async function deleteDocument(documentItem: OrganizationDocument) {
   documentsLoading.value = true;
   documentsError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/storage/documents/${documentItem.id}`), { method: "DELETE", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/storage/documents/${documentItem.id}`), { method: "DELETE", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not remove this document.");
     documentsMessage.value = `${documentItem.fileName} removed.`;
@@ -1410,7 +1903,7 @@ async function deleteDocument(documentItem: OrganizationDocument) {
 async function resolveKnowledgeGap(gap: KnowledgeGap) {
   const approvedAnswer = answerDrafts.value[gap.question]?.trim();
   if (!approvedAnswer) return;
-  const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/resolve`), {
+  const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/resolve`), {
     method: "POST",
     headers: { "content-type": "application/json", ...ownerHeaders() },
     body: JSON.stringify({ question: gap.question, approvedAnswer }),
@@ -1429,7 +1922,7 @@ async function loadWidgetInstall() {
     widgetInstall.value = null;
     return;
   }
-  const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
+  const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
   if (!response.ok) return;
   widgetInstall.value = await response.json() as WidgetInstall;
 }
@@ -1437,7 +1930,7 @@ async function loadWidgetInstall() {
 async function loadOwnershipVerification() {
   if (!firebaseToken.value || !authSnapshot.value) return;
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification`), { headers: ownerHeaders() });
     const payload = await response.json() as { verification?: WorkspacePayload["ownership"] };
     if (response.ok && payload.verification) {
       ownershipVerification.value = payload.verification;
@@ -1454,7 +1947,7 @@ async function requestOwnershipVerification() {
   verificationError.value = "";
   verificationMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification/request`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification/request`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ method: verificationMethod.value }),
@@ -1472,13 +1965,18 @@ async function requestOwnershipVerification() {
   }
 }
 
+function startAgentVerification(method: VerificationMethod) {
+  verificationMethod.value = method;
+  void requestOwnershipVerification();
+}
+
 async function checkOwnershipVerification() {
   if (!firebaseToken.value || !authSnapshot.value || !verificationToken.value.trim() || verificationLoading.value) return;
   verificationLoading.value = true;
   verificationError.value = "";
   verificationMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification/check`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/verification/check`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ token: verificationToken.value.trim() }),
@@ -1505,7 +2003,7 @@ async function loadLeads() {
   leadsLoading.value = true;
   leadsError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads?limit=500`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads?limit=500`), { headers: ownerHeaders() });
     const payload = await response.json() as { leads?: Array<{ id: string; name?: string | null; email?: string | null; phone?: string | null; intent?: string | null; source?: string | null; notes?: string | null; metadata?: Record<string, unknown>; status?: string; createdAt?: string }>; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load leads.");
     leads.value = (payload.leads ?? []).map((lead) => ({
@@ -1535,7 +2033,7 @@ async function loadInbox() {
     if (inboxStatusFilter.value !== "all") params.set("status", inboxStatusFilter.value);
     if (inboxAssignmentFilter.value === "mine" && authSnapshot.value?.user.id) params.set("assignedTo", authSnapshot.value.user.id);
     const query = params.toString() ? `?${params.toString()}` : "";
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/inbox${query}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/inbox${query}`), { headers: ownerHeaders() });
     const payload = await response.json() as { error?: string; conversations?: InboxConversation[] };
     if (!response.ok) throw new Error(payload.error ?? "Could not load the inbox.");
     inboxConversations.value = payload.conversations ?? [];
@@ -1553,7 +2051,7 @@ async function loadInbox() {
 async function loadNotifications() {
   if (!firebaseToken.value && !demoAccessToken.value) return;
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/notifications?limit=30`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/notifications?limit=30`), { headers: ownerHeaders() });
     const payload = await response.json() as { notifications?: StaffNotification[]; unreadCount?: number };
     if (response.ok) {
       staffNotifications.value = payload.notifications ?? [];
@@ -1564,16 +2062,66 @@ async function loadNotifications() {
   }
 }
 
+function activeBusinessIdForPreferences(): string | null {
+  return availableBusinesses.value.find((business) => business.slug === demoSlug.value)?.id ?? availableBusinesses.value[0]?.id ?? null;
+}
+
+async function loadNotificationPreferences() {
+  if (!authSnapshot.value) return;
+  const businessId = activeBusinessIdForPreferences();
+  if (!businessId) return;
+  notificationPreferencesError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/messaging/preferences?businessId=${encodeURIComponent(businessId)}`), { headers: ownerHeaders() });
+    const payload = await response.json() as { preferences?: typeof notificationPreferences.value; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load notification preferences.");
+    if (payload.preferences) notificationPreferences.value = payload.preferences;
+  } catch (error) {
+    notificationPreferencesError.value = error instanceof Error ? error.message : "Could not load notification preferences.";
+  }
+}
+
+async function saveNotificationPreferences() {
+  if (!authSnapshot.value || notificationPreferencesLoading.value) return;
+  const businessId = activeBusinessIdForPreferences();
+  if (!businessId) return;
+  notificationPreferencesLoading.value = true;
+  notificationPreferencesMessage.value = "";
+  notificationPreferencesError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/messaging/preferences"), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ businessId, ...notificationPreferences.value }),
+    });
+    const payload = await response.json() as { preferences?: typeof notificationPreferences.value; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not save notification preferences.");
+    if (payload.preferences) notificationPreferences.value = payload.preferences;
+    notificationPreferencesMessage.value = "Notification preferences saved.";
+  } catch (error) {
+    notificationPreferencesError.value = error instanceof Error ? error.message : "Could not save notification preferences.";
+  } finally {
+    notificationPreferencesLoading.value = false;
+  }
+}
+
+function toggleNotifications() {
+  if (!authSnapshot.value) return;
+  notificationMenuOpen.value = !notificationMenuOpen.value;
+  profileMenuOpen.value = false;
+  if (notificationMenuOpen.value && !staffNotifications.value.length) void loadNotifications();
+}
+
 async function markNotificationRead(notification: StaffNotification) {
   if (notification.readAt) return;
-  await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/notifications/${notification.id}/read`), { method: "POST", headers: ownerHeaders() });
+  await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/notifications/${notification.id}/read`), { method: "POST", headers: ownerHeaders() });
   notification.readAt = new Date().toISOString();
   notificationUnreadCount.value = Math.max(0, notificationUnreadCount.value - 1);
 }
 
 async function openInboxConversation(conversation: InboxConversation) {
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}`), { headers: ownerHeaders() });
     const payload = await response.json() as { error?: string; conversation?: InboxConversation };
     if (!response.ok || !payload.conversation) throw new Error(payload.error ?? "Could not open this conversation.");
     selectedInboxConversation.value = payload.conversation;
@@ -1589,7 +2137,7 @@ async function inboxMutation(path: string, body?: Record<string, unknown>) {
   inboxActionLoading.value = true;
   inboxError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}${path}`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}${path}`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1641,7 +2189,7 @@ async function suggestInboxReply() {
   inboxActionLoading.value = true;
   inboxError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${selectedInboxConversation.value.id}/ai-assist`), { method: "POST", headers: { "content-type": "application/json", ...ownerHeaders() } });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${selectedInboxConversation.value.id}/ai-assist`), { method: "POST", headers: { "content-type": "application/json", ...ownerHeaders() } });
     const payload = await response.json() as { error?: string; suggestion?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not prepare an AI suggestion.");
     inboxSuggestion.value = payload.suggestion ?? "";
@@ -1658,7 +2206,7 @@ async function loadTeam() {
   teamLoading.value = true;
   teamError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/team`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/team`), { headers: ownerHeaders() });
     const payload = await response.json() as { error?: string; members?: TeamMember[]; businesses?: Array<{ id: string; name: string; slug: string }> };
     if (!response.ok) throw new Error(payload.error ?? "Could not load the team.");
     teamMembers.value = payload.members ?? [];
@@ -1676,7 +2224,7 @@ async function inviteTeamMember() {
   teamError.value = "";
   teamMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/team/invite`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/team/invite`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ email: teamInviteEmail.value.trim(), name: teamInviteName.value.trim() || undefined, role: teamInviteRole.value, businessIds: [selectedBusinessId()] }),
@@ -1699,7 +2247,7 @@ async function updateTeamMember(member: TeamMember, role: TeamMember["role"]) {
   teamLoading.value = true;
   teamError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/team/${member.id}`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/team/${member.id}`), {
       method: "PATCH",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ role, businessIds: member.businessIds.length ? member.businessIds : [selectedBusinessId()] }),
@@ -1735,7 +2283,7 @@ async function saveLeadDetail() {
   leadDetailLoading.value = true;
   leadsError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads/${selectedLead.value.id}`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads/${selectedLead.value.id}`), {
       method: "PATCH",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ status: leadDetailStatus.value.toLowerCase(), notes: leadDetailNotes.value }),
@@ -1760,7 +2308,7 @@ async function deleteLead() {
   leadDetailLoading.value = true;
   leadsError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads/${selectedLead.value.id}`), { method: "DELETE", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads/${selectedLead.value.id}`), { method: "DELETE", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not delete this lead.");
     leads.value = leads.value.filter((lead) => lead.id !== selectedLead.value?.id);
@@ -1804,7 +2352,7 @@ async function recrawlSource(source: WorkspaceSource) {
   sourceActionMessage.value = "";
   knowledgeError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/sources/${source.id}/recrawl`), { method: "POST", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/sources/${source.id}/recrawl`), { method: "POST", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string; sourceCount?: number };
     if (!response.ok) throw new Error(payload.error ?? "Could not refresh website knowledge.");
     sourceActionMessage.value = `Website refreshed · ${payload.sourceCount ?? 0} pages available`;
@@ -1827,7 +2375,7 @@ async function deleteSource(source: WorkspaceSource) {
   sourceActionMessage.value = "";
   knowledgeError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/sources/${source.id}`), { method: "DELETE", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/sources/${source.id}`), { method: "DELETE", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not remove this source.");
     sourceActionMessage.value = `${source.title} removed`;
@@ -1845,7 +2393,7 @@ async function reindexKnowledge() {
   embeddingMessage.value = "";
   knowledgeError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/reindex`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/reindex`), {
       method: "POST",
       headers: ownerHeaders(),
     });
@@ -1865,7 +2413,7 @@ async function loadIntegrations() {
   integrationLoading.value = true;
   integrationError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations`), { headers: ownerHeaders() });
     const payload = await response.json() as { integrations?: Integration[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load integrations.");
     integrations.value = payload.integrations ?? [];
@@ -1881,7 +2429,7 @@ async function loadMcpConnections() {
   mcpLoading.value = true;
   mcpError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections`), { headers: ownerHeaders() });
     const payload = await response.json() as { connections?: McpConnection[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load MCP connections.");
     mcpConnections.value = payload.connections ?? [];
@@ -1901,6 +2449,10 @@ function selectAction(action: ActionFlow | null) {
     selectedActionId.value = "";
     actionDraft.value = null;
     actionTriggerText.value = "";
+    actionTriggerPhraseInput.value = "";
+    actionEditorStage.value = "trigger";
+    actionFieldDrawerIndex.value = null;
+    actionAdvancedOpen.value = false;
     return;
   }
   selectedActionId.value = action.id;
@@ -1912,6 +2464,113 @@ function selectAction(action: ActionFlow | null) {
     field.visibility ??= "visible";
   });
   actionTriggerText.value = action.triggerPhrases.join("\n");
+  actionTriggerPhraseInput.value = "";
+  actionEditorStage.value = "trigger";
+  actionFieldDrawerIndex.value = null;
+  actionAdvancedOpen.value = false;
+}
+
+const actionTriggerPhrases = computed(() => actionTriggerText.value.split("\n").map((item) => item.trim()).filter(Boolean));
+const selectedActionField = computed(() => {
+  if (!actionDraft.value || actionFieldDrawerIndex.value === null) return null;
+  return actionDraft.value.fields[actionFieldDrawerIndex.value] ?? null;
+});
+const actionEditorStageLabels: Array<{ id: ActionEditorStage; label: string; helper: string }> = [
+  { id: "trigger", label: "Trigger", helper: "When it starts" },
+  { id: "qualify", label: "Qualify", helper: "Questions" },
+  { id: "contact", label: "Contact", helper: "Capture style" },
+  { id: "complete", label: "Complete", helper: "Success" },
+  { id: "deliver", label: "Deliver", helper: "Team & systems" },
+];
+
+function actionFunnelFor(action: ActionFlow) {
+  return workspaceStats.value?.conversionFunnels?.find((funnel) => funnel.flowId === action.id || funnel.flowKey === action.key) ?? null;
+}
+
+function actionCompletionRate(action: ActionFlow): number {
+  return actionFunnelFor(action)?.completionRate ?? 0;
+}
+
+function actionDeliveriesFor(action: ActionFlow): ActionDelivery[] {
+  return actionDeliveries.value.filter((delivery) => delivery.actionId === action.id);
+}
+
+function actionStatusLabel(action: ActionFlow): "Active" | "Draft" | "Paused" | "Needs setup" | "Integration error" {
+  const delivery = actionDeliveries.value.find((item) => item.actionId === action.id && item.status === "failed");
+  if (delivery) return "Integration error";
+  if (!action.enabled) return "Paused";
+  if (!action.fields.length || !action.completion.createLead) return "Needs setup";
+  return action.updatedAt === action.createdAt ? "Draft" : "Active";
+}
+
+function actionStatusTone(status: ReturnType<typeof actionStatusLabel>): "active" | "draft" | "paused" | "attention" {
+  if (status === "Active") return "active";
+  if (status === "Paused") return "paused";
+  if (status === "Integration error" || status === "Needs setup") return "attention";
+  return "draft";
+}
+
+function setActionStage(stage: ActionEditorStage) {
+  actionEditorStage.value = stage;
+  actionFieldDrawerIndex.value = null;
+  actionAdvancedOpen.value = false;
+}
+
+function addActionTriggerPhrase() {
+  const phrase = actionTriggerPhraseInput.value.trim();
+  if (!phrase) return;
+  if (!actionTriggerPhrases.value.includes(phrase)) actionTriggerText.value = [...actionTriggerPhrases.value, phrase].join("\n");
+  actionTriggerPhraseInput.value = "";
+}
+
+function removeActionTriggerPhrase(phrase: string) {
+  actionTriggerText.value = actionTriggerPhrases.value.filter((item) => item !== phrase).join("\n");
+}
+
+function setActionIntentDetection(event: Event) {
+  if (!actionDraft.value) return;
+  const enabled = (event.target as HTMLInputElement).checked;
+  if (enabled && !actionDraft.value.triggerIntents.length) actionDraft.value.triggerIntents = ["general"];
+  if (!enabled) actionDraft.value.triggerIntents = [];
+}
+
+function setActionTriggerIntents(event: Event) {
+  if (!actionDraft.value) return;
+  actionDraft.value.triggerIntents = (event.target as HTMLInputElement).value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function selectActionCaptureMode(mode: ActionFlow["captureMode"]) {
+  if (actionDraft.value) actionDraft.value.captureMode = mode;
+}
+
+function openActionField(index: number) {
+  actionFieldDrawerIndex.value = index;
+  actionAdvancedOpen.value = false;
+}
+
+function closeActionField() {
+  actionFieldDrawerIndex.value = null;
+}
+
+function moveSelectedActionField(direction: -1 | 1) {
+  if (actionFieldDrawerIndex.value === null) return;
+  const nextIndex = actionFieldDrawerIndex.value + direction;
+  if (!actionDraft.value || nextIndex < 0 || nextIndex >= actionDraft.value.fields.length) return;
+  moveActionField(actionFieldDrawerIndex.value, direction);
+  actionFieldDrawerIndex.value = nextIndex;
+}
+
+function dragActionField(index: number) {
+  draggedActionFieldIndex.value = index;
+}
+
+function dropActionField(index: number) {
+  const from = draggedActionFieldIndex.value;
+  if (!actionDraft.value || from === null || from === index) return;
+  const [field] = actionDraft.value.fields.splice(from, 1);
+  actionDraft.value.fields.splice(index, 0, field);
+  draggedActionFieldIndex.value = null;
+  actionFieldDrawerIndex.value = null;
 }
 
 function toggleActionNotificationTarget(target: "owner" | "business_team" | "assigned_staff", event: Event) {
@@ -1964,13 +2623,13 @@ async function loadActions() {
   actionsLoading.value = true;
   actionsError.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions"), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions"), { headers: ownerHeaders() });
     const payload = await response.json() as { actions?: ActionFlow[]; templates?: ActionTemplate[]; deliveries?: ActionDelivery[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load conversation flows.");
     actionFlows.value = payload.actions ?? [];
     actionTemplates.value = payload.templates ?? [];
     actionDeliveries.value = payload.deliveries ?? [];
-    const selected = actionFlows.value.find((action) => action.id === selectedActionId.value) ?? actionFlows.value[0] ?? null;
+    const selected = actionFlows.value.find((action) => action.id === selectedActionId.value) ?? null;
     selectAction(selected);
   } catch (error) {
     actionsError.value = error instanceof Error ? error.message : "Could not load conversation flows.";
@@ -1984,7 +2643,7 @@ async function retryActionDelivery(delivery: ActionDelivery) {
   actionsLoading.value = true;
   actionsError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/action-deliveries/${delivery.id}/retry`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/action-deliveries/${delivery.id}/retry`), {
       method: "POST",
       headers: ownerHeaders(),
     });
@@ -2005,14 +2664,16 @@ async function addActionTemplate(template: ActionTemplate) {
   actionsError.value = "";
   actionsMessage.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions"), {
+    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ templateKey: template.key }),
     });
-    const payload = await response.json() as { error?: string };
+    const payload = await response.json() as { error?: string; action?: ActionFlow };
     if (!response.ok) throw new Error(payload.error ?? "Could not add this flow.");
     actionsMessage.value = "Flow added · review the questions before publishing";
+    selectedActionId.value = payload.action?.id ?? "";
+    actionTemplateChooserOpen.value = false;
     await loadActions();
   } catch (error) {
     actionsError.value = error instanceof Error ? error.message : "Could not add this flow.";
@@ -2021,13 +2682,31 @@ async function addActionTemplate(template: ActionTemplate) {
   }
 }
 
+async function addCustomAction() {
+  const now = Date.now();
+  await addActionTemplate({
+    key: `custom_action_${now}`,
+    name: "Custom action",
+    description: "Build a focused customer action from your own questions.",
+    triggerPhrases: ["I need help", "contact me"],
+    triggerIntents: ["general"],
+    captureMode: "auto",
+    fields: [
+      { id: "name", key: "name", label: "Name", type: "text", required: true, visibility: "visible", question: "What’s your name?" },
+      { id: "email", key: "email", label: "Email", type: "email", required: true, visibility: "visible", question: "What email address should we use?" },
+    ],
+    completion: { createLead: true, leadStatus: "new", message: "Thanks — I’ve sent your request to the team.", notifyStaff: true, notifyChannels: ["in_app", "email"], notifyTargets: ["business_team"] },
+    enabled: false,
+  });
+}
+
 async function saveAction() {
   if (!actionDraft.value || actionsLoading.value) return;
   actionsLoading.value = true;
   actionsError.value = "";
   actionsMessage.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions/" + actionDraft.value.id), {
+    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions/" + actionDraft.value.id), {
       method: "PUT",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -2051,7 +2730,7 @@ async function removeAction() {
   actionsLoading.value = true;
   actionsError.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions/" + actionDraft.value.id), {
+    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions/" + actionDraft.value.id), {
       method: "DELETE",
       headers: ownerHeaders(),
     });
@@ -2119,7 +2798,7 @@ async function loadBilling() {
   billingLoading.value = true;
   billingError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/billing?organizationId=${encodeURIComponent(authSnapshot.value.activeOrganizationId ?? "")}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/billing?organizationId=${encodeURIComponent(authSnapshot.value.activeOrganizationId ?? "")}`), { headers: ownerHeaders() });
     const payload = await response.json() as BillingSnapshot & { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load billing.");
     billingSnapshot.value = payload;
@@ -2141,6 +2820,10 @@ function formatLabel(value: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
+function formatTemplateVariable(value: string): string {
+  return `{{${value}}}`;
+}
+
 function formatPlanLabel(value: string): string {
   const labels: Record<string, string> = {
     starter: "Starter",
@@ -2159,7 +2842,7 @@ async function loadAdminOrganizations() {
   if (!authSnapshot.value || adminLoading.value) return;
   adminLoading.value = true;
   try {
-    const response = await fetch(apiUrl("/api/v1/admin/organizations"), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl("/api/v1/admin/organizations"), { headers: ownerHeaders() });
     if (!response.ok) {
       isSuperAdmin.value = false;
       adminError.value = "This account is not authorized for the super-admin control plane.";
@@ -2182,7 +2865,7 @@ async function loadAdminOrganizationDetail(organizationId: string, activate = tr
   adminError.value = "";
   adminBillingMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/admin/organizations/${encodeURIComponent(organizationId)}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/organizations/${encodeURIComponent(organizationId)}`), { headers: ownerHeaders() });
     const payload = await response.json() as AdminOrganizationDetail & { error?: string };
     if (!response.ok || !payload.organization) throw new Error(payload.error ?? "Could not load organization detail.");
     adminOrganizationDetail.value = payload;
@@ -2193,13 +2876,29 @@ async function loadAdminOrganizationDetail(organizationId: string, activate = tr
     adminOverrideMaxBusinesses.value = String(billing.plan.maxBusinesses ?? 1);
     adminOverrideReason.value = billing.override?.reason ?? "";
     if (activate) {
-      adminSection.value = "organization-detail";
-      view.value = "admin";
+      navigateToAdminSection("organization-detail", { organizationId });
     }
   } catch (error) {
     adminError.value = error instanceof Error ? error.message : "Could not load organization detail.";
   } finally {
     adminOrganizationDetailLoading.value = false;
+  }
+}
+
+async function loadAdminBusinessDetail(businessId: string, activate = true) {
+  if (!authSnapshot.value || adminBusinessDetailLoading.value) return;
+  adminBusinessDetailLoading.value = true;
+  adminError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/businesses/${encodeURIComponent(businessId)}`), { headers: ownerHeaders() });
+    const payload = await response.json() as AdminBusinessDetail & { error?: string };
+    if (!response.ok || !payload.business) throw new Error(payload.error ?? "Could not load business detail.");
+    adminBusinessDetail.value = payload;
+    if (activate) navigateToAdminSection("business-detail", { businessId });
+  } catch (error) {
+    adminError.value = error instanceof Error ? error.message : "Could not load business detail.";
+  } finally {
+    adminBusinessDetailLoading.value = false;
   }
 }
 
@@ -2212,8 +2911,8 @@ async function loadAdminHealth() {
   if (!authSnapshot.value) return;
   try {
     const [healthResponse, readyResponse] = await Promise.all([
-      fetch(apiUrl("/health")),
-      fetch(apiUrl("/ready")),
+      trackedFetch(apiUrl("/health")),
+      trackedFetch(apiUrl("/ready")),
     ]);
     const health = await healthResponse.json() as { objectStorageConfigured?: boolean; emailConfigured?: boolean; stripeConfigured?: boolean; storage?: string };
     const ready = await readyResponse.json() as { ok?: boolean; database?: string; objectStorageConfigured?: boolean; emailConfigured?: boolean; stripeConfigured?: boolean };
@@ -2240,7 +2939,7 @@ async function loadAdminHealth() {
 async function loadAdminUsers() {
   if (!authSnapshot.value) return;
   try {
-    const response = await fetch(apiUrl("/api/v1/admin/users?limit=200"), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl("/api/v1/admin/users?limit=200"), { headers: ownerHeaders() });
     if (!response.ok) return;
     const payload = await response.json() as { users?: AdminUser[] };
     adminUsers.value = payload.users ?? [];
@@ -2249,47 +2948,148 @@ async function loadAdminUsers() {
   }
 }
 
+async function loadAdminMessaging(force = false) {
+  if (!authSnapshot.value || (messagingLoading.value && !force)) return;
+  messagingLoading.value = true;
+  messagingError.value = "";
+  try {
+    const filter = messagingDeliveryFilter.value === "all" ? "" : `?status=${encodeURIComponent(messagingDeliveryFilter.value)}`;
+    const [summaryResponse, templatesResponse, automationsResponse, deliveriesResponse] = await Promise.all([
+      trackedFetch(apiUrl("/api/v1/admin/messaging/summary"), { headers: ownerHeaders() }),
+      trackedFetch(apiUrl("/api/v1/admin/messaging/templates"), { headers: ownerHeaders() }),
+      trackedFetch(apiUrl("/api/v1/admin/messaging/automations"), { headers: ownerHeaders() }),
+      trackedFetch(apiUrl(`/api/v1/admin/messaging/deliveries${filter}`), { headers: ownerHeaders() }),
+    ]);
+    const [summary, templates, automations, deliveries] = await Promise.all([
+      summaryResponse.json() as Promise<MessagingSummary & { error?: string }>,
+      templatesResponse.json() as Promise<{ templates?: MessagingTemplate[]; error?: string }>,
+      automationsResponse.json() as Promise<{ automations?: MessagingAutomation[]; error?: string }>,
+      deliveriesResponse.json() as Promise<{ deliveries?: MessagingDelivery[]; error?: string }>,
+    ]);
+    if (!summaryResponse.ok || !templatesResponse.ok || !automationsResponse.ok || !deliveriesResponse.ok) {
+      throw new Error(summary.error ?? templates.error ?? automations.error ?? deliveries.error ?? "Could not load messaging controls.");
+    }
+    messagingSummary.value = summary;
+    messagingTemplates.value = templates.templates ?? [];
+    messagingAutomations.value = automations.automations ?? [];
+    messagingDeliveries.value = deliveries.deliveries ?? [];
+    if (!messagingTemplateDraft.value && messagingTemplates.value.length) selectMessagingTemplate(messagingTemplates.value[0]);
+  } catch (error) {
+    messagingError.value = error instanceof Error ? error.message : "Could not load messaging controls.";
+  } finally {
+    messagingLoading.value = false;
+  }
+}
+
+function selectMessagingTemplate(template: MessagingTemplate) {
+  selectedMessagingTemplateKey.value = template.templateKey;
+  messagingTemplateDraft.value = JSON.parse(JSON.stringify(template)) as MessagingTemplate;
+  messagingMessage.value = "";
+}
+
+async function saveMessagingTemplate() {
+  const template = messagingTemplateDraft.value;
+  if (!template || messagingLoading.value) return;
+  messagingLoading.value = true;
+  messagingError.value = "";
+  messagingMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/messaging/templates/${encodeURIComponent(template.templateKey)}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify(template),
+    });
+    const payload = await response.json() as { template?: MessagingTemplate; error?: string };
+    if (!response.ok || !payload.template) throw new Error(payload.error ?? "Could not save the message template.");
+    messagingMessage.value = "Template saved · a new version is now active";
+    await loadAdminMessaging(true);
+    if (payload.template) selectMessagingTemplate(payload.template);
+  } catch (error) {
+    messagingError.value = error instanceof Error ? error.message : "Could not save the message template.";
+  } finally {
+    messagingLoading.value = false;
+  }
+}
+
+async function updateMessagingAutomation(automation: MessagingAutomation) {
+  if (messagingLoading.value) return;
+  messagingLoading.value = true;
+  messagingError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/messaging/automations/${encodeURIComponent(automation.automationKey)}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ enabled: automation.enabled, delaySeconds: automation.delaySeconds }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not save the automation.");
+    await loadAdminMessaging(true);
+  } catch (error) {
+    messagingError.value = error instanceof Error ? error.message : "Could not save the automation.";
+  } finally {
+    messagingLoading.value = false;
+  }
+}
+
+async function testMessagingTemplate() {
+  const template = messagingTemplateDraft.value;
+  if (!template || messagingTestLoading.value) return;
+  messagingTestLoading.value = true;
+  messagingError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/messaging/templates/${encodeURIComponent(template.templateKey)}/test`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ recipient: messagingTestRecipient.value.trim() || undefined }),
+    });
+    const payload = await response.json() as { recipient?: string; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not send the test message.");
+    messagingMessage.value = `Test message sent to ${payload.recipient ?? "the authenticated admin"}.`;
+  } catch (error) {
+    messagingError.value = error instanceof Error ? error.message : "Could not send the test message.";
+  } finally {
+    messagingTestLoading.value = false;
+  }
+}
+
+async function retryMessagingDelivery(delivery: MessagingDelivery) {
+  if (messagingLoading.value) return;
+  messagingLoading.value = true;
+  messagingError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/messaging/deliveries/${encodeURIComponent(delivery.id)}/retry`), {
+      method: "POST",
+      headers: ownerHeaders(),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not retry the delivery.");
+    await loadAdminMessaging(true);
+  } catch (error) {
+    messagingError.value = error instanceof Error ? error.message : "Could not retry the delivery.";
+  } finally {
+    messagingLoading.value = false;
+  }
+}
+
 function isPlatformRoute(): boolean {
-  return typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") === "/platform";
+  return route.value.kind === "platform";
 }
 
 function legalRoute(): "privacy" | "terms" | null {
-  if (typeof window === "undefined") return null;
-  const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  return path === "/privacy" ? "privacy" : path === "/terms" ? "terms" : null;
+  return route.value.kind === "legal" ? route.value.page : null;
 }
 
 function navigateToAdmin() {
-  if (typeof window !== "undefined" && window.location.pathname !== "/platform") {
-    window.history.pushState({}, "", "/platform");
-  }
   if (isSuperAdmin.value) {
-    adminSection.value = "overview";
-    view.value = "admin";
-    void loadAdminOrganizations();
+    navigateToAdminSection("overview");
   }
   else openAuth("signin");
 }
 
 function handleRouteChange() {
-  if (isPlatformRoute()) {
-    if (isSuperAdmin.value) {
-      view.value = "admin";
-      void loadAdminOrganizations();
-    }
-    else if (authSnapshot.value) openHome();
-    else openAuth("signin");
-    return;
-  }
-  const legal = legalRoute();
-  if (legal) {
-    view.value = legal;
-    return;
-  }
-  if (view.value === "privacy" || view.value === "terms") {
-    view.value = authSnapshot.value ? "overview" : "home";
-  }
-  if (view.value === "admin") view.value = authSnapshot.value ? "overview" : "home";
+  const nextRoute = parseRoute();
+  route.value = nextRoute;
+  void runWithGlobalLoading(() => applyRouteState(nextRoute));
 }
 
 async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string> } | null) {
@@ -2319,7 +3119,7 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
 async function loadAdminDemoRequests() {
   if (!authSnapshot.value) return;
   try {
-    const response = await fetch(apiUrl("/api/v1/admin/demo-requests?limit=100"), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl("/api/v1/admin/demo-requests?limit=100"), { headers: ownerHeaders() });
     if (!response.ok) return;
     const payload = await response.json() as { requests?: AdminDemoRequest[]; summary?: typeof adminDemoSummary.value };
     adminDemoRequests.value = payload.requests ?? [];
@@ -2334,7 +3134,7 @@ async function adminDemoAction(item: AdminDemoRequest, action: "extend" | "reset
   adminLoading.value = true;
   adminError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/admin/demo-requests/${item.id}/${action}`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/demo-requests/${item.id}/${action}`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify(action === "extend" ? { days: 7 } : {}),
@@ -2359,7 +3159,7 @@ async function generateAdminDemoLink() {
   adminLoading.value = true;
   adminError.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/admin/demo-requests"), {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/demo-requests"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -2390,7 +3190,7 @@ async function testAdminEmail() {
   adminEmailTestLoading.value = true;
   adminEmailTestMessage.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/admin/email/test"), {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/email/test"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({}),
@@ -2410,7 +3210,7 @@ async function adminOrganizationAction(organization: AdminOrganization, action: 
   adminLoading.value = true;
   adminError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/admin/organizations/${organization.id}/${action}`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/organizations/${organization.id}/${action}`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify(action === "trial" ? { days: 30 } : {}),
@@ -2454,7 +3254,7 @@ async function saveAdminPlanOverride() {
   adminError.value = "";
   adminBillingMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/admin/organizations/${encodeURIComponent(organizationId)}/plan-override`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/organizations/${encodeURIComponent(organizationId)}/plan-override`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -2484,7 +3284,7 @@ async function approveAdminBusiness(business: AdminOrganizationDetail["businesse
   adminError.value = "";
   adminBillingMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/admin/businesses/${encodeURIComponent(business.id)}/verification/approve`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/businesses/${encodeURIComponent(business.id)}/verification/approve`), {
       method: "POST",
       headers: { ...ownerHeaders() },
     });
@@ -2492,7 +3292,8 @@ async function approveAdminBusiness(business: AdminOrganizationDetail["businesse
     if (!response.ok) throw new Error(payload.error ?? "Could not approve business ownership.");
     adminBillingMessage.value = `${business.name} is now marked verified.`;
     adminLoading.value = false;
-    await refreshAdminOrganizationDetail();
+    if (adminOrganizationDetail.value?.organization.id) await refreshAdminOrganizationDetail();
+    if (adminBusinessDetail.value?.business.id === business.id) await loadAdminBusinessDetail(business.id, false);
   } catch (error) {
     adminError.value = error instanceof Error ? error.message : "Could not approve business ownership.";
   } finally {
@@ -2505,7 +3306,7 @@ async function adminUserAction(user: AdminUser, status: "active" | "disabled") {
   adminLoading.value = true;
   adminError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/admin/users/${user.id}/status`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/users/${user.id}/status`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ status }),
@@ -2525,7 +3326,7 @@ async function startCheckout(plan: BillingPlan) {
   billingLoading.value = true;
   billingError.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/billing/checkout-session"), {
+    const response = await trackedFetch(apiUrl("/api/v1/billing/checkout-session"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ organizationId: authSnapshot.value.activeOrganizationId, planKey: plan.key, interval: "month" }),
@@ -2545,7 +3346,7 @@ async function openBillingPortal() {
   billingLoading.value = true;
   billingError.value = "";
   try {
-    const response = await fetch(apiUrl("/api/v1/billing/portal-session"), {
+    const response = await trackedFetch(apiUrl("/api/v1/billing/portal-session"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ organizationId: authSnapshot.value.activeOrganizationId }),
@@ -2566,7 +3367,7 @@ async function connectIntegration() {
   integrationError.value = "";
   integrationMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -2607,7 +3408,7 @@ async function connectMcpConnection() {
   mcpError.value = "";
   mcpMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -2635,7 +3436,7 @@ async function testMcpConnection(connection: McpConnection) {
   mcpError.value = "";
   mcpMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections/${connection.id}/test`), { method: "POST", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections/${connection.id}/test`), { method: "POST", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "The MCP connection test failed.");
     mcpMessage.value = `${connection.displayName} is healthy · tool list refreshed`;
@@ -2654,7 +3455,7 @@ async function saveMcpPermissions(connection: McpConnection) {
   mcpError.value = "";
   mcpMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections/${connection.id}/tools`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections/${connection.id}/tools`), {
       method: "PATCH",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ allowedTools: connection.tools.filter((tool) => tool.allowed).map((tool) => tool.name) }),
@@ -2675,7 +3476,7 @@ async function disconnectMcpConnection(connection: McpConnection) {
   mcpLoading.value = true;
   mcpError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections/${connection.id}`), { method: "DELETE", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/mcp-connections/${connection.id}`), { method: "DELETE", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not disconnect the MCP server.");
     mcpMessage.value = `${connection.displayName} disconnected`;
@@ -2692,7 +3493,7 @@ async function testIntegration(integration: Integration) {
   integrationError.value = "";
   integrationMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/${integration.id}/test`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/${integration.id}/test`), {
       method: "POST",
       headers: ownerHeaders(),
     });
@@ -2712,7 +3513,7 @@ async function retryIntegration(integration: Integration) {
   integrationLoading.value = true;
   integrationError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/${integration.id}/retry`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/${integration.id}/retry`), {
       method: "POST",
       headers: ownerHeaders(),
     });
@@ -2733,7 +3534,7 @@ async function disconnectIntegration(integration: Integration) {
   integrationError.value = "";
   integrationMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/${integration.id}`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/${integration.id}`), {
       method: "DELETE",
       headers: ownerHeaders(),
     });
@@ -2760,7 +3561,7 @@ async function verifyWidgetInstall() {
   widgetVerificationLoading.value = true;
   widgetVerificationMessage.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/verify`), { method: "POST", headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/verify`), { method: "POST", headers: ownerHeaders() });
     const payload = await response.json() as { verified?: boolean; message?: string; verification?: WidgetInstall["verification"]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not verify the widget installation.");
     if (payload.verification) widgetInstall.value.verification = payload.verification;
@@ -2785,7 +3586,7 @@ async function askQuestion() {
   answerFormValues.value = {};
   try {
     if (!publicDemoMode.value && !conversationId.value) {
-      const conversationResponse = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations`), {
+      const conversationResponse = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations`), {
         method: "POST",
         headers: { "content-type": "application/json", ...ownerHeaders() },
         body: JSON.stringify({ sessionId: `dashboard-${Date.now()}` }),
@@ -2797,7 +3598,7 @@ async function askQuestion() {
     const endpoint = publicDemoMode.value
       ? `/api/v1/demo/${demoSlug.value}/public/test`
       : `/api/v1/demo/${demoSlug.value}/conversations/${conversationId.value}/messages`;
-    const response = await fetch(apiUrl(endpoint), {
+    const response = await trackedFetch(apiUrl(endpoint), {
       method: "POST",
       headers: { "content-type": "application/json", ...(publicDemoMode.value ? {} : ownerHeaders()) },
       body: JSON.stringify({ question: testQuestion.value }),
@@ -2827,7 +3628,7 @@ async function submitActionForm() {
   if (!answerAction.value?.form || !answerAction.value.id || !conversationId.value || isAsking.value) return;
   isAsking.value = true;
   try {
-    const response = await fetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/conversations/" + conversationId.value + "/actions/" + answerAction.value.id + "/submit"), {
+    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/conversations/" + conversationId.value + "/actions/" + answerAction.value.id + "/submit"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ values: answerFormValues.value }),
@@ -2852,7 +3653,7 @@ async function runReadinessEvaluation() {
   evaluationLoading.value = true;
   evaluationError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/evaluation`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/evaluation`), {
       method: "POST",
       headers: { "content-type": "application/json", ...(publicDemoMode.value ? {} : ownerHeaders()) },
       body: JSON.stringify({ limit: 10 }),
@@ -2871,7 +3672,7 @@ async function captureLead() {
   if (!leadEmail.value.trim() && !leadPhone.value.trim()) return;
   leadsError.value = "";
   try {
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads`), {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({
@@ -2896,58 +3697,101 @@ async function captureLead() {
   }
 }
 
-async function saveAgent() {
+async function saveAgent(...args: Array<AgentSaveModel | Event>) {
   if (!requireAccountForPublish()) return;
-  const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/agent-config`), {
+  const model = args[0];
+  const nextModel = model && !(model instanceof Event) ? model : agentModel.value;
+  const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/agent-config`), {
     method: "POST",
     headers: { "content-type": "application/json", ...ownerHeaders() },
     body: JSON.stringify({
-      assistantName: assistantName.value,
-      welcomeMessage: welcomeMessage.value,
-      widgetColor: widgetColor.value,
-      collectLeads: showLeadCapture.value,
-      showBookingAction: showBookingAction.value,
-      widgetDefaultMode: widgetDefaultMode.value,
-      widgetAllowExpand: widgetAllowExpand.value,
-      widgetLogoUrl: widgetLogoUrl.value || null,
-      widgetQuickActions: widgetQuickActions.value,
+      assistantName: nextModel.assistantName,
+      welcomeMessage: nextModel.welcomeMessage,
+      tone: nextModel.tone,
+      primaryLanguage: nextModel.primaryLanguage,
+      fallbackBehavior: nextModel.fallbackBehavior,
+      humanHandoffEnabled: nextModel.humanHandoffEnabled,
+      widgetColor: nextModel.widgetColor,
+      collectLeads: nextModel.showLeadCapture,
+      showBookingAction: nextModel.showBookingAction,
+      widgetDefaultMode: nextModel.widgetDefaultMode,
+      widgetAllowExpand: nextModel.widgetAllowExpand,
+      widgetLogoUrl: nextModel.widgetLogoUrl || null,
+      widgetTheme: nextModel.widgetTheme,
+      widgetPosition: nextModel.widgetPosition,
+      widgetQuickActions: nextModel.widgetQuickActions,
       proactiveEnabled: proactiveEnabled.value,
       proactiveDelaySeconds: proactiveDelaySeconds.value,
       proactiveMessage: proactiveMessage.value,
       proactiveTriggers: proactiveTriggers.value,
-      requireLeadConsent: requireLeadConsent.value,
-      privacyNoticeUrl: privacyNoticeUrl.value || null,
-      retentionDays: retentionDays.value,
-      showAiDisclosure: showAiDisclosure.value,
+      requireLeadConsent: nextModel.requireLeadConsent,
+      privacyNoticeUrl: nextModel.privacyNoticeUrl || null,
+      retentionDays: nextModel.retentionDays,
+      showAiDisclosure: nextModel.showAiDisclosure,
     }),
   });
   savedMessage.value = response.ok ? "Saved · assistant settings updated" : "Could not save the assistant settings";
   window.setTimeout(() => (savedMessage.value = ""), 2600);
 }
 
+function askAgentQuestion(question: string) {
+  testQuestion.value = question;
+  void askQuestion();
+}
+
+function submitAgentAction(values: Record<string, string>) {
+  answerFormValues.value = values;
+  void submitActionForm();
+}
+
+function resetAgentConversation() {
+  conversationId.value = "";
+  testQuestion.value = "";
+  testAnswer.value = "";
+  answerGrounded.value = false;
+  answerCitations.value = [];
+  answerAction.value = null;
+  answerFormValues.value = {};
+}
+
 watch(() => setupDismissalKey.value, hydrateSetupDismissal, { immediate: true });
 
-watch(view, (nextView) => {
+watch(adminSection, (nextSection, previousSection) => {
+  if (nextSection === previousSection || route.value.kind !== "platform" || route.value.section === nextSection) return;
+  commitRoute(platformRoute(nextSection));
+});
+
+watch(view, (nextView, previousView) => {
   if (nextView === "inbox") { void loadInbox(); void loadNotifications(); }
   if (nextView === "team") { settingsTab.value = "team"; void loadTeam(); }
   if (nextView === "knowledge") {
     void loadKnowledge();
     void loadDocuments();
   }
-  if (nextView === "agent") { agentTab.value = "behavior"; void loadWidgetInstall(); }
+  if (nextView === "agent") { void loadWidgetInstall(); }
   if (nextView === "leads") void loadLeads();
   if (nextView === "actions") {
+    if (previousView !== "actions") selectAction(null);
     void loadActions();
     void loadIntegrations();
   }
   if (nextView === "connections") { settingsTab.value = "integrations"; void loadMcpConnections(); }
   if (nextView === "billing") { settingsTab.value = "billing"; void loadBilling(); }
-  if (nextView === "settings" && !["general", "verification"].includes(settingsTab.value)) settingsTab.value = "general";
+  if (nextView === "settings" && settingsTab.value === "notifications") { void loadNotifications(); void loadNotificationPreferences(); }
+  if (nextView === "settings" && !["general", "verification", "notifications"].includes(settingsTab.value)) settingsTab.value = "general";
   if (nextView === "admin") {
     void loadAdminOrganizations();
     void loadAdminUsers();
     void loadAdminDemoRequests();
+    void loadAdminMessaging();
     void loadAdminHealth();
+  }
+});
+
+watch(settingsTab, (nextTab) => {
+  if (nextTab === "notifications") {
+    void loadNotifications();
+    void loadNotificationPreferences();
   }
 });
 
@@ -2961,14 +3805,13 @@ function updateDocumentMetadata() {
   const canonical = document.head.querySelector<HTMLLinkElement>('link[rel="canonical"]');
   if (canonical && typeof window !== "undefined") {
     const siteOrigin = String(import.meta.env.VITE_SITE_ORIGIN ?? window.location.origin).replace(/\/$/, "");
-    canonical.href = `${siteOrigin}${legal ? `/${view.value}` : "/"}`;
+    canonical.href = `${siteOrigin}${landing || legal ? window.location.pathname : "/"}`;
   }
 }
 
 watch(view, updateDocumentMetadata);
 onMounted(() => {
-  const initialLegalRoute = legalRoute();
-  if (initialLegalRoute) view.value = initialLegalRoute;
+  void runWithGlobalLoading(() => applyRouteState(route.value));
   updateDocumentMetadata();
   void loadFeaturedDemos();
   void consumeDemoLink();
@@ -2978,7 +3821,7 @@ onMounted(() => {
       if (isPlatformRoute()) openAuth("signin");
     } else {
       stopFirebaseObserver = observeFirebaseUser((user) => {
-        void restoreAuthenticatedSession(user);
+        void runWithGlobalLoading(() => restoreAuthenticatedSession(user));
       });
     }
   }
@@ -2990,91 +3833,132 @@ onBeforeUnmount(() => {
 });
 
 function openHome() {
-  if (typeof window !== "undefined" && window.location.pathname !== "/") window.history.pushState({}, "", "/");
-  view.value = "home";
+  commitRoute({ kind: "landing" });
 }
 </script>
 
 <template>
-  <main class="app-shell">
-    <section v-if="view === 'home'" class="marketing-shell">
-      <header class="marketing-nav">
+  <main class="app-shell" :aria-busy="globalLoading || authLoading">
+    <section v-if="routeIsNotFound" class="not-found-shell">
+      <div class="not-found-card"><p class="eyebrow">404</p><h1>That page is not available.</h1><p>Check the address or return to FrontDeskWise.</p><button class="primary-button" type="button" @click="openHome">Back to home</button></div>
+    </section>
+    <section v-else-if="view === 'home'" class="marketing-shell landing-page">
+      <header class="marketing-nav landing-nav">
         <button class="brand-mark" type="button" @click="openHome">
           <img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" />
           <span>FrontDesk<span>Wise</span></span>
         </button>
+        <nav class="landing-nav-links" aria-label="Main navigation">
+          <button class="text-button" type="button" @click="scrollLandingTo('how-it-works')">How it works</button>
+          <button class="text-button" type="button" @click="scrollLandingTo('industries')">Use cases</button>
+          <button class="text-button" type="button" @click="scrollToPricing">Pricing</button>
+        </nav>
         <div class="nav-actions">
-            <button class="text-button" type="button" @click="scrollToPricing">Pricing</button>
-            <button class="text-button" type="button" @click="openPublicDemo()">View demo dashboard</button>
+          <button class="text-button landing-demo-nav" type="button" @click="openPublicDemo()">View demo</button>
           <button class="dark-button small" type="button" @click="openAuth('signin')">Sign in</button>
         </div>
       </header>
 
-      <div class="hero-grid">
-        <div class="hero-copy">
+      <div class="landing-hero">
+        <div class="landing-hero-copy">
           <div class="eyebrow"><span class="pulse-dot"></span> AI front desk for local businesses</div>
           <h1>Turn your website into your best front desk.</h1>
-          <p class="hero-subtitle">
-            Answer questions, capture leads, and move visitors toward booking — in minutes, using the information your business already has.
-          </p>
-          <div class="url-form">
+          <p class="landing-hero-subtitle"><strong>Answer every visitor. Capture every opportunity. Move more people toward booking — 24/7.</strong></p>
+          <p class="landing-hero-body">Paste your website. FrontDeskWise learns your services, pricing, policies, and locations and builds an AI front desk in minutes.</p>
+          <div class="url-form landing-url-form">
             <input v-model="websiteUrl" type="url" placeholder="https://yourbusiness.com" aria-label="Business website URL" @keyup.enter="generateDemo" />
             <button class="primary-button" type="button" :disabled="isGenerating" @click="generateDemo">
-              {{ isGenerating ? "Building demo…" : "Generate my AI front desk" }}
-              <span aria-hidden="true">→</span>
+              {{ isGenerating ? "Building demo…" : "Generate my AI front desk" }} <span aria-hidden="true">→</span>
             </button>
           </div>
-          <div class="demo-requester-fields">
+          <div class="demo-requester-fields landing-requester-fields">
             <input v-model="demoRequesterName" type="text" placeholder="Your name (optional)" aria-label="Your name" />
             <input v-model="demoRequesterEmail" type="email" placeholder="Work email (optional)" aria-label="Work email" />
             <span>We’ll log the request and can send a fresh demo link later.</span>
           </div>
           <p v-if="generationError" class="form-error">{{ generationError }}</p>
-          <div class="trust-row"><span>✓ No credit card</span><span>✓ Demo in under 5 minutes</span><span>✓ Built from your website</span></div>
+          <div class="trust-row landing-trust-row"><span>✓ No credit card</span><span>✓ Built from your website</span><span>✓ Ready in minutes</span></div>
         </div>
 
-        <div class="hero-visual">
-          <div class="floating-label label-one">{{ featuredDemo ? `${featuredDemo.stats.leads} leads in demo` : 'Live demo workspace' }}</div>
-          <div class="floating-label label-two">{{ featuredDemo ? `${featuredDemo.knowledge.openGaps} open knowledge gaps` : 'Grounded knowledge' }}</div>
-          <div class="demo-card">
-            <div class="demo-card-top"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="demo-url">{{ featuredDemo?.business.websiteUrl || 'yourbusiness.com' }}</span></div>
-            <div class="demo-site-hero"><span class="demo-badge">AI FRONT DESK · ONLINE</span><h3>More answers.<br />More bookings.</h3><div class="fake-cta">Get started <span>→</span></div></div>
-            <div class="chat-preview">
-              <div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div>
-              <div class="chat-bubble">Hi! I can answer questions, recommend the right service, and help you book.</div>
-              <div class="suggested-question">What should I book for my child? <span>›</span></div>
-              <div class="suggested-question">Do you have weekend availability? <span>›</span></div>
+        <div class="landing-hero-visual">
+          <div class="landing-metric-chip landing-metric-chip-top"><strong>{{ featuredDemo ? featuredDemo.stats.leads : "—" }}</strong><span>leads in sample workspace</span></div>
+          <div class="landing-metric-chip landing-metric-chip-bottom"><strong>{{ featuredDemo ? featuredDemo.stats.bookingClicks : "—" }}</strong><span>booking actions</span></div>
+          <div class="landing-browser">
+            <div class="landing-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="landing-browser-url">{{ featuredDemo?.business.websiteUrl || "yourbusiness.com" }}</span></div>
+            <div class="landing-site-preview">
+              <div class="landing-site-nav"><strong>{{ featuredDemo?.business.name || "Your Business" }}</strong><span>Services &nbsp; About &nbsp; Contact</span></div>
+              <div class="landing-site-content"><span class="landing-site-kicker">WELCOME IN</span><h2>More answers.<br />More bookings.</h2><span>Make it easier for customers to take the next step.</span></div>
+              <div class="landing-widget">
+                <div class="landing-widget-head"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small><span class="online-dot"></span> Online now</small></div><span class="landing-widget-close">×</span></div>
+                <div class="landing-widget-body">
+                  <div class="landing-widget-tabs"><button v-for="(step, index) in landingDemoSteps" :key="step.label" type="button" :class="{ active: heroDemoStep === index }" @click="heroDemoStep = index">{{ index + 1 }}</button></div>
+                  <p class="landing-step-label">{{ landingDemoSteps[heroDemoStep].label }}</p>
+                  <div v-if="heroDemoStep === 0" class="landing-chat-stack"><div class="landing-chat-question">Do you have swim lessons for a 4-year-old?</div><div class="landing-chat-answer">Yes — I can help you find the right class. Which location works best?</div></div>
+                  <div v-else-if="heroDemoStep === 1" class="landing-chat-stack"><div class="landing-chat-question">Tampa Bay. What do I need to get started?</div><div class="landing-chat-answer">I can send an enrollment request to the team. What’s the best way to reach you?</div><div class="landing-choice-row"><span>Tampa Bay</span><span>Weekend classes</span></div></div>
+                  <div v-else class="landing-lead-captured"><div class="landing-check">✓</div><div><strong>Lead captured</strong><span>Enrollment request sent to the team.</span></div></div>
+                  <div class="landing-widget-caption">{{ landingDemoSteps[heroDemoStep].body }}</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      <div v-if="featuredDemos.length" class="featured-demo-links"><span>Preview a sample workspace:</span><button v-for="demo in featuredDemos" :key="demo.slug" type="button" @click="openPublicDemo(demo.slug)">{{ demo.business.name }}</button></div>
+      <div v-if="featuredDemos.length" class="featured-demo-links landing-featured-links"><span>Explore a sample workspace:</span><button v-for="demo in featuredDemos" :key="demo.slug" type="button" @click="openPublicDemo(demo.slug)">{{ demo.business.name }} dashboard →</button></div>
 
-      <section class="proof-strip">
-        <span>One simple loop:</span><strong>Question</strong><i>→</i><strong>Qualification</strong><i>→</i><strong>Action</strong><i>→</i><strong>Lead</strong><i>→</i><strong>Booking</strong>
+      <section id="how-it-works" class="landing-section landing-conversion-section">
+        <div class="landing-section-heading"><p class="eyebrow">The commercial story</p><h2>See what happens after someone visits your website.</h2><p>FrontDeskWise keeps the conversation moving until the visitor gets an answer, takes an action, or reaches your team.</p></div>
+        <div class="landing-conversion-track">
+          <article v-for="(step, index) in ['Question', 'Answer', 'Qualify', 'Capture', 'Book', 'Handoff']" :key="step" class="landing-conversion-step"><span>{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ step }}</strong><small>{{ ['Visitor starts the conversation', 'Grounded reply from your knowledge', 'AI asks the useful next question', 'Contact details stay attached to intent', 'Booking or next step begins', 'A human joins when needed'][index] }}</small></article>
+        </div>
       </section>
-      <section class="benefit-grid">
-        <article><span class="benefit-icon blue">◎</span><h3>Grounded answers</h3><p>It answers from approved business information and knows when to say, “I’m not sure.”</p></article>
-        <article><span class="benefit-icon orange">↗</span><h3>Revenue outcomes</h3><p>Every conversation can become a lead, registration, appointment, or human handoff.</p></article>
-        <article><span class="benefit-icon green">✦</span><h3>Ready in minutes</h3><p>Paste a URL, review the generated agent, and share a personalized demo before you buy.</p></article>
-      </section>
-      <section id="pricing" class="marketing-pricing">
-        <div class="pricing-heading"><div><p class="eyebrow">Simple organization pricing</p><h2>Start with one business. Grow without another login.</h2></div><p>Every plan includes grounded answers, lead capture, and a shared path to booking. Start with a trial—no card required.</p></div>
-        <div class="pricing-grid">
-          <article v-for="plan in landingPlans" :key="plan.key" :class="['pricing-card', { featured: plan.featured }]">
-            <span v-if="plan.featured" class="pricing-badge">Most flexible</span>
-            <h3>{{ plan.name }}</h3><p>{{ plan.description }}</p><strong class="pricing-price">{{ plan.price }}<small>/month</small></strong><span class="pricing-businesses">{{ plan.businesses }}</span>
-            <button class="primary-button small" type="button" @click="openAuth('signup')">Start free trial →</button>
+
+      <section id="industries" class="landing-section landing-industries-section">
+        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">Works where you work</p><h2>Show customers what happens next.</h2></div><p>Real conversations. Clear outcomes. A front desk that feels useful from the first question.</p></div>
+        <div class="landing-industry-grid">
+          <article v-for="industry in landingIndustries" :key="industry.name" class="landing-industry-card">
+            <div class="landing-industry-top"><span class="landing-industry-icon">{{ industry.icon }}</span><span class="landing-industry-tag">{{ industry.name }}</span></div>
+            <p class="landing-industry-question">“{{ industry.question }}”</p>
+            <div class="landing-industry-flow"><span v-for="(step, index) in industry.steps" :key="step"><b>{{ index + 1 }}</b>{{ step }}</span></div>
+            <button class="landing-text-link" type="button" @click="websiteUrl = ''; scrollLandingTo('final-cta')">Build this workflow <span>→</span></button>
           </article>
         </div>
       </section>
 
-      <footer class="marketing-footer">
-        <div><strong>FrontDeskWise</strong><span>FrontDeskWise is a product of Sudo Programmer, Inc.</span></div>
-        <nav aria-label="Footer navigation"><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:hello@frontdeskwise.com">Contact</a></nav>
-        <small>© 2026 Sudo Programmer, Inc. · FrontDeskWise. Built for clearer customer conversations.</small>
-      </footer>
+      <section class="landing-section landing-capabilities-section">
+        <div class="landing-section-heading"><p class="eyebrow">One front desk. More useful conversations.</p><h2>Built for answers, actions, and human judgment.</h2></div>
+        <div class="landing-capability-grid"><article v-for="capability in landingCapabilities" :key="capability.title" class="landing-capability-card"><span :class="['landing-capability-icon', capability.tone]">{{ capability.icon }}</span><h3>{{ capability.title }}</h3><p>{{ capability.body }}</p></article></div>
+      </section>
+
+      <section class="landing-section landing-dashboard-section">
+        <div class="landing-dashboard-copy"><p class="eyebrow">A clearer owner view</p><h2>Know what your AI front desk is doing for the business.</h2><p>See conversations, leads, booking actions, handoffs, and the questions worth adding to your knowledge base.</p><button class="outline-button" type="button" @click="openPublicDemo()">View sample dashboard →</button></div>
+        <div class="landing-dashboard-card">
+          <div class="landing-dashboard-header"><div><span class="landing-dashboard-kicker">OWNER DASHBOARD · SAMPLE WORKSPACE</span><h3>Today</h3></div><span class="landing-live-pill"><i></i> Live view</span></div>
+          <div class="landing-dashboard-metrics"><div><strong>{{ featuredDemo ? featuredDemo.stats.conversations : "—" }}</strong><span>Conversations</span></div><div><strong>{{ featuredDemo ? featuredDemo.stats.leads : "—" }}</strong><span>Leads</span></div><div><strong>{{ featuredDemo ? featuredDemo.stats.bookingClicks : "—" }}</strong><span>Booking actions</span></div><div><strong>{{ featuredDemo ? featuredDemo.stats.handoffs ?? 0 : "—" }}</strong><span>Need your team</span></div></div>
+          <div class="landing-dashboard-bottom"><div class="landing-mini-chart"><div class="landing-mini-chart-head"><strong>Conversation activity</strong><span>Last 7 days</span></div><div class="landing-bars"><i v-for="height in [32, 48, 41, 67, 54, 79, 88]" :key="height" :style="{ height: `${height}%` }"></i></div><div class="landing-chart-labels"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div></div><div class="landing-opportunity"><span class="landing-opportunity-label">TOP OPPORTUNITY</span><strong>17 visitors asked about weekend availability.</strong><p>Add weekend hours to your knowledge.</p><span class="landing-opportunity-action">Knowledge gap →</span></div></div>
+        </div>
+      </section>
+
+      <section class="landing-section landing-setup-section">
+        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">From website to working agent</p><h2>Built from your website. Ready for your review.</h2></div><p>One URL gives you a starting point. You decide what the AI can say, do, and hand off.</p></div>
+        <div class="landing-setup-grid"><div class="landing-setup-steps"><article><span>01</span><div><h3>Paste your URL</h3><p><code>yourbusiness.com</code></p></div></article><article><span>02</span><div><h3>FrontDeskWise learns your business</h3><p>Services, pricing, locations, and policies are organized for review.</p></div></article><article><span>03</span><div><h3>Review and test</h3><p>Ask real questions before anything goes live.</p></div></article><article><span>04</span><div><h3>Add it to your website</h3><p>Install the widget and start capturing the next opportunity.</p></div></article></div><div class="landing-knowledge-card"><div class="landing-knowledge-url">{{ featuredDemo?.business.websiteUrl || "https://yourbusiness.com" }} <span>✓</span></div><div class="landing-knowledge-summary"><strong>Business knowledge ready</strong><span>{{ featuredDemo ? `${featuredDemo.knowledge.sourceCount} sources analyzed` : "Review your sources" }}</span></div><div class="landing-knowledge-list"><span>✓ Services found</span><span>✓ Pricing found</span><span>✓ Locations found</span><span>✓ Policies found</span></div><div class="landing-knowledge-footer"><span>Readiness <strong>{{ featuredDemo?.knowledge.readiness ? `${featuredDemo.knowledge.readiness.score}%` : "Review needed" }}</strong></span><span class="landing-readiness-bar"><i :style="{ width: `${featuredDemo?.knowledge.readiness?.score ?? 0}%` }"></i></span></div></div></div>
+      </section>
+
+      <section class="landing-section landing-handoff-section"><div class="landing-handoff-card"><div class="landing-handoff-conversation"><span class="landing-dashboard-kicker">SAFE HUMAN HANDOFF</span><div class="landing-handoff-message customer"><strong>Customer</strong><p>Can I talk to someone about a custom request?</p></div><div class="landing-handoff-message ai"><strong>AI front desk</strong><p>Absolutely. I’ve notified the team and kept your details with the conversation.</p></div><div class="landing-human-joined"><span>●</span><strong>Sarah joined the conversation</strong><small>Team notified · AI can assist</small></div></div><div class="landing-handoff-copy"><p class="eyebrow">AI + your team</p><h2>Automation should feel helpful, not risky.</h2><p>Let AI handle the routine work while your team keeps the context, the customer, and the final say.</p><button class="landing-text-link" type="button" @click="openAuth('signup')">Start with a safer front desk <span>→</span></button></div></div></section>
+
+      <section class="landing-section landing-integrations-section"><div class="landing-section-heading"><p class="eyebrow">Fits your existing workflow</p><h2>Works with the tools your business already uses.</h2><p>Capture the lead first, then send it into the systems your team already trusts.</p></div><div class="landing-integration-row"><span>CRM</span><span>Booking</span><span>Calendar</span><span>Email</span><span>Zapier</span><span>Make</span><span>HubSpot</span><span>Custom API / MCP</span></div></section>
+
+      <section class="landing-multi-business"><div><p class="eyebrow">One login. Multiple businesses.</p><h2>Grow your portfolio without adding another tool to manage.</h2><p>Keep businesses, teams, actions, and analytics organized in one shared operating layer.</p></div><div class="landing-portfolio-card"><div><span class="landing-portfolio-avatar blue">B</span><strong>British Swim School</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar orange">S</span><strong>Sunset Salon</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar green">A</span><strong>AC Pro Services</strong><small>Connected workspace · shared team</small></div></div></section>
+
+      <section class="landing-section landing-proof-section"><div class="landing-proof-card"><div><p class="eyebrow">Proof that compounds</p><h2>Make the numbers that matter visible.</h2><p>FrontDeskWise is built to show the conversations handled, leads captured, actions completed, and questions your team should improve next.</p></div><div class="landing-proof-stats"><span><strong>{{ featuredDemo ? featuredDemo.stats.conversations : "—" }}</strong><small>conversations</small></span><span><strong>{{ featuredDemo ? featuredDemo.stats.leads : "—" }}</strong><small>leads captured</small></span><span><strong>{{ featuredDemo ? featuredDemo.stats.bookingClicks : "—" }}</strong><small>actions completed</small></span></div></div></section>
+
+      <section id="pricing" class="marketing-pricing landing-pricing"><div class="pricing-heading"><div><p class="eyebrow">Simple organization pricing</p><h2>Start with one business. Grow without another login.</h2></div><p>Every plan includes grounded answers, lead capture, and a shared path to booking. Start with a trial — no card required.</p></div><div class="pricing-grid"><article v-for="plan in landingPlans" :key="plan.key" :class="['pricing-card landing-pricing-card', { featured: plan.featured }]" tabindex="0"><span v-if="plan.badge" class="pricing-badge">{{ plan.badge }}</span><h3>{{ plan.name }}</h3><p>{{ plan.description }}</p><strong class="pricing-price">{{ plan.price }}<small>/month</small></strong><span class="pricing-businesses">{{ plan.businesses }}</span><ul class="landing-plan-bullets"><li v-for="bullet in plan.bullets" :key="bullet">✓ {{ bullet }}</li></ul><button class="primary-button small" type="button" @click="openAuth('signup')">Start free trial →</button></article></div></section>
+
+      <section class="landing-section landing-faq-section"><div class="landing-section-heading"><p class="eyebrow">Questions owners ask</p><h2>A front desk that is easy to understand.</h2></div><div class="landing-faq-list"><details><summary>Does FrontDeskWise make up answers?</summary><p>It answers from the business knowledge you review and can use a fallback or human handoff when the answer is not grounded.</p></details><details><summary>Can my team take over a conversation?</summary><p>Yes. Human handoff keeps the conversation context and notifies the team when a customer needs a person.</p></details><details><summary>Do I need to replace my booking or CRM tools?</summary><p>No. FrontDeskWise is designed to connect to existing booking, CRM, email, webhook, and MCP-powered workflows.</p></details><details><summary>How quickly can I see my own demo?</summary><p>Paste a website URL to generate a starting workspace from your services, policies, locations, and other approved business information.</p></details></div></section>
+
+      <section id="final-cta" class="landing-final-cta"><div><p class="eyebrow">See your own version</p><h2>See what FrontDeskWise can build from your website.</h2><p>Your next customer may already be on the page. Give them a useful next step.</p></div><div class="url-form landing-final-form"><input v-model="websiteUrl" type="url" placeholder="https://yourbusiness.com" aria-label="Business website URL" @keyup.enter="generateDemo" /><button class="primary-button" type="button" :disabled="isGenerating" @click="generateDemo">{{ isGenerating ? "Building…" : "Generate my AI front desk" }} <span aria-hidden="true">→</span></button></div></section>
+
+      <footer class="marketing-footer landing-footer"><div><strong>FrontDeskWise</strong><span>FrontDeskWise is a product of Sudo Programmer, Inc.</span></div><nav aria-label="Footer navigation"><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:hello@frontdeskwise.com">Contact</a></nav><small>© 2026 Sudo Programmer, Inc. · FrontDeskWise. Built for clearer customer conversations.</small></footer>
     </section>
 
     <section v-else-if="view === 'privacy' || view === 'terms'" class="legal-shell">
@@ -3101,7 +3985,7 @@ function openHome() {
       </aside>
 
       <section class="content-area">
-        <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="notificationMenuOpen = true; profileMenuOpen = false">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
+        <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><svg class="notification-bell" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
         <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger compact"><span><strong>Your workspace is read-only</strong><small>· Restore billing to resume publishing</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Restore billing →</button></div>
@@ -3114,14 +3998,44 @@ function openHome() {
           <button v-for="tab in agentTabs" :key="tab.id" type="button" role="tab" :aria-selected="agentTab === tab.id" :class="['agent-tab', { active: agentTab === tab.id }]" @click="selectAgentTab(tab.id)">{{ tab.label }}</button>
         </div>
 
-        <div v-if="view === 'overview' && showAllBusinesses" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Organization overview</p><h2>All businesses</h2><p>One account, one subscription, and a clear view across every business you manage.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
-          <div class="metric-grid aggregate-metric-grid"><article class="metric-card blue-tint"><span class="metric-icon blue">♧</span><strong>{{ aggregateMetrics.leads }}</strong><span>Total leads</span><em>Across all businesses</em></article><article class="metric-card green-tint"><span class="metric-icon green">▣</span><strong>{{ aggregateMetrics.bookings }}</strong><span>Booking actions</span><em>Across all businesses</em></article><article class="metric-card orange-tint"><span class="metric-icon orange">◌</span><strong>{{ aggregateMetrics.conversations }}</strong><span>Conversations</span><em>Last recorded totals</em></article><article class="metric-card purple-tint"><span class="metric-icon purple">▱</span><strong>{{ activeOrganization?.businesses.length ?? 0 }}</strong><span>Businesses</span><em>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }} plan</em></article></div>
-          <article class="panel aggregate-business-panel"><div class="panel-heading"><div><h2>Businesses in {{ activeOrganization?.name ?? 'your organization' }}</h2><p>Switch context without creating another account.</p></div><span class="conversation-status">{{ formatLabel(activeOrganization?.billing.status ?? 'trial') }}</span></div><div class="aggregate-business-list"><div v-for="business in availableBusinesses" :key="business.id" class="aggregate-business-row"><div><strong>{{ business.name }}</strong><small>{{ business.websiteUrl ?? 'Website pending' }}</small></div><span>{{ formatLabel(business.role) }}</span><span class="status-pill qualified">{{ formatPlanLabel(business.planKey) }}</span><button class="outline-button small" type="button" @click="workspaceSelection = business.slug">Open →</button></div></div></article>
-          <article class="panel aggregate-billing-note"><p class="eyebrow">Shared billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }} · {{ activeOrganization?.billing.access.allowed ? 'Access enabled' : 'Read-only access' }}</h2><p>{{ activeOrganization?.billing.access.allowed ? 'All businesses share this organization subscription and its capacity.' : 'Billing needs attention before new businesses or write actions can be added.' }}</p><button class="text-button" type="button" @click="openSettingsTab('billing')">View billing →</button></article>
+        <div v-if="view === 'agent'" class="view-content agent-view-content">
+          <AgentExperience
+            :tab="agentTab"
+            :business-key="demoSlug"
+            :business-name="businessName"
+            :website-url="websiteUrl"
+            :model="agentModel"
+            :saved-message="savedMessage"
+            :auth-ready="Boolean(authSnapshot)"
+            :public-demo-mode="publicDemoMode"
+            :billing-read-only="billingReadOnly"
+            :ownership-status="ownershipVerification?.status ?? null"
+            :install="widgetInstall"
+            :install-message="widgetInstallMessage"
+            :verification-message="widgetVerificationMessage"
+            :verification-loading="widgetVerificationLoading"
+            :verification-method="verificationMethod"
+            :verification-instructions="verificationInstructions"
+            :verification-token="verificationToken"
+            :ownership-message="verificationMessage"
+            :ownership-error="verificationError"
+            :test="agentTestModel"
+            @select-tab="selectAgentTab"
+            @save="saveAgent"
+            @require-auth="openAuth('signup')"
+            @copy-snippet="copyWidgetSnippet"
+            @verify-install="verifyWidgetInstall"
+            @refresh-install="loadWidgetInstall"
+            @start-verification="startAgentVerification"
+            @check-verification="checkOwnershipVerification"
+            @ask-question="askAgentQuestion"
+            @submit-action="submitAgentAction"
+            @reset-conversation="resetAgentConversation"
+            @view-leads="view = 'leads'"
+          />
         </div>
 
-        <div v-else-if="view === 'overview'" class="view-content">
+        <div v-if="view === 'overview'" class="view-content">
           <div v-if="workspaceError" class="panel workspace-message"><strong>Workspace data unavailable</strong><p>{{ workspaceError }}</p><button class="outline-button small" type="button" @click="loadBusinessWorkspace(demoSlug)">Retry</button></div>
           <div v-else-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message"><strong>Your organization is ready</strong><p>Add your first business to crawl its website, create the agent, and start collecting real conversations and leads.</p><button class="primary-button small" type="button" @click="openAddBusiness">+ Add your first business</button></div>
           <template v-else>
@@ -3162,15 +4076,13 @@ function openHome() {
         <div v-else-if="view === 'team'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">People and permissions</p><h2>Team access</h2><p>Invite staff, keep access business-scoped, and see who is active in the inbox.</p></div><span v-if="teamMessage" class="saved-message">✓ {{ teamMessage }}</span></div>
           <p v-if="teamError" class="form-error">{{ teamError }}</p>
-          <article class="panel form-panel"><div class="panel-heading"><div><h2>Invite a team member</h2><p>They can sign in with this email to accept access.</p></div></div><div class="flow-field-grid"><label>Name <span class="optional">optional</span><input v-model="teamInviteName" type="text" placeholder="Alex Morgan" /></label><label>Email<input v-model="teamInviteEmail" type="email" placeholder="alex@business.com" /></label><label>Role<select v-model="teamInviteRole"><option value="staff">Staff</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><div class="toolbar-actions"><button class="primary-button small" type="button" :disabled="teamLoading || !teamInviteEmail.trim()" @click="inviteTeamMember">{{ teamLoading ? 'Inviting…' : 'Send invitation' }}</button><button class="outline-button small" type="button" :disabled="teamLoading" @click="loadTeam">Refresh</button></div></div></article>
-          <article class="panel table-panel"><div class="table-heading"><span>Team member</span><span>Role</span><span>Status</span><span>Last active</span></div><div v-if="!teamMembers.length" class="diagnostics-empty">No team members found.</div><div v-for="member in teamMembers" :key="member.id" class="table-row"><div class="lead-name"><span class="lead-avatar">{{ member.name.charAt(0).toUpperCase() }}</span><span><strong>{{ member.name }}</strong><small>{{ member.email }}</small></span></div><select v-if="member.role !== 'owner'" :value="member.role" :disabled="teamLoading" @change="updateTeamMember(member, String(($event.target as HTMLSelectElement).value) as TeamMember['role'])"><option value="admin">Admin</option><option value="staff">Staff</option><option value="viewer">Viewer</option></select><span v-else class="status-pill booked">Owner</span><span :class="['status-pill', member.status === 'active' ? 'booked' : 'qualified']">{{ member.status }}</span><small>{{ member.lastActiveAt ? new Date(member.lastActiveAt).toLocaleString() : 'Not active yet' }}</small></div></article>
+          <article class="panel form-panel team-invite-panel"><div class="panel-heading"><div><p class="eyebrow">Invite people you trust</p><h2>Invite a team member</h2><p>They can sign in with this email to accept access.</p></div></div><form class="team-invite-form" @submit.prevent="inviteTeamMember"><div class="team-invite-grid"><label>Name <span class="optional">optional</span><input v-model="teamInviteName" type="text" autocomplete="name" placeholder="Alex Morgan" /></label><label>Email<input v-model="teamInviteEmail" type="email" autocomplete="email" required placeholder="alex@business.com" /></label><label>Role<select v-model="teamInviteRole"><option value="staff">Staff</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><div class="toolbar-actions"><button class="primary-button small" type="submit" :disabled="teamLoading || !teamInviteEmail.trim()">{{ teamLoading ? 'Inviting…' : 'Send invitation' }}</button><button class="outline-button small" type="button" :disabled="teamLoading" @click="loadTeam">Refresh</button></div></div></form></article>
+          <article class="panel table-panel team-table-panel"><div class="table-heading team-row"><span>Team member</span><span>Role</span><span>Status</span><span>Last active</span></div><div v-if="!teamMembers.length" class="diagnostics-empty">No team members found.</div><div v-for="member in teamMembers" :key="member.id" class="table-row team-row"><div class="lead-name"><span class="lead-avatar">{{ member.name.charAt(0).toUpperCase() }}</span><span><strong>{{ member.name }}</strong><small>{{ member.email }}</small></span></div><select v-if="member.role !== 'owner'" :value="member.role" :disabled="teamLoading" @change="updateTeamMember(member, String(($event.target as HTMLSelectElement).value) as TeamMember['role'])"><option value="admin">Admin</option><option value="staff">Staff</option><option value="viewer">Viewer</option></select><span v-else class="status-pill booked">Owner</span><span :class="['status-pill', member.status === 'active' ? 'booked' : 'qualified']">{{ member.status }}</span><small>{{ member.lastActiveAt ? new Date(member.lastActiveAt).toLocaleString() : 'Not active yet' }}</small></div></article>
         </div>
 
-        <div v-else-if="view === 'conversations'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Grounded answers</p><h2>Test a conversation</h2><p>Ask a real customer question and check the answer before publishing.</p></div><span v-if="conversationId" class="conversation-status">Conversation active</span></div><div class="conversation-layout"><article class="panel conversation-panel"><div class="conversation-intro"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small>Answers from {{ businessName }} knowledge</small></div></div><div v-if="suggestedQuestions.length" class="suggested-question-list"><span>Try a common question</span><button v-for="suggestion in suggestedQuestions" :key="suggestion" type="button" @click="testQuestion = suggestion; void askQuestion()">{{ suggestion }} <b>›</b></button></div><div v-if="testAnswer" class="answer-card"><div class="answer-meta"><span v-if="answerAction" class="answer-badge grounded">✓ {{ answerAction.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', answerGrounded ? 'grounded' : 'fallback']">{{ answerGrounded ? '✓ Grounded in your business knowledge' : '! Not found in business knowledge' }}</span></div><p>{{ testAnswer }}</p><form v-if="answerAction?.form" class="action-inline-form" @submit.prevent="submitActionForm"><label v-for="field in answerAction.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required" class="optional">optional</span><select v-if="field.type === 'select'" v-model="answerFormValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="answerFormValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label><button class="primary-button small" type="submit" :disabled="isAsking">{{ isAsking ? 'Submitting…' : answerAction.form.submitLabel }}</button></form><div v-if="answerCitations.length" class="answer-citations"><span>Sources ({{ answerCitations.length }})</span><a v-for="citation in answerCitations" :key="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} ↗</a></div></div><div v-else class="conversation-empty">Ask a question to see the answer and its sources.</div><form class="question-form" @submit.prevent="askQuestion"><input v-model="testQuestion" type="text" placeholder="e.g. What services do you offer?" aria-label="Test question" /><button class="primary-button small" type="submit" :disabled="isAsking">{{ isAsking ? 'Checking…' : 'Ask assistant' }}</button></form></article><article class="panel lead-capture-panel"><div class="panel-heading"><div><h2>Capture a lead</h2><p>Submit a contact to verify lead capture.</p></div></div><label>Name<input v-model="leadName" type="text" placeholder="Jamie Rodriguez" /></label><label>Email<input v-model="leadEmail" type="email" placeholder="jamie@company.com" /></label><label>Phone <span class="optional">optional</span><input v-model="leadPhone" type="tel" placeholder="(555) 010-2026" /></label><label>Intent <span class="optional">optional</span><input v-model="leadIntent" type="text" placeholder="Service inquiry" /></label><button class="primary-button" type="button" :disabled="!leadEmail && !leadPhone" @click="captureLead">Save lead →</button><span v-if="leadSavedMessage" class="saved-message">✓ {{ leadSavedMessage }}</span></article></div></div>
 
         <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
 
-        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">AI front desk</p><h2>Agent</h2><p>Configure how your assistant behaves, looks, and converts visitors.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'conversations'">Test agent</button><button class="primary-button small" type="button" @click="saveAgent">{{ authSnapshot ? 'Save & publish' : 'Create account to publish' }}</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Assistant identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Widget behavior</h3><label>Opening size<select v-model="widgetDefaultMode"><option value="compact">Compact</option><option value="expanded">Expanded</option><option value="fullscreen">Full screen</option></select></label><label>Logo URL <span class="optional">optional · HTTPS only</span><input v-model="widgetLogoUrl" type="url" placeholder="https://example.com/logo.png" /></label><label class="toggle-row"><span>Allow visitors to expand the assistant</span><input v-model="widgetAllowExpand" type="checkbox" /></label><p class="form-help">Compact keeps the assistant beside the page. Expanded gives visitors more room for services, forms, and booking flows. On mobile it opens full screen automatically.</p></div><div class="form-section"><h3>Quick actions</h3><p class="form-help">Give visitors useful starting points before they type. Keep the labels short and the questions specific.</p><div class="quick-action-editor"><div v-for="(action, index) in widgetQuickActions" :key="index" class="quick-action-row"><label>Button {{ index + 1 }}<input v-model="action.label" type="text" maxlength="48" placeholder="Pricing" /></label><label>Question <input v-model="action.question" type="text" maxlength="300" placeholder="What does pricing look like?" /></label></div></div></div><div class="form-section"><h3>Proactive engagement</h3><label class="toggle-row"><span>Invite visitors before they click</span><input v-model="proactiveEnabled" type="checkbox" /></label><label>Proactive message<input v-model="proactiveMessage" type="text" maxlength="240" placeholder="Looking for the right service? I can help." /></label><label>Delay<select v-model.number="proactiveDelaySeconds"><option :value="10">10 seconds</option><option :value="20">20 seconds</option><option :value="30">30 seconds</option><option :value="60">60 seconds</option></select></label><div class="trigger-options"><span>Triggers</span><label><input v-model="proactiveTriggers" type="checkbox" value="delay" /> Time on page</label><label><input v-model="proactiveTriggers" type="checkbox" value="scroll" /> 70% scroll</label><label><input v-model="proactiveTriggers" type="checkbox" value="exit" /> Exit intent</label><label><input v-model="proactiveTriggers" type="checkbox" value="returning" /> Returning visitor</label></div><p class="form-help">The prompt appears once per page and respects the visitor’s close action.</p></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><div class="form-section"><h3>Privacy & trust</h3><label class="toggle-row"><span>Show AI assistant disclosure</span><input v-model="showAiDisclosure" type="checkbox" /></label><label class="toggle-row"><span>Require consent before lead capture</span><input v-model="requireLeadConsent" type="checkbox" /></label><label>Privacy notice URL <span class="optional">optional · HTTPS only</span><input v-model="privacyNoticeUrl" type="url" placeholder="https://yourbusiness.com/privacy" /></label><label>Conversation retention<select v-model.number="retentionDays"><option :value="30">30 days</option><option :value="60">60 days</option><option :value="90">90 days</option><option :value="365">1 year</option></select></label><p class="form-help">Consent is shown in the widget before details are sent. Retention controls are stored with this business and prepare the workspace for automated cleanup.</p></div></div></article><article :class="['panel', 'live-preview', { 'mobile-preview': widgetPreviewMode === 'mobile' }]" aria-label="Widget preview"><div class="preview-toolbar"><strong>Preview</strong><div class="preview-mode-toggle"><button type="button" :class="{ active: widgetPreviewMode === 'desktop' }" @click="widgetPreviewMode = 'desktop'">Desktop</button><button type="button" :class="{ active: widgetPreviewMode === 'mobile' }" @click="widgetPreviewMode = 'mobile'">Mobile</button></div></div><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ websiteUrl || 'Your website' }}</span></div><div class="preview-site"><div class="preview-site-nav"><strong>{{ businessName || 'Your business' }}</strong><span>Services　About　FAQs　Contact</span><button>Get started</button></div><div class="preview-site-hero"><div><h2>Help visitors<br />take the next step</h2><p>Grounded answers from {{ businessName || 'your website' }}.</p><button>Explore services →</button></div><div class="fake-swimmer">✦</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><template v-if="widgetQuickActions.length"><div v-for="action in widgetQuickActions.slice(0, 2)" :key="action.label" class="suggested-question">{{ action.label }} <span>›</span></div></template><div v-else class="preview-empty-question">Add quick actions to guide visitors.</div><button v-if="showLeadCapture" class="chat-cta" type="button">Request information</button><div class="chat-input">Ask a question… <span>➤</span></div></div></div></div></article></div><article class="panel install-panel"><div class="panel-heading"><div><p class="eyebrow">Publish anywhere</p><h2>Install your front desk</h2><p>Copy one snippet and paste it before <code>&lt;/body&gt;</code> on the business website.</p></div><span v-if="widgetInstallMessage" class="saved-message">✓ {{ widgetInstallMessage }}</span></div><template v-if="authSnapshot && widgetInstall"><div class="install-snippet"><code>{{ widgetInstall.snippet }}</code><button class="primary-button small" type="button" @click="copyWidgetSnippet">Copy snippet</button></div><div class="install-verification"><small class="install-note">Site key: {{ widgetInstall.siteKey }} · {{ widgetInstall.verification.loadCount }} detected load{{ widgetInstall.verification.loadCount === 1 ? '' : 's' }}</small><button class="outline-button small" type="button" :disabled="widgetVerificationLoading" @click="verifyWidgetInstall">{{ widgetVerificationLoading ? 'Checking…' : 'Verify installation' }}</button></div><p v-if="widgetVerificationMessage" class="conversation-status">{{ widgetVerificationMessage }}</p></template><div v-else-if="!authSnapshot" class="install-gate"><p>Sign in to generate a private install snippet for this business. The preview remains available without an account.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to install →</button></div><div v-else-if="ownershipVerification && ownershipVerification.status !== 'verified'" class="install-gate"><p>Verify website ownership before installing the live widget. This protects the business from unauthorized publishing.</p><button class="outline-button small" type="button" @click="openSettingsTab('verification')">Verify ownership →</button></div><div v-else-if="billingReadOnly" class="install-gate"><p>Your workspace is read-only until billing is restored. Existing preview data is safe, but live publishing is paused.</p><button class="outline-button small" type="button" @click="openSettingsTab('billing')">Review billing →</button></div><div v-else class="install-gate"><p>Your private install snippet is still loading. Refresh the page if it does not appear shortly.</p><button class="outline-button small" type="button" @click="void loadWidgetInstall()">Refresh install details</button></div></article></div>
 
         <div v-else-if="view === 'knowledge'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><div class="toolbar-actions"><span v-if="embeddingMessage" class="saved-message">✓ {{ embeddingMessage }}</span><button v-if="authSnapshot && availableBusinesses.length" class="outline-button small" type="button" :disabled="embeddingLoading" @click="reindexKnowledge">{{ embeddingLoading ? 'Re-indexing…' : 'Re-index knowledge' }}</button><button class="outline-button small" type="button" @click="loadKnowledge">{{ knowledgeLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
@@ -3192,37 +4104,78 @@ function openHome() {
           <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Outcome</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Needs review' }}<small>{{ diagnostic.retrieval?.candidateCount ?? 0 }} knowledge matches</small></span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No answer checks yet.</div></article>
         </div>
 
-        <div v-else-if="view === 'actions'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Define what your assistant can help customers do, then deliver completed outcomes to your team.</p></div><span v-if="integrationLoading" class="conversation-status">Working…</span></div>
+        <div v-else-if="view === 'actions'" class="view-content action-page">
+          <div class="actions-page-header">
+            <div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Define what your AI front desk can help visitors do.</p></div>
+            <button v-if="!actionDraft" class="primary-button" type="button" @click="actionTemplateChooserOpen = true">+ Create action</button>
+            <div v-else class="toolbar-actions"><button class="outline-button small" type="button" @click="selectAction(null)">← All actions</button><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
+          </div>
           <p v-if="integrationError" class="form-error">{{ integrationError }}</p>
           <p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p>
           <p v-if="actionsError" class="form-error">{{ actionsError }}</p>
           <p v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</p>
-          <section class="flow-builder-grid">
-            <article class="panel flow-library">
-              <div class="panel-heading"><div><p class="eyebrow">Owner-controlled automation</p><h2>Conversation flows</h2><p>Define the business rules once. The AI asks each next question naturally.</p></div><span v-if="actionsLoading" class="conversation-status">Working…</span></div>
-              <div class="flow-template-list"><p class="flow-subheading">Quick setup</p><button v-for="template in actionTemplates" :key="template.key" class="flow-template-button" type="button" :disabled="actionsLoading || actionFlows.some((action) => action.key === template.key)" @click="addActionTemplate(template)"><span>＋</span><span><strong>{{ template.name }}</strong><small>{{ actionFlows.some((action) => action.key === template.key) ? 'Already added' : template.description }}</small></span></button></div>
-              <div class="flow-list"><p class="flow-subheading">Your flows</p><button v-for="action in actionFlows" :key="action.id" :class="['flow-card', { selected: selectedActionId === action.id }]" type="button" @click="selectAction(action)"><span class="flow-card-icon">ϟ</span><span><strong>{{ action.name }}</strong><small>{{ action.fields.length }} questions · {{ action.enabled ? 'Enabled' : 'Paused' }}</small></span><span class="flow-card-arrow">›</span></button><div v-if="!actionFlows.length" class="diagnostics-empty">Add a template to create your first action.</div></div>
-            </article>
-            <article v-if="actionDraft" class="panel flow-editor">
-              <div class="panel-heading"><div><p class="eyebrow">Customize</p><h2>{{ actionDraft.name }}</h2><p>Owner defines the rules; AI chooses the conversational wording.</p></div><label class="toggle-row flow-enabled-toggle"><span>Enabled</span><input v-model="actionDraft.enabled" type="checkbox" /></label></div>
-              <div class="flow-steps"><span>Trigger</span><b>→</b><span v-for="field in actionDraft.fields.slice(0, 4)" :key="field.id">{{ field.label }}</span><b v-if="actionDraft.fields.length > 4">→</b><span v-if="actionDraft.fields.length > 4">More fields</span><b>→</b><span>Complete</span></div>
-              <div class="form-section"><label>Flow name<input v-model="actionDraft.name" type="text" /></label><label>Description<textarea v-model="actionDraft.description" rows="2"></textarea></label><label>Lead capture style<select v-model="actionDraft.captureMode"><option value="auto">Auto — Recommended</option><option value="conversational">Conversational</option><option value="form">Inline form</option><option value="hybrid">Hybrid</option></select></label><label>Trigger phrases <span class="optional">one per line</span><textarea v-model="actionTriggerText" rows="3" placeholder="Book an appointment&#10;Schedule a visit"></textarea></label></div>
-              <div class="form-section"><div class="panel-heading compact-heading"><div><h3>Questions and fields</h3><p>Ask only what is still missing. Reorder steps with the arrows.</p></div><button class="outline-button small" type="button" @click="addActionField">+ Add question</button></div><div v-for="(field, index) in actionDraft.fields" :key="field.id" class="flow-field-card"><div class="flow-field-heading"><strong>Step {{ index + 1 }}</strong><div class="flow-field-controls"><button type="button" title="Move up" :disabled="index === 0" @click="moveActionField(index, -1)">↑</button><button type="button" title="Move down" :disabled="index === actionDraft.fields.length - 1" @click="moveActionField(index, 1)">↓</button><button type="button" title="Remove field" @click="removeActionField(index)">×</button></div></div><div class="flow-field-grid"><label>Field key<input v-model="field.key" type="text" /></label><label>Type<select v-model="field.type"><option value="text">Text</option><option value="email">Email</option><option value="phone">Phone</option><option value="select">Select</option><option value="date">Date</option><option value="number">Number</option></select></label><label>Visibility<select v-model="field.visibility"><option value="visible">Visible</option><option value="hidden">Hidden</option></select></label><label class="toggle-row"><span>Required</span><input v-model="field.required" type="checkbox" /></label><label class="flow-field-wide">Question / wording<input v-model="field.question" type="text" /></label><label class="flow-field-wide">Label<input v-model="field.label" type="text" /></label><label v-if="field.type === 'select'" class="flow-field-wide">Choices <span class="optional">comma separated</span><input :value="(field.options ?? []).join(', ')" type="text" @input="setFieldOptions(field, $event)" /></label><label>Show when<select :value="field.condition?.field ?? ''" @change="setFieldCondition(field, $event)"><option value="">Always</option><option v-for="conditionField in actionDraft.fields.slice(0, index)" :key="conditionField.key" :value="conditionField.key">{{ conditionField.label }}</option></select></label><label v-if="field.condition?.field">Equals<input :value="field.condition?.equals ?? ''" type="text" @input="setFieldConditionEquals(field, $event)" /></label></div></div><button class="outline-button small" type="button" @click="addActionField">+ Add another question</button></div>
-              <div class="form-section"><h3>Completion</h3><div class="flow-field-grid"><label class="flow-field-wide">Success message<textarea v-model="actionDraft.completion.message" rows="2"></textarea></label><label>Submit button label<input v-model="actionDraft.completion.submitLabel" type="text" placeholder="Continue request" /></label><label>Lead status<select v-model="actionDraft.completion.leadStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><label>Continue link <span class="optional">optional</span><input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://…" /></label><label class="toggle-row"><span>Create lead</span><input v-model="actionDraft.completion.createLead" type="checkbox" /></label><label class="toggle-row"><span>Notify staff</span><input v-model="actionDraft.completion.notifyStaff" type="checkbox" /></label><label class="toggle-row"><span>Require staff handoff</span><input v-model="actionDraft.completion.requiresStaff" type="checkbox" /></label><label class="toggle-row"><span>Notify owner</span><input :checked="hasActionNotificationTarget('owner')" type="checkbox" @change="toggleActionNotificationTarget('owner', $event)" /></label><label class="toggle-row"><span>Notify assigned staff</span><input :checked="hasActionNotificationTarget('assigned_staff')" type="checkbox" @change="toggleActionNotificationTarget('assigned_staff', $event)" /></label></div></div>
-              <div class="form-section"><h3>External completion action</h3><p>Save the lead first, then run this connector. Failures stay in a retry queue and never remove the captured lead.</p><div class="flow-field-grid"><label>Connector<select :value="actionDraft.completion.connector?.provider ?? 'none'" @change="setActionConnectorProviderFromEvent"><option value="none">None — FrontDeskWise only</option><option value="email">Email the team</option><option v-if="integrations.some((integration) => integration.provider === 'webhook' && integration.connectionStatus === 'active')" value="generic_webhook">Generic webhook</option><option v-if="integrations.some((integration) => integration.provider === 'hubspot' && integration.connectionStatus === 'active')" value="hubspot">HubSpot</option></select></label><label v-if="actionDraft.completion.connector && actionDraft.completion.connector.provider !== 'email'">Connected system<select :value="actionDraft.completion.connector?.integrationId ?? ''" @change="setActionConnectorIntegrationFromEvent"><option value="">Select a connected system…</option><option v-for="integration in integrations.filter((item) => item.connectionStatus === 'active' && ((actionDraft?.completion.connector?.provider === 'generic_webhook' && item.provider === 'webhook') || (actionDraft?.completion.connector?.provider === 'hubspot' && item.provider === 'hubspot')))" :key="integration.id" :value="integration.id">{{ integration.displayName }} · {{ integration.connectionStatus }}</option></select></label><small class="flow-field-wide">Use the Generic webhook connector for Jackrabbit, Square, Mindbody, Calendly, or another vendor through Zapier, Make, or your own integration endpoint.</small></div></div>
-              <div class="toolbar-actions flow-editor-actions"><button class="text-button" type="button" :disabled="actionsLoading" @click="removeAction">Remove flow</button><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save flow' }}</button></div>
-            </article>
-            <article v-else class="panel empty-view flow-editor-empty"><div class="empty-icon">ϟ</div><h2>Select a flow to customize</h2><p>Start with a template on the left, then make the questions fit your business.</p></article>
-          </section>
-          <div class="agent-layout">
-            <article class="panel form-panel">
-              <div class="form-section"><h3>Connect a CRM</h3><p>Use a signed webhook for Zapier, Make, or an internal endpoint, or connect a HubSpot private-app token. Secrets stay server-side.</p><label>Provider<select v-model="integrationProvider"><option value="webhook">Webhook / automation tool</option><option value="hubspot">HubSpot</option></select></label><label>Display name<input v-model="integrationDisplayName" type="text" autocomplete="organization" placeholder="Sales CRM" /></label><template v-if="integrationProvider === 'webhook'"><label>Webhook URL<input v-model="integrationWebhookUrl" name="webhookUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://hooks.example.com/frontdeskwise" /></label><label>Signing secret <span class="optional">optional · never shown again</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Secret stored server-side" /></label></template><label v-else>HubSpot private-app token <span class="optional">never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="pat-na1-…" /></label><button class="primary-button" type="button" :disabled="integrationLoading || (integrationProvider === 'webhook' ? !integrationWebhookUrl.trim() : !integrationAccessToken.trim())" @click="connectIntegration">Save integration →</button></div>
-              <div class="form-section"><h3>Delivery contract</h3><p>Every lead is saved first, then queued for delivery. Temporary failures retry with backoff; permanent failures stay visible for a manual retry.</p></div>
-            </article>
-            <article class="panel form-panel"><div class="form-section"><h3>Connected systems</h3><p v-if="!integrations.length">No CRM connected yet.</p><div v-for="integration in integrations" :key="integration.id" class="integration-card"><div class="setup-row"><strong>{{ integration.displayName }}</strong><span :class="['status-pill', integration.connectionStatus === 'active' ? 'booked' : integration.connectionStatus === 'error' ? 'new' : 'qualified']">{{ integration.connectionStatus }}</span></div><small>{{ integration.provider }} · {{ integration.sync.synced }}/{{ integration.sync.total }} leads synced</small><small v-if="integration.sync.pending">{{ integration.sync.pending }} pending delivery</small><small v-if="integration.sync.failed" class="form-error">{{ integration.sync.failed }} failed delivery</small><small v-if="integration.lastError" class="form-error">{{ integration.lastError }}</small><div class="toolbar-actions"><button class="outline-button small" type="button" :disabled="integrationLoading" @click="testIntegration(integration)">Test connection</button><button v-if="integration.sync.failed" class="text-button" type="button" :disabled="integrationLoading" @click="retryIntegration(integration)">Retry failed</button><button class="text-button danger-text" type="button" :disabled="integrationLoading" @click="disconnectIntegration(integration)">Disconnect</button></div></div></div></article>
+
+          <template v-if="!actionDraft">
+            <section v-if="actionFlows.length" class="action-dashboard-list">
+              <div class="action-section-heading"><div><p class="eyebrow">Your actions</p><h3>Conversion flows</h3><p>Give visitors a clear next step and keep the outcome visible to your team.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
+              <article v-for="action in actionFlows" :key="action.id" class="action-summary-card">
+                <div class="action-summary-main"><span class="action-summary-icon">ϟ</span><div><h3>{{ action.name }}</h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
+                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
+              </article>
+            </section>
+            <section v-else class="panel action-empty-state"><span class="action-empty-icon">✦</span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="actionTemplateChooserOpen = true">Create your first action</button></div></section>
+            <section class="action-template-strip"><div><p class="eyebrow">Quick-start templates</p><h3>Start with a proven flow</h3></div><div class="action-template-chips"><button v-for="template in actionTemplates.slice(0, 5)" :key="template.key" type="button" @click="actionTemplateChooserOpen = true">{{ template.name }}</button><button type="button" @click="actionTemplateChooserOpen = true">Custom action</button></div></section>
+          </template>
+
+          <div v-else-if="actionDraft">
+            <div class="action-editor-titlebar"><div><p class="eyebrow">Action editor</p><h2>{{ actionDraft.name }}</h2><p>{{ actionDraft.description }}</p></div><div class="action-editor-title-actions"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(actionDraft))}`]">{{ actionStatusLabel(actionDraft) }}</span><label class="toggle-row"><span>Active</span><input v-model="actionDraft.enabled" type="checkbox" /></label><button class="outline-button small" type="button" @click="actionAdvancedOpen = !actionAdvancedOpen">{{ actionAdvancedOpen ? 'Hide advanced' : 'Advanced' }}</button></div></div>
+            <section class="action-funnel-summary"><div><p class="eyebrow">Last 30 days</p><h3>Conversion flow</h3></div><div class="action-funnel-steps"><div><strong>{{ actionFunnelFor(actionDraft)?.started ?? 0 }}</strong><span>Started</span></div><i></i><div><strong>{{ actionFunnelFor(actionDraft)?.formDisplayed ?? 0 }}</strong><span>Reached form</span></div><i></i><div><strong>{{ actionFunnelFor(actionDraft)?.submitted ?? 0 }}</strong><span>Submitted</span></div><i></i><div><strong>{{ actionFunnelFor(actionDraft)?.completed ?? 0 }}</strong><span>Completed</span></div><div class="action-funnel-rate"><strong>{{ actionCompletionRate(actionDraft) }}%</strong><span>Completion rate</span></div></div><small v-if="actionFunnelFor(actionDraft)?.dropOffs?.length">Biggest drop-off: {{ actionFunnelFor(actionDraft)?.dropOffs[0].label }} · {{ actionFunnelFor(actionDraft)?.dropOffs[0].count }} visitors</small></section>
+            <section class="action-editor-layout">
+              <article class="panel action-config-panel">
+                <nav class="action-flow-stepper" aria-label="Action stages"><button v-for="(stage, index) in actionEditorStageLabels" :key="stage.id" type="button" :class="{ active: actionEditorStage === stage.id }" @click="setActionStage(stage.id)"><span>{{ index + 1 }}</span><strong>{{ stage.label }}</strong><small>{{ stage.helper }}</small></button></nav>
+                <div class="action-stage-content">
+                  <template v-if="actionEditorStage === 'trigger'">
+                    <div class="action-stage-heading"><span class="action-stage-number">1</span><div><p class="eyebrow">Trigger</p><h3>When should this action start?</h3><p>Use a few examples and let the AI recognize similar wording automatically.</p></div></div>
+                    <div class="action-chip-list"><button v-for="phrase in actionTriggerPhrases" :key="phrase" type="button" class="action-chip" @click="removeActionTriggerPhrase(phrase)">{{ phrase }} <span>×</span></button><span v-if="!actionTriggerPhrases.length" class="action-inline-empty">Add the phrases visitors might use.</span></div>
+                    <div class="action-add-row"><input v-model="actionTriggerPhraseInput" type="text" placeholder="e.g. contact me" @keyup.enter="addActionTriggerPhrase" /><button class="outline-button small" type="button" @click="addActionTriggerPhrase">+ Add phrase</button></div>
+                    <label class="action-option-card"><span><strong>AI intent detection</strong><small>The assistant can recognize similar wording automatically.</small></span><input type="checkbox" :checked="Boolean(actionDraft.triggerIntents.length)" @change="setActionIntentDetection" /></label>
+                  </template>
+
+                  <template v-else-if="actionEditorStage === 'qualify'">
+                    <div class="action-stage-heading"><span class="action-stage-number">2</span><div><p class="eyebrow">Qualify</p><h3>What should the assistant ask?</h3><p>Keep the list short. Click a question to edit its wording and rules.</p></div><button class="outline-button small" type="button" @click="addActionField">+ Add question</button></div>
+                    <div class="action-question-list"><div v-for="(field, index) in actionDraft.fields" :key="field.id" class="action-question-row" draggable="true" @dragstart="dragActionField(index)" @dragover.prevent @drop="dropActionField(index)"><button class="action-drag-handle" type="button" aria-label="Drag question">≡</button><button class="action-question-button" type="button" @click="openActionField(index)"><strong>{{ index + 1 }}. {{ field.label }}</strong><span>{{ formatLabel(field.type) }} · {{ field.required ? 'Required' : 'Optional' }}</span></button><button class="action-question-remove" type="button" aria-label="Remove question" @click="removeActionField(index)">×</button></div><div v-if="!actionDraft.fields.length" class="action-inline-empty">Add a question to collect the details your team needs.</div></div>
+                    <p class="form-help">Drag the ≡ handle to reorder. The arrow controls remain available inside each question’s editor.</p>
+                  </template>
+
+                  <template v-else-if="actionEditorStage === 'contact'">
+                    <div class="action-stage-heading"><span class="action-stage-number">3</span><div><p class="eyebrow">Contact</p><h3>How should FrontDeskWise collect the information?</h3><p>Choose the experience that feels natural for this action. Auto is recommended.</p></div></div>
+                    <div class="capture-mode-grid"><button v-for="mode in [{ id: 'auto', label: 'Auto', description: 'FrontDeskWise chooses the best experience.', badge: 'Recommended' }, { id: 'conversational', label: 'Conversation', description: 'Ask questions one at a time.', badge: '' }, { id: 'form', label: 'Form', description: 'Show all fields together.', badge: '' }, { id: 'hybrid', label: 'Hybrid', description: 'Ask key questions, then show a short form.', badge: '' }]" :key="mode.id" type="button" :class="['capture-mode-card', { selected: actionDraft.captureMode === mode.id }]" @click="selectActionCaptureMode(mode.id as ActionFlow['captureMode'])"><span class="capture-mode-radio"></span><strong>{{ mode.label }}</strong><small>{{ mode.description }}</small><em v-if="mode.badge">{{ mode.badge }}</em></button></div>
+                    <div class="capture-mini-preview"><p class="eyebrow">Visitor experience</p><strong>{{ actionDraft.captureMode === 'form' ? 'A short form appears at once.' : actionDraft.captureMode === 'conversational' ? 'The assistant asks one question at a time.' : actionDraft.captureMode === 'hybrid' ? 'The assistant qualifies first, then shows the contact form.' : 'The assistant chooses based on the action and visitor.' }}</strong><span>{{ actionDraft.fields.filter((field) => field.visibility !== 'hidden').length }} visible questions · {{ actionDraft.fields.filter((field) => field.required).length }} required</span></div>
+                  </template>
+
+                  <template v-else-if="actionEditorStage === 'complete'">
+                    <div class="action-stage-heading"><span class="action-stage-number">4</span><div><p class="eyebrow">Complete</p><h3>What happens when the action is completed?</h3><p>Keep the success moment clear, then decide what should be saved or sent.</p></div></div>
+                    <div class="completion-checklist"><label class="action-option-card"><span><strong>Save lead in FrontDeskWise</strong><small>Keep the captured contact and outcome in your Leads workspace.</small></span><input v-model="actionDraft.completion.createLead" type="checkbox" /></label><label class="action-option-card"><span><strong>Notify staff</strong><small>Send the completed request to the selected team channels.</small></span><input v-model="actionDraft.completion.notifyStaff" type="checkbox" /></label><label class="action-option-card"><span><strong>Send an email notification</strong><small>Use email alongside the in-app notification.</small></span><input v-model="actionDraft.completion.notifyChannels" type="checkbox" value="email" /></label></div>
+                    <div class="action-two-column"><label>Success message<textarea v-model="actionDraft.completion.message" rows="3"></textarea></label><label>Lead status<select v-model="actionDraft.completion.leadStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label></div>
+                  </template>
+
+                  <template v-else>
+                    <div class="action-stage-heading"><span class="action-stage-number">5</span><div><p class="eyebrow">Deliver</p><h3>Where should the completed action go?</h3><p>Leads are saved first. Select an existing connection for an additional delivery.</p></div></div>
+                    <div class="action-delivery-choice"><label>Deliver to<select :value="actionDraft.completion.connector?.provider ?? 'none'" @change="setActionConnectorProviderFromEvent"><option value="none">FrontDeskWise only</option><option value="email">Email the team</option><option v-if="integrations.some((integration) => integration.provider === 'webhook' && integration.connectionStatus === 'active')" value="generic_webhook">Webhook / automation</option><option v-if="integrations.some((integration) => integration.provider === 'hubspot' && integration.connectionStatus === 'active')" value="hubspot">HubSpot CRM</option></select></label><label v-if="actionConnectorProvider !== 'email' && actionConnectorProvider !== 'none'">Connected system<select :value="actionDraft.completion.connector?.integrationId ?? ''" @change="setActionConnectorIntegrationFromEvent"><option value="">Select a connected system…</option><option v-for="integration in activeActionIntegrations" :key="integration.id" :value="integration.id">{{ integration.displayName }}</option></select></label></div>
+                    <div v-if="!integrations.length" class="action-connection-empty"><strong>No integration connected</strong><span>Connect one in Settings when you need delivery outside FrontDeskWise.</span><button class="outline-button small" type="button" @click="openSettingsTab('integrations')">Connect an integration</button></div>
+                    <div v-else class="action-delivery-queue"><div class="panel-heading"><div><p class="eyebrow">Delivery history</p><h3>{{ actionDeliveriesFor(actionDraft).length ? 'Recent deliveries' : 'No deliveries yet' }}</h3></div><button class="text-button" type="button" :disabled="actionsLoading" @click="loadActions">Refresh</button></div><div v-for="delivery in actionDeliveriesFor(actionDraft)" :key="delivery.id" class="action-delivery-row"><span><strong>{{ delivery.provider }}</strong><small>{{ delivery.attempts }} attempt{{ delivery.attempts === 1 ? '' : 's' }} · {{ new Date(delivery.updatedAt).toLocaleString() }}</small></span><span :class="['status-pill', delivery.status === 'succeeded' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span><button v-if="delivery.status === 'failed'" class="text-button" type="button" :disabled="actionsLoading" @click="retryActionDelivery(delivery)">Retry</button></div></div>
+                  </template>
+
+                  <details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced settings <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Internal action key<input v-model="actionDraft.key" type="text" /></label><label>Trigger intents <input :value="actionDraft.triggerIntents.join(', ')" type="text" placeholder="contact, lead" @input="setActionTriggerIntents" /></label><label>Continue link <span class="optional">optional</span><input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://…" /></label><p class="form-help">Technical identifiers and connector details are kept here so the main setup stays focused on the customer journey.</p></div></details>
+                </div>
+                <div class="action-editor-footer"><button class="text-button danger-text" type="button" :disabled="actionsLoading" @click="removeAction">Delete action</button><span v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</span><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
+              </article>
+              <aside class="panel action-live-preview"><div class="action-preview-heading"><div><p class="eyebrow">Live customer preview</p><h3>What visitors will see</h3></div><span class="preview-live-dot">Live</span></div><div class="action-preview-window"><div class="action-preview-top"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div class="action-preview-thread"><div class="action-preview-bubble">{{ actionDraft.completion.message || 'Absolutely. I just need a few details.' }}</div><div class="action-preview-bubble visitor">I’d like to {{ actionDraft.name.toLowerCase() }}.</div><div class="action-preview-bubble">Absolutely. I just need a few details.</div><div class="action-preview-form"><label v-for="field in actionDraft.fields.filter((item) => item.visibility !== 'hidden').slice(0, 4)" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><input :type="field.type === 'phone' ? 'tel' : field.type" disabled :placeholder="field.label" /></label><span v-if="!actionDraft.fields.length" class="action-inline-empty">Add questions to see the form preview.</span><button class="primary-button small" type="button">{{ actionDraft.completion.submitLabel || 'Send request' }}</button></div></div><div class="action-preview-input">Ask a question… <span>➤</span></div></div><p class="form-help">Updates appear here as you change questions, capture style, or completion behavior.</p></aside>
+            </section>
           </div>
-          <article class="panel action-delivery-panel"><div class="panel-heading"><div><h3>Completion delivery queue</h3><p>External actions are retried independently from saved leads.</p></div><button class="outline-button small" type="button" :disabled="actionsLoading" @click="loadActions">Refresh</button></div><div v-if="!actionDeliveries.length" class="diagnostics-empty">No external action deliveries yet.</div><div v-for="delivery in actionDeliveries" :key="delivery.id" class="integration-card"><div class="setup-row"><strong>{{ delivery.actionName }}</strong><span :class="['status-pill', delivery.status === 'succeeded' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span></div><small>{{ delivery.provider }} · {{ delivery.attempts }} attempt{{ delivery.attempts === 1 ? '' : 's' }} · {{ new Date(delivery.updatedAt).toLocaleString() }}</small><small v-if="delivery.lastError" class="form-error">{{ delivery.lastError }}</small><button v-if="delivery.status === 'failed'" class="text-button" type="button" :disabled="actionsLoading" @click="retryActionDelivery(delivery)">Retry action</button></div></article>
+
+          <div v-if="actionTemplateChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="actionTemplateChooserOpen = false"><section class="action-template-modal" role="dialog" aria-modal="true" aria-labelledby="create-action-title"><button class="auth-close" type="button" aria-label="Close" @click="actionTemplateChooserOpen = false">×</button><p class="eyebrow">Quick start</p><h2 id="create-action-title">Create an action</h2><p>What should visitors be able to do?</p><div class="action-template-modal-grid"><button v-for="template in actionTemplates" :key="template.key" type="button" :disabled="actionsLoading || actionFlows.some((action) => action.key === template.key)" @click="addActionTemplate(template)"><strong>{{ template.name }}</strong><small>{{ actionFlows.some((action) => action.key === template.key) ? 'Already configured' : template.description }}</small></button><button type="button" :disabled="actionsLoading" @click="addCustomAction"><strong>Custom action</strong><small>Start with a blank conversion flow.</small></button></div></section></div>
+          <div v-if="actionFieldDrawerIndex !== null && selectedActionField" class="action-modal-backdrop" role="presentation" @click.self="closeActionField"><aside class="action-field-drawer" role="dialog" aria-modal="true" aria-labelledby="question-editor-title"><div class="action-drawer-header"><div><p class="eyebrow">Question {{ actionFieldDrawerIndex + 1 }}</p><h2 id="question-editor-title">Edit question</h2></div><button class="auth-close" type="button" aria-label="Close" @click="closeActionField">×</button></div><label>Label<input v-model="selectedActionField.label" type="text" /></label><label>How the AI asks<input v-model="selectedActionField.question" type="text" /></label><label>Type<select v-model="selectedActionField.type"><option value="text">Text</option><option value="email">Email</option><option value="phone">Phone</option><option value="select">Select</option><option value="date">Date</option><option value="number">Number</option></select></label><label class="toggle-row"><span>Required</span><input v-model="selectedActionField.required" type="checkbox" /></label><label>Show when<select :value="selectedActionField.condition?.field ?? ''" @change="setFieldCondition(selectedActionField, $event)"><option value="">Always</option><option v-for="conditionField in actionDraft?.fields.slice(0, actionFieldDrawerIndex)" :key="conditionField.key" :value="conditionField.key">{{ conditionField.label }}</option></select></label><div v-if="selectedActionField.type === 'select'"><label>Choices <span class="optional">comma separated</span><input :value="(selectedActionField.options ?? []).join(', ')" type="text" @input="setFieldOptions(selectedActionField, $event)" /></label></div><details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Field key<input v-model="selectedActionField.key" type="text" /></label><label>Visibility<select v-model="selectedActionField.visibility"><option value="visible">Visible</option><option value="hidden">Hidden</option></select></label><label v-if="selectedActionField.condition?.field">Equals<input :value="selectedActionField.condition?.equals ?? ''" type="text" @input="setFieldConditionEquals(selectedActionField, $event)" /></label></div></details><div class="action-drawer-footer"><div class="action-drawer-reorder"><button class="outline-button small" type="button" :disabled="actionFieldDrawerIndex === 0" @click="moveSelectedActionField(-1)">↑ Move up</button><button class="outline-button small" type="button" :disabled="actionDraft ? actionFieldDrawerIndex === actionDraft.fields.length - 1 : true" @click="moveSelectedActionField(1)">Move down ↓</button></div><button class="text-button danger-text" type="button" @click="removeActionField(actionFieldDrawerIndex); closeActionField()">Remove question</button><button class="primary-button small" type="button" @click="closeActionField">Done</button></div></aside></div>
         </div>
 
         <div v-else-if="view === 'connections'" class="view-content">
@@ -3267,6 +4220,10 @@ function openHome() {
           <template v-else-if="currentSettingsTab === 'verification'">
             <div class="section-toolbar"><div><p class="eyebrow">Website verification</p><h2>Verification</h2><p>Verify the website connected to this business before installing the live widget.</p></div></div>
           </template>
+          <template v-else-if="currentSettingsTab === 'notifications'">
+            <div class="section-toolbar"><div><p class="eyebrow">Workspace updates</p><h2>Notifications</h2><p>Review operational updates for conversations, delivery, and account activity.</p></div><button class="outline-button small" type="button" @click="loadNotifications">Refresh</button></div>
+            <article v-if="authSnapshot" class="panel notification-preferences-card"><div class="panel-heading"><div><p class="eyebrow">Owner preferences</p><h3>Operational email</h3><p>Choose which non-mandatory team updates reach you by email. Billing and security notices always stay on.</p></div><button class="primary-button small" type="button" :disabled="notificationPreferencesLoading" @click="saveNotificationPreferences">{{ notificationPreferencesLoading ? 'Saving…' : 'Save preferences' }}</button></div><div class="notification-preference-list"><label><span><strong>New qualified leads</strong><small>Get an email when a qualified inquiry is captured.</small></span><input v-model="notificationPreferences.newLead" type="checkbox" /></label><label><span><strong>Human handoffs</strong><small>Know when a visitor is waiting for a team member.</small></span><input v-model="notificationPreferences.humanHandoff" type="checkbox" /></label><label><span><strong>Integration failures</strong><small>Get notified when a connected CRM needs attention.</small></span><input v-model="notificationPreferences.integrationFailure" type="checkbox" /></label></div><p v-if="notificationPreferencesMessage" class="saved-message">✓ {{ notificationPreferencesMessage }}</p><p v-if="notificationPreferencesError" class="form-error">{{ notificationPreferencesError }}</p></article><article class="panel notification-settings-panel"><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></article>
+          </template>
           <article v-if="authSnapshot && ownershipVerification && currentSettingsTab === 'verification'" class="panel verification-panel"><div class="panel-heading"><div><p class="eyebrow">Website ownership</p><h2>{{ ownershipVerification.status === 'verified' ? 'Ownership verified' : 'Verify before publishing' }}</h2><p>{{ ownershipVerification.status === 'verified' ? 'This business can publish its widget and receive production leads.' : 'Complete one verification method to protect production publishing.' }}</p></div><span :class="['status-pill', ownershipVerification.status === 'verified' ? 'booked' : ownershipVerification.status === 'rejected' ? 'new' : 'qualified']">{{ formatLabel(ownershipVerification.status) }}</span></div><div v-if="ownershipVerification.status !== 'verified'" class="verification-controls"><label>Method<select v-model="verificationMethod"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><button class="outline-button small" type="button" :disabled="verificationLoading" @click="requestOwnershipVerification">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethod !== 'email' && verificationMethod !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="checkOwnershipVerification">Check now</button></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="verificationMessage" class="saved-message">✓ {{ verificationMessage }}</p><p v-if="verificationError" class="form-error">{{ verificationError }}</p></article>
           <article v-if="currentSettingsTab === 'verification' && !ownershipVerification" class="panel empty-view"><div class="empty-icon">✓</div><h2>Verification is loading</h2><p>We’re checking the website ownership state for this business.</p></article>
         </div>
@@ -3299,6 +4256,14 @@ function openHome() {
             <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
           </template>
           <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
+          <template v-if="adminSection === 'business-detail'">
+            <div v-if="adminBusinessDetailLoading" class="ds-card admin-detail-loading">Loading business detail…</div>
+            <template v-else-if="adminBusinessDetail">
+              <div class="section-toolbar admin-detail-toolbar"><div><p class="eyebrow">Business detail</p><h2>{{ adminBusinessDetail.business.name }}</h2><p>{{ adminBusinessDetail.business.websiteUrl }} · {{ adminBusinessDetail.business.slug }}</p></div><div class="toolbar-actions"><button v-if="adminBusinessDetail.business.ownershipStatus !== 'verified'" class="outline-button small" type="button" :disabled="adminLoading" @click="approveAdminBusiness(adminBusinessDetail.business)">Approve ownership</button><button class="outline-button small" type="button" @click="navigateToAdminSection('organizations')">← Back</button></div></div>
+              <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue">▤</span><strong>{{ adminBusinessDetail.business.sourceCount }}</strong><small>Knowledge sources</small><em>{{ adminBusinessDetail.business.chunkCount }} indexed chunks</em></article><article class="ds-stat-card"><span class="ds-stat-icon green">♧</span><strong>{{ adminBusinessDetail.business.leadCount }}</strong><small>Leads captured</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange">◌</span><strong>{{ adminBusinessDetail.business.conversationCount }}</strong><small>Conversations</small><em>Customer activity</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple">$</span><strong>{{ adminBusinessDetail.business.billingStatus }}</strong><small>Billing status</small><em>{{ adminBusinessDetail.business.ownershipStatus }} ownership</em></article></div>
+              <div class="admin-detail-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Business context</p><h2>{{ adminBusinessDetail.organization.name }}</h2><p>{{ adminBusinessDetail.business.location || 'Location not provided' }} · Updated {{ adminBusinessDetail.business.updatedAt ? new Date(adminBusinessDetail.business.updatedAt).toLocaleDateString() : 'not yet' }}</p></div></div><div class="health-list"><div><span>Plan</span><strong>{{ adminBusinessDetail.business.planKey }}</strong></div><div><span>Ownership</span><strong>{{ adminBusinessDetail.business.ownershipStatus }}</strong></div><div><span>Organization access</span><strong>{{ adminBusinessDetail.organization.billing.access.allowed ? 'Write access' : 'Read-only' }}</strong></div></div><div class="detail-subsection"><p class="eyebrow">Organization members</p><div v-for="owner in adminBusinessDetail.owners" :key="`${owner.email}-${owner.role}`" class="detail-list-row"><span><strong>{{ owner.name || 'Unnamed user' }}</strong><small>{{ owner.email }}</small></span><span class="status-pill qualified">{{ owner.role }}</span></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Billing relationship</p><h2>{{ adminBusinessDetail.organization.billing.plan.displayName }}</h2><p>Business access follows the organization billing relationship.</p></div></div><div class="billing-intervention-note"><strong>Current organization billing</strong><span>{{ adminBusinessDetail.organization.billing.status }} · {{ adminBusinessDetail.organization.billing.amountCents === null ? 'No amount' : `$${(adminBusinessDetail.organization.billing.amountCents / 100).toFixed(2)}` }}</span><small>{{ adminBusinessDetail.organization.billing.access.reason }}</small></div><button class="outline-button small" type="button" @click="navigateToAdminSection('organization-detail', { organizationId: adminBusinessDetail.organization.id })">Open organization billing →</button></article></div>
+            </template>
+          </template>
           <template v-if="adminSection === 'organization-detail'">
             <div v-if="adminOrganizationDetailLoading" class="ds-card admin-detail-loading">Loading organization detail…</div>
             <template v-else-if="adminOrganizationDetail">
@@ -3325,6 +4290,21 @@ function openHome() {
               <div><small>Requested {{ item.requestedAt ? new Date(item.requestedAt).toLocaleString() : '—' }}</small><small>Expires {{ item.session?.expiresAt ? new Date(item.session.expiresAt).toLocaleString() : '—' }}</small></div>
               <div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'validate')">Validate</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'extend')">Extend 7d</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'reset')">New link</button><button class="text-button" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'revoke')">Revoke</button></div>
             </div>
+          </article>
+          <article v-if="adminSection === 'messaging'" class="panel messaging-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Lifecycle messaging</p><h2>Centralized communication control</h2><p>Manage transactional templates, activation automations, and delivery health without putting email logic in product requests.</p></div><div class="toolbar-actions"><span v-if="messagingSummary" class="status-pill" :class="messagingSummary.provider.configured ? 'booked' : 'new'">{{ messagingSummary.provider.configured ? 'Provider ready' : 'Provider setup needed' }}</span><button class="outline-button small" type="button" :disabled="messagingLoading" @click="loadAdminMessaging(true)">Refresh</button></div></div>
+            <div v-if="messagingSummary" class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue">↗</span><strong>{{ messagingSummary.last24Hours.queued }}</strong><small>Queued · last 24h</small><em>Async delivery</em></article><article class="ds-stat-card"><span class="ds-stat-icon green">✓</span><strong>{{ messagingSummary.last24Hours.sent }}</strong><small>Sent · last 24h</small><em>SES accepted</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange">!</span><strong>{{ messagingSummary.last24Hours.deferred }}</strong><small>Deferred</small><em>Retrying automatically</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple">▤</span><strong>{{ messagingSummary.last24Hours.failed }}</strong><small>Failed</small><em>Needs review</em></article></div>
+            <nav class="admin-section-tabs messaging-tabs" aria-label="Messaging sections"><button v-for="tab in messagingTabs" :key="tab.id" type="button" :class="{ active: messagingTab === tab.id }" @click="messagingTab = tab.id">{{ tab.label }}</button></nav>
+            <p v-if="messagingError" class="form-error">{{ messagingError }}</p><p v-if="messagingMessage" class="saved-message">✓ {{ messagingMessage }}</p>
+            <template v-if="messagingTab === 'templates'">
+              <div class="messaging-template-layout">
+                <aside class="messaging-template-list"><button v-for="template in messagingTemplates" :key="template.templateKey" type="button" :class="['messaging-template-item', { active: selectedMessagingTemplateKey === template.templateKey }]" @click="selectMessagingTemplate(template)"><span><strong>{{ template.name }}</strong><small>{{ template.description }}</small></span><em :class="['status-pill', template.status === 'active' ? 'booked' : 'new']">{{ template.status }}</em></button></aside>
+                <form v-if="messagingTemplateDraft" class="messaging-template-editor" @submit.prevent="saveMessagingTemplate"><div class="panel-heading"><div><p class="eyebrow">Version {{ messagingTemplateDraft.version }}</p><h3>{{ messagingTemplateDraft.name }}</h3><p>{{ messagingTemplateDraft.description }}</p></div><span class="status-pill qualified">{{ formatLabel(messagingTemplateDraft.category) }}</span></div><div class="admin-detail-form-grid"><label>Subject<input v-model="messagingTemplateDraft.subject" required maxlength="240" /></label><label>Status<select v-model="messagingTemplateDraft.status"><option value="active">Active</option><option value="draft">Draft</option><option value="disabled">Disabled</option></select></label></div><label>Preview text<input v-model="messagingTemplateDraft.previewText" maxlength="240" /></label><label>Heading<input v-model="messagingTemplateDraft.heading" required maxlength="240" /></label><label>Body<textarea v-model="messagingTemplateDraft.body" rows="9" required></textarea></label><div class="admin-detail-form-grid"><label>CTA label<input v-model="messagingTemplateDraft.ctaLabel" maxlength="120" /></label><label>CTA URL<input v-model="messagingTemplateDraft.ctaUrl" maxlength="1000" /></label></div><label>Footer<input v-model="messagingTemplateDraft.footer" maxlength="1000" /></label><div class="messaging-variable-row"><span>Available variables</span><code v-for="variable in messagingTemplateDraft.variables" :key="variable">{{ formatTemplateVariable(variable) }}</code></div><div class="messaging-test-row"><input v-model="messagingTestRecipient" type="email" placeholder="Test recipient (optional)" /><button class="outline-button small" type="button" :disabled="messagingTestLoading" @click="testMessagingTemplate">{{ messagingTestLoading ? 'Sending…' : 'Send test' }}</button><button class="primary-button small" type="submit" :disabled="messagingLoading">{{ messagingLoading ? 'Saving…' : 'Save template →' }}</button></div></form>
+              </div>
+            </template>
+            <template v-else-if="messagingTab === 'automations'"><div class="messaging-automation-list"><div v-for="automation in messagingAutomations" :key="automation.automationKey" class="messaging-automation-row"><div><strong>{{ automation.templateName }}</strong><small>{{ formatLabel(automation.eventType) }} · {{ formatLabel(automation.recipientScope) }}<span v-if="automation.mandatory"> · mandatory</span></small></div><label class="messaging-toggle"><input v-model="automation.enabled" type="checkbox" :disabled="automation.mandatory" @change="updateMessagingAutomation(automation)" /><span>{{ automation.enabled ? 'Active' : 'Off' }}</span></label><label class="messaging-delay">Delay<input v-model.number="automation.delaySeconds" type="number" min="0" max="2592000" step="1" @change="updateMessagingAutomation(automation)" /><small>seconds</small></label></div></div></template>
+            <template v-else-if="messagingTab === 'delivery'"><div class="section-toolbar compact"><div><p class="eyebrow">Provider delivery log</p><h3>Recent messages</h3></div><select v-model="messagingDeliveryFilter" @change="loadAdminMessaging(true)"><option value="all">All statuses</option><option value="queued">Queued</option><option value="sent">Sent</option><option value="deferred">Deferred</option><option value="failed">Failed</option></select></div><div class="table-heading messaging-delivery-row"><span>Message</span><span>Recipient</span><span>Status</span><span>Time</span><span></span></div><div v-if="!messagingDeliveries.length" class="diagnostics-empty">No lifecycle deliveries found.</div><div v-for="delivery in messagingDeliveries" :key="delivery.id" class="table-row messaging-delivery-row"><div><strong>{{ delivery.templateName }}</strong><small>{{ delivery.businessName || 'Account' }} · {{ formatLabel(delivery.eventType) }}</small></div><span>{{ delivery.recipientEmail }}</span><span :class="['status-pill', delivery.status === 'sent' || delivery.status === 'delivered' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span><span>{{ delivery.sentAt ? new Date(delivery.sentAt).toLocaleString() : delivery.scheduledAt ? new Date(delivery.scheduledAt).toLocaleString() : '—' }}</span><button v-if="delivery.status === 'failed' || delivery.status === 'deferred'" class="outline-button small" type="button" :disabled="messagingLoading" @click="retryMessagingDelivery(delivery)">Retry</button><span v-else></span></div></template>
+            <template v-else><div class="messaging-settings-grid"><article class="ds-card"><p class="eyebrow">Provider</p><h3>{{ messagingSummary?.provider.name.toUpperCase() ?? 'SES' }}</h3><p>{{ messagingSummary?.provider.configured ? 'Configured for transactional delivery.' : 'Set AWS_REGION and FRONTDESKWISE_SES_FROM_EMAIL to enable delivery.' }}</p><small>Provider delivery IDs are stored on each message. Provider dashboards are not the canonical template source.</small></article><article class="ds-card"><p class="eyebrow">Guardrails</p><h3>Operational control stays explicit</h3><p>Super Admins manage lifecycle templates and automations. Business owners manage noisy operational notifications.</p><small>Billing, payment, and security notices remain mandatory.</small></article></div></template>
           </article>
           <div v-if="adminSection === 'operations'" class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">System health</p><h2>Infrastructure readiness</h2><p>Refresh this page after changing Render, storage, email, or model configuration.</p></div><button class="outline-button small" type="button" @click="loadAdminHealth">Refresh checks</button></div><div class="health-list health-list-large"><div><span>API</span><strong :class="`health-${adminHealth?.api ?? 'degraded'}`">{{ adminHealth?.api ?? 'Checking…' }}</strong></div><div><span>Database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Object storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Transactional email</span><strong>{{ adminHealth?.emailConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Stripe billing</span><strong>{{ adminHealth?.stripeConfigured ? 'Ready' : 'Not configured' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Delivery test</p><h2>Email operations</h2><p>Send a controlled SES test to the authenticated super-admin address.</p></div></div><button class="primary-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Send test email →' }}</button><p v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</p></article></div>
         </div>
@@ -3360,22 +4340,23 @@ function openHome() {
     </div>
 
     <div v-if="authModalOpen" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title" @click.self="authModalOpen = false">
-      <form class="auth-card" @submit.prevent="submitAuth">
+      <form class="auth-card" @submit.prevent="authMode === 'forgot' ? resetPassword() : submitAuth()">
         <button class="auth-close" type="button" aria-label="Close" @click="authModalOpen = false">×</button>
-        <p class="eyebrow">{{ authMode === 'signup' ? 'Save your AI front desk' : 'Welcome back' }}</p>
-        <h2 id="auth-title">{{ authMode === 'signup' ? 'Create your FrontDeskWise account' : 'Sign in to FrontDeskWise' }}</h2>
-        <p class="auth-copy">{{ authMode === 'signup' ? (publicDemoMode ? 'Your workspace stays attached to your new organization.' : 'Create your organization and add your first business.') : 'Pick up where you left off across all your businesses.' }}</p>
+        <p class="eyebrow">{{ authMode === 'signup' ? 'Save your AI front desk' : authMode === 'forgot' ? 'Account recovery' : 'Welcome back' }}</p>
+        <h2 id="auth-title">{{ authMode === 'signup' ? 'Create your FrontDeskWise account' : authMode === 'forgot' ? 'Reset your password' : 'Sign in to FrontDeskWise' }}</h2>
+        <p class="auth-copy">{{ authMode === 'signup' ? (publicDemoMode ? 'Your workspace stays attached to your new organization.' : 'Create your organization and add your first business.') : authMode === 'forgot' ? 'Enter your email and we will send password recovery instructions.' : 'Pick up where you left off across all your businesses.' }}</p>
         <label>Email<input v-model="authEmail" type="email" autocomplete="email" required placeholder="name@company.com" /></label>
-        <label>Password<input v-model="authPassword" type="password" autocomplete="new-password" minlength="6" required placeholder="At least 6 characters" /></label>
+        <label v-if="authMode !== 'forgot'">Password<input v-model="authPassword" type="password" autocomplete="new-password" minlength="6" required placeholder="At least 6 characters" /></label>
         <label v-if="authMode === 'signup'">Organization name <span class="optional">optional</span><input v-model="authOrganizationName" type="text" placeholder="Your company" /></label>
         <p v-if="authError" class="form-error">{{ authError }}</p>
-        <button class="primary-button auth-submit" type="submit" :disabled="authLoading">{{ authLoading ? 'Working…' : authMode === 'signup' ? 'Create account →' : 'Sign in →' }}</button>
-        <div class="auth-divider"><span>or</span></div>
-        <button class="google-button" type="button" :disabled="authLoading" @click="submitGoogleAuth"><span class="google-mark">G</span> Continue with Google</button>
-        <button v-if="authMode === 'signin'" class="text-button auth-switch" type="button" @click="resetPassword">Forgot password?</button>
-        <button class="text-button auth-switch" type="button" @click="authMode = authMode === 'signup' ? 'signin' : 'signup'; authError = ''">{{ authMode === 'signup' ? 'Already have an account? Sign in' : 'New to FrontDeskWise? Create an account' }}</button>
+        <button class="primary-button auth-submit" type="submit" :disabled="authLoading">{{ authLoading ? 'Working…' : authMode === 'signup' ? 'Create account →' : authMode === 'forgot' ? 'Send reset instructions' : 'Sign in →' }}</button>
+        <template v-if="authMode !== 'forgot'"><div class="auth-divider"><span>or</span></div><button class="google-button" type="button" :disabled="authLoading" @click="submitGoogleAuth"><span class="google-mark">G</span> Continue with Google</button></template>
+        <button v-if="authMode === 'signin'" class="text-button auth-switch" type="button" @click="openAuth('forgot')">Forgot password?</button>
+        <button class="text-button auth-switch" type="button" @click="openAuth(authMode === 'signup' ? 'signin' : 'signup')">{{ authMode === 'signup' ? 'Already have an account? Sign in' : authMode === 'forgot' ? 'Back to sign in' : 'New to FrontDeskWise? Create an account' }}</button>
       </form>
     </div>
+
+    <AppFeedback :loading="globalLoading || authLoading" :toasts="feedbackToasts" @dismiss="dismissToast" />
   </main>
 </template>
 

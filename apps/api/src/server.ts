@@ -48,6 +48,16 @@ import {
   storageConfigurationMessage,
 } from "./storage.js";
 import { notifySuperAdmins, sendTransactionalEmail, sesConfigured, sesConfigurationMessage, superAdminEmails } from "./email.js";
+import {
+  emitLifecycleEvent,
+  lifecycleTemplatePayload,
+  processLifecycleMessagingOutbox,
+  retryLifecycleDelivery,
+  scheduleLifecycleMessaging,
+  scheduleNextLifecycleMessaging,
+  renderLifecycleEmail,
+  type LifecycleEventType,
+} from "./lifecycle-messaging.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import {
   createActionConnector,
@@ -132,6 +142,10 @@ type WidgetQuickAction = {
 type AgentConfig = {
   assistantName: string;
   welcomeMessage: string;
+  tone: "friendly" | "professional" | "concise" | "custom";
+  primaryLanguage: string;
+  fallbackBehavior: "contact_form" | "human" | "unavailable";
+  humanHandoffEnabled: boolean;
   widgetColor: string;
   collectLeads: boolean;
   showBookingAction: boolean;
@@ -140,6 +154,8 @@ type AgentConfig = {
   widgetAllowExpand: boolean;
   widgetQuickActions: WidgetQuickAction[];
   widgetLogoUrl: string | null;
+  widgetTheme: "light" | "dark" | "auto";
+  widgetPosition: "bottom-right" | "bottom-left";
   proactiveEnabled: boolean;
   proactiveDelaySeconds: number;
   proactiveMessage: string;
@@ -518,6 +534,10 @@ function normalizedRetentionDays(value: unknown): number {
 const defaultConfig = (businessName: string): AgentConfig => ({
   assistantName: `${businessName} Assistant`,
   welcomeMessage: `Hi! I’m the ${businessName} assistant. I can answer questions, help you choose a service, or get you started.`,
+  tone: "friendly",
+  primaryLanguage: "English",
+  fallbackBehavior: "contact_form",
+  humanHandoffEnabled: true,
   widgetColor: "#0d6efd",
   collectLeads: true,
   showBookingAction: true,
@@ -526,6 +546,8 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   widgetAllowExpand: true,
   widgetQuickActions: defaultQuickActions(businessName),
   widgetLogoUrl: null,
+  widgetTheme: "auto",
+  widgetPosition: "bottom-right",
   proactiveEnabled: false,
   proactiveDelaySeconds: 20,
   proactiveMessage: "Looking for the right service? I can help.",
@@ -559,6 +581,29 @@ function contentHash(content: string): string {
 
 function optionalString(value: unknown, maxLength: number): string | null {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, maxLength) : null;
+}
+
+function lifecycleAppUrl(path: string): string {
+  const origin = process.env.FRONTDESKWISE_APP_URL?.trim() || process.env.WEB_ORIGIN?.split(",")[0]?.trim() || "https://app.frontdeskwise.com";
+  return `${origin.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+async function queueLifecycleEvent(input: {
+  eventType: LifecycleEventType;
+  eventKey: string;
+  organizationId?: string | null;
+  businessId?: string | null;
+  recipientUserId?: string | null;
+  recipientUserIds?: string[];
+  recipientEmail?: string | null;
+  payload?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await emitLifecycleEvent(pool, input);
+    scheduleLifecycleMessaging(250);
+  } catch (error) {
+    app.log.warn({ eventType: input.eventType, eventKey: input.eventKey, error: error instanceof Error ? error.message : "unknown messaging error" }, "Lifecycle message could not be queued");
+  }
 }
 
 function safeConsentAt(value: unknown): string | null {
@@ -967,6 +1012,18 @@ async function bootstrapAuthenticatedUser(
 
     await client.query("commit");
     if (claimedDemoAudit) await recordDemoAudit(claimedDemoAudit);
+    await queueLifecycleEvent({
+      eventType: "USER_CREATED",
+      eventKey: `user.created:${user.id}`,
+      organizationId,
+      recipientUserId: user.id,
+      recipientEmail: authUser.email,
+      payload: {
+        first_name: authUser.name.split(/\s+/)[0] || authUser.name,
+        business_name: "your business",
+        dashboard_url: lifecycleAppUrl("/app"),
+      },
+    });
     return await authSnapshot(user.id, organizationId);
   } catch (error) {
     await client.query("rollback");
@@ -1722,11 +1779,15 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     }
 
     await client.query(
-      `insert into agent_configs (business_id, assistant_name, welcome_message, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
        on conflict (business_id) do update set
          assistant_name = excluded.assistant_name,
          welcome_message = excluded.welcome_message,
+         tone = excluded.tone,
+         primary_language = excluded.primary_language,
+         fallback_behavior = excluded.fallback_behavior,
+         human_handoff_enabled = excluded.human_handoff_enabled,
          widget_color = excluded.widget_color,
          collect_leads = excluded.collect_leads,
          show_booking_action = excluded.show_booking_action,
@@ -1735,6 +1796,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
          widget_allow_expand = excluded.widget_allow_expand,
          widget_quick_actions = excluded.widget_quick_actions,
          widget_logo_url = excluded.widget_logo_url,
+         widget_theme = excluded.widget_theme,
+         widget_position = excluded.widget_position,
          proactive_enabled = excluded.proactive_enabled,
          proactive_delay_seconds = excluded.proactive_delay_seconds,
          proactive_message = excluded.proactive_message,
@@ -1748,6 +1811,10 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.id,
         business.agentConfig.assistantName,
         business.agentConfig.welcomeMessage,
+        business.agentConfig.tone,
+        business.agentConfig.primaryLanguage,
+        business.agentConfig.fallbackBehavior,
+        business.agentConfig.humanHandoffEnabled,
         business.agentConfig.widgetColor,
         business.agentConfig.collectLeads,
         business.agentConfig.showBookingAction,
@@ -1756,6 +1823,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.agentConfig.widgetAllowExpand,
         JSON.stringify(business.agentConfig.widgetQuickActions),
         business.agentConfig.widgetLogoUrl,
+        business.agentConfig.widgetTheme,
+        business.agentConfig.widgetPosition,
         business.agentConfig.proactiveEnabled,
         business.agentConfig.proactiveDelaySeconds,
         business.agentConfig.proactiveMessage,
@@ -1939,6 +2008,10 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     agentConfig: config ? {
       assistantName: String(config.assistant_name),
       welcomeMessage: String(config.welcome_message),
+      tone: ["friendly", "professional", "concise", "custom"].includes(String(config.tone)) ? String(config.tone) as AgentConfig["tone"] : "friendly",
+      primaryLanguage: typeof config.primary_language === "string" && config.primary_language.trim() ? config.primary_language.trim() : "English",
+      fallbackBehavior: ["contact_form", "human", "unavailable"].includes(String(config.fallback_behavior)) ? String(config.fallback_behavior) as AgentConfig["fallbackBehavior"] : "contact_form",
+      humanHandoffEnabled: config.human_handoff_enabled !== false,
       widgetColor: String(config.widget_color),
       collectLeads: Boolean(config.collect_leads),
       showBookingAction: Boolean(config.show_booking_action),
@@ -1947,6 +2020,8 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       widgetAllowExpand: config.widget_allow_expand !== false,
       widgetQuickActions: normalizedWidgetQuickActions(config.widget_quick_actions, String(row.name)),
       widgetLogoUrl: typeof config.widget_logo_url === "string" && config.widget_logo_url.trim() ? config.widget_logo_url.trim() : null,
+      widgetTheme: ["light", "dark", "auto"].includes(String(config.widget_theme)) ? String(config.widget_theme) as AgentConfig["widgetTheme"] : "auto",
+      widgetPosition: ["bottom-right", "bottom-left"].includes(String(config.widget_position)) ? String(config.widget_position) as AgentConfig["widgetPosition"] : "bottom-right",
       proactiveEnabled: config.proactive_enabled === true,
       proactiveDelaySeconds: normalizedProactiveDelay(config.proactive_delay_seconds),
       proactiveMessage: typeof config.proactive_message === "string" && config.proactive_message.trim() ? config.proactive_message.trim() : defaultConfig(String(row.name)).proactiveMessage,
@@ -2223,6 +2298,22 @@ async function persistLead(business: Business, lead: Lead): Promise<Lead> {
     await client.query("commit");
     await recordOrganizationUsage(business, "leads");
     void processIntegrationOutbox();
+    if (persisted.status === "qualified") {
+      const organizationId = await businessOrganizationId(business);
+      await queueLifecycleEvent({
+        eventType: "QUALIFIED_LEAD",
+        eventKey: `lead.qualified:${persisted.id}`,
+        organizationId,
+        businessId: business.id,
+        payload: {
+          business_name: business.name,
+          lead_name: persisted.name || "A visitor",
+          lead_intent: persisted.intent || "customer inquiry",
+          lead_contact: persisted.email || persisted.phone || "No direct contact provided",
+          leads_url: lifecycleAppUrl(`/app/${business.slug}/leads`),
+        },
+      });
+    }
     return persisted;
   } catch (error) {
     await client.query("rollback");
@@ -2267,11 +2358,15 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
 async function persistAgentConfig(business: Business): Promise<void> {
   if (!pool) return;
   await pool.query(
-    `insert into agent_configs (business_id, assistant_name, welcome_message, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
      on conflict (business_id) do update set
        assistant_name = excluded.assistant_name,
        welcome_message = excluded.welcome_message,
+       tone = excluded.tone,
+       primary_language = excluded.primary_language,
+       fallback_behavior = excluded.fallback_behavior,
+       human_handoff_enabled = excluded.human_handoff_enabled,
        widget_color = excluded.widget_color,
        collect_leads = excluded.collect_leads,
        show_booking_action = excluded.show_booking_action,
@@ -2280,6 +2375,8 @@ async function persistAgentConfig(business: Business): Promise<void> {
        widget_allow_expand = excluded.widget_allow_expand,
        widget_quick_actions = excluded.widget_quick_actions,
        widget_logo_url = excluded.widget_logo_url,
+       widget_theme = excluded.widget_theme,
+       widget_position = excluded.widget_position,
        proactive_enabled = excluded.proactive_enabled,
        proactive_delay_seconds = excluded.proactive_delay_seconds,
        proactive_message = excluded.proactive_message,
@@ -2289,7 +2386,7 @@ async function persistAgentConfig(business: Business): Promise<void> {
        retention_days = excluded.retention_days,
        show_ai_disclosure = excluded.show_ai_disclosure,
        updated_at = now()`,
-    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure],
+    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure],
   );
 }
 
@@ -3318,6 +3415,29 @@ async function processIntegrationOutbox(): Promise<void> {
             `update crm_integrations set connection_status = 'error', last_error = $2, updated_at = now() where id = $1`,
             [outbox.integration_id, message],
           );
+          const context = await pool.query<{ business_name: string; business_slug: string; organization_id: string; integration_name: string }>(
+            `select b.name as business_name, b.slug as business_slug, b.organization_id,
+                    coalesce(ci.display_name, ci.provider) as integration_name
+             from businesses b
+             left join crm_integrations ci on ci.id = $2
+             where b.id = $1`,
+            [outbox.business_id, outbox.integration_id],
+          );
+          const row = context.rows[0];
+          if (row) {
+            await queueLifecycleEvent({
+              eventType: "INTEGRATION_FAILURE",
+              eventKey: `integration.failed:${outbox.id}`,
+              organizationId: row.organization_id,
+              businessId: String(outbox.business_id),
+              payload: {
+                business_name: row.business_name,
+                integration_name: row.integration_name,
+                failure_reason: message,
+                integrations_url: lifecycleAppUrl(`/app/${row.business_slug}/connections`),
+              },
+            });
+          }
         }
         app.log.warn({ integrationId: outbox.integration_id, outboxId: outbox.id, attempts, retry, error: message }, "CRM delivery attempt failed");
       }
@@ -4822,16 +4942,34 @@ async function notifyStaff(
       }
     }
   }
-  if (sesConfigured() && channels.includes("email") && filteredRecipients.length) {
-    try {
-      await sendTransactionalEmail({
-        to: filteredRecipients.map((recipient) => recipient.email),
-        subject: `${business.name}: ${input.title}`,
-        text: `${input.body}\n\nOpen the FrontDeskWise inbox to respond.`,
-        replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO,
+  if (channels.includes("email") && filteredRecipients.length) {
+    const eventType: LifecycleEventType | null = input.type === "handoff_requested"
+      ? "HUMAN_HANDOFF"
+      : input.type === "lead_created"
+        ? "QUALIFIED_LEAD"
+        : input.type === "action_staff_required" ? "HUMAN_HANDOFF" : null;
+    if (eventType) {
+      const lead = input.leadId ? business.leads.find((item) => item.id === input.leadId) : null;
+      await queueLifecycleEvent({
+        eventType,
+        eventKey: `business.notification:${business.id}:${conversation.id}:${input.type}:${input.leadId ?? "none"}`,
+        organizationId,
+        businessId: business.id,
+        recipientUserIds: filteredRecipients.map((recipient) => recipient.id),
+        payload: eventType === "QUALIFIED_LEAD"
+          ? {
+            business_name: business.name,
+            lead_name: lead?.name || "A visitor",
+            lead_intent: lead?.intent || "customer inquiry",
+            lead_contact: lead?.email || lead?.phone || "No direct contact provided",
+            leads_url: lifecycleAppUrl(`/app/${business.slug}/leads`),
+          }
+          : {
+            business_name: business.name,
+            handoff_reason: conversation.handoffReason || input.body,
+            inbox_url: lifecycleAppUrl(`/app/${business.slug}/inbox`),
+          },
       });
-    } catch (error) {
-      app.log.warn({ error: error instanceof Error ? error.message : "unknown email error", businessId: business.id }, "Staff notification email failed");
     }
   }
 }
@@ -5050,9 +5188,14 @@ await syncStripePlanPrices();
 await resumeEmbeddingJobs();
 void processIntegrationOutbox();
 void processActionOutbox();
+void processLifecycleMessagingOutbox(pool);
+void scheduleNextLifecycleMessaging(pool);
+void reconcileLifecycleBillingEvents();
 void purgeExpiredCustomerData();
 const retentionCleanupTimer = setInterval(() => { void purgeExpiredCustomerData(); }, 60 * 60 * 1_000);
 retentionCleanupTimer.unref?.();
+const lifecycleBillingTimer = setInterval(() => { void reconcileLifecycleBillingEvents(); }, 60 * 60 * 1_000);
+lifecycleBillingTimer.unref?.();
 
 async function requireSuperAdmin(request: FastifyRequest): Promise<AppUser> {
   const { authUser, appUser } = await authenticatedAppUser(request);
@@ -5085,6 +5228,66 @@ async function findOrganizationIdForStripeEvent(object: Record<string, unknown>)
     [customerId, subscriptionId],
   );
   return result.rows[0]?.id ?? null;
+}
+
+async function queueOrganizationLifecycleEvent(input: {
+  organizationId: string;
+  eventType: LifecycleEventType;
+  eventKey: string;
+  payload: Record<string, unknown>;
+}): Promise<void> {
+  if (!pool) return;
+  if (input.eventType === "SUBSCRIPTION_ACTIVATED") {
+    await pool.query(
+      `update message_deliveries
+       set status = 'canceled', updated_at = now()
+       where organization_id = $1 and template_key = 'trial_midpoint' and status in ('queued', 'deferred')`,
+      [input.organizationId],
+    );
+  }
+  const business = await pool.query<{ id: string; name: string; slug: string }>(
+    `select id, name, slug from businesses where organization_id = $1 order by created_at limit 1`,
+    [input.organizationId],
+  );
+  const row = business.rows[0];
+  if (!row) return;
+  await queueLifecycleEvent({
+    eventType: input.eventType,
+    eventKey: input.eventKey,
+    organizationId: input.organizationId,
+    businessId: row.id,
+    payload: { business_name: row.name, ...input.payload },
+  });
+}
+
+async function reconcileLifecycleBillingEvents(): Promise<void> {
+  if (!pool) return;
+  const result = await pool.query<{ id: string; trial_end_at: string | null }>(
+    `select id, trial_end_at
+     from organizations
+     where billing_status = 'trial' and trial_end_at is not null`,
+  );
+  const now = Date.now();
+  for (const row of result.rows) {
+    if (!row.trial_end_at) continue;
+    const trialEnd = Date.parse(toIso(row.trial_end_at));
+    if (Number.isNaN(trialEnd)) continue;
+    if (trialEnd <= now) {
+      await queueOrganizationLifecycleEvent({
+        organizationId: row.id,
+        eventType: "TRIAL_EXPIRED",
+        eventKey: `trial.expired:${row.id}:${row.trial_end_at}`,
+        payload: { billing_url: lifecycleAppUrl("/app/settings/billing") },
+      });
+    } else if (trialEnd <= now + 3 * 24 * 60 * 60 * 1_000) {
+      await queueOrganizationLifecycleEvent({
+        organizationId: row.id,
+        eventType: "TRIAL_ENDING_SOON",
+        eventKey: `trial.ending_soon:${row.id}:${row.trial_end_at}`,
+        payload: { trial_days_remaining: Math.max(1, Math.ceil((trialEnd - now) / (24 * 60 * 60 * 1_000))), billing_url: lifecycleAppUrl("/app/settings/billing") },
+      });
+    }
+  }
 }
 
 async function handleStripeEvent(event: Stripe.Event): Promise<void> {
@@ -5130,8 +5333,24 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       const subscription = await stripe.subscriptions.retrieve(subscriptionId);
       if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription as unknown as Record<string, unknown>);
     }
+    if (resolvedOrganizationId) {
+      await queueOrganizationLifecycleEvent({
+        organizationId: resolvedOrganizationId,
+        eventType: "SUBSCRIPTION_ACTIVATED",
+        eventKey: `stripe.subscription_activated:${event.id}`,
+        payload: { plan_name: stripeMetadataString(asRecord(object.metadata), "plan_key", "planKey") || "FrontDeskWise", dashboard_url: lifecycleAppUrl("/app") },
+      });
+    }
   } else if (event.type.startsWith("customer.subscription.")) {
     if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, object);
+    if (resolvedOrganizationId && event.type === "customer.subscription.deleted") {
+      await queueOrganizationLifecycleEvent({
+        organizationId: resolvedOrganizationId,
+        eventType: "SUBSCRIPTION_CANCELED",
+        eventKey: `stripe.subscription_canceled:${event.id}`,
+        payload: { access_end_at: stripeTimestamp(object.current_period_end) || "the end of your current billing period", billing_url: lifecycleAppUrl("/app/settings/billing") },
+      });
+    }
   } else if (event.type === "invoice.paid") {
     const subscriptionId = stripeObjectId(object.subscription);
     if (subscriptionId && stripe) {
@@ -5140,6 +5359,14 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription as unknown as Record<string, unknown>);
     } else if (resolvedOrganizationId) {
       await pool.query("update organizations set billing_status = 'active', grace_end_at = null, updated_at = now() where id = $1", [resolvedOrganizationId]);
+    }
+    if (resolvedOrganizationId) {
+      await queueOrganizationLifecycleEvent({
+        organizationId: resolvedOrganizationId,
+        eventType: "SUBSCRIPTION_ACTIVATED",
+        eventKey: `stripe.invoice_paid:${event.id}`,
+        payload: { plan_name: "FrontDeskWise", dashboard_url: lifecycleAppUrl("/app") },
+      });
     }
   } else if (event.type === "invoice.payment_failed" && resolvedOrganizationId) {
     await pool.query(
@@ -5154,6 +5381,12 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
     } finally {
       client.release();
     }
+    await queueOrganizationLifecycleEvent({
+      organizationId: resolvedOrganizationId,
+      eventType: "PAYMENT_FAILED",
+      eventKey: `stripe.payment_failed:${event.id}`,
+      payload: { grace_end_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString(), billing_url: lifecycleAppUrl("/app/settings/billing") },
+    });
   }
 
   await pool.query("update billing_events set organization_id = coalesce(organization_id, $2), processed_at = now() where provider = 'stripe' and event_id = $1", [event.id, resolvedOrganizationId]);
@@ -5425,6 +5658,42 @@ app.post("/api/v1/stripe/webhook", { config: { rawBody: true } }, async (request
   return { received: true };
 });
 
+app.post("/api/v1/webhooks/email/ses", async (request, reply) => {
+  if (!pool) return reply.code(503).send({ error: "Email webhooks require PostgreSQL storage" });
+  const expectedSecret = process.env.FRONTDESKWISE_EMAIL_WEBHOOK_SECRET?.trim();
+  if (!expectedSecret) return reply.code(503).send({ error: "Email webhook secret is not configured" });
+  const receivedSecret = request.headers["x-frontdeskwise-email-secret"];
+  if (typeof receivedSecret !== "string" || receivedSecret !== expectedSecret) return reply.code(401).send({ error: "Invalid email webhook secret" });
+  const body = asRecord(request.body);
+  const notificationType = optionalString(body.eventType ?? body.notificationType ?? body.type, 80) ?? "unknown";
+  const mail = asRecord(body.mail);
+  const providerMessageId = optionalString(body.messageId ?? body.providerMessageId ?? mail.messageId, 320);
+  const providerEventId = optionalString(body.eventId ?? body.providerEventId, 320) ?? `${providerMessageId ?? "unknown"}:${notificationType}:${Date.now()}`;
+  const normalizedType = notificationType.toLowerCase();
+  const delivery = providerMessageId
+    ? await pool.query<{ id: string }>("select id from message_deliveries where provider = 'ses' and provider_message_id = $1 limit 1", [providerMessageId])
+    : { rows: [] } as { rows: Array<{ id: string }> };
+  const inserted = await pool.query(
+    `insert into message_provider_events (provider, provider_event_id, delivery_id, event_type, payload)
+     values ('ses', $1, $2, $3, $4)
+     on conflict (provider, provider_event_id) do nothing`,
+    [providerEventId, delivery.rows[0]?.id ?? null, notificationType, JSON.stringify(body)],
+  );
+  if (inserted.rowCount && delivery.rows[0]?.id) {
+    const deliveryId = delivery.rows[0].id;
+    if (normalizedType === "delivery") {
+      await pool.query("update message_deliveries set status = 'delivered', delivered_at = coalesce(delivered_at, now()), updated_at = now() where id = $1", [deliveryId]);
+    } else if (normalizedType === "open") {
+      await pool.query("update message_deliveries set opened_at = coalesce(opened_at, now()), updated_at = now() where id = $1", [deliveryId]);
+    } else if (normalizedType === "click") {
+      await pool.query("update message_deliveries set clicked_at = coalesce(clicked_at, now()), updated_at = now() where id = $1", [deliveryId]);
+    } else if (normalizedType === "bounce" || normalizedType === "complaint" || normalizedType.includes("failure")) {
+      await pool.query("update message_deliveries set status = 'failed', failed_at = coalesce(failed_at, now()), failure_reason = $2, updated_at = now() where id = $1", [deliveryId, notificationType]);
+    }
+  }
+  return { received: true, duplicate: !inserted.rowCount, providerMessageId };
+});
+
 app.post("/api/v1/admin/email/test", async (request) => {
   const admin = await requireSuperAdmin(request);
   if (!sesConfigured()) throw httpError(503, sesConfigurationMessage());
@@ -5437,6 +5706,219 @@ app.post("/api/v1/admin/email/test", async (request) => {
     replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO,
   });
   return { ok: true, recipient };
+});
+
+app.get("/api/v1/admin/messaging/summary", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select count(*) filter (where created_at >= now() - interval '24 hours')::integer as queued,
+            count(*) filter (where status in ('sent', 'delivered') and sent_at >= now() - interval '24 hours')::integer as sent,
+            count(*) filter (where status = 'deferred' and created_at >= now() - interval '24 hours')::integer as deferred,
+            count(*) filter (where status = 'failed' and created_at >= now() - interval '24 hours')::integer as failed
+     from message_deliveries`,
+  );
+  const row = result.rows[0] ?? {};
+  const templates = await pool.query<{ active: string; total: string }>(
+    `select count(*) filter (where status = 'active')::text as active, count(*)::text as total from message_templates`,
+  );
+  return {
+    last24Hours: {
+      queued: Number(row.queued ?? 0),
+      sent: Number(row.sent ?? 0),
+      deferred: Number(row.deferred ?? 0),
+      failed: Number(row.failed ?? 0),
+    },
+    templates: { active: Number(templates.rows[0]?.active ?? 0), total: Number(templates.rows[0]?.total ?? 0) },
+    provider: { name: "ses", configured: sesConfigured() },
+  };
+});
+
+app.get("/api/v1/admin/messaging/templates", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    "select * from message_templates order by name",
+  );
+  return { templates: result.rows.map(lifecycleTemplatePayload) };
+});
+
+app.patch("/api/v1/admin/messaging/templates/:templateKey", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const templateKey = requiredString((request.params as { templateKey?: string }).templateKey, "templateKey", 120);
+  const body = asRecord(request.body);
+  const current = await pool.query<Record<string, unknown>>("select * from message_templates where template_key = $1", [templateKey]);
+  if (!current.rowCount) throw httpError(404, "Message template not found");
+  const currentRow = current.rows[0];
+  const status = body.status === "draft" || body.status === "active" || body.status === "disabled" ? body.status : String(currentRow.status);
+  const mandatoryAutomation = await pool.query("select 1 from message_automations where template_key = $1 and mandatory = true limit 1", [templateKey]);
+  if (mandatoryAutomation.rowCount && status !== "active") throw httpError(400, "Mandatory account and billing templates must remain active");
+  const category = body.category === "transactional" || body.category === "operational" || body.category === "account" ? body.category : String(currentRow.category);
+  const textField = (key: string, fallback: string, max: number): string => typeof body[key] === "string" ? String(body[key]).trim().slice(0, max) : fallback;
+  const variables = Array.isArray(body.variables)
+    ? body.variables.filter((item): item is string => typeof item === "string" && /^[a-zA-Z0-9_.-]+$/.test(item)).slice(0, 80)
+    : (Array.isArray(currentRow.variables) ? currentRow.variables : []);
+  const updated = await pool.query<Record<string, unknown>>(
+    `update message_templates
+     set name = $2, description = $3, category = $4, subject = $5, preview_text = $6,
+         heading = $7, body = $8, cta_label = $9, cta_url = $10, footer = $11,
+         variables = $12, status = $13, version = version + 1, updated_by_user_id = $14, updated_at = now()
+     where template_key = $1
+     returning *`,
+    [
+      templateKey,
+      textField("name", String(currentRow.name), 160),
+      textField("description", String(currentRow.description ?? ""), 500),
+      category,
+      textField("subject", String(currentRow.subject), 240),
+      textField("previewText", String(currentRow.preview_text ?? ""), 240),
+      textField("heading", String(currentRow.heading), 240),
+      textField("body", String(currentRow.body), 20_000),
+      body.ctaLabel === null ? null : textField("ctaLabel", typeof currentRow.cta_label === "string" ? currentRow.cta_label : "", 120) || null,
+      body.ctaUrl === null ? null : textField("ctaUrl", typeof currentRow.cta_url === "string" ? currentRow.cta_url : "", 1_000) || null,
+      textField("footer", String(currentRow.footer ?? ""), 1_000),
+      JSON.stringify(variables),
+      status,
+      admin.id,
+    ],
+  );
+  return { template: lifecycleTemplatePayload(updated.rows[0]) };
+});
+
+app.post("/api/v1/admin/messaging/templates/:templateKey/test", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  if (!sesConfigured()) throw httpError(503, sesConfigurationMessage());
+  const templateKey = requiredString((request.params as { templateKey?: string }).templateKey, "templateKey", 120);
+  const result = await pool.query<Record<string, unknown>>("select * from message_templates where template_key = $1", [templateKey]);
+  if (!result.rowCount) throw httpError(404, "Message template not found");
+  const body = asRecord(request.body);
+  const template = lifecycleTemplatePayload(result.rows[0]);
+  const supplied = asRecord(body.variables);
+  const variables: Record<string, unknown> = {};
+  for (const variable of template.variables) variables[variable] = typeof supplied[variable] === "string" ? supplied[variable] : variable === "first_name" ? admin.name.split(/\s+/)[0] : variable === "dashboard_url" ? lifecycleAppUrl("/app") : `Sample ${variable.replace(/[_-]/g, " ")}`;
+  const rendered = renderLifecycleEmail(template, variables);
+  const recipient = optionalString(body.recipient, 320) ?? admin.email;
+  const sendResult = await sendTransactionalEmail({ to: [recipient], ...rendered, replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO });
+  return { ok: true, recipient, provider: sendResult.provider, providerMessageId: sendResult.providerMessageId };
+});
+
+app.get("/api/v1/admin/messaging/automations", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select a.*, t.name as template_name
+     from message_automations a join message_templates t on t.template_key = a.template_key
+     order by a.created_at`,
+  );
+  return { automations: result.rows.map((row) => ({
+    id: String(row.id), automationKey: String(row.automation_key), templateKey: String(row.template_key), templateName: String(row.template_name),
+    eventType: String(row.event_type), delaySeconds: Number(row.delay_seconds ?? 0), recipientScope: String(row.recipient_scope),
+    conditions: asRecord(row.conditions), mandatory: Boolean(row.mandatory), enabled: Boolean(row.enabled), updatedAt: nullableIso(row.updated_at),
+  })) };
+});
+
+app.patch("/api/v1/admin/messaging/automations/:automationKey", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const automationKey = requiredString((request.params as { automationKey?: string }).automationKey, "automationKey", 120);
+  const body = asRecord(request.body);
+  const delaySeconds = body.delaySeconds === undefined ? null : Number(body.delaySeconds);
+  if (delaySeconds !== null && (!Number.isInteger(delaySeconds) || delaySeconds < 0 || delaySeconds > 2_592_000)) throw httpError(400, "delaySeconds must be a whole number from 0 to 2592000");
+  const current = await pool.query<{ mandatory: boolean }>("select mandatory from message_automations where automation_key = $1", [automationKey]);
+  if (!current.rowCount) throw httpError(404, "Message automation not found");
+  if (current.rows[0].mandatory && body.enabled === false) throw httpError(400, "Mandatory account and billing automations cannot be disabled");
+  const updated = await pool.query<Record<string, unknown>>(
+    `update message_automations
+     set enabled = coalesce($2, enabled), delay_seconds = coalesce($3, delay_seconds),
+         conditions = coalesce($4, conditions), updated_at = now()
+     where automation_key = $1
+     returning *`,
+    [automationKey, typeof body.enabled === "boolean" ? body.enabled : null, delaySeconds, body.conditions && typeof body.conditions === "object" ? JSON.stringify(body.conditions) : null],
+  );
+  return { automation: updated.rows[0] };
+});
+
+app.get("/api/v1/admin/messaging/deliveries", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const status = typeof query.status === "string" && ["queued", "running", "sent", "delivered", "deferred", "failed", "canceled"].includes(query.status) ? query.status : null;
+  const requestedLimit = Number(query.limit ?? 100);
+  const limit = Math.min(200, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 100));
+  const result = await pool.query<Record<string, unknown>>(
+    `select d.*, t.name as template_name, b.name as business_name
+     from message_deliveries d
+     join message_templates t on t.template_key = d.template_key
+     left join businesses b on b.id = d.business_id
+     where ($1::text is null or d.status = $1)
+     order by d.created_at desc limit $2`,
+    [status, limit],
+  );
+  return { deliveries: result.rows.map((row) => ({
+    id: String(row.id), templateKey: String(row.template_key), templateName: String(row.template_name), eventType: String(row.event_type),
+    businessName: row.business_name ? String(row.business_name) : null, recipientEmail: String(row.recipient_email), status: String(row.status),
+    attempts: Number(row.attempts ?? 0), scheduledAt: nullableIso(row.scheduled_at), sentAt: nullableIso(row.sent_at), deliveredAt: nullableIso(row.delivered_at),
+    failedAt: nullableIso(row.failed_at), failureReason: typeof row.failure_reason === "string" ? row.failure_reason : null, providerMessageId: row.provider_message_id ? String(row.provider_message_id) : null,
+  })) };
+});
+
+app.post("/api/v1/admin/messaging/deliveries/:deliveryId/retry", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Messaging administration requires PostgreSQL storage");
+  const deliveryId = requiredString((request.params as { deliveryId?: string }).deliveryId, "deliveryId", 80);
+  try {
+    await retryLifecycleDelivery(pool, deliveryId);
+  } catch (error) {
+    throw httpError(404, error instanceof Error ? error.message : "Delivery is not retryable");
+  }
+  return { ok: true, deliveryId };
+});
+
+app.get("/api/v1/messaging/preferences", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Notification preferences require PostgreSQL storage");
+  const businessId = optionalString((request.query as Record<string, unknown> | undefined)?.businessId, 80);
+  if (businessId) {
+    const business = await pool.query<{ organization_id: string }>("select organization_id from businesses where id = $1", [businessId]);
+    if (!business.rowCount) throw httpError(404, "Business not found");
+    await organizationBusinessForUser(appUser.id, business.rows[0].organization_id, businessId);
+  }
+  const result = await pool.query<{ preference_key: string; enabled: boolean }>(
+    `select preference_key, enabled from message_preferences
+     where user_id = $1 and ($2::uuid is null or business_id = $2::uuid)`,
+    [appUser.id, businessId],
+  );
+  const values = { newLead: true, humanHandoff: true, integrationFailure: true };
+  for (const row of result.rows) {
+    if (row.preference_key === "new_lead") values.newLead = row.enabled;
+    if (row.preference_key === "human_handoff") values.humanHandoff = row.enabled;
+    if (row.preference_key === "integration_failure") values.integrationFailure = row.enabled;
+  }
+  return { preferences: values, mandatory: ["billing", "security"] };
+});
+
+app.patch("/api/v1/messaging/preferences", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Notification preferences require PostgreSQL storage");
+  const body = asRecord(request.body);
+  const businessId = requiredString(body.businessId, "businessId", 80);
+  const business = await pool.query<{ organization_id: string }>("select organization_id from businesses where id = $1", [businessId]);
+  if (!business.rowCount) throw httpError(404, "Business not found");
+  await organizationBusinessForUser(appUser.id, business.rows[0].organization_id, businessId);
+  const values: Array<[string, unknown]> = [["new_lead", body.newLead], ["human_handoff", body.humanHandoff], ["integration_failure", body.integrationFailure]];
+  for (const [key, value] of values) {
+    if (typeof value !== "boolean") continue;
+    await pool.query(
+      `insert into message_preferences (user_id, organization_id, business_id, preference_key, enabled)
+       values ($1, $2, $3, $4, $5)
+       on conflict (user_id, organization_id, business_id, preference_key)
+       do update set enabled = excluded.enabled, updated_at = now()`,
+      [appUser.id, business.rows[0].organization_id, businessId, key, value],
+    );
+  }
+  return { ok: true, preferences: { newLead: body.newLead !== false, humanHandoff: body.humanHandoff !== false, integrationFailure: body.integrationFailure !== false } };
 });
 
 app.get("/api/v1/admin/organizations", async (request) => {
@@ -5564,6 +6046,73 @@ app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
       planKey: String(business.plan_key ?? "starter"), sourceCount: Number(business.source_count ?? 0),
       conversationCount: Number(business.conversation_count ?? 0), leadCount: Number(business.lead_count ?? 0), updatedAt: nullableIso(business.updated_at),
     })),
+  };
+});
+
+app.get("/api/v1/admin/businesses/:businessId", async (request) => {
+  await requireSuperAdmin(request);
+  const params = request.params as { businessId?: string };
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const businessId = requiredString(params.businessId, "businessId", 80);
+  const businessResult = await pool.query<Record<string, unknown>>(
+    `select b.id, b.name, b.slug, b.website_url, b.location, b.ownership_status, b.billing_status, b.plan_key, b.updated_at,
+            (select count(*) from business_sources bs where bs.business_id = b.id)::integer as source_count,
+            (select count(*) from knowledge_chunks kc where kc.business_id = b.id)::integer as chunk_count,
+            (select count(*) from conversations c where c.business_id = b.id)::integer as conversation_count,
+            (select count(*) from leads l where l.business_id = b.id)::integer as lead_count,
+            o.id as organization_id, o.name as organization_name, o.slug as organization_slug
+     from businesses b
+     join organizations o on o.id = b.organization_id
+     where b.id = $1`,
+    [businessId],
+  );
+  if (!businessResult.rowCount) throw httpError(404, "Business not found");
+
+  const business = businessResult.rows[0];
+  const organizationResult = await pool.query<Record<string, unknown>>(
+    `select o.*, bp.display_name as plan_display_name, bp.description as plan_description,
+            bp.max_businesses, coalesce(opo.amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
+            coalesce(opo.max_businesses, bp.max_businesses) as effective_max_businesses,
+            opo.billing_interval as override_interval, opo.reason as override_reason
+     from organizations o
+     left join billing_plans bp on bp.plan_key = o.plan_key
+     left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+     where o.id = $1`,
+    [business.organization_id],
+  );
+  const owners = await pool.query<{ email: string; name: string; role: string }>(
+    `select u.email, u.name, om.role
+     from organization_members om
+     join app_users u on u.id = om.user_id
+     where om.organization_id = $1
+     order by om.role, u.email`,
+    [business.organization_id],
+  );
+  if (!organizationResult.rowCount) throw httpError(404, "Organization not found");
+
+  return {
+    organization: {
+      id: String(business.organization_id),
+      name: String(business.organization_name),
+      slug: String(business.organization_slug),
+      billing: organizationBillingPayload(organizationResult.rows[0]),
+    },
+    business: {
+      id: String(business.id),
+      name: String(business.name),
+      slug: String(business.slug),
+      websiteUrl: String(business.website_url),
+      location: String(business.location ?? ""),
+      ownershipStatus: String(business.ownership_status ?? "pending"),
+      billingStatus: String(business.billing_status ?? "trial"),
+      planKey: String(business.plan_key ?? "starter"),
+      sourceCount: Number(business.source_count ?? 0),
+      chunkCount: Number(business.chunk_count ?? 0),
+      conversationCount: Number(business.conversation_count ?? 0),
+      leadCount: Number(business.lead_count ?? 0),
+      updatedAt: nullableIso(business.updated_at),
+    },
+    owners: owners.rows,
   };
 });
 
@@ -6056,6 +6605,28 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
      on conflict (business_id, user_id) do update set role = 'admin', updated_at = now()`,
     [business.id, userResult.rows[0].id],
   );
+  await queueLifecycleEvent({
+    eventType: "TRIAL_STARTED",
+    eventKey: `trial.started:${organizationResult.rows[0].id}`,
+    organizationId: organizationResult.rows[0].id,
+    businessId: business.id,
+    payload: {
+      business_name: business.name,
+      trial_days: defaultTrialDays,
+      dashboard_url: lifecycleAppUrl(`/app/${business.slug}`),
+      billing_url: lifecycleAppUrl("/app/settings/billing"),
+    },
+  });
+  await queueLifecycleEvent({
+    eventType: "BUSINESS_VERIFICATION_NEEDED",
+    eventKey: `business.verification_needed:${business.id}`,
+    organizationId: organizationResult.rows[0].id,
+    businessId: business.id,
+    payload: {
+      business_name: business.name,
+      verification_url: lifecycleAppUrl(`/app/${business.slug}/settings/verification`),
+    },
+  });
   return reply.code(201).send({ business: workspacePayload(business), auth: await authSnapshot(userResult.rows[0].id, organizationResult.rows[0].id) });
 });
 
@@ -6094,6 +6665,20 @@ async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<
       name: requesterName,
       accessType: "public",
     });
+    if (requesterEmail) {
+      await queueLifecycleEvent({
+        eventType: "DEMO_READY",
+        eventKey: `demo.ready:${business.id}:${requestId ?? requesterEmail}`,
+        organizationId: await businessOrganizationId(business),
+        businessId: business.id,
+        recipientEmail: requesterEmail,
+        payload: {
+          first_name: requesterName?.split(/\s+/)[0] || "there",
+          business_name: business.name,
+          demo_url: lifecycleAppUrl(`/demo/${business.slug}`),
+        },
+      });
+    }
     const { sessionId: _sessionId, ...publicAccess } = access;
     return {
       ...workspacePayload(business),
@@ -6363,6 +6948,19 @@ app.post("/api/v1/demo/:slug/widget/verify", async (request) => {
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const detected = Boolean(business.widget.lastLoadedAt && business.widget.loadCount > 0);
+  if (detected) {
+    const organizationId = await businessOrganizationId(business);
+    await queueLifecycleEvent({
+      eventType: "WIDGET_INSTALLED",
+      eventKey: `widget.installed:${business.id}`,
+      organizationId,
+      businessId: business.id,
+      payload: {
+        business_name: business.name,
+        dashboard_url: lifecycleAppUrl(`/app/${business.slug}`),
+      },
+    });
+  }
   return {
     verified: detected,
     message: detected
@@ -6817,19 +7415,20 @@ app.post("/api/v1/demo/:slug/team/invite", async (request, reply) => {
   } finally {
     client.release();
   }
-  if (sesConfigured()) {
-    try {
-      await sendTransactionalEmail({
-        to: [email],
-        subject: `You’ve been invited to ${business.name} on FrontDeskWise`,
-        text: `${actor.name} invited you to help manage ${business.name}. Sign in to FrontDeskWise with this email to accept the invitation.`,
-        replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO,
-      });
-    } catch (error) {
-      app.log.warn({ error: error instanceof Error ? error.message : "unknown email error" }, "Team invitation email failed");
-    }
-  }
-  return reply.code(201).send({ member: { id: userId, email, name, role, status: "invited", businessIds: requestedBusinessIds }, emailSent: sesConfigured() });
+  await queueLifecycleEvent({
+    eventType: "TEAM_INVITED",
+    eventKey: `team.invited:${organizationId}:${userId}:${role}`,
+    organizationId,
+    businessId: business.id,
+    recipientUserId: userId,
+    recipientEmail: email,
+    payload: {
+      inviter_name: actor.name,
+      business_name: business.name,
+      dashboard_url: lifecycleAppUrl(`/app/${business.slug}`),
+    },
+  });
+  return reply.code(201).send({ member: { id: userId, email, name, role, status: "invited", businessIds: requestedBusinessIds }, emailQueued: true });
 });
 
 app.patch("/api/v1/demo/:slug/team/:userId", async (request) => {
@@ -7402,6 +8001,10 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const body = asRecord(request.body);
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);
+  if (["friendly", "professional", "concise", "custom"].includes(String(body.tone))) business.agentConfig.tone = body.tone as AgentConfig["tone"];
+  if (typeof body.primaryLanguage === "string" && body.primaryLanguage.trim()) business.agentConfig.primaryLanguage = body.primaryLanguage.trim().slice(0, 80);
+  if (["contact_form", "human", "unavailable"].includes(String(body.fallbackBehavior))) business.agentConfig.fallbackBehavior = body.fallbackBehavior as AgentConfig["fallbackBehavior"];
+  if (typeof body.humanHandoffEnabled === "boolean") business.agentConfig.humanHandoffEnabled = body.humanHandoffEnabled;
   if (typeof body.widgetColor === "string" && /^#[\da-f]{6}$/i.test(body.widgetColor)) business.agentConfig.widgetColor = body.widgetColor;
   if (typeof body.collectLeads === "boolean") business.agentConfig.collectLeads = body.collectLeads;
   if (typeof body.showBookingAction === "boolean") business.agentConfig.showBookingAction = body.showBookingAction;
@@ -7413,6 +8016,8 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
     const logoUrl = body.widgetLogoUrl.trim();
     if (!logoUrl || /^https:\/\//i.test(logoUrl)) business.agentConfig.widgetLogoUrl = logoUrl || null;
   }
+  if (["light", "dark", "auto"].includes(String(body.widgetTheme))) business.agentConfig.widgetTheme = body.widgetTheme as AgentConfig["widgetTheme"];
+  if (["bottom-right", "bottom-left"].includes(String(body.widgetPosition))) business.agentConfig.widgetPosition = body.widgetPosition as AgentConfig["widgetPosition"];
   if (typeof body.proactiveEnabled === "boolean") business.agentConfig.proactiveEnabled = body.proactiveEnabled;
   if (body.proactiveDelaySeconds !== undefined) business.agentConfig.proactiveDelaySeconds = normalizedProactiveDelay(body.proactiveDelaySeconds);
   if (typeof body.proactiveMessage === "string" && body.proactiveMessage.trim()) business.agentConfig.proactiveMessage = body.proactiveMessage.trim().slice(0, 240);
@@ -7526,6 +8131,7 @@ app.setErrorHandler((error, request: FastifyRequest, reply: FastifyReply) => {
 
 app.addHook("onClose", async () => {
   clearInterval(retentionCleanupTimer);
+  clearInterval(lifecycleBillingTimer);
   await pool?.end();
 });
 

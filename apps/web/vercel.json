@@ -7,6 +7,12 @@
   "rewrites": [
     { "source": "/platform", "destination": "/" },
     { "source": "/platform/(.*)", "destination": "/" },
+    { "source": "/app", "destination": "/" },
+    { "source": "/app/(.*)", "destination": "/" },
+    { "source": "/demo/(.*)", "destination": "/" },
+    { "source": "/auth/(.*)", "destination": "/" },
+    { "source": "/onboarding", "destination": "/" },
+    { "source": "/onboarding/(.*)", "destination": "/" },
     { "source": "/privacy", "destination": "/" },
     { "source": "/terms", "destination": "/" }
   ],

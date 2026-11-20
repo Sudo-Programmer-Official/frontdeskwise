@@ -12,6 +12,23 @@ export function sesConfigured(): boolean {
   return Boolean(awsRegion() && sesFromEmail());
 }
 
+export type EmailMessage = {
+  to: string[];
+  subject: string;
+  text: string;
+  html?: string;
+  replyTo?: string;
+};
+
+export type EmailSendResult = {
+  provider: "ses";
+  providerMessageId: string | null;
+};
+
+export interface EmailProvider {
+  send(message: EmailMessage): Promise<EmailSendResult>;
+}
+
 export function sesConfigurationMessage(): string {
   return "Email delivery is not configured. Set AWS_REGION and FRONTDESKWISE_SES_FROM_EMAIL.";
 }
@@ -28,16 +45,10 @@ function client(): SESv2Client {
   return new SESv2Client({ region: awsRegion() });
 }
 
-export async function sendTransactionalEmail(input: {
-  to: string[];
-  subject: string;
-  text: string;
-  html?: string;
-  replyTo?: string;
-}): Promise<void> {
+export async function sendTransactionalEmail(input: EmailMessage): Promise<EmailSendResult> {
   const to = input.to.map((email) => email.trim().toLowerCase()).filter(Boolean);
-  if (!to.length) return;
-  await client().send(new SendEmailCommand({
+  if (!to.length) return { provider: "ses", providerMessageId: null };
+  const result = await client().send(new SendEmailCommand({
     FromEmailAddress: process.env.FRONTDESKWISE_SES_FROM_NAME?.trim()
       ? `${process.env.FRONTDESKWISE_SES_FROM_NAME.trim()} <${sesFromEmail()}>`
       : sesFromEmail(),
@@ -53,7 +64,12 @@ export async function sendTransactionalEmail(input: {
       },
     },
   }));
+  return { provider: "ses", providerMessageId: result.MessageId ?? null };
 }
+
+export const sesEmailProvider: EmailProvider = {
+  send: sendTransactionalEmail,
+};
 
 export async function notifySuperAdmins(input: {
   subject: string;

@@ -38,6 +38,11 @@ The current API exposes:
 - `POST /api/v1/demo/:slug/conversations/:conversationId/assign`, `/return-to-ai`, `/resolve`, `/messages/human`, `/ai-assist`, and `/notes` for deterministic staff operations.
 - `GET /api/v1/demo/:slug/team`, `POST /api/v1/demo/:slug/team/invite`, and `PATCH /api/v1/demo/:slug/team/:userId` for business-scoped team access.
 - `GET /api/v1/demo/:slug/notifications` and `POST /api/v1/demo/:slug/notifications/:notificationId/read` for the in-app notification center.
+- `GET/PATCH /api/v1/messaging/preferences` for owner-controlled operational email preferences; billing and security notices remain mandatory.
+
+Super-admin lifecycle messaging controls are available under `/api/v1/admin/messaging/*` for template editing and test sends, automation enable/disable and delays, delivery summaries/logs, and retrying failed deliveries. Migration `026_lifecycle_messaging.sql` seeds the V1 templates and automations. Messages are queued and retried asynchronously through the configured SES provider; FrontDeskWise remains the canonical template store.
+
+`POST /api/v1/webhooks/email/ses` accepts normalized SES event payloads with the `x-frontdeskwise-email-secret` header and records delivery, bounce, complaint, open, and click events against the stored provider message ID.
 
 Public widget routes use the generated site key rather than a tenant slug:
 
