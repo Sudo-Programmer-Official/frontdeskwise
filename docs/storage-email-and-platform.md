@@ -41,7 +41,7 @@ The customer app and control plane share the same SPA. Once the allowlisted Fire
 https://app.frontdeskwise.com/platform
 ```
 
-`https://frontdeskwise.com/platform` also works if the main domain serves the same web deployment. The API authorizes super-admin access server-side using `FRONTDESKWISE_SUPER_ADMIN_EMAILS` plus the `super_admin_users` table.
+`https://www.frontdeskwise.com/platform` is the canonical super-admin route. The API authorizes super-admin access server-side using `FRONTDESKWISE_SUPER_ADMIN_EMAILS` plus the `super_admin_users` table.
 
 ## AWS setup
 
@@ -146,7 +146,7 @@ For the web deployment, keep only public Firebase configuration and the API orig
 
 ```ini
 VITE_API_ORIGIN=https://api.frontdeskwise.com
-VITE_SITE_ORIGIN=https://frontdeskwise.com
+VITE_SITE_ORIGIN=https://www.frontdeskwise.com
 ```
 
 Never put AWS keys, SES settings, Stripe secrets, webhook signing secrets, database credentials, or `FRONTDESKWISE_CREDENTIAL_KEY` in `VITE_*` variables.

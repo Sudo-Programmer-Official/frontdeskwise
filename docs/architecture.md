@@ -164,6 +164,13 @@ Protected owner operations include:
 - Embedding status and reindexing.
 - CRM connection, test, retry, and sync inspection.
 
+The readiness workflow is available through `POST /api/v1/demo/:slug/evaluation`.
+It runs a bounded set of representative questions from indexed source content
+plus an unsupported-question case, then reports pass rate, citation coverage,
+safe fallback behavior, open gaps, and latency. Internal public demos can run
+the same evaluation without an owner token. Public sample assistants can be
+tested read-only through `POST /api/v1/demo/:slug/public/test`.
+
 Visitor widget operations use the public site key and do not use owner tokens. The site key resolves to a tenant but does not expose database credentials or provider secrets. Dashboard test conversations and dashboard lead/booking actions use the separate slug routes and require the owner token.
 
 The `workspace_users.identity_subject` column is reserved for the future Identity SDK integration. The current implementation does not create a second password-based identity system.
@@ -246,6 +253,10 @@ Example shape:
 ```
 
 The widget loads its configuration by site key, renders inside a shadow root, starts a public visitor conversation, sends questions to the API, displays citations, and offers lead capture when an answer falls back.
+
+The owner dashboard exposes the same assistant before installation, and the
+public sample workspace uses the read-only test route so a prospect can ask a
+real business question before creating an account.
 
 ## Billing and entitlements
 

@@ -225,6 +225,28 @@ type KnowledgeGap = {
   lastSeenAt: string;
 };
 
+type EvaluationExpectation = "grounded" | "fallback";
+
+type EvaluationCase = {
+  category: string;
+  question: string;
+  expectation: EvaluationExpectation;
+};
+
+type EvaluationResult = {
+  category: string;
+  question: string;
+  expectation: EvaluationExpectation;
+  passed: boolean;
+  grounded: boolean;
+  confidenceScore: number;
+  confidenceBand: "high" | "medium" | "low";
+  citationCount: number;
+  answer: string;
+  latencyMs: number;
+  retrievalMode: string;
+};
+
 type Business = {
   id: string;
   name: string;
@@ -2529,6 +2551,10 @@ function workspacePayload(business: Business) {
     Boolean(business.agentConfig.assistantName && business.agentConfig.welcomeMessage),
     Boolean(business.widget.enabled && business.widget.siteKey),
   ];
+  const businessTerms = [...new Set(
+    tokenise(business.chunks[0]?.content ?? "")
+      .filter((term) => !tokenise(business.name).includes(term)),
+  )].slice(0, 2);
   const questionCounts = new Map<string, { question: string; count: number }>();
   for (const conversation of conversations) {
     for (const message of conversation.messages) {
@@ -2563,6 +2589,11 @@ function workspacePayload(business: Business) {
       websiteUrl: business.websiteUrl,
     },
     agent: business.agentConfig,
+    suggestedQuestions: [
+      `What services does ${business.name} offer?`,
+      businessTerms.length ? `What should I know about ${businessTerms.join(" ")}?` : "How do I get started?",
+      `How can I contact ${business.name}?`,
+    ],
     ownership: {
       status: business.ownershipStatus,
       method: business.ownershipVerificationMethod,
@@ -2630,13 +2661,17 @@ function publicWorkspacePayload(business: Business) {
     status: payload.status,
     business: payload.business,
     agent: payload.agent,
+    suggestedQuestions: payload.suggestedQuestions,
     knowledge: payload.knowledge,
     stats: payload.stats,
   };
 }
 
 function tokenise(value: string): string[] {
-  const stopWords = new Set(["a", "an", "and", "are", "can", "class", "classes", "do", "for", "how", "i", "in", "is", "it", "lesson", "lessons", "my", "offer", "offers", "of", "on", "or", "program", "programs", "school", "swim", "swimming", "the", "to", "we", "what", "when", "where", "you"]);
+  // Keep business vocabulary searchable. Removing terms such as "school",
+  // "program", or "lesson" makes ordinary customer questions look empty for
+  // verticals where those words carry the meaning of the request.
+  const stopWords = new Set(["a", "an", "and", "are", "can", "do", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "the", "to", "we", "what", "when", "where", "you"]);
   return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((token) => token.length > 2 && !stopWords.has(token));
 }
 
@@ -2739,7 +2774,7 @@ async function databaseRetrieval(business: Business, question: string): Promise<
   }
 }
 
-async function answerQuestion(business: Business, question: string) {
+async function answerQuestion(business: Business, question: string, options: { recordGap?: boolean } = {}) {
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
   if (/^(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you)\b[.!? ]*$/i.test(question.trim())) {
     const modelUsage: ModelUsage = {
@@ -2827,7 +2862,7 @@ async function answerQuestion(business: Business, question: string) {
   const enrichedRetrieval = { ...retrievalContract, ...modelUsage };
 
   if (!match || confidenceBand === "low") {
-    const gap = rememberGap(business, question);
+    const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question);
     return {
       answer: business.agentConfig.fallbackMessage,
       grounded: false,
@@ -2874,6 +2909,88 @@ async function answerQuestion(business: Business, question: string) {
     confidenceBand,
     retrieval: enrichedRetrieval,
     modelUsage,
+  };
+}
+
+function evaluationCases(business: Business, requestedLimit: number): EvaluationCase[] {
+  const limit = Math.max(4, Math.min(20, requestedLimit));
+  const cases: EvaluationCase[] = [];
+  const seen = new Set<string>();
+  const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
+  if (!readySources.length) return cases;
+
+  for (const source of readySources) {
+    const chunk = business.chunks.find((item) => item.sourceId === source.id);
+    if (!chunk) continue;
+    const terms = tokenise(chunk.content).slice(0, 5);
+    if (terms.length < 2) continue;
+    const question = `What does ${business.name} say about ${terms.join(" ")}?`;
+    const key = question.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cases.push({ category: source.pageType || "website_content", question, expectation: "grounded" });
+    if (cases.length >= limit - 1) break;
+  }
+
+  // Every readiness run includes one deliberately unsupported prompt. A safe
+  // front desk should refuse to invent an answer and create no false citation.
+  if (cases.length < limit) {
+    cases.push({
+      category: "unsupported_question",
+      question: "What is the exact moonbase launch date and private jet policy for this business?",
+      expectation: "fallback",
+    });
+  }
+  return cases.slice(0, limit);
+}
+
+async function evaluateBusiness(business: Business, requestedLimit: number) {
+  const cases = evaluationCases(business, requestedLimit);
+  const results: EvaluationResult[] = [];
+  for (const evaluationCase of cases) {
+    const startedAt = Date.now();
+    const answer = await answerQuestion(business, evaluationCase.question, { recordGap: false });
+    const latencyMs = Date.now() - startedAt;
+    const passed = evaluationCase.expectation === "grounded"
+      ? answer.grounded && answer.citations.length > 0 && answer.confidenceScore >= 0.55
+      : !answer.grounded && answer.citations.length === 0 && answer.confidenceBand === "low";
+    results.push({
+      category: evaluationCase.category,
+      question: evaluationCase.question,
+      expectation: evaluationCase.expectation,
+      passed,
+      grounded: answer.grounded,
+      confidenceScore: answer.confidenceScore,
+      confidenceBand: answer.confidenceBand,
+      citationCount: answer.citations.length,
+      answer: answer.answer,
+      latencyMs,
+      retrievalMode: String(answer.retrieval?.mode ?? "unknown"),
+    });
+  }
+
+  const passCount = results.filter((item) => item.passed).length;
+  const latencies = results.map((item) => item.latencyMs).sort((left, right) => left - right);
+  const p95Index = latencies.length ? Math.min(latencies.length - 1, Math.ceil(latencies.length * 0.95) - 1) : 0;
+  const groundedCases = results.filter((item) => item.expectation === "grounded");
+  const fallbackCases = results.filter((item) => item.expectation === "fallback");
+  const openGaps = [...business.knowledgeGaps.values()].filter((gap) => gap.status === "open").length;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    score: results.length ? Math.round((passCount / results.length) * 100) : 0,
+    passed: passCount,
+    total: results.length,
+    groundedQuestions: groundedCases.length,
+    groundedWithCitations: groundedCases.filter((item) => item.grounded && item.citationCount > 0).length,
+    fallbackQuestions: fallbackCases.length,
+    fallbackPassed: fallbackCases.filter((item) => item.passed).length,
+    openGaps,
+    averageLatencyMs: latencies.length ? Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length) : 0,
+    p95LatencyMs: latencies[p95Index] ?? 0,
+    citationCoverage: groundedCases.length ? Math.round((groundedCases.filter((item) => item.citationCount > 0).length / groundedCases.length) * 100) : 0,
+    needsReview: results.filter((item) => !item.passed && item.expectation === "grounded").length,
+    cases: results,
   };
 }
 
@@ -4029,11 +4146,30 @@ app.get("/api/v1/demo/:slug/public", async (request) => {
   return publicWorkspacePayload(business);
 });
 
+app.post("/api/v1/demo/:slug/public/test", async (request) => {
+  const params = request.params as { slug?: string };
+  const slug = requiredString(params.slug, "slug", 120);
+  if (!isInternalDemoSlug(slug)) throw httpError(404, "Public demo assistant not found");
+  const business = await getBusiness(slug);
+  const question = requiredString(asRecord(request.body).question, "question", 1_000);
+  // Public samples are intentionally read-only: prospects can test the agent,
+  // but their questions do not mutate the seeded demo's conversations or gaps.
+  return { ...await answerQuestion(business, question, { recordGap: false }), businessName: business.name };
+});
+
 app.get("/api/v1/demo/:slug", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
   return workspacePayload(business);
+});
+
+app.post("/api/v1/demo/:slug/evaluation", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  if (!isInternalDemoSlug(business.slug)) await requireDemoOwner(business, request);
+  const requestedLimit = Number(asRecord(request.body).limit ?? 10);
+  return evaluateBusiness(business, Number.isFinite(requestedLimit) ? requestedLimit : 10);
 });
 
 app.get("/api/v1/demo/:slug/knowledge/embedding-status", async (request) => {

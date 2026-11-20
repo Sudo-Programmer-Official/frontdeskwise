@@ -15,9 +15,9 @@ FrontDeskWise is the customer-facing product brand operated by Sudo Programmer, 
 - Product/app name: `FrontDeskWise`
 - Operator and legal/billing entity: `Sudo Programmer, Inc.`
 - Public positioning: `FrontDeskWise by Sudo Programmer, Inc.`
-- Application home page: `https://frontdeskwise.com`
-- Privacy policy: `https://frontdeskwise.com/privacy`
-- Terms of service: `https://frontdeskwise.com/terms`
+- Application home page: `https://www.frontdeskwise.com`
+- Privacy policy: `https://www.frontdeskwise.com/privacy`
+- Terms of service: `https://www.frontdeskwise.com/terms`
 - Developer contact: `hello@frontdeskwise.com`
 
 Configure the app name, home page, privacy policy, terms URL, and developer contact in the Google Cloud OAuth consent-screen/branding settings. This is a Google Cloud configuration step, separate from Firebase Authorized Domains and separate from the web hosting provider. Keep `hello@frontdeskwise.com` monitored because it is the published product and privacy contact.
@@ -29,7 +29,7 @@ Configure the app name, home page, privacy policy, terms URL, and developer cont
 - The API migration runner is forward-only, checksum-verified, advisory-locked, and runs before deployment.
 - Production env templates use the public domains and support RDS CA validation through a Render Secret File at `DATABASE_SSL_CA_FILE`.
 - The API has `/health` liveness, `/ready` database readiness, request IDs, security headers, and process-local request limits.
-- The public web build generates the production canonical URL, robots file, sitemap, manifest, and structured metadata when built with `VITE_SITE_ORIGIN=https://frontdeskwise.com`.
+- The public web build generates the production canonical URL, robots file, sitemap, manifest, and structured metadata when built with `VITE_SITE_ORIGIN=https://www.frontdeskwise.com`.
 - Leads remain durable in FrontDeskWise before CRM delivery. Webhook and HubSpot delivery are idempotent, encrypted, retryable, and observable from the owner dashboard.
 - Firebase email/password and Google sign-in bootstrap each account into an organization; the browser never receives server secrets.
 - Stripe Checkout, Customer Portal, signed webhook reconciliation, seven-day trials, entitlements, and read-only billing states are implemented.
@@ -56,10 +56,10 @@ In Vercel, import this repository with project root `apps/web`. The checked-in `
 
 ```text
 VITE_API_ORIGIN=https://api.frontdeskwise.com
-VITE_SITE_ORIGIN=https://frontdeskwise.com
+VITE_SITE_ORIGIN=https://www.frontdeskwise.com
 ```
 
-Attach `frontdeskwise.com` and `www.frontdeskwise.com` according to the DNS records Vercel provides. Redirect `www` to the canonical apex domain if the product should have one canonical URL.
+Attach `frontdeskwise.com` and `www.frontdeskwise.com` according to the DNS records Vercel provides. The current deployment redirects the apex domain to `www`, so keep `https://www.frontdeskwise.com` as the canonical origin unless the redirect direction is intentionally changed.
 
 ### 3. Inject production secrets
 

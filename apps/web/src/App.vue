@@ -67,6 +67,37 @@ interface RetrievalDiagnostic {
   createdAt: string;
 }
 
+interface ReadinessEvaluationCase {
+  category: string;
+  question: string;
+  expectation: "grounded" | "fallback";
+  passed: boolean;
+  grounded: boolean;
+  confidenceScore: number;
+  confidenceBand: "high" | "medium" | "low";
+  citationCount: number;
+  answer: string;
+  latencyMs: number;
+  retrievalMode: string;
+}
+
+interface ReadinessEvaluation {
+  generatedAt: string;
+  score: number;
+  passed: number;
+  total: number;
+  groundedQuestions: number;
+  groundedWithCitations: number;
+  fallbackQuestions: number;
+  fallbackPassed: number;
+  openGaps: number;
+  averageLatencyMs: number;
+  p95LatencyMs: number;
+  citationCoverage: number;
+  needsReview: number;
+  cases: ReadinessEvaluationCase[];
+}
+
 interface WidgetInstall {
   siteKey: string;
   snippet: string;
@@ -90,6 +121,7 @@ interface WorkspacePayload {
   status: string;
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
   agent?: { assistantName?: string; welcomeMessage?: string; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean };
+  suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; sources?: Array<{ title: string; url: string; pageType: string; crawlStatus: string; lastCrawledAt: string }>; readiness?: { score: number; sources: number; chunks: number; openGaps: number; pendingSources?: number; failedSources?: number } };
   stats?: WorkspaceStats;
@@ -223,6 +255,11 @@ const answerGrounded = ref(false);
 const answerConfidence = ref(0);
 const answerConfidenceBand = ref<"high" | "medium" | "low">("low");
 const answerRetrievalMode = ref("");
+const answerCitations = ref<Array<{ title?: string; url?: string; pageType?: string }>>([]);
+const suggestedQuestions = ref<string[]>([]);
+const readinessEvaluation = ref<ReadinessEvaluation | null>(null);
+const evaluationLoading = ref(false);
+const evaluationError = ref("");
 const widgetInstall = ref<WidgetInstall | null>(null);
 const widgetInstallMessage = ref("");
 const ownershipVerification = ref<WorkspacePayload["ownership"] | null>(null);
@@ -240,6 +277,7 @@ const leadIntent = ref("");
 const leadSavedMessage = ref("");
 const knowledgeGaps = ref<KnowledgeGap[]>([]);
 const retrievalDiagnostics = ref<RetrievalDiagnostic[]>([]);
+const sourceLibraryOpen = ref(false);
 const knowledgeError = ref("");
 const knowledgeLoading = ref(false);
 const answerDrafts = ref<Record<string, string>>({});
@@ -383,7 +421,10 @@ async function submitGoogleAuth() {
     authModalOpen.value = false;
     view.value = "overview";
   } catch (error) {
-    authError.value = error instanceof Error ? error.message : "Could not finish Google sign-in.";
+    const message = error instanceof Error ? error.message : "";
+    authError.value = message.includes("auth/popup-closed-by-user")
+      ? "Google sign-in could not load. Try email/password, or ask the owner to verify the Firebase auth domain and SSL certificate."
+      : message || "Could not finish Google sign-in.";
   } finally {
     authLoading.value = false;
   }
@@ -433,6 +474,11 @@ function clearWorkspaceState() {
   verificationMessage.value = "";
   verificationError.value = "";
   conversationId.value = "";
+  answerCitations.value = [];
+  suggestedQuestions.value = [];
+  sourceLibraryOpen.value = false;
+  readinessEvaluation.value = null;
+  evaluationError.value = "";
 }
 
 function applyWorkspacePayload(payload: WorkspacePayload) {
@@ -444,6 +490,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   widgetColor.value = payload.agent?.widgetColor ?? "#0d6efd";
   showLeadCapture.value = payload.agent?.collectLeads ?? true;
   showBookingAction.value = payload.agent?.showBookingAction ?? true;
+  suggestedQuestions.value = payload.suggestedQuestions ?? [];
   ownershipVerification.value = payload.ownership ?? null;
   workspaceStats.value = payload.stats ?? null;
   workspaceKnowledge.value = payload.knowledge ?? null;
@@ -1303,8 +1350,9 @@ async function askQuestion() {
   answerConfidence.value = 0;
   answerConfidenceBand.value = "low";
   answerRetrievalMode.value = "";
+  answerCitations.value = [];
   try {
-    if (!conversationId.value) {
+    if (!publicDemoMode.value && !conversationId.value) {
       const conversationResponse = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations`), {
         method: "POST",
         headers: { "content-type": "application/json", ...ownerHeaders() },
@@ -1314,26 +1362,50 @@ async function askQuestion() {
       if (!conversationResponse.ok || !conversationPayload.conversationId) throw new Error("Could not start a test conversation.");
       conversationId.value = conversationPayload.conversationId;
     }
-    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversationId.value}/messages`), {
+    const endpoint = publicDemoMode.value
+      ? `/api/v1/demo/${demoSlug.value}/public/test`
+      : `/api/v1/demo/${demoSlug.value}/conversations/${conversationId.value}/messages`;
+    const response = await fetch(apiUrl(endpoint), {
       method: "POST",
-      headers: { "content-type": "application/json", ...ownerHeaders() },
+      headers: { "content-type": "application/json", ...(publicDemoMode.value ? {} : ownerHeaders()) },
       body: JSON.stringify({ question: testQuestion.value }),
     });
-    const payload = await response.json() as { error?: string; answer?: string; grounded?: boolean; confidenceScore?: number; confidenceBand?: "high" | "medium" | "low"; retrieval?: { mode?: string }; citations?: Array<{ url?: string }> };
+    const payload = await response.json() as { error?: string; answer?: string; grounded?: boolean; confidenceScore?: number; confidenceBand?: "high" | "medium" | "low"; retrieval?: { mode?: string }; citations?: Array<{ title?: string; url?: string; pageType?: string }> };
     if (!response.ok) throw new Error(payload.error ?? "Could not answer that question.");
     testAnswer.value = payload.answer ?? "";
     answerGrounded.value = Boolean(payload.grounded);
     answerConfidence.value = payload.confidenceScore ?? 0;
     answerConfidenceBand.value = payload.confidenceBand ?? "low";
     answerRetrievalMode.value = payload.retrieval?.mode ?? "";
+    answerCitations.value = payload.citations ?? [];
     answerSource.value = payload.citations?.[0]?.url ?? "";
     testQuestion.value = "";
-    await Promise.all([refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
+    if (!publicDemoMode.value) await Promise.all([refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
   } catch (error) {
     testAnswer.value = error instanceof Error ? error.message : "Could not answer that question.";
     answerGrounded.value = false;
   } finally {
     isAsking.value = false;
+  }
+}
+
+async function runReadinessEvaluation() {
+  if (evaluationLoading.value) return;
+  evaluationLoading.value = true;
+  evaluationError.value = "";
+  try {
+    const response = await fetch(apiUrl(`/api/v1/demo/${demoSlug.value}/evaluation`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(publicDemoMode.value ? {} : ownerHeaders()) },
+      body: JSON.stringify({ limit: 10 }),
+    });
+    const payload = await response.json() as ReadinessEvaluation & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not run the readiness check.");
+    readinessEvaluation.value = payload;
+  } catch (error) {
+    evaluationError.value = error instanceof Error ? error.message : "Could not run the readiness check.";
+  } finally {
+    evaluationLoading.value = false;
   }
 }
 
@@ -1561,11 +1633,24 @@ function openHome() {
               <article class="panel chart-panel"><div class="panel-heading"><div><h2>Conversations & leads</h2><p>Last 30 days · live records</p></div><div class="legend"><span><i class="blue-dot"></i> Conversations</span><span><i class="orange-dot"></i> Leads</span></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Conversations and leads trend"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
               <article class="panel readiness-panel"><div class="panel-heading"><div><h2>Knowledge readiness</h2><p>Calculated from indexed sources and open gaps</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="readiness-ring" :style="{ background: `conic-gradient(#7256c9 0deg ${readinessScore * 3.6}deg, #edf0f6 ${readinessScore * 3.6}deg 360deg)` }"><div><strong>{{ readinessScore }}</strong><span>/100</span></div></div><div class="readiness-list"><div><span class="check">✓</span> Sources indexed <strong>{{ workspaceKnowledge?.sourceCount ?? 0 }}</strong></div><div><span class="check">✓</span> Knowledge chunks <strong>{{ workspaceKnowledge?.chunkCount ?? 0 }}</strong></div><div><span :class="workspaceStats?.unansweredQuestions ? 'warning' : 'check'">{{ workspaceStats?.unansweredQuestions ? '!' : '✓' }}</span> Open answer gaps <strong>{{ workspaceStats?.unansweredQuestions ?? 0 }}</strong></div><div><span class="check">✓</span> Widget loads <strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong></div></div></article>
             </div>
+            <article class="panel evaluation-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">Proof, not vibes</p><h2>AI readiness check</h2><p>Run ten representative questions before you share this workspace. Grounded answers need citations; unsupported questions must safely fall back.</p></div>
+                <div class="evaluation-actions"><button class="outline-button small" type="button" @click="view = 'conversations'">Test assistant</button><button class="primary-button small" type="button" :disabled="evaluationLoading" @click="runReadinessEvaluation">{{ evaluationLoading ? 'Testing…' : readinessEvaluation ? 'Run again' : 'Run 10-question check' }}</button></div>
+              </div>
+              <p v-if="evaluationError" class="form-error">{{ evaluationError }}</p>
+              <div v-if="readinessEvaluation" class="evaluation-summary">
+                <div class="evaluation-score"><strong>{{ readinessEvaluation.score }}%</strong><span>{{ readinessEvaluation.passed }}/{{ readinessEvaluation.total }} passed</span></div>
+                <div class="evaluation-metrics"><span><strong>{{ readinessEvaluation.groundedWithCitations }}/{{ readinessEvaluation.groundedQuestions }}</strong><small>grounded with citations</small></span><span><strong>{{ readinessEvaluation.fallbackPassed }}/{{ readinessEvaluation.fallbackQuestions }}</strong><small>safe fallbacks</small></span><span><strong>{{ readinessEvaluation.openGaps }}</strong><small>open knowledge gaps</small></span><span><strong>{{ readinessEvaluation.averageLatencyMs }}ms</strong><small>average response</small></span></div>
+              </div>
+              <div v-if="readinessEvaluation" class="evaluation-cases"><div v-for="evaluationCase in readinessEvaluation.cases" :key="evaluationCase.question" class="evaluation-case"><span :class="['answer-badge', evaluationCase.passed ? 'grounded' : 'fallback']">{{ evaluationCase.passed ? '✓ Pass' : '! Review' }}</span><div><strong>{{ evaluationCase.question }}</strong><small>{{ evaluationCase.expectation === 'grounded' ? `${evaluationCase.citationCount} citation${evaluationCase.citationCount === 1 ? '' : 's'} · ${Math.round(evaluationCase.confidenceScore * 100)}% confidence` : 'Expected safe fallback' }}</small></div><span class="evaluation-latency">{{ evaluationCase.latencyMs }}ms</span></div></div>
+              <div v-else class="evaluation-empty"><span class="empty-icon">✓</span><div><strong>Know whether the assistant is ready to sell.</strong><p>This check uses the business’s indexed content, measures citations and fallback behavior, and shows what needs review.</p></div></div>
+            </article>
             <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>What visitors are asking</p></div><button class="text-button" type="button" @click="view = 'conversations'">See all →</button></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Recommended actions</h2><p>Open gaps from live conversations</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Add answer</button></div></div><div v-else class="diagnostics-empty">No open actions. New low-confidence questions will appear here.</div></article></div>
           </template>
         </div>
 
-        <div v-else-if="view === 'conversations'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Grounded answers</p><h2>Test a conversation</h2><p>Ask what a visitor would ask and verify the source before sharing the demo.</p></div><span v-if="conversationId" class="conversation-status">Conversation active</span></div><div class="conversation-layout"><article class="panel conversation-panel"><div class="conversation-intro"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small>Answers from {{ businessName }} knowledge</small></div></div><div v-if="testAnswer" class="answer-card"><div class="answer-meta"><span :class="['answer-badge', answerGrounded ? 'grounded' : 'fallback']">{{ answerGrounded ? '✓ Grounded in source' : '! Needs an answer' }}</span><span class="answer-diagnostic">{{ Math.round(answerConfidence * 100) }}% · {{ answerConfidenceBand }}<span v-if="answerRetrievalMode"> · {{ answerRetrievalMode }}</span></span><a v-if="answerSource" :href="answerSource" target="_blank" rel="noreferrer">View source ↗</a></div><p>{{ testAnswer }}</p></div><div v-else class="conversation-empty">Ask a question to see the agent’s answer and citation.</div><form class="question-form" @submit.prevent="askQuestion"><input v-model="testQuestion" type="text" placeholder="e.g. What age can my child start?" aria-label="Test question" /><button class="primary-button small" type="submit" :disabled="isAsking">{{ isAsking ? 'Checking…' : 'Ask agent' }}</button></form></article><article class="panel lead-capture-panel"><div class="panel-heading"><div><h2>Capture the next step</h2><p>Send a contact to the owner dashboard.</p></div></div><label>Name<input v-model="leadName" type="text" placeholder="Jamie Rodriguez" /></label><label>Email<input v-model="leadEmail" type="email" placeholder="jamie@example.com" /></label><label>Phone <span class="optional">optional</span><input v-model="leadPhone" type="tel" placeholder="(555) 010-2026" /></label><label>Intent <span class="optional">optional</span><input v-model="leadIntent" type="text" placeholder="Toddler lessons" /></label><button class="primary-button" type="button" :disabled="!leadEmail && !leadPhone" @click="captureLead">Capture lead →</button><span v-if="leadSavedMessage" class="saved-message">✓ {{ leadSavedMessage }}</span></article></div></div>
+        <div v-else-if="view === 'conversations'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Grounded answers</p><h2>Test a conversation</h2><p>Ask what a visitor would ask and verify the source before sharing the demo.</p></div><span v-if="conversationId" class="conversation-status">Conversation active</span></div><div class="conversation-layout"><article class="panel conversation-panel"><div class="conversation-intro"><span class="mini-orb">✦</span><div><strong>{{ assistantName }}</strong><small>Answers from {{ businessName }} knowledge</small></div></div><div v-if="suggestedQuestions.length" class="suggested-question-list"><span>Try a real question</span><button v-for="suggestion in suggestedQuestions" :key="suggestion" type="button" @click="testQuestion = suggestion; void askQuestion()">{{ suggestion }} <b>›</b></button></div><div v-if="testAnswer" class="answer-card"><div class="answer-meta"><span :class="['answer-badge', answerGrounded ? 'grounded' : 'fallback']">{{ answerGrounded ? '✓ Grounded in source' : '! Needs an answer' }}</span><span class="answer-diagnostic">{{ Math.round(answerConfidence * 100) }}% · {{ answerConfidenceBand }}<span v-if="answerRetrievalMode"> · {{ answerRetrievalMode }}</span></span></div><p>{{ testAnswer }}</p><div v-if="answerCitations.length" class="answer-citations"><span>Sources</span><a v-for="citation in answerCitations" :key="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} ↗</a></div></div><div v-else class="conversation-empty">Ask a question to see the agent’s answer and citation.</div><form class="question-form" @submit.prevent="askQuestion"><input v-model="testQuestion" type="text" placeholder="e.g. What age can my child start?" aria-label="Test question" /><button class="primary-button small" type="submit" :disabled="isAsking">{{ isAsking ? 'Checking…' : 'Ask agent' }}</button></form></article><article class="panel lead-capture-panel"><div class="panel-heading"><div><h2>Capture the next step</h2><p>Send a contact to the owner dashboard.</p></div></div><label>Name<input v-model="leadName" type="text" placeholder="Jamie Rodriguez" /></label><label>Email<input v-model="leadEmail" type="email" placeholder="jamie@example.com" /></label><label>Phone <span class="optional">optional</span><input v-model="leadPhone" type="tel" placeholder="(555) 010-2026" /></label><label>Intent <span class="optional">optional</span><input v-model="leadIntent" type="text" placeholder="Toddler lessons" /></label><button class="primary-button" type="button" :disabled="!leadEmail && !leadPhone" @click="captureLead">Capture lead →</button><span v-if="leadSavedMessage" class="saved-message">✓ {{ leadSavedMessage }}</span></article></div></div>
 
         <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>People FrontDeskWise helped move closer to a booking.</p></div><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!leads.length" class="diagnostics-empty">No leads captured yet.</div><div v-for="lead in leads" :key="lead.id" class="table-row"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0) }}</span><strong>{{ lead.name }}</strong></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></div></div></div>
 
@@ -1584,7 +1669,7 @@ function openHome() {
             <div v-else class="document-list"><div v-for="documentItem in organizationDocuments" :key="documentItem.id" class="document-row"><div><strong>{{ documentItem.fileName }}</strong><small>{{ documentItem.contentType }} · {{ formatDocumentSize(documentItem.sizeBytes) }} · {{ documentItem.status }}</small></div><div class="admin-actions"><button class="outline-button small" type="button" @click="downloadDocument(documentItem)">Download</button><button class="text-button" type="button" :disabled="documentsLoading" @click="deleteDocument(documentItem)">Remove</button></div></div></div>
           </article>
           <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps—not placeholder metrics.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
-          <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>These are the pages currently available to the assistant. Private uploads appear above after processing.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh sources</button></div><div class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.url" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.pageType }} · {{ source.url }}</small></div><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span></div></div></article>
+          <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} page{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.url" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.pageType }} · {{ source.url }}</small></div><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span></div></div></article>
           <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon">✓</div><h2>No open knowledge gaps</h2><p>New low-confidence questions will appear here for review.</p></article>
           <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || gap.status === 'resolved'" @click="resolveKnowledgeGap(gap)">{{ gap.status === 'resolved' ? 'Approved' : 'Approve answer' }}</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Explainability</p><h2>Retrieval diagnostics</h2><p>Recent answers with confidence and retrieval mode.</p></div></div>
