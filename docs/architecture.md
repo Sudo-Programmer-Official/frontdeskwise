@@ -230,7 +230,7 @@ running
                   failed
 ```
 
-The current worker runs in the API process but uses durable `embedding_jobs` rows. It supports startup recovery, attempt counters, next-attempt timestamps, progress counts, and provider/model metadata. If `OPENAI_API_KEY` is absent, the API reports `not_configured` and continues using full-text retrieval.
+The current worker runs in the API process but uses durable `embedding_jobs` rows. It supports startup recovery, attempt counters, next-attempt timestamps, progress counts, and provider/model metadata. Startup probes the OpenAI embedding path without logging secrets. Business readiness distinguishes `SEMANTIC_SEARCH_HEALTHY`, `DEGRADED_FULL_TEXT_ONLY`, `EMBEDDING_CONFIGURATION_ERROR`, and `EMBEDDING_BACKLOG`; full-text fallback is explicit rather than presented as semantic readiness.
 
 ## Cost-aware answer routing
 

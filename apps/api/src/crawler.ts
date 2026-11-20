@@ -240,6 +240,7 @@ export async function crawlWebsite(websiteUrl: string): Promise<{ pages: Crawled
   const root = new URL(websiteUrl);
   const queue: Array<{ url: string; depth: number }> = [{ url: websiteUrl, depth: 0 }];
   const visited = new Set<string>();
+  const seenContentHashes = new Set<string>();
   const pages: CrawledPage[] = [];
   let robotsText = "";
   try {
@@ -273,15 +274,19 @@ export async function crawlWebsite(websiteUrl: string): Promise<{ pages: Crawled
     const readable = extracted.sections.map((section) => section.text).join(" ").trim();
     if (readable.length < 40) continue;
     const now = new Date().toISOString();
-    pages.push({
-      url: canonicalUrl,
-      canonicalUrl,
-      title: extracted.title,
-      contentHash: hash(readable),
-      pageType: type,
-      lastCrawledAt: now,
-      chunks: chunkSections(extracted.sections, type),
-    });
+    const contentHash = hash(readable);
+    if (!seenContentHashes.has(contentHash)) {
+      seenContentHashes.add(contentHash);
+      pages.push({
+        url: canonicalUrl,
+        canonicalUrl,
+        title: extracted.title,
+        contentHash,
+        pageType: type,
+        lastCrawledAt: now,
+        chunks: chunkSections(extracted.sections, type),
+      });
+    }
 
     if (next.depth < MAX_DEPTH) {
       for (const href of extracted.links) {

@@ -8,7 +8,7 @@ import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
 import { CrawlError, crawlWebsite, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
-import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
+import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { generateGroundedAnswer, routeQuestion, verifyGroundedAnswer, type ModelUsage } from "./model-routing.js";
@@ -34,6 +34,15 @@ import {
   sourceSemanticType,
   type RetrievalIntent,
 } from "./retrieval.js";
+import {
+  embeddingReadiness,
+  ragMetricsSnapshot,
+  recordAnswer,
+  recordEmbeddingJobAttempt,
+  recordEmbeddingJobFailure,
+  recordLowConfidenceFallback,
+  recordRetrieval,
+} from "./rag-observability.js";
 import {
   allowedDocumentTypeList,
   createDocumentDownload,
@@ -185,6 +194,8 @@ type KnowledgeChunk = {
   content: string;
   contentHash: string;
   metadata: Record<string, unknown>;
+  embeddingModel?: string | null;
+  embeddingDimensions?: number | null;
 };
 
 type BillingStatus = "trial" | "active" | "grace" | "paused" | "cancelled";
@@ -1410,8 +1421,11 @@ async function enqueueEmbeddingJob(business: Business): Promise<string | null> {
   if (active.rowCount) return active.rows[0].id;
 
   const total = await pool.query<{ count: string }>(
-    "select count(*)::text as count from knowledge_chunks where business_id = $1 and embedding is null",
-    [business.id],
+    `select count(*)::text as count
+     from knowledge_chunks
+     where business_id = $1
+       and (embedding is null or embedding_model is distinct from $2 or embedding_dimensions is distinct from $3)`,
+    [business.id, embeddingModel(), embeddingDimensions()],
   );
   if (Number(total.rows[0].count) === 0) return null;
 
@@ -1470,14 +1484,16 @@ async function processEmbeddingJob(business: Business, jobId: string): Promise<v
     [jobId],
   );
   if (!claim.rowCount) return;
+  recordEmbeddingJobAttempt();
 
   try {
     const pending = await pool.query<{ id: string; content: string }>(
       `select id, content
        from knowledge_chunks
-       where business_id = $1 and embedding is null
+       where business_id = $1
+         and (embedding is null or embedding_model is distinct from $2 or embedding_dimensions is distinct from $3)
        order by created_at`,
-      [business.id],
+      [business.id, embeddingModel(), embeddingDimensions()],
     );
     let processed = 0;
     for (let index = 0; index < pending.rows.length; index += 64) {
@@ -1512,6 +1528,7 @@ async function processEmbeddingJob(business: Business, jobId: string): Promise<v
       [jobId],
     );
   } catch (error) {
+    recordEmbeddingJobFailure();
     const retryDelaySeconds = await markEmbeddingJobRetry(jobId, error);
     if (retryDelaySeconds !== null) {
       setTimeout(() => void processEmbeddingJob(business, jobId), retryDelaySeconds * 1_000);
@@ -1979,6 +1996,8 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       content: String(chunk.content),
       contentHash: String(chunk.content_hash),
       metadata: asRecord(chunk.metadata),
+      embeddingModel: typeof chunk.embedding_model === "string" ? chunk.embedding_model : null,
+      embeddingDimensions: chunk.embedding_dimensions === null || chunk.embedding_dimensions === undefined ? null : Number(chunk.embedding_dimensions),
     })),
     actions: actionResult.rows.length
       ? actionResult.rows.map(actionFromRow)
@@ -3764,7 +3783,61 @@ function conversionFunnelPayload(business: Business) {
   }));
 }
 
-function workspacePayload(business: Business) {
+async function embeddingReadinessForBusiness(business: Business) {
+  const provider = embeddingProviderHealth();
+  if (!pool) {
+    const embeddedChunks = business.chunks.filter((chunk) => chunk.embeddingModel === embeddingModel() && chunk.embeddingDimensions === embeddingDimensions()).length;
+    return embeddingReadiness({
+      configured: embeddingsConfigured(),
+      providerStatus: provider.status,
+      providerReason: provider.reason,
+      model: embeddingModel(),
+      dimensions: embeddingDimensions(),
+      totalChunks: business.chunks.length,
+      embeddedChunks,
+    });
+  }
+
+  const [counts, latest] = await Promise.all([
+    pool.query<{ total: string; embedded: string }>(
+      `select count(*)::text as total,
+              count(*) filter (where embedding is not null and embedding_model = $2 and embedding_dimensions = $3)::text as embedded
+       from knowledge_chunks where business_id = $1`,
+      [business.id, embeddingModel(), embeddingDimensions()],
+    ),
+    pool.query<Record<string, unknown>>(
+      `select id, status, model, attempts, max_attempts, total_chunks, embedded_chunks, next_attempt_at, started_at, completed_at, last_error
+       from embedding_jobs where business_id = $1 order by created_at desc limit 1`,
+      [business.id],
+    ),
+  ]);
+  const job = latest.rows[0];
+  const latestJob = job ? {
+    id: String(job.id),
+    status: String(job.status),
+    model: String(job.model),
+    attempts: Number(job.attempts),
+    maxAttempts: Number(job.max_attempts),
+    totalChunks: Number(job.total_chunks),
+    embeddedChunks: Number(job.embedded_chunks),
+    nextAttemptAt: job.next_attempt_at ? toIso(job.next_attempt_at) : null,
+    startedAt: job.started_at ? toIso(job.started_at) : null,
+    completedAt: job.completed_at ? toIso(job.completed_at) : null,
+    lastError: typeof job.last_error === "string" ? job.last_error : null,
+  } : null;
+  return embeddingReadiness({
+    configured: embeddingsConfigured(),
+    providerStatus: provider.status,
+    providerReason: provider.reason,
+    model: embeddingModel(),
+    dimensions: embeddingDimensions(),
+    totalChunks: Number(counts.rows[0]?.total ?? 0),
+    embeddedChunks: Number(counts.rows[0]?.embedded ?? 0),
+    latestJob,
+  });
+}
+
+async function workspacePayload(business: Business) {
   const conversations = [...business.conversations.values()];
   const leadCount = business.leads.length;
   const gapList = [...business.knowledgeGaps.values()];
@@ -3775,9 +3848,10 @@ function workspacePayload(business: Business) {
   const pendingSourceCount = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling").length;
   const failedSourceCount = business.sources.filter((source) => source.crawlStatus === "failed").length;
   const chunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId)).length;
+  const semantic = await embeddingReadinessForBusiness(business);
   const readinessScore = sourceCount === 0
     ? 0
-    : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (chunkCount > 0 ? 30 : 0) + Math.max(0, 30 - gapCount * 5)));
+    : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (chunkCount > 0 ? 30 : 0) + (semantic.status === "SEMANTIC_SEARCH_HEALTHY" ? 20 : 0) + Math.max(0, 10 - gapCount * 2)));
   const readinessStatus = sourceCount === 0
     ? "needs_website"
     : chunkCount === 0 || pendingSourceCount > 0
@@ -3785,6 +3859,9 @@ function workspacePayload(business: Business) {
       : gapCount > 0 || failedSourceCount > 0
         ? "review_recommended"
         : "ready";
+  const knowledgeStatus = sourceCount === 0 || chunkCount === 0 || pendingSourceCount > 0
+    ? readinessStatus
+    : semantic.status;
   const setupSteps = [
     sourceCount > 0,
     chunkCount > 0,
@@ -3855,7 +3932,9 @@ function workspacePayload(business: Business) {
       openGaps: gapCount,
       pendingSources: pendingSourceCount,
       failedSources: failedSourceCount,
-      status: readinessStatus,
+      status: knowledgeStatus,
+      indexed: sourceCount > 0 && chunkCount > 0,
+      semantic,
       sources: business.sources.map((source) => ({
         id: source.id,
         title: source.title,
@@ -3869,6 +3948,9 @@ function workspacePayload(business: Business) {
         score: readinessScore,
         sources: sourceCount,
         chunks: chunkCount,
+        embeddedChunks: semantic.embeddedChunks,
+        embeddingCoveragePercent: semantic.coveragePercent,
+        semanticSearchStatus: semantic.status,
         openGaps: gapCount,
         pendingSources: pendingSourceCount,
         failedSources: failedSourceCount,
@@ -3899,8 +3981,8 @@ function workspacePayload(business: Business) {
   };
 }
 
-function publicWorkspacePayload(business: Business) {
-  const payload = workspacePayload(business);
+async function publicWorkspacePayload(business: Business) {
+  const payload = await workspacePayload(business);
   return {
     slug: payload.slug,
     status: payload.status,
@@ -3964,6 +4046,7 @@ function rememberGap(business: Business, question: string): KnowledgeGap {
 }
 
 type RetrievalMatch = { chunk: KnowledgeChunk; score: number; evidenceScore: number };
+type RetrievalResult = { matches: RetrievalMatch[]; mode: string; latencyMs: number };
 
 function retrievalTokens(question: string, intent: RetrievalIntent): string[] {
   const intentTerms: Record<RetrievalIntent, string[]> = {
@@ -3999,7 +4082,8 @@ function contentEvidenceScore(content: string, question: string, intent: Retriev
   return Math.max(0, Math.min(1, lexicalEvidence * 0.45 + Math.max(0, Math.min(1, vectorScore)) * 0.55));
 }
 
-function memoryRetrieval(business: Business, question: string): { matches: RetrievalMatch[]; mode: string } {
+function memoryRetrieval(business: Business, question: string): RetrievalResult {
+  const startedAt = Date.now();
   const intent = classifyQuestionIntent(question);
   const tokens = retrievalTokens(question, intent);
   const matches = business.chunks.map((chunk) => {
@@ -4007,11 +4091,12 @@ function memoryRetrieval(business: Business, question: string): { matches: Retri
     const score = tokens.reduce((total, token) => total + (lower.includes(token) ? 1 : 0), 0);
     return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, question, intent, null, null) };
   }).filter((item) => item.score > 0);
-  return { matches: rankMatches(matches, business.sources, intent), mode: "memory_lexical" };
+  return { matches: rankMatches(matches, business.sources, intent), mode: "memory_lexical", latencyMs: Date.now() - startedAt };
 }
 
-async function databaseRetrieval(business: Business, question: string): Promise<{ matches: RetrievalMatch[]; mode: string } | null> {
+async function databaseRetrieval(business: Business, question: string): Promise<RetrievalResult | null> {
   if (!pool) return null;
+  const startedAt = Date.now();
   try {
     const lexicalQuery = retrievalTokens(question, classifyQuestionIntent(question)).map((token) => `${token}:*`).join(" | ");
     const lexicalResult = await pool.query<Record<string, unknown>>(
@@ -4039,10 +4124,13 @@ async function databaseRetrieval(business: Business, question: string): Promise<
         `select id, source_id, content, content_hash, metadata,
                 1 - (embedding <=> $2::vector) as vector_score
          from knowledge_chunks
-         where business_id = $1 and embedding is not null
+         where business_id = $1
+           and embedding is not null
+           and embedding_model = $3
+           and embedding_dimensions = $4
          order by embedding <=> $2::vector
          limit 20`,
-        [business.id, vectorLiteral(queryVector)],
+        [business.id, vectorLiteral(queryVector), embeddingModel(), embeddingDimensions()],
       )
       : { rows: [] as Record<string, unknown>[], rowCount: 0 };
 
@@ -4079,6 +4167,7 @@ async function databaseRetrieval(business: Business, question: string): Promise<
     return {
       matches: rankMatches(matches, business.sources, classifyQuestionIntent(question)),
       mode: vectorResult.rowCount ? "hybrid_rrf" : "postgres_full_text",
+      latencyMs: Date.now() - startedAt,
     };
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : "unknown retrieval error", businessId: business.id }, "Database retrieval fell back to memory");
@@ -4177,6 +4266,7 @@ async function answerQuestion(business: Business, question: string, options: { r
   }
   const intent = classifyQuestionIntent(question);
   const retrieval = await databaseRetrieval(business, question) ?? memoryRetrieval(business, question);
+  recordRetrieval(retrieval.mode, retrieval.latencyMs);
   const match = retrieval.matches[0];
   const secondMatch = retrieval.matches[1];
   const answerability = answerabilityDecision(retrieval.matches, business.sources, intent);
@@ -4188,6 +4278,7 @@ async function answerQuestion(business: Business, question: string, options: { r
   const confidenceBand: "high" | "medium" | "low" = confidenceScore >= 0.78 ? "high" : confidenceScore >= 0.55 ? "medium" : "low";
   const retrievalContract = {
     mode: retrieval.mode,
+    latencyMs: retrieval.latencyMs,
     intent,
     candidateCount: retrieval.matches.length,
     topScore: answerability.score,
@@ -5246,6 +5337,8 @@ async function persistConversationExchange(
   userContent: string,
   result: ConversationAnswerResult,
 ): Promise<ConversationAnswerResult> {
+  recordAnswer(result.modelUsage.latencyMs);
+  if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer") recordLowConfidenceFallback();
   const now = new Date().toISOString();
   const userMessage: Message = { role: "user", content: userContent, createdAt: now };
   const assistantMessage: Message = {
@@ -5351,6 +5444,15 @@ if (pool) {
   }
 }
 await syncStripePlanPrices();
+void probeEmbeddingProvider().then((health) => {
+  if (health.status === "healthy") {
+    app.log.info({ provider: "OpenAI", model: embeddingModel(), dimensions: embeddingDimensions() }, "Embedding provider readiness probe passed");
+  } else {
+    app.log.warn({ provider: "OpenAI", model: embeddingModel(), dimensions: embeddingDimensions(), status: health.status, reason: health.reason, httpStatus: health.httpStatus }, "Embedding provider readiness probe failed; semantic search is not healthy");
+  }
+}).catch((error: unknown) => {
+  app.log.warn({ provider: "OpenAI", model: embeddingModel(), dimensions: embeddingDimensions(), error: error instanceof Error ? error.message : "unknown embedding probe error" }, "Embedding provider readiness probe could not complete");
+});
 await resumeEmbeddingJobs();
 void processIntegrationOutbox();
 void processActionOutbox();
@@ -5592,6 +5694,11 @@ app.get("/health", async () => ({
   service: "frontdeskwise-api",
   databaseConfigured: Boolean(pool),
   storage: pool ? "postgres" : "memory",
+  embeddingProvider: "openai",
+  embeddingModel: embeddingModel(),
+  embeddingDimensions: embeddingDimensions(),
+  embeddingConfigured: embeddingsConfigured(),
+  embeddingProviderStatus: embeddingProviderHealth().status,
   objectStorageConfigured: storageConfigured(),
   emailConfigured: sesConfigured(),
   stripeConfigured: Boolean(stripe),
@@ -5605,6 +5712,14 @@ app.get("/ready", async (_request, reply) => {
       ok: true,
       service: "frontdeskwise-api",
       database: "ready",
+      semanticSearch: {
+        provider: "openai",
+        model: embeddingModel(),
+        dimensions: embeddingDimensions(),
+        configured: embeddingsConfigured(),
+        providerStatus: embeddingProviderHealth().status,
+        providerReason: embeddingProviderHealth().reason,
+      },
       objectStorageConfigured: storageConfigured(),
       emailConfigured: sesConfigured(),
       stripeConfigured: Boolean(stripe),
@@ -5612,6 +5727,72 @@ app.get("/ready", async (_request, reply) => {
   } catch {
     return reply.code(503).send({ ok: false, service: "frontdeskwise-api", reason: "database_unavailable" });
   }
+});
+
+app.get("/api/v1/admin/rag/metrics", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "RAG metrics require PostgreSQL storage");
+  const [businessesResult, jobsResult, jobMetricsResult] = await Promise.all([
+    pool.query<Record<string, unknown>>(
+      `select b.id, b.name, b.slug,
+              count(kc.id)::text as total_chunks,
+              count(kc.id) filter (where kc.embedding is not null and kc.embedding_model = $1 and kc.embedding_dimensions = $2)::text as embedded_chunks
+       from businesses b
+       left join knowledge_chunks kc on kc.business_id = b.id
+       group by b.id, b.name, b.slug
+       order by b.name, b.slug`,
+      [embeddingModel(), embeddingDimensions()],
+    ),
+    pool.query<Record<string, unknown>>(
+      `select distinct on (business_id)
+              business_id, id, status, model, attempts, max_attempts, total_chunks, embedded_chunks,
+              next_attempt_at, started_at, completed_at, last_error
+       from embedding_jobs
+       order by business_id, created_at desc`,
+    ),
+    pool.query<{ attempted: string; failed: string }>(
+      `select coalesce(sum(attempts), 0)::text as attempted,
+              count(*) filter (where status = 'failed')::text as failed
+       from embedding_jobs`,
+    ),
+  ]);
+  const provider = embeddingProviderHealth();
+  const jobsByBusiness = new Map(jobsResult.rows.map((job) => [String(job.business_id), job]));
+  const statuses = businessesResult.rows.map((business) => {
+    const job = jobsByBusiness.get(String(business.id));
+    const readiness = embeddingReadiness({
+      configured: embeddingsConfigured(),
+      providerStatus: provider.status,
+      providerReason: provider.reason,
+      model: embeddingModel(),
+      dimensions: embeddingDimensions(),
+      totalChunks: Number(business.total_chunks ?? 0),
+      embeddedChunks: Number(business.embedded_chunks ?? 0),
+      latestJob: job ? {
+        id: String(job.id),
+        status: String(job.status),
+        model: String(job.model),
+        attempts: Number(job.attempts),
+        maxAttempts: Number(job.max_attempts),
+        totalChunks: Number(job.total_chunks),
+        embeddedChunks: Number(job.embedded_chunks),
+        nextAttemptAt: job.next_attempt_at ? toIso(job.next_attempt_at) : null,
+        startedAt: job.started_at ? toIso(job.started_at) : null,
+        completedAt: job.completed_at ? toIso(job.completed_at) : null,
+        lastError: typeof job.last_error === "string" ? job.last_error : null,
+      } : null,
+    });
+    return { id: String(business.id), name: String(business.name), slug: String(business.slug), readiness };
+  });
+  return {
+    provider: { name: "OpenAI", model: embeddingModel(), dimensions: embeddingDimensions(), ...provider },
+    metrics: {
+      ...ragMetricsSnapshot(),
+      durableEmbeddingJobsAttempted: Number(jobMetricsResult.rows[0]?.attempted ?? 0),
+      durableEmbeddingJobsFailed: Number(jobMetricsResult.rows[0]?.failed ?? 0),
+    },
+    businesses: statuses,
+  };
 });
 
 app.get("/api/v1/storage/documents", async (request) => {
@@ -6893,7 +7074,7 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
       verification_url: lifecycleAppUrl(`/app/${business.slug}/settings/verification`),
     },
   });
-  return reply.code(201).send({ business: workspacePayload(business), auth: await authSnapshot(userResult.rows[0].id, organizationResult.rows[0].id) });
+  return reply.code(201).send({ business: await workspacePayload(business), auth: await authSnapshot(userResult.rows[0].id, organizationResult.rows[0].id) });
 });
 
 async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<string, unknown>> {
@@ -6947,7 +7128,7 @@ async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<
     }
     const { sessionId: _sessionId, ...publicAccess } = access;
     return {
-      ...workspacePayload(business),
+      ...(await workspacePayload(business)),
       access: publicAccess,
       demoRequest: requestId ? { id: requestId, status: "ready" } : null,
     };
@@ -6978,14 +7159,14 @@ app.post("/api/v1/demo-access/exchange", async (request) => {
     accessToken: token,
     expiresAt: session.expiresAt,
     user: session.user,
-    workspace: workspacePayload(business),
+    workspace: await workspacePayload(business),
   };
 });
 
 app.get("/api/v1/demo-catalog", async () => ({
-  demos: [...businesses.values()]
+  demos: await Promise.all([...businesses.values()]
     .filter((business) => isInternalDemoSlug(business.slug))
-    .map(publicWorkspacePayload),
+    .map((business) => publicWorkspacePayload(business))),
 }));
 
 app.get("/api/v1/demo/:slug/public", async (request) => {
@@ -7029,38 +7210,7 @@ app.get("/api/v1/demo/:slug/knowledge/embedding-status", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
-  if (!pool) return { configured: false, status: "memory", embeddedChunks: 0, totalChunks: business.chunks.length, job: null };
-  const [counts, latest] = await Promise.all([
-    pool.query<{ total: string; embedded: string }>(
-      `select count(*)::text as total, count(*) filter (where embedding is not null)::text as embedded
-       from knowledge_chunks where business_id = $1`,
-      [business.id],
-    ),
-    pool.query<Record<string, unknown>>(
-      `select id, status, model, attempts, max_attempts, total_chunks, embedded_chunks, next_attempt_at, started_at, completed_at, last_error
-       from embedding_jobs where business_id = $1 order by created_at desc limit 1`,
-      [business.id],
-    ),
-  ]);
-  return {
-    configured: embeddingsConfigured(),
-    status: embeddingsConfigured() ? "available" : "not_configured",
-    totalChunks: Number(counts.rows[0].total),
-    embeddedChunks: Number(counts.rows[0].embedded),
-    job: latest.rows[0] ? {
-      id: String(latest.rows[0].id),
-      status: String(latest.rows[0].status),
-      model: String(latest.rows[0].model),
-      attempts: Number(latest.rows[0].attempts),
-      maxAttempts: Number(latest.rows[0].max_attempts),
-      totalChunks: Number(latest.rows[0].total_chunks),
-      embeddedChunks: Number(latest.rows[0].embedded_chunks),
-      nextAttemptAt: latest.rows[0].next_attempt_at ? toIso(latest.rows[0].next_attempt_at) : null,
-      startedAt: latest.rows[0].started_at ? toIso(latest.rows[0].started_at) : null,
-      completedAt: latest.rows[0].completed_at ? toIso(latest.rows[0].completed_at) : null,
-      lastError: typeof latest.rows[0].last_error === "string" ? latest.rows[0].last_error : null,
-    } : null,
-  };
+  return embeddingReadinessForBusiness(business);
 });
 
 app.post("/api/v1/demo/:slug/knowledge/reindex", async (request) => {
@@ -7069,6 +7219,8 @@ app.post("/api/v1/demo/:slug/knowledge/reindex", async (request) => {
   await requireDemoOwner(business, request);
   requireWritableBusiness(business);
   if (!pool || !embeddingsConfigured()) throw httpError(503, "Embedding jobs require OPENAI_API_KEY in the API environment");
+  const provider = embeddingProviderHealth().status === "unknown" ? await probeEmbeddingProvider() : embeddingProviderHealth();
+  if (provider.status !== "healthy") throw httpError(503, `Embedding provider is not ready (${provider.reason ?? provider.status})`);
   const jobId = await enqueueEmbeddingJob(business);
   if (!jobId) return { status: "succeeded", message: "All knowledge chunks already have embeddings" };
   void processEmbeddingJob(business, jobId);

@@ -59,7 +59,7 @@ Database migrations are versioned under `../../infra/db/` and applied with `npm 
 
 Demo sessions are hashed before storage and expire after 48 hours. Firebase Auth owns email/password sign-up/sign-in, Google sign-in, and password reset; the API verifies Firebase ID tokens and maps the verified subject to `app_users`, organizations, and business memberships. Migration 010 adds the multi-business hierarchy and claims temporary demos into the authenticated organization. `workspace_users` remains as a compatibility table for the current hashed demo bearer path while the Identity SDK migration is completed.
 
-Migration `006_retrieval_search_fields.sql` adds a generated `tsvector` plus embedding metadata, and `007_grounded_answer_contract.sql` adds confidence, citations, and retrieval diagnostics fields. Set `OPENAI_API_KEY` and optionally `FRONTDESKWISE_EMBEDDING_MODEL` to enable asynchronous pgvector hydration; without a key, the API remains fully functional with PostgreSQL full-text retrieval.
+Migration `006_retrieval_search_fields.sql` adds a generated `tsvector` plus embedding metadata, and `007_grounded_answer_contract.sql` adds confidence, citations, and retrieval diagnostics fields. Set `OPENAI_API_KEY` and optionally `FRONTDESKWISE_EMBEDDING_MODEL` to enable asynchronous pgvector hydration. Without a healthy provider, the API may continue in explicitly labeled degraded PostgreSQL full-text mode with conservative abstention.
 
 Migration `008_embedding_jobs_widget.sql` adds retryable embedding jobs and public widget site keys. The install endpoint returns a copyable script snippet; `apps/web/public/widget.js` is the current shadow-DOM widget implementation.
 

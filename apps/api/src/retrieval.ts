@@ -59,6 +59,12 @@ export function classifyQuestionIntent(question: string): RetrievalIntent {
 export function sourceSemanticType(source: Pick<RetrievalSource, "url" | "title" | "pageType">): string {
   const value = `${source.url} ${source.title}`.toLowerCase();
   const pageType = source.pageType.toLowerCase();
+  let pathname = "";
+  try {
+    pathname = new URL(source.url).pathname.toLowerCase();
+  } catch {
+    // Fall back to title/page type classification below.
+  }
 
   // Keep the database's coarse page_type for compatibility, but derive a
   // finer semantic type from the URL/title so existing crawls benefit too.
@@ -67,14 +73,9 @@ export function sourceSemanticType(source: Pick<RetrievalSource, "url" | "title"
   if (/\bprivacy|data[- ]?(deletion|usage|handling)|security|personal data|oauth|token\b/.test(value)) return "privacy";
   if (/\bpermission|access control|role[- ]?based|administrator|admin controls\b/.test(value)) return "permissions";
   if (pageType === "policy" || /\b(terms|cookie|legal|cancellation|refund|agreement|policy|policies)\b/.test(value)) return "policy";
+  if (/\/contact(?:\/|$)/.test(pathname)) return "contact";
   if (/\b(support|help[- ]?center|technical help)\b/.test(value)) return "support";
   if (pageType === "location" || /\b(contact|location|hours?|directions|visit us)\b/.test(value)) return "contact";
-  let pathname = "";
-  try {
-    pathname = new URL(source.url).pathname.toLowerCase();
-  } catch {
-    // Fall back to title/page type classification below.
-  }
   if (/\/(voice|spoken|speech)/.test(pathname)) return "voice";
   if (/\/(reminder|recurring-reminder|recap|nudge)/.test(pathname)) return "reminders";
   if (/\/(calendar|google-calendar)/.test(pathname)) return "calendar";
@@ -85,12 +86,8 @@ export function sourceSemanticType(source: Pick<RetrievalSource, "url" | "title"
   if (/\b(reminder|recap|nudge|notification|follow[- ]?up)\b/.test(value)) return "reminders";
   if (/\b(case[- ]?stud|customer stor|success stor|portfolio)\b/.test(value)) return "case_study";
   if (/\b(blog|article|insight|news)\b/.test(value)) return "blog";
-  try {
-    const normalizedPathname = new URL(source.url).pathname.replace(/\/+$/, "");
-    if (!normalizedPathname || normalizedPathname === "") return "homepage";
-  } catch {
-    // A malformed source URL should not prevent title/page-type ranking.
-  }
+  const normalizedPathname = pathname.replace(/\/+$/, "");
+  if (!normalizedPathname || normalizedPathname === "") return "homepage";
   if (/\b(about|team|company)\b/.test(value)) return "about";
   if (/\b(solution|solutions)\b/.test(value)) return "solution";
   if (/\b(feature|features|product|products|planner|task)\b/.test(value)) return "product";
@@ -109,7 +106,7 @@ const intentWeights: Record<RetrievalIntent, Record<string, number>> = {
   reminders: { reminders: 0.36, service: 0.24, product: 0.22, voice: 0.14, calendar: 0.12, faq: 0.12, document: 0.05, web_page: 0 },
   calendar: { calendar: 0.38, product: 0.24, service: 0.18, reminders: 0.12, voice: 0.1, faq: 0.12, privacy: 0.08, policy: 0.04, document: 0.05, web_page: 0 },
   voice: { voice: 0.38, product: 0.24, service: 0.2, reminders: 0.14, faq: 0.12, document: 0.05, web_page: 0 },
-  teams: { teams: 0.38, product: 0.24, service: 0.2, about: 0.16, faq: 0.12, document: 0.05, web_page: 0 },
+  teams: { teams: 0.38, pricing: 0.34, product: 0.24, service: 0.2, about: 0.16, faq: 0.12, document: 0.05, web_page: 0 },
   permissions: { permissions: 0.4, privacy: 0.34, policy: 0.24, faq: 0.14, document: 0.05, web_page: 0 },
   privacy: { privacy: 0.4, permissions: 0.32, policy: 0.24, faq: 0.14, document: 0.05, web_page: 0 },
   policy: { policy: 0.38, privacy: 0.32, permissions: 0.22, faq: 0.14, pricing: 0.08, document: 0.05, web_page: 0 },
