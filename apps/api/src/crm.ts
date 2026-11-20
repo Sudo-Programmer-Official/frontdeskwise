@@ -12,6 +12,10 @@ export type HubSpotCredentials = {
   portalId?: string | null;
 };
 
+export type JackrabbitCredentials = {
+  apiToken: string;
+};
+
 export type CrmLeadPayload = {
   eventId: string;
   eventType: "lead.created" | "integration.test";
@@ -227,14 +231,14 @@ export function integrationEncryptionConfigured(): boolean {
   return credentialsConfigured();
 }
 
-export function encryptIntegrationCredentials(credentials: WebhookCredentials | HubSpotCredentials): string {
+export function encryptIntegrationCredentials(credentials: WebhookCredentials | HubSpotCredentials | JackrabbitCredentials): string {
   return encryptSecret(JSON.stringify(credentials));
 }
 
-export function decryptIntegrationCredentials(payload: string): WebhookCredentials & Partial<HubSpotCredentials> {
+export function decryptIntegrationCredentials(payload: string): WebhookCredentials & Partial<HubSpotCredentials> & Partial<JackrabbitCredentials> {
   const parsed = JSON.parse(decryptSecret(payload)) as unknown;
   if (!parsed || typeof parsed !== "object") throw new Error("CRM credentials are invalid");
-  return parsed as WebhookCredentials & { accessToken?: string };
+  return parsed as WebhookCredentials & Partial<HubSpotCredentials> & Partial<JackrabbitCredentials>;
 }
 
 export function validateWebhookUrl(value: unknown): string {

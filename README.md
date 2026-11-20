@@ -24,6 +24,7 @@ Business URL → instant personalized demo → lead capture → owner dashboard 
 - Grounded conversation testing with source citations, fallback gaps, and lead capture.
 - Durable lead events with encrypted CRM webhook delivery, idempotency, retry, and sync status.
 - Owner-configured completion connectors with a durable action retry queue; failed external delivery never removes the saved lead.
+- Versioned action workflows with generic steps (`ask`, `capture`, `form`, `condition`, `lookup`, `recommend`, `select`, `confirm`, `book`, `generate_link`, `handoff`, and `complete`), interruption state, repeatable participants, and provider completion-link prefill mappings.
 - Conversion telemetry for flow starts, field progress, forms, action outcomes, handoffs, booking links, and abandonment.
 
 ## Run locally
@@ -62,6 +63,8 @@ With `DATABASE_URL` set, demo workspaces, sources, conversations, knowledge gaps
 CRM delivery is configured from the owner dashboard with `POST /api/v1/demo/:slug/integrations` and tested with the integration test endpoint. The API stores the lead first, then asynchronously delivers a signed webhook or syncs a HubSpot contact. Set `FRONTDESKWISE_CREDENTIAL_KEY` through the staging/production secret manager before enabling CRM connections; no provider secret belongs in source control.
 
 Flows can optionally run a completion connector after the lead is saved. The current owner UI supports email-to-team, HubSpot, and the generic signed webhook connector; the latter is the fast path for Jackrabbit, Square, Mindbody, Calendly, or another vendor through Zapier, Make, or a business-owned endpoint. `action_outbox` retries delivery independently of the lead record.
+
+Actions can also define a versioned `steps` graph. Existing field-based flows remain supported, while V2 flows can pause for knowledge answers, resume from a durable cursor, and generate an external completion link from explicitly mapped values. Provider-owned signatures, policies, and payment fields stay outside FrontDeskWise.
 
 The public widget posts conversion events to `POST /api/v1/widget/:siteKey/telemetry`. Events are stored in `conversion_events` with tenant, conversation, flow, field, source-page, device, and timestamp context. Workspace analytics exposes the resulting flow funnel and field drop-offs.
 

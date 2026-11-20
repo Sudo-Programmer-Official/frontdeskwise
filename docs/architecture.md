@@ -4,7 +4,7 @@ This document describes the architecture implemented in the current FrontDeskWis
 
 ## Architecture status
 
-The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, lead capture, knowledge-gap approval, configurable action flows, business-scoped team access, durable human handoff, staff notifications, assignments, internal notes, demo billing state, widget installation, and durable CRM lead delivery.
+The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, lead capture, knowledge-gap approval, configurable action flows, versioned workflow steps, business-scoped team access, durable human handoff, staff notifications, assignments, internal notes, demo billing state, widget installation, and durable CRM lead delivery.
 
 The remaining intentionally limited areas are:
 
@@ -142,6 +142,8 @@ sequenceDiagram
 FrontDeskWise is the source of truth for contact details, attribution, consent, and lead status. `crm_integrations` stores only encrypted credentials and non-secret configuration. `integration_outbox` is the durable delivery queue; `crm_sync_records` is the per-lead projection and audit state. A unique integration/idempotency key prevents duplicate deliveries across retries or multiple API instances. See [data-and-integrations.md](data-and-integrations.md) for the field inventory and adapter contract.
 
 An action flow may also define a completion connector. The flow persists its lead first, creates an `action_outbox` job with an idempotency key, and returns the configured safe completion message. A separate worker executes the connector and records `ACTION_SUCCEEDED` or `ACTION_FAILED`; retry exhaustion is visible to operators without changing the lead. Connector implementations include generic signed webhooks, email, HubSpot, and vendor HTTP adapters for Jackrabbit, Square, Mindbody, and Calendly.
+
+Action V2 adds a business-neutral step graph stored in `business_actions.steps`. Steps can capture conversational values, show compact forms, branch on conditions, look up or recommend structured results, confirm an outcome, invoke a connector, hand off to staff, or finish the action. `conversations.action_state` stores the current step, completed steps, lookup results, interruption stack, repeatable participant values, and any generated completion URL. A completion link uses an allowlisted HTTPS base URL and explicit source-to-provider field mappings; FrontDeskWise never infers or forwards legal/payment fields.
 
 The widget emits `conversion_events` for flow starts, field views/completions/abandonment, form display/submission, action outcomes, CTA clicks, handoff requests, lead capture, booking-link opens, and conversation abandonment. Funnel summaries are derived from those events per business and flow.
 

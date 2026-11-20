@@ -49,3 +49,13 @@ export function decryptSecret(payload: string): string {
 export function credentialFingerprint(secret: string): string {
   return createHash("sha256").update(secret).digest("hex").slice(0, 12);
 }
+
+/**
+ * A display-only hint for credentials that have already been stored encrypted.
+ * This intentionally keeps only the final four characters and is never used
+ * to authenticate a provider.
+ */
+export function credentialHint(secret: string): string {
+  const value = secret.trim();
+  return `••••${value.slice(-4)}`;
+}

@@ -111,6 +111,7 @@ interface Integration {
   authType?: "oauth" | "pat";
   accountId?: string | null;
   accountName?: string | null;
+  credentialHint?: string | null;
   connectionStatus: "pending" | "active" | "error" | "disabled";
   lastTestedAt: string | null;
   lastError: string | null;
@@ -210,6 +211,7 @@ interface StaffNotification {
 
 type ActionFieldType = "text" | "email" | "phone" | "select" | "date" | "number";
 type ActionEditorStage = "trigger" | "qualify" | "contact" | "complete" | "deliver";
+type CompletionMode = "external_provider" | "native_form" | "booking_connector" | "payment_link" | "api_webhook" | "human_follow_up";
 
 interface ActionField {
   id: string;
@@ -269,10 +271,13 @@ interface ActionFlow {
   triggerIntents: string[];
   captureMode: "auto" | "conversational" | "form" | "hybrid";
   fields: ActionField[];
+  steps?: Array<Record<string, unknown>>;
   completion: {
     createLead: boolean;
     leadStatus: "new" | "qualified" | "booked";
     message: string;
+    completionMode?: CompletionMode;
+    linkTemplate?: { baseUrl: string; fieldMappings: Record<string, string>; staticParams?: Record<string, string> };
     submitLabel?: string;
     linkUrl?: string;
     linkLabel?: string;
@@ -987,7 +992,7 @@ const knowledgeTestContext = ref<"updated" | "answer" | null>(null);
 const resolvedKnowledgeQuestion = ref("");
 const integrations = ref<Integration[]>([]);
 const mcpConnections = ref<McpConnection[]>([]);
-const integrationProvider = ref<"webhook" | "hubspot">("webhook");
+const integrationProvider = ref<"webhook" | "hubspot" | "jackrabbit">("webhook");
 const integrationDisplayName = ref("CRM webhook");
 const integrationWebhookUrl = ref("");
 const integrationSigningSecret = ref("");
@@ -1018,6 +1023,7 @@ const activeActionIntegrations = computed(() => integrations.value.filter((integ
     || (actionConnectorProvider.value === "hubspot" && integration.provider === "hubspot"))));
 const hubspotIntegration = computed(() => integrations.value.find((integration) => integration.provider === "hubspot") ?? null);
 const webhookIntegration = computed(() => integrations.value.find((integration) => integration.provider === "webhook") ?? null);
+const jackrabbitIntegration = computed(() => integrations.value.find((integration) => integration.provider === "jackrabbit") ?? null);
 const hubspotMcpConnection = computed(() => mcpConnections.value.find((connection) => connection.provider === "hubspot") ?? null);
 const actionTriggerText = ref("");
 const actionTriggerPhraseInput = ref("");
@@ -1025,6 +1031,7 @@ const actionEditorStage = ref<ActionEditorStage>("trigger");
 const actionTemplateChooserOpen = ref(false);
 const actionFieldDrawerIndex = ref<number | null>(null);
 const actionAdvancedOpen = ref(false);
+const completionLinkMappingsText = ref("");
 const draggedActionFieldIndex = ref<number | null>(null);
 const billingSnapshot = ref<BillingSnapshot | null>(null);
 const billingLoading = ref(false);
@@ -3119,13 +3126,17 @@ function selectAction(action: ActionFlow | null) {
     actionEditorStage.value = "trigger";
     actionFieldDrawerIndex.value = null;
     actionAdvancedOpen.value = false;
+    completionLinkMappingsText.value = "";
     return;
   }
   selectedActionId.value = action.id;
   actionDraft.value = cloneAction(action);
   actionDraft.value.captureMode ??= "auto";
+  actionDraft.value.completion.completionMode ??= "native_form";
   actionDraft.value.completion.notifyTargets ??= ["business_team"];
   actionDraft.value.completion.notifyChannels ??= ["in_app", "email"];
+  completionLinkMappingsText.value = Object.entries(actionDraft.value.completion.linkTemplate?.fieldMappings ?? {})
+    .map(([source, target]) => `${source}=${target}`).join("\n");
   actionDraft.value.fields.forEach((field) => {
     field.visibility ??= "visible";
   });
@@ -3134,6 +3145,31 @@ function selectAction(action: ActionFlow | null) {
   actionEditorStage.value = "trigger";
   actionFieldDrawerIndex.value = null;
   actionAdvancedOpen.value = false;
+}
+
+function ensureCompletionLinkTemplate() {
+  if (!actionDraft.value) return;
+  if (actionDraft.value.completion.completionMode === "external_provider" || actionDraft.value.completion.completionMode === "payment_link") {
+    actionDraft.value.completion.linkTemplate ??= { baseUrl: "", fieldMappings: {} };
+  }
+}
+
+function setCompletionLinkMappings(value: string) {
+  completionLinkMappingsText.value = value;
+  if (!actionDraft.value?.completion.linkTemplate) return;
+  const mappings: Record<string, string> = {};
+  for (const line of value.split("\n")) {
+    const separator = line.indexOf("=");
+    if (separator < 1) continue;
+    const source = line.slice(0, separator).trim();
+    const target = line.slice(separator + 1).trim();
+    if (source && target) mappings[source] = target;
+  }
+  actionDraft.value.completion.linkTemplate.fieldMappings = mappings;
+}
+
+function setCompletionLinkMappingsFromEvent(event: Event) {
+  setCompletionLinkMappings((event.target as HTMLTextAreaElement).value);
 }
 
 const actionTriggerPhrases = computed(() => actionTriggerText.value.split("\n").map((item) => item.trim()).filter(Boolean));
@@ -4191,14 +4227,18 @@ async function connectIntegration() {
         displayName: integrationDisplayName.value,
         ...(integrationProvider.value === "webhook"
           ? { webhookUrl: integrationWebhookUrl.value, signingSecret: integrationSigningSecret.value || undefined }
-          : { accessToken: integrationAccessToken.value }),
+          : integrationProvider.value === "jackrabbit"
+            ? { apiToken: integrationAccessToken.value }
+            : { accessToken: integrationAccessToken.value }),
       }),
     });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not save this integration.");
     integrationSigningSecret.value = "";
     integrationAccessToken.value = "";
-    integrationMessage.value = "Saved securely · test the connection to activate delivery";
+    integrationMessage.value = integrationProvider.value === "jackrabbit"
+      ? "Connected securely · Jackrabbit account detected"
+      : "Saved securely · test the connection to activate delivery";
     await loadIntegrations();
   } catch (error) {
     integrationError.value = error instanceof Error ? error.message : "Could not save this integration.";
@@ -4207,9 +4247,10 @@ async function connectIntegration() {
   }
 }
 
-function openNativeIntegrationForm(provider: "webhook" | "hubspot") {
+function openNativeIntegrationForm(provider: "webhook" | "hubspot" | "jackrabbit") {
   integrationProvider.value = provider;
-  integrationDisplayName.value = provider === "hubspot" ? "HubSpot" : "Automation webhook";
+  integrationDisplayName.value = provider === "hubspot" ? "HubSpot" : provider === "jackrabbit" ? "Jackrabbit" : "Automation webhook";
+  integrationAccessToken.value = "";
   integrationManualMode.value = false;
   integrationError.value = "";
   integrationMessage.value = "";
@@ -4219,6 +4260,9 @@ function openNativeIntegrationForm(provider: "webhook" | "hubspot") {
 function closeNativeIntegrationForm() {
   nativeIntegrationFormOpen.value = false;
   integrationManualMode.value = false;
+  integrationAccessToken.value = "";
+  integrationSigningSecret.value = "";
+  integrationWebhookUrl.value = "";
   integrationError.value = "";
   integrationMessage.value = "";
 }
@@ -5172,7 +5216,7 @@ function startMarketingDemo() {
                     <div v-else class="action-delivery-queue"><div class="panel-heading"><div><p class="eyebrow">Delivery history</p><h3>{{ actionDeliveriesFor(actionDraft).length ? 'Recent deliveries' : 'No deliveries yet' }}</h3></div><button class="text-button" type="button" :disabled="actionsLoading" @click="loadActions">Refresh</button></div><div v-for="delivery in actionDeliveriesFor(actionDraft)" :key="delivery.id" class="action-delivery-row"><span><strong>{{ delivery.provider }}</strong><small>{{ delivery.attempts }} attempt{{ delivery.attempts === 1 ? '' : 's' }} · {{ new Date(delivery.updatedAt).toLocaleString() }}</small></span><span :class="['status-pill', delivery.status === 'succeeded' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span><button v-if="delivery.status === 'failed'" class="text-button" type="button" :disabled="actionsLoading" @click="retryActionDelivery(delivery)">Retry</button></div></div>
                   </template>
 
-                  <details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced settings <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Internal action key<input v-model="actionDraft.key" type="text" /></label><label>Trigger intents <input :value="actionDraft.triggerIntents.join(', ')" type="text" placeholder="contact, lead" @input="setActionTriggerIntents" /></label><label>Continue link <span class="optional">optional</span><input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://…" /></label><p class="form-help">Technical identifiers and connector details are kept here so the main setup stays focused on the customer journey.</p></div></details>
+                  <details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced settings <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Internal action key<input v-model="actionDraft.key" type="text" /></label><label>Trigger intents <input :value="actionDraft.triggerIntents.join(', ')" type="text" placeholder="contact, lead" @input="setActionTriggerIntents" /></label><label>Continue link <span class="optional">optional</span><input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://…" /></label><label>Completion mode<select v-model="actionDraft.completion.completionMode" @change="ensureCompletionLinkTemplate"><option value="native_form">FrontDeskWise native</option><option value="external_provider">External provider link</option><option value="booking_connector">Booking connector</option><option value="payment_link">Payment link</option><option value="human_follow_up">Human follow-up</option></select></label><template v-if="(actionDraft.completion.completionMode === 'external_provider' || actionDraft.completion.completionMode === 'payment_link') && actionDraft.completion.linkTemplate"><label>Provider completion URL<input v-model="actionDraft.completion.linkTemplate.baseUrl" type="url" placeholder="https://provider.example/register" @focus="ensureCompletionLinkTemplate" /></label><label>Prefill mappings <span class="optional">one per line · source.path=providerParameter</span><textarea :value="completionLinkMappingsText" rows="4" placeholder="parent_name=MFName&#10;email=MEmail&#10;student.name=S1FName" @input="setCompletionLinkMappingsFromEvent"></textarea></label></template><p class="form-help">Completion links only include fields you explicitly map. Provider-owned waivers, signatures, and payment details stay on the provider.</p></div></details>
                 </div>
                 <div class="action-editor-footer"><button class="text-button danger-text" type="button" :disabled="actionsLoading" @click="removeAction">Delete action</button><span v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</span><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
               </article>
@@ -5200,6 +5244,15 @@ function startMarketingDemo() {
             <div class="integration-section-heading"><div><p class="eyebrow">Business integrations</p><h2>Connected apps</h2><p>Native and API-based connections power lead delivery, CRM sync, notifications, and other guaranteed workflows.</p></div><button class="primary-button small" type="button" @click="openNativeIntegrationForm('hubspot')">+ Add business integration</button></div>
             <div class="integration-card-grid">
               <article class="panel business-integration-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><Waves :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Jackrabbit</h3><small>Class management · read-only availability</small></div></div><span :class="['status-pill', jackrabbitIntegration?.connectionStatus === 'active' ? 'booked' : jackrabbitIntegration?.connectionStatus === 'error' ? 'new' : jackrabbitIntegration ? 'qualified' : 'qualified']">{{ jackrabbitIntegration?.connectionStatus === 'active' ? 'Connected ✓' : jackrabbitIntegration?.connectionStatus === 'error' ? 'Needs attention' : jackrabbitIntegration ? formatLabel(jackrabbitIntegration.connectionStatus) : 'Not connected' }}</span></div>
+                <p class="integration-card-description">Find live classes and availability while Jackrabbit remains the system of record for registration, waivers, and payment.</p>
+                <div v-if="jackrabbitIntegration?.accountName" class="integration-account-line">Account: {{ jackrabbitIntegration.accountName }}</div>
+                <div v-if="jackrabbitIntegration?.accountId" class="integration-account-line">Organization ID: {{ jackrabbitIntegration.accountId }}</div>
+                <div v-if="jackrabbitIntegration" class="integration-subsection"><div class="integration-subsection-heading"><strong>Connection</strong><span>{{ jackrabbitIntegration.lastTestedAt ? `Verified ${new Date(jackrabbitIntegration.lastTestedAt).toLocaleString()}` : 'Not verified yet' }}</span></div><div class="integration-capability-list"><div><span>Credential</span><b>{{ jackrabbitIntegration.credentialHint ?? 'Stored securely' }}</b></div><div><span>Read class availability</span><b :class="jackrabbitIntegration.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ jackrabbitIntegration.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Enrollment writes</span><b class="capability-pending">—</b></div></div></div>
+                <p v-if="jackrabbitIntegration?.lastError" class="form-error">{{ jackrabbitIntegration.lastError }}</p>
+                <div class="integration-card-actions"><button v-if="!jackrabbitIntegration" class="primary-button small" type="button" @click="openNativeIntegrationForm('jackrabbit')">Connect Jackrabbit</button><template v-else><button class="outline-button small" type="button" :disabled="integrationLoading" @click="testIntegration(jackrabbitIntegration)">Test connection</button><button class="outline-button small" type="button" :disabled="integrationLoading" @click="openNativeIntegrationForm('jackrabbit')">Replace token</button><button class="text-button danger-text" type="button" :disabled="integrationLoading" @click="disconnectIntegration(jackrabbitIntegration)">Disconnect</button></template></div>
+              </article>
+              <article class="panel business-integration-card">
                 <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo hubspot-logo"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path :d="siHubspot.path" /></svg></span><div><h3>HubSpot</h3><small>CRM · native OAuth connection</small></div></div><span :class="['status-pill', hubspotIntegration?.connectionStatus === 'active' ? 'booked' : hubspotIntegration ? 'new' : 'qualified']">{{ hubspotIntegration?.connectionStatus === 'active' ? 'Connected ✓' : hubspotIntegration?.connectionStatus === 'error' ? 'Needs attention' : hubspotIntegration ? 'Connecting…' : 'Not connected' }}</span></div>
                 <p class="integration-card-description">Send captured lead context to HubSpot while FrontDeskWise remains the source of truth.</p>
                 <p v-if="hubspotIntegration?.accountName" class="integration-account-line">Account: {{ hubspotIntegration.accountName }}</p>
@@ -5220,7 +5273,7 @@ function startMarketingDemo() {
               <article class="panel business-integration-card integration-card-muted"><div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><CalendarCheck :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Booking tools</h3><small>Calendly / custom booking endpoint</small></div></div><span class="status-pill qualified">Action connector</span></div><p class="integration-card-description">Keep bookings deterministic. Configure a booking link or supported completion connector inside Actions so the customer-facing confirmation stays reliable.</p><div class="integration-subsection"><div class="integration-subsection-heading"><strong>Completion actions</strong><span>Configured in Actions</span></div><div class="integration-capability-list"><div><span>Booking links</span><b class="capability-check">✓</b></div><div><span>Vendor HTTP connectors</span><b class="capability-check">✓</b></div><div><span>Lead saved before booking delivery</span><b class="capability-check">✓</b></div></div></div><div class="integration-card-actions"><button class="outline-button small" type="button" @click="view = 'actions'">Configure in Actions →</button></div></article>
             </div>
 
-            <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>Connect a business integration</h3><p>FrontDeskWise keeps OAuth credentials server-side, encrypted at rest, and out of the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : 'Automation webhook'" /></label><div v-if="integrationProvider === 'hubspot' && !integrationManualMode" class="integration-connect-wide integration-oauth-callout"><strong>Connect with HubSpot OAuth</strong><p>Authorize FrontDeskWise to create or update contacts in the selected HubSpot account. You will return here after authorization.</p><button class="primary-button small" type="button" :disabled="integrationLoading" @click="connectIntegration">{{ integrationLoading ? 'Opening HubSpot…' : 'Connect HubSpot' }}</button><button class="text-button" type="button" @click="integrationManualMode = true">Advanced / Manual connection</button></div><label v-if="integrationProvider === 'hubspot' && integrationManualMode" class="integration-connect-wide">Private app or service key <span class="optional">encrypted · advanced</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the provider token" /><small>Use this only for an account-local manual connection. Customer installs should use OAuth.</small></label><template v-else-if="integrationProvider === 'webhook'"><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button v-if="integrationProvider === 'webhook' || integrationManualMode" class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : 'Test & connect securely →' }}</button></div></div>
+            <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>{{ integrationProvider === 'jackrabbit' ? 'Connect Jackrabbit' : 'Connect a business integration' }}</h3><p>FrontDeskWise keeps credentials server-side, encrypted at rest, and out of the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="jackrabbit">Jackrabbit</option><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : integrationProvider === 'jackrabbit' ? 'Jackrabbit' : 'Automation webhook'" /></label><label v-if="integrationProvider === 'jackrabbit'" class="integration-connect-wide">Customer API token <span class="optional">encrypted · never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste your Jackrabbit Customer API token" /><small>FrontDeskWise detects the Jackrabbit account automatically after validation. Enrollment, payment, waivers, and registration remain in Jackrabbit.</small></label><div v-if="integrationProvider === 'hubspot' && !integrationManualMode" class="integration-connect-wide integration-oauth-callout"><strong>Connect with HubSpot OAuth</strong><p>Authorize FrontDeskWise to create or update contacts in the selected HubSpot account. You will return here after authorization.</p><button class="primary-button small" type="button" :disabled="integrationLoading" @click="connectIntegration">{{ integrationLoading ? 'Opening HubSpot…' : 'Connect HubSpot' }}</button><button class="text-button" type="button" @click="integrationManualMode = true">Advanced / Manual connection</button></div><label v-if="integrationProvider === 'hubspot' && integrationManualMode" class="integration-connect-wide">Private app or service key <span class="optional">encrypted · advanced</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the provider token" /><small>Use this only for an account-local manual connection. Customer installs should use OAuth.</small></label><template v-else-if="integrationProvider === 'webhook'"><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button v-if="integrationProvider === 'webhook' || integrationProvider === 'jackrabbit' || integrationManualMode" class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : integrationProvider === 'jackrabbit' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : integrationProvider === 'jackrabbit' ? 'Connect Jackrabbit' : 'Test & connect securely →' }}</button></div></div>
           </section>
 
           <section class="integration-section mcp-section">

@@ -26,6 +26,20 @@ import {
   type ActionFlow,
   type ConversationActionState,
 } from "./action-flows.js";
+import { generateCompletionLink } from "./completion-links.js";
+import {
+  applyWorkflowInput,
+  addWorkflowParticipant,
+  completeActiveWorkflowParticipant,
+  currentWorkflowStep,
+  pushWorkflowInterruption,
+  resumeWorkflowInterruption,
+  setWorkflowParticipantValue,
+  transitionWorkflow,
+  workflowField,
+  workflowFormFields,
+} from "./workflow-engine.js";
+import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
 import {
   answerabilityDecision,
   citationMatches,
@@ -101,7 +115,7 @@ import {
   type HubSpotOAuthTokenSet,
 } from "./hubspot-oauth.js";
 import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from "./mcp.js";
-import { decryptSecret, encryptSecret } from "./secrets.js";
+import { credentialHint, decryptSecret, encryptSecret } from "./secrets.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
 await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
@@ -1240,6 +1254,16 @@ function mcpBearerToken(payload: string): string {
 function actionFromRow(row: Record<string, unknown>): ActionFlow {
   const completion = asRecord(row.completion);
   const connector = actionConnectorFromValue(completion.connector);
+  const completionModes = new Set(["external_provider", "native_form", "booking_connector", "payment_link", "api_webhook", "human_follow_up"]);
+  const linkTemplateSource = asRecord(completion.linkTemplate);
+  const linkMappings = asRecord(linkTemplateSource.fieldMappings);
+  const linkTemplate = typeof linkTemplateSource.baseUrl === "string"
+    ? {
+      baseUrl: linkTemplateSource.baseUrl,
+      fieldMappings: Object.fromEntries(Object.entries(linkMappings).filter(([, value]) => typeof value === "string")) as Record<string, string>,
+      ...(Object.keys(asRecord(linkTemplateSource.staticParams)).length ? { staticParams: Object.fromEntries(Object.entries(asRecord(linkTemplateSource.staticParams)).filter(([, value]) => typeof value === "string")) as Record<string, string> } : {}),
+    }
+    : undefined;
   return {
     id: String(row.id),
     key: String(row.action_key),
@@ -1249,10 +1273,13 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
     triggerIntents: Array.isArray(row.trigger_intents) ? row.trigger_intents.filter((item): item is string => typeof item === "string") : [],
     captureMode: row.capture_mode === "conversational" || row.capture_mode === "form" || row.capture_mode === "hybrid" ? row.capture_mode : "auto",
     fields: Array.isArray(row.fields) ? row.fields as ActionFlow["fields"] : [],
+    ...(Array.isArray(row.steps) ? { steps: row.steps as ActionFlow["steps"] } : {}),
     completion: {
       createLead: completion.createLead !== false,
       leadStatus: completion.leadStatus === "qualified" || completion.leadStatus === "booked" ? completion.leadStatus : "new",
       message: typeof completion.message === "string" ? completion.message : "Thanks — the team has your request.",
+      ...(typeof completion.completionMode === "string" && completionModes.has(completion.completionMode) ? { completionMode: completion.completionMode as ActionFlow["completion"]["completionMode"] } : {}),
+      ...(linkTemplate ? { linkTemplate } : {}),
       submitLabel: typeof completion.submitLabel === "string" ? completion.submitLabel : undefined,
       linkUrl: typeof completion.linkUrl === "string" ? completion.linkUrl : undefined,
       linkLabel: typeof completion.linkLabel === "string" ? completion.linkLabel : undefined,
@@ -1896,8 +1923,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     for (const action of business.actions) {
       await client.query(
         `insert into business_actions
-           (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, completion, enabled, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, enabled, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          on conflict (business_id, action_key) do update set
            name = excluded.name,
            description = excluded.description,
@@ -1905,6 +1932,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            trigger_intents = excluded.trigger_intents,
            capture_mode = excluded.capture_mode,
            fields = excluded.fields,
+           steps = excluded.steps,
            completion = excluded.completion,
            enabled = excluded.enabled,
            updated_at = excluded.updated_at`,
@@ -1918,6 +1946,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           JSON.stringify(action.triggerIntents),
           action.captureMode,
           JSON.stringify(action.fields),
+          JSON.stringify(action.steps ?? []),
           JSON.stringify(action.completion),
           action.enabled,
           action.createdAt,
@@ -3002,12 +3031,68 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
       ...(condition ? { condition } : {}),
     };
   });
+  const allowedStepTypes = new Set([
+    "ask", "capture", "form", "condition", "decision", "lookup", "recommend", "select", "confirm",
+    "api_action", "create_lead", "book", "generate_link", "redirect", "notify", "handoff", "complete",
+  ]);
+  const sourceSteps = Array.isArray(body.steps) ? body.steps : (base.steps ?? []);
+  const steps = sourceSteps.map((value, index) => {
+    const source = asRecord(value);
+    const type = typeof source.type === "string" && allowedStepTypes.has(source.type) ? source.type : "ask";
+    const id = (optionalString(source.id, 120) ?? `step_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_");
+    const branches = Array.isArray(source.branches) ? source.branches.map((branchValue) => {
+      const branch = asRecord(branchValue);
+      const when = asRecord(branch.when);
+      const field = optionalString(when.field, 120);
+      const nextStepId = optionalString(branch.nextStepId, 120);
+      return field && nextStepId ? {
+        when: {
+          field,
+          ...(optionalString(when.equals, 160) ? { equals: optionalString(when.equals, 160) as string } : {}),
+          ...(optionalString(when.notEquals, 160) ? { notEquals: optionalString(when.notEquals, 160) as string } : {}),
+        },
+        nextStepId,
+      } : null;
+    }).filter((item): item is NonNullable<typeof item> => Boolean(item)).slice(0, 20) : undefined;
+    const configSource = asRecord(source.config);
+    const config: Record<string, unknown> = {};
+    for (const [key, configValue] of Object.entries(configSource).slice(0, 30)) {
+      if (!/^[a-zA-Z0-9_.-]{1,120}$/.test(key)) continue;
+      if (typeof configValue === "string" || typeof configValue === "number" || typeof configValue === "boolean") config[key] = typeof configValue === "string" ? configValue.slice(0, 2_000) : configValue;
+      else if (Array.isArray(configValue)) config[key] = configValue.filter((item) => typeof item === "string").slice(0, 50);
+    }
+    return {
+      id,
+      type: type as NonNullable<ActionFlow["steps"]>[number]["type"],
+      ...(optionalString(source.label, 160) ? { label: optionalString(source.label, 160) as string } : {}),
+      ...(optionalString(source.fieldKey, 120) ? { fieldKey: optionalString(source.fieldKey, 120) as string } : {}),
+      ...(optionalString(source.question, 500) ? { question: optionalString(source.question, 500) as string } : {}),
+      ...(typeof source.required === "boolean" ? { required: source.required } : {}),
+      ...(Array.isArray(source.options) ? { options: source.options.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 120)).slice(0, 30) } : {}),
+      ...(optionalString(source.nextStepId, 120) ? { nextStepId: optionalString(source.nextStepId, 120) as string } : {}),
+      ...(branches?.length ? { branches } : {}),
+      ...(Object.keys(config).length ? { config } : {}),
+    };
+  });
   const sourceCompletion = asRecord(body.completion);
   const leadStatus = sourceCompletion.leadStatus === "qualified" || sourceCompletion.leadStatus === "booked" ? sourceCompletion.leadStatus : base.completion.leadStatus;
   const submitLabel = optionalString(sourceCompletion.submitLabel, 160) ?? base.completion.submitLabel;
   const linkUrl = optionalString(sourceCompletion.linkUrl, 2_000) ?? base.completion.linkUrl;
   const linkLabel = optionalString(sourceCompletion.linkLabel, 160) ?? base.completion.linkLabel;
   const connector = actionConnectorFromValue(sourceCompletion.connector) ?? base.completion.connector;
+  const hasCompletionMode = Object.prototype.hasOwnProperty.call(sourceCompletion, "completionMode");
+  const completionMode = ["external_provider", "native_form", "booking_connector", "payment_link", "api_webhook", "human_follow_up"].includes(String(sourceCompletion.completionMode))
+    ? sourceCompletion.completionMode as ActionFlow["completion"]["completionMode"]
+    : hasCompletionMode ? undefined : base.completion.completionMode;
+  const linkTemplateSource = asRecord(sourceCompletion.linkTemplate);
+  const linkMappings = asRecord(linkTemplateSource.fieldMappings);
+  const linkTemplate = typeof linkTemplateSource.baseUrl === "string"
+    ? {
+      baseUrl: linkTemplateSource.baseUrl.slice(0, 2_000),
+      fieldMappings: Object.fromEntries(Object.entries(linkMappings).filter(([key, value]) => /^[a-zA-Z0-9_.-]{1,120}$/.test(key) && typeof value === "string").slice(0, 50)) as Record<string, string>,
+      ...(Object.keys(asRecord(linkTemplateSource.staticParams)).length ? { staticParams: Object.fromEntries(Object.entries(asRecord(linkTemplateSource.staticParams)).filter(([key, value]) => /^[a-zA-Z0-9_.-]{1,120}$/.test(key) && typeof value === "string").slice(0, 50)) as Record<string, string> } : {}),
+    }
+    : base.completion.linkTemplate;
   const now = new Date().toISOString();
   return {
     id: existing?.id ?? base.id,
@@ -3022,10 +3107,13 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
       ? body.captureMode
       : base.captureMode,
     fields,
+    ...(steps.length ? { steps } : {}),
     completion: {
       createLead: typeof sourceCompletion.createLead === "boolean" ? sourceCompletion.createLead : base.completion.createLead,
       leadStatus,
       message: optionalString(sourceCompletion.message, 1_000) ?? base.completion.message,
+      ...(completionMode ? { completionMode } : {}),
+      ...(linkTemplate ? { linkTemplate } : {}),
       ...(submitLabel ? { submitLabel } : {}),
       ...(linkUrl ? { linkUrl } : {}),
       ...(linkLabel ? { linkLabel } : {}),
@@ -3045,8 +3133,8 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
   if (!pool) return;
   await pool.query(
     `insert into business_actions
-       (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, completion, enabled, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, enabled, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      on conflict (business_id, action_key) do update set
        name = excluded.name,
        description = excluded.description,
@@ -3054,6 +3142,7 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
        trigger_intents = excluded.trigger_intents,
        capture_mode = excluded.capture_mode,
        fields = excluded.fields,
+       steps = excluded.steps,
        completion = excluded.completion,
        enabled = excluded.enabled,
        updated_at = excluded.updated_at`,
@@ -3067,6 +3156,7 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
       JSON.stringify(action.triggerIntents),
       action.captureMode,
       JSON.stringify(action.fields),
+      JSON.stringify(action.steps ?? []),
       JSON.stringify(action.completion),
       action.enabled,
       action.createdAt,
@@ -3955,6 +4045,7 @@ function integrationPayload(row: Record<string, unknown>) {
     authType: row.auth_type === "oauth" ? "oauth" : "pat",
     accountId: typeof row.provider_account_id === "string" ? row.provider_account_id : null,
     accountName: typeof row.provider_account_name === "string" ? row.provider_account_name : null,
+    credentialHint: typeof row.credential_hint === "string" ? row.credential_hint : null,
     connectionStatus: String(row.connection_status),
     lastTestedAt: row.last_tested_at ? toIso(row.last_tested_at) : null,
     lastError: typeof row.last_error === "string" ? row.last_error : null,
@@ -3965,6 +4056,51 @@ function integrationPayload(row: Record<string, unknown>) {
       failed: Number(row.sync_failed ?? 0),
     },
   };
+}
+
+type ResolvedJackrabbitCredentials = {
+  apiToken: string;
+  source: "database" | "environment";
+  integrationId: string | null;
+};
+
+function jackrabbitEnvironmentFallbackAllowed(): boolean {
+  return process.env.NODE_ENV !== "production" || process.env.FRONTDESKWISE_JACKRABBIT_ALLOW_ENV_FALLBACK === "true";
+}
+
+/** Resolve stored credentials first; the environment fallback is for local certification only. */
+async function resolveJackrabbitCredentials(businessId: string, preferredIntegrationId?: string): Promise<ResolvedJackrabbitCredentials> {
+  if (pool) {
+    const result = preferredIntegrationId
+      ? await pool.query<{ id: string; encrypted_credentials: string | null }>(
+        `select id, encrypted_credentials
+         from crm_integrations
+         where id = $1 and business_id = $2 and provider = 'jackrabbit'`,
+        [preferredIntegrationId, businessId],
+      )
+      : await pool.query<{ id: string; encrypted_credentials: string | null }>(
+        `select id, encrypted_credentials
+         from crm_integrations
+         where business_id = $1 and provider = 'jackrabbit'
+         order by case when connection_status = 'active' then 0 else 1 end, updated_at desc
+         limit 1`,
+        [businessId],
+      );
+    const row = result.rows[0];
+    if (row?.encrypted_credentials) {
+      try {
+        const credentials = decryptIntegrationCredentials(row.encrypted_credentials);
+        if (credentials.apiToken?.trim()) return { apiToken: credentials.apiToken, source: "database", integrationId: row.id };
+      } catch {
+        // Fall through to the explicitly allowed local environment fallback.
+      }
+    }
+  }
+  const environmentToken = process.env.FRONTDESKWISE_JACKRABBIT_API_TOKEN?.trim();
+  if (jackrabbitEnvironmentFallbackAllowed() && environmentToken) {
+    return { apiToken: environmentToken, source: "environment", integrationId: null };
+  }
+  throw new Error("Jackrabbit is not connected for this business");
 }
 
 function hubSpotCredentialsFromTokenSet(tokenSet: HubSpotOAuthTokenSet, existing?: HubSpotCredentials): HubSpotCredentials {
@@ -4733,21 +4869,25 @@ type ConversationAnswerResult = AnswerResult & {
 function actionFormSchema(action: ActionFlow, state: ConversationActionState): ActionFormSchema {
   return {
     submitLabel: action.completion.submitLabel ?? action.completion.linkLabel ?? "Submit request",
-    fields: formFields(action, state).map((field) => ({ ...field, value: state.values[field.key] ?? "" })),
+    fields: (action.steps?.length ? workflowFormFields(action, state) : formFields(action, state)).map((field) => ({ ...field, value: state.values[field.key] ?? "" })),
   };
 }
 
 function actionStatePayload(action: ActionFlow, state: ConversationActionState): ConversationAnswerResult["action"] {
-  const next = nextConversationalField(action, state);
-  const showForm = state.status === "active" && (Boolean(state.formShown) || state.captureMode === "form");
+  const workflow = action.steps?.length ? currentWorkflowStep(action, state) : null;
+  const next = workflow?.fieldKey
+    ? action.fields.find((field) => field.key === workflow.fieldKey || field.id === workflow.fieldKey) ?? null
+    : nextConversationalField(action, state);
+  const showForm = state.status === "active" && (Boolean(state.formShown) || state.captureMode === "form" || workflow?.type === "form");
+  const completionUrl = state.completionUrl ?? action.completion.linkUrl;
   return {
     id: action.id,
     key: action.key,
     status: state.status,
     captureMode: state.captureMode,
     ...(next ? { nextField: next.key } : {}),
-    ...(state.status === "completed" && action.completion.linkUrl
-      ? { linkUrl: action.completion.linkUrl, linkLabel: action.completion.linkLabel ?? action.completion.submitLabel ?? "Continue" }
+    ...(state.status === "completed" && completionUrl
+      ? { linkUrl: completionUrl, linkLabel: action.completion.linkLabel ?? action.completion.submitLabel ?? "Continue" }
       : {}),
     ...(showForm ? { form: actionFormSchema(action, state) } : {}),
   };
@@ -4791,6 +4931,141 @@ function actionAnswerWithKnowledge(
 
 const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
 
+function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): string {
+  if (step.type === "confirm") return step.question ?? "Would you like to continue?";
+  const field = workflowField(action, step.fieldKey);
+  if (field) return fieldPrompt(field);
+  return step.question ?? step.label ?? `Let's continue with ${action.name.toLowerCase()}.`;
+}
+
+async function advanceWorkflowAutomation(
+  action: ActionFlow,
+  state: ConversationActionState,
+): Promise<NonNullable<ReturnType<typeof currentWorkflowStep>> | null> {
+  let step = currentWorkflowStep(action, state);
+  const visited = new Set<string>();
+  while (step && !visited.has(step.id) && ["lookup", "recommend", "generate_link", "create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type)) {
+    visited.add(step.id);
+    if (step.type === "lookup" || step.type === "recommend") {
+      const result = step.config?.result;
+      if (result !== undefined) state.lookupResults = { ...(state.lookupResults ?? {}), [step.id]: result };
+    }
+    const transition = transitionWorkflow(action, state, step.id);
+    step = transition.step;
+  }
+  return step;
+}
+
+function repeatableWorkflowConfig(action: ActionFlow): { entityType: string; entityLabel: string; fieldKeys: string[]; maxParticipants: number } | null {
+  const config = action.steps?.[0]?.config;
+  if (!config || config.repeatableEntity !== true) return null;
+  return {
+    entityType: typeof config.entityType === "string" ? config.entityType : "participant",
+    entityLabel: typeof config.entityLabel === "string" ? config.entityLabel : "participant",
+    fieldKeys: Array.isArray(config.participantFieldKeys) ? config.participantFieldKeys.filter((value): value is string => typeof value === "string") : [],
+    maxParticipants: typeof config.maxParticipants === "number" && Number.isInteger(config.maxParticipants) ? Math.max(1, Math.min(20, config.maxParticipants)) : 8,
+  };
+}
+
+function wantsAnotherParticipant(question: string): boolean {
+  return /\b(another|add|different)\b.{0,24}\b(child|student|participant|person|guest|member)\b|\b(i have|we have)\s+(another|one more)\b/i.test(question);
+}
+
+function startAnotherWorkflowParticipant(state: ConversationActionState, config: ReturnType<typeof repeatableWorkflowConfig>, action: ActionFlow): boolean {
+  if (!config || !action.steps?.length) return false;
+  const participants = state.participants ?? [];
+  if (participants.length >= config.maxParticipants) return false;
+  completeActiveWorkflowParticipant(state);
+  addWorkflowParticipant(state, config.entityType);
+  for (const key of config.fieldKeys) delete state.values[key];
+  state.skipped = (state.skipped ?? []).filter((key) => !config.fieldKeys.includes(key));
+  state.currentStepId = action.steps[0].id;
+  state.formShown = false;
+  return true;
+}
+
+async function continueWorkflowActionConversation(
+  business: Business,
+  conversation: Conversation,
+  action: ActionFlow,
+  question: string,
+  starting = false,
+): Promise<ConversationAnswerResult> {
+  const state = conversation.actionState ?? createActionState(action);
+  conversation.actionState = state;
+  if (!state.currentStepId) state.currentStepId = action.steps?.[0]?.id;
+  const repeatable = repeatableWorkflowConfig(action);
+  if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
+
+  if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
+    return actionAnswer(action, state, `Absolutely — let’s add another ${repeatable.entityLabel}. ${workflowPrompt(action, state, currentWorkflowStep(action, state) ?? action.steps![0])}`);
+  }
+
+  if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
+    const current = currentWorkflowStep(action, state);
+    pushWorkflowInterruption(state, {
+      intent: classifyQuestionIntent(question),
+      question,
+      returnStepId: current?.id ?? state.currentStepId ?? null,
+    });
+    const knowledge = await answerQuestion(business, question);
+    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current) : "The workflow is ready to continue.");
+  }
+  if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
+
+  let step = await advanceWorkflowAutomation(action, state);
+  if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
+  state.currentStepId = step.id;
+
+  if (starting) {
+    if (step.type === "form") {
+      state.formShown = true;
+      await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+      return actionAnswer(action, state, "Great — just complete these details below and I’ll prepare the next step.");
+    }
+    await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: step.fieldKey ?? step.id });
+    return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + workflowPrompt(action, state, step));
+  }
+
+  if (state.formShown || step.type === "form") {
+    state.formShown = true;
+    return actionAnswer(action, state, "Please complete the details below to continue.");
+  }
+
+  if (step.type === "confirm") {
+    if (!/^(yes|y|sure|ok|okay|please|continue|do it|go ahead)\b/i.test(question.trim())) {
+      return actionAnswer(action, state, "No problem. " + workflowPrompt(action, state, step));
+    }
+    transitionWorkflow(action, state, step.id);
+  } else {
+    const field = workflowField(action, step.fieldKey);
+    if (!field && !step.fieldKey) {
+      transitionWorkflow(action, state, step.id);
+    } else {
+      const input = applyWorkflowInput(action, state, question);
+      if (!input.ok) return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step)}`);
+      if (repeatable && input.value && repeatable.fieldKeys.includes(field?.key ?? step.fieldKey ?? "")) setWorkflowParticipantValue(state, field?.key ?? step.fieldKey ?? "", input.value);
+      await recordConversionEvent(business, {
+        event: "FIELD_COMPLETED",
+        conversationId: conversation.id,
+        flowId: action.id,
+        fieldId: field?.key ?? step.fieldKey ?? step.id,
+      });
+    }
+  }
+
+  step = await advanceWorkflowAutomation(action, state);
+  if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
+  state.currentStepId = step.id;
+  if (step.type === "form") {
+    state.formShown = true;
+    await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+    return actionAnswer(action, state, "Almost done — just leave the remaining details below.");
+  }
+  await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: step.fieldKey ?? step.id });
+  return actionAnswer(action, state, "Thanks — " + workflowPrompt(action, state, step));
+}
+
 async function continueActionConversation(
   business: Business,
   conversation: Conversation,
@@ -4811,6 +5086,7 @@ async function continueActionConversation(
       flowId: action.id,
       metadata: { flowKey: action.key },
     });
+    if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, true);
     const next = nextConversationalField(action, state);
     if (state.captureMode === "form" || !next) {
       state.formShown = true;
@@ -4838,6 +5114,8 @@ async function continueActionConversation(
     }
     return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + fieldPrompt(next));
   }
+
+  if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question);
 
   const state = conversation.actionState ?? createActionState(action);
   conversation.actionState = state;
@@ -4910,8 +5188,20 @@ async function completeActionConversation(
   state.status = "completed";
   state.completedAt = new Date().toISOString();
   state.formShown = false;
+  if (state.participants?.length) completeActiveWorkflowParticipant(state);
   conversation.actionTaken = action.key;
   let answer = action.completion.message;
+  if (action.completion.linkTemplate && action.completion.completionMode !== "native_form" && action.completion.completionMode !== "human_follow_up") {
+    try {
+      const generated = generateCompletionLink(action.completion.linkTemplate, state.values);
+      state.completionUrl = generated.url;
+      if (generated.missingFields.length) {
+        app.log.info({ businessId: business.id, actionId: action.id, missingFields: generated.missingFields }, "Completion link generated with partial prefill");
+      }
+    } catch (error) {
+      app.log.warn({ businessId: business.id, actionId: action.id, error: error instanceof Error ? error.message : "invalid completion link" }, "Completion link generation failed");
+    }
+  }
   let persistedLead: Lead | null = null;
   if (action.completion.createLead) {
     const values = state.values;
@@ -4931,7 +5221,7 @@ async function completeActionConversation(
         referrer: null,
         consentAt: null,
         idempotencyKey: "action:" + conversation.id + ":" + action.id,
-        metadata: { actionKey: action.key, actionId: action.id, fields: values },
+        metadata: { actionKey: action.key, actionId: action.id, fields: values, participants: state.participants ?? [] },
         createdAt: new Date().toISOString(),
       };
       const persisted = await persistLead(business, lead);
@@ -4948,8 +5238,9 @@ async function completeActionConversation(
       });
     }
   }
-  if (action.completion.linkUrl) {
-    answer += "\n\n" + (action.completion.linkLabel ?? "Continue") + ": " + action.completion.linkUrl;
+  const completionUrl = state.completionUrl ?? action.completion.linkUrl;
+  if (completionUrl) {
+    answer += "\n\n" + (action.completion.linkLabel ?? "Continue") + ": " + completionUrl;
   }
   if (action.completion.notifyStaff || action.completion.requiresStaff) {
     const now = new Date().toISOString();
@@ -5035,7 +5326,9 @@ async function submitActionForm(
     conversationId: conversation.id,
     flowId: action.id,
   });
-  for (const field of formFields(action, state)) {
+  const visibleFormFields = action.steps?.length ? workflowFormFields(action, state) : formFields(action, state);
+  const repeatable = repeatableWorkflowConfig(action);
+  for (const field of visibleFormFields) {
     const raw = rawValues[field.key];
     const supplied = typeof raw === "string" ? raw : raw === null || raw === undefined ? "" : String(raw);
     if (!supplied.trim()) {
@@ -5046,12 +5339,27 @@ async function submitActionForm(
     const validation = validateFieldValue(field, supplied);
     if (!validation.value) return actionAnswer(action, state, validation.error ?? ("Please check " + field.label.toLowerCase() + "."));
     state.values[field.key] = validation.value;
+    if (repeatable && repeatable.fieldKeys.includes(field.key)) setWorkflowParticipantValue(state, field.key, validation.value);
     await recordConversionEvent(business, {
       event: "FIELD_COMPLETED",
       conversationId: conversation.id,
       flowId: action.id,
       fieldId: field.key,
     });
+  }
+  if (action.steps?.length) {
+    state.formShown = false;
+    const formStep = currentWorkflowStep(action, state);
+    if (formStep?.type === "form") transitionWorkflow(action, state, formStep.id);
+    const next = await advanceWorkflowAutomation(action, state);
+    if (!next || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
+    state.currentStepId = next.id;
+    if (next.type === "form") {
+      state.formShown = true;
+      await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+      return actionAnswer(action, state, "One more detail is needed below.");
+    }
+    return actionAnswer(action, state, workflowPrompt(action, state, next));
   }
   const remaining = nextActionField(action, state);
   if (remaining) {
@@ -8206,7 +8514,7 @@ app.get("/api/v1/demo/:slug/integrations", async (request) => {
   if (!pool) return { integrations: [] };
   const result = await pool.query<Record<string, unknown>>(
     `select i.id, i.provider, i.display_name, i.connection_status, i.auth_type, i.provider_account_id,
-            i.provider_account_name, i.last_tested_at, i.last_error,
+            i.provider_account_name, i.credential_hint, i.last_tested_at, i.last_error,
             count(sr.id)::int as sync_total,
             count(sr.id) filter (where sr.sync_status = 'synced')::int as sync_synced,
             count(sr.id) filter (where sr.sync_status in ('pending', 'retrying'))::int as sync_pending,
@@ -8332,10 +8640,14 @@ app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
   if (!integrationEncryptionConfigured()) throw httpError(503, "CRM integrations are not configured on this environment yet");
   const body = asRecord(request.body);
   const provider = optionalString(body.provider, 40) ?? "webhook";
-  if (provider !== "webhook" && provider !== "hubspot") throw httpError(400, "Supported CRM providers are hubspot and webhook");
+  if (provider !== "webhook" && provider !== "hubspot" && provider !== "jackrabbit") throw httpError(400, "Supported CRM providers are hubspot, jackrabbit, and webhook");
   let encryptedCredentials: string;
   let config: Record<string, unknown>;
   let displayName: string;
+  let connectionStatus: "pending" | "active" = "pending";
+  let providerAccountId: string | null = null;
+  let providerAccountName: string | null = null;
+  let storedCredentialHint: string | null = null;
   if (provider === "hubspot") {
     const accessToken = requiredString(body.accessToken, "accessToken", 2_000);
     displayName = optionalString(body.displayName, 120) ?? "HubSpot";
@@ -8346,6 +8658,22 @@ app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
     }
     encryptedCredentials = encryptIntegrationCredentials({ accessToken, authType: "pat" });
     config = { delivery: "hubspot", idempotency: true };
+  } else if (provider === "jackrabbit") {
+    const apiToken = requiredString(body.apiToken, "apiToken", 4_000);
+    displayName = optionalString(body.displayName, 120) ?? "Jackrabbit";
+    let connection: Awaited<ReturnType<JackrabbitProvider["verifyConnection"]>>;
+    try {
+      connection = await jackrabbitProviderForToken(apiToken).verifyConnection();
+    } catch {
+      throw httpError(502, "Jackrabbit connection failed. Check the Customer API token and try again.");
+    }
+    if (!connection.id && !connection.name) throw httpError(502, "Jackrabbit connection did not return organization metadata.");
+    connectionStatus = "active";
+    providerAccountId = connection.id;
+    providerAccountName = connection.name;
+    storedCredentialHint = credentialHint(apiToken);
+    encryptedCredentials = encryptIntegrationCredentials({ apiToken });
+    config = { delivery: "jackrabbit", apiVersion: "v1", readOnly: true };
   } else {
     let webhookUrl: string;
     try {
@@ -8359,22 +8687,28 @@ app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
     config = { delivery: "webhook", idempotency: true };
   }
   const result = await pool.query<Record<string, unknown>>(
-    `insert into crm_integrations (business_id, provider, display_name, connection_status, auth_type, encrypted_credentials, config)
-     values ($1, $2, $3, 'pending', $6, $4, $5)
+    `insert into crm_integrations
+       (business_id, provider, display_name, connection_status, auth_type, provider_account_id,
+        provider_account_name, encrypted_credentials, credential_hint, config)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      on conflict (business_id, provider) do update set
        display_name = excluded.display_name,
-       connection_status = 'pending',
+       connection_status = excluded.connection_status,
        auth_type = excluded.auth_type,
+       provider_account_id = coalesce(excluded.provider_account_id, crm_integrations.provider_account_id),
+       provider_account_name = coalesce(excluded.provider_account_name, crm_integrations.provider_account_name),
        encrypted_credentials = excluded.encrypted_credentials,
+       credential_hint = coalesce(excluded.credential_hint, crm_integrations.credential_hint),
        config = excluded.config,
        last_error = null,
+       last_tested_at = case when excluded.connection_status = 'active' then now() else crm_integrations.last_tested_at end,
        updated_at = now()
      returning id, provider, display_name, connection_status, auth_type, provider_account_id, provider_account_name,
-       last_tested_at, last_error,
+       credential_hint, last_tested_at, last_error,
        0::int as sync_total, 0::int as sync_synced, 0::int as sync_pending, 0::int as sync_failed`,
-    [business.id, provider, displayName, encryptedCredentials, JSON.stringify(config), "pat"],
+    [business.id, provider, displayName, connectionStatus, "pat", providerAccountId, providerAccountName, encryptedCredentials, storedCredentialHint, JSON.stringify(config)],
   );
-  return reply.code(201).send({ integration: integrationPayload(result.rows[0]), next: "Test the connection to activate delivery" });
+  return reply.code(201).send({ integration: integrationPayload(result.rows[0]), next: connectionStatus === "active" ? "Jackrabbit is connected" : "Test the connection to activate delivery" });
 });
 
 app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) => {
@@ -8389,23 +8723,28 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
     [requiredString(params.integrationId, "integrationId", 80), business.id],
   );
   if (!integration.rowCount) throw httpError(404, "CRM integration not found");
-  if (integration.rows[0].provider !== "webhook" && integration.rows[0].provider !== "hubspot") throw httpError(400, "CRM provider is not supported");
+  if (integration.rows[0].provider !== "webhook" && integration.rows[0].provider !== "hubspot" && integration.rows[0].provider !== "jackrabbit") throw httpError(400, "CRM provider is not supported");
   try {
     const encryptedCredentials = integration.rows[0].encrypted_credentials;
     if (typeof encryptedCredentials !== "string" || !encryptedCredentials) throw new Error("CRM credentials are not configured");
     const credentials = decryptIntegrationCredentials(encryptedCredentials);
     let hubSpotConnection: { portalId: string | null; accountName: string | null } | null = null;
+    let jackrabbitConnection: { id: string | null; name: string | null } | null = null;
     if (integration.rows[0].provider === "webhook") {
       await sendWebhookEvent(
         credentials,
         { eventId: randomUUID(), eventType: "integration.test", tenant: { id: business.id, slug: business.slug, name: business.name } },
         `integration.test:${integration.rows[0].id}:${Date.now()}`,
       );
-    } else {
+    } else if (integration.rows[0].provider === "hubspot") {
       if (!credentials.accessToken) throw new Error("HubSpot credentials are not configured");
       const hubSpotCredentials: HubSpotCredentials = { ...credentials, accessToken: credentials.accessToken };
       const accessToken = await hubSpotAccessTokenForIntegration(String(integration.rows[0].id), hubSpotCredentials);
       hubSpotConnection = await createCrmAdapter("hubspot", accessToken).testConnection();
+    } else {
+      const resolved = await resolveJackrabbitCredentials(business.id, String(integration.rows[0].id));
+      const connection = await jackrabbitProviderForToken(resolved.apiToken).verifyConnection();
+      jackrabbitConnection = { id: connection.id, name: connection.name };
     }
     await pool.query(
       `update crm_integrations
@@ -8414,22 +8753,24 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
            provider_account_name = coalesce($3, provider_account_name),
            last_tested_at = now(), last_error = null, updated_at = now()
        where id = $1`,
-      [integration.rows[0].id, hubSpotConnection?.portalId ?? null, hubSpotConnection?.accountName ?? null],
+      [integration.rows[0].id, hubSpotConnection?.portalId ?? jackrabbitConnection?.id ?? null, hubSpotConnection?.accountName ?? jackrabbitConnection?.name ?? null],
     );
-    await pool.query(
-      `update integration_outbox
-       set status = 'retrying', attempts = 0, next_attempt_at = now(), last_error = null, updated_at = now()
-       where integration_id = $1 and status = 'failed'`,
-      [integration.rows[0].id],
-    );
-    await pool.query(
-      `update crm_sync_records
-       set sync_status = 'retrying', attempts = 0, last_error = null, updated_at = now()
-       where integration_id = $1 and sync_status = 'failed'`,
-      [integration.rows[0].id],
-    );
-    await queueLeadsForIntegration(business, String(integration.rows[0].id));
-    void processIntegrationOutbox();
+    if (integration.rows[0].provider !== "jackrabbit") {
+      await pool.query(
+        `update integration_outbox
+         set status = 'retrying', attempts = 0, next_attempt_at = now(), last_error = null, updated_at = now()
+         where integration_id = $1 and status = 'failed'`,
+        [integration.rows[0].id],
+      );
+      await pool.query(
+        `update crm_sync_records
+         set sync_status = 'retrying', attempts = 0, last_error = null, updated_at = now()
+         where integration_id = $1 and sync_status = 'failed'`,
+        [integration.rows[0].id],
+      );
+      await queueLeadsForIntegration(business, String(integration.rows[0].id));
+      void processIntegrationOutbox();
+    }
   } catch (error) {
     const message = integrationErrorMessage(error);
     await pool.query(

@@ -4,6 +4,65 @@ export type ActionFieldType = "text" | "email" | "phone" | "select" | "date" | "
 export type ActionCaptureMode = "auto" | "conversational" | "form" | "hybrid";
 export type ResolvedActionCaptureMode = Exclude<ActionCaptureMode, "auto">;
 
+/**
+ * Version 2 actions are intentionally made from business-neutral primitives.
+ * A swim-school enrollment, salon booking, or HVAC estimate can use the same
+ * runtime without teaching the engine industry-specific concepts.
+ */
+export type ActionStepType =
+  | "ask"
+  | "capture"
+  | "form"
+  | "condition"
+  | "decision"
+  | "lookup"
+  | "recommend"
+  | "select"
+  | "confirm"
+  | "api_action"
+  | "create_lead"
+  | "book"
+  | "generate_link"
+  | "redirect"
+  | "notify"
+  | "handoff"
+  | "complete";
+
+export type ActionStepBranch = {
+  when: ActionFieldCondition;
+  nextStepId: string;
+};
+
+export type ActionStep = {
+  id: string;
+  type: ActionStepType;
+  label?: string;
+  fieldKey?: string;
+  question?: string;
+  required?: boolean;
+  options?: string[];
+  condition?: ActionFieldCondition;
+  nextStepId?: string;
+  branches?: ActionStepBranch[];
+  /** JSON configuration for provider lookup, recommendation, or API steps. */
+  config?: Record<string, unknown>;
+};
+
+export type CompletionMode =
+  | "external_provider"
+  | "native_form"
+  | "booking_connector"
+  | "payment_link"
+  | "api_webhook"
+  | "human_follow_up";
+
+export type CompletionLinkTemplate = {
+  baseUrl: string;
+  /** Maps a FrontDeskWise value path to a provider query parameter. */
+  fieldMappings: Record<string, string>;
+  staticParams?: Record<string, string>;
+};
+
 export type ActionFieldCondition = {
   field: string;
   equals?: string;
@@ -26,6 +85,8 @@ export type ActionCompletion = {
   createLead: boolean;
   leadStatus: "new" | "qualified" | "booked";
   message: string;
+  completionMode?: CompletionMode;
+  linkTemplate?: CompletionLinkTemplate;
   submitLabel?: string;
   linkUrl?: string;
   linkLabel?: string;
@@ -45,6 +106,8 @@ export type ActionFlow = {
   triggerIntents: string[];
   captureMode: ActionCaptureMode;
   fields: ActionField[];
+  /** Present for versioned workflow actions; absent means legacy field flow. */
+  steps?: ActionStep[];
   completion: ActionCompletion;
   enabled: boolean;
   createdAt: string;
@@ -54,6 +117,14 @@ export type ActionFlow = {
 export type ConversationActionState = {
   actionId: string;
   values: Record<string, string>;
+  /** Current V2 workflow cursor. Legacy flows continue to use field order. */
+  currentStepId?: string;
+  completedStepIds?: string[];
+  lookupResults?: Record<string, unknown>;
+  completionUrl?: string;
+  participants?: ActionParticipant[];
+  activeParticipantId?: string;
+  interruptionStack?: ActionInterruption[];
   skipped?: string[];
   captureMode: ResolvedActionCaptureMode;
   conversationalKeys: string[];
@@ -61,6 +132,22 @@ export type ConversationActionState = {
   status: "active" | "completed";
   startedAt: string;
   completedAt?: string;
+};
+
+export type ActionParticipant = {
+  id: string;
+  entityType: string;
+  label?: string;
+  values: Record<string, string>;
+  status: "active" | "completed";
+  createdAt: string;
+};
+
+export type ActionInterruption = {
+  intent: string;
+  question: string;
+  returnStepId: string | null;
+  startedAt: string;
 };
 
 type ActionTemplate = Omit<ActionFlow, "id" | "createdAt" | "updatedAt">;
@@ -154,6 +241,14 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
       field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?"),
       field("email", "Email", "email", "What email address should we use?"),
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
+    ],
+    steps: [
+      { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age"], maxParticipants: 8 } },
+      { id: "student-age", type: "capture", fieldKey: "child_age" },
+      { id: "enrollment-details", type: "form", config: { fieldKeys: ["location", "program", "parent_name", "email", "phone"] } },
+      { id: "enrollment-confirm", type: "confirm", question: "I have the details I need. Shall I prepare the registration link?" },
+      { id: "registration-link", type: "generate_link", config: { completion: "external_provider" } },
+      { id: "enrollment-complete", type: "complete" },
     ],
     completion: completion("Thanks — your registration request is ready for the team.", "qualified", "Continue registration"),
     enabled: true,
@@ -323,5 +418,13 @@ export function createActionState(action: ActionFlow, now = new Date().toISOStri
     : captureMode === "hybrid"
       ? action.fields.filter((field) => !isContactField(field) && field.visibility !== "hidden").slice(0, 2).map((field) => field.key)
       : [];
-  return { actionId: action.id, values: {}, captureMode, conversationalKeys, status: "active", startedAt: now };
+  return {
+    actionId: action.id,
+    values: {},
+    ...(action.steps?.length ? { currentStepId: action.steps[0].id, completedStepIds: [], interruptionStack: [] } : {}),
+    captureMode,
+    conversationalKeys,
+    status: "active",
+    startedAt: now,
+  };
 }
