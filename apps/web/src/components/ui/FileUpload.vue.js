@@ -1,3 +1,4 @@
+import { FileImage } from "@lucide/vue";
 const { defineProps, defineEmits, } = {};
 const __VLS_props = defineProps();
 const emit = defineEmits();
@@ -30,6 +31,18 @@ const __VLS_template = () => {
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
             'aria-hidden': "true",
         });
+        let __VLS_0;
+        /** @ts-ignore @type { | typeof FileImage} */
+        FileImage;
+        // @ts-ignore
+        const __VLS_1 = __VLS_asFunctionalComponent1(__VLS_0, new __VLS_0({
+            // @ts-ignore
+            size: (24), strokeWidth: (1.8),
+        }));
+        const __VLS_2 = __VLS_1({
+            size: (24),
+            strokeWidth: (1.8),
+        }, ...__VLS_functionalComponentArgsRest(__VLS_1));
     }
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "ds-file-copy" },

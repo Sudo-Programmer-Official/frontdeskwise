@@ -15,7 +15,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@lucide/vue": "^1.77.0",
     "firebase": "^10.14.1",
+    "simple-icons": "^13.21.0",
     "vue": "^3.5.25"
   },
   "devDependencies": {

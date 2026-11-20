@@ -8,6 +8,7 @@ import { parseRoute, routePath, routeView } from "../src/router/index.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const app = await readFile(resolve(here, "../src/App.vue"), "utf8");
 const agent = await readFile(resolve(here, "../src/AgentExperience.vue"), "utf8");
+const widgetPreview = await readFile(resolve(here, "../src/components/WidgetPreview.vue"), "utf8");
 const styles = await readFile(resolve(here, "../src/styles.css"), "utf8");
 const feedback = await readFile(resolve(here, "../src/AppFeedback.vue"), "utf8");
 const widget = await readFile(resolve(here, "../public/widget.js"), "utf8");
@@ -52,6 +53,17 @@ test("owner UI uses the shared product design language", () => {
   assert.match(styles, /select option\s*\{/);
   assert.match(styles, /mobile-preview/);
   assert.match(agent, /aria-label="Widget preview"|Customer view/);
+  assert.match(widgetPreview, /class="preview-website-frame"/);
+  assert.match(widgetPreview, /@load="markWebsitePreviewReady"/);
+  assert.match(styles, /\.preview-chat \{[^}]*max-height: calc\(100% - 44px\)/);
+  assert.match(styles, /font-weight: 500; line-height: 1\.35/);
+  assert.match(styles, /team-row \.lead-name > span:last-child/);
+  assert.match(app, /class="field-label">Name <span class="optional">Optional/);
+  assert.match(app, /from "@lucide\/vue"/);
+  assert.match(app, /from "simple-icons"/);
+  assert.match(app, /class="provider-logo"/);
+  assert.match(app, /<component :is="item\.icon"/);
+  assert.doesNotMatch(app, /icon: "[⌂✉♧◒▤ϟ✦▦⚙⌁]"/);
 });
 
 test("landing page presents an honest, conversion-ready product story", () => {
@@ -189,6 +201,8 @@ test("Install keeps verification and platform guidance in the Agent flow", () =>
   }
   assert.match(app, /@start-verification="startAgentVerification"/);
   assert.match(app, /@check-verification="checkOwnershipVerification"/);
+  assert.match(app, /<div v-else-if="view === 'overview'" class="view-content">/);
+  assert.match(app, /if \(payload\.verification\?\.status === "verified"\) await loadWidgetInstall\(\);/);
 });
 
 test("Actions uses a progressive conversion-flow builder", () => {
