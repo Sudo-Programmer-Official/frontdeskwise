@@ -127,6 +127,21 @@ test("application navigation is route-driven and refresh-safe", () => {
   assert.match(app, /Keep control-plane and onboarding deep links stable/);
 });
 
+test("invalid sessions refresh once and preserve the deep return route", () => {
+  const returnTo = "/app/plancraftai-ajg8l/agent/install";
+  const signInRoute = parseRoute({ pathname: "/auth/sign-in", search: `?returnTo=${encodeURIComponent(returnTo)}` });
+  assert.deepEqual(signInRoute, { kind: "auth", mode: "signin", returnTo });
+  assert.equal(routePath(signInRoute), `/auth/sign-in?returnTo=${encodeURIComponent(returnTo)}`);
+
+  const unsafeRoute = parseRoute({ pathname: "/auth/sign-in", search: "?returnTo=https%3A%2F%2Fevil.example" });
+  assert.deepEqual(unsafeRoute, { kind: "auth", mode: "signin" });
+  assert.match(app, /currentFirebaseToken\(true\)/);
+  assert.match(app, /refreshRetryCompleted/);
+  assert.match(app, /function redirectToSignIn/);
+  assert.match(app, /const authInitializing = ref/);
+  assert.doesNotMatch(app, /Your session may have expired/);
+});
+
 test("public SEO routes are unique, indexable, and statically packaged", () => {
   assert.ok(marketing.length >= 25, "expected a meaningful first SEO content cluster");
   const paths = new Set();

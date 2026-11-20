@@ -576,7 +576,8 @@ function sendDeveloperInstructions(): void {
 .install-platform-tabs button { flex: 0 0 auto; padding: 7px 3px 9px; border: 0; color: var(--agent-muted); background: transparent; font-size: 11px; font-weight: 700; }
 .install-platform-tabs button.active { color: #1769e8; border-bottom: 2px solid #1769e8; }
 .install-verification-controls { display: grid; gap: 14px; margin-top: 20px; }
-.install-verification-controls label { gap: 9px; }
+.install-verification-controls label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 14px; row-gap: 9px; min-width: 0; margin: 0; }
+.install-verification-controls label select { width: 100%; min-width: 0; }
 .install-verification-controls .drawer-actions { justify-content: flex-start; gap: 12px; margin-top: 4px; }
 .install-help { font-size: 11px !important; }
 .snippet-box { display: grid; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid var(--agent-border); border-radius: 9px; background: #f8fafd; }

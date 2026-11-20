@@ -188,6 +188,11 @@ button:disabled { cursor: wait; opacity: .7; }
 :where(button, input, textarea, select, a):focus-visible { outline: 3px solid rgba(47,128,237,.28); outline-offset: 2px; }
 
 .app-shell { min-height: 100vh; }
+.auth-initializing { min-height: 100vh; display: grid; place-items: center; background: #f7f9fc; }
+.auth-initializing-card { display: grid; justify-items: center; gap: 12px; color: #6e7f99; font-size: 12px; }
+.auth-initializing-card img { width: 48px; height: 48px; object-fit: contain; border-radius: 14px; box-shadow: 0 12px 26px rgba(21, 76, 151, .14); }
+.auth-initializing-card p { margin: 0; }
+.auth-initializing-spinner { color: var(--ds-color-brand-600); animation: app-feedback-spin .8s linear infinite; }
 .marketing-shell { min-height: 100vh; background: radial-gradient(circle at 84% 16%, #e4f5ff 0, transparent 30%), #f8fbff; }
 .marketing-nav { height: 76px; display: flex; justify-content: space-between; align-items: center; max-width: 1240px; margin: 0 auto; padding: 0 32px; }
 .brand-mark, .sidebar-brand { display: inline-flex; align-items: center; gap: 10px; border: 0; background: transparent; color: var(--ink); font-weight: 800; font-size: 20px; letter-spacing: -.04em; }

@@ -63,6 +63,13 @@ type FirebaseConfig = {
   appId: string;
 };
 
+export class AuthSessionExpiredError extends Error {
+  constructor() {
+    super("Your FrontDeskWise session is no longer valid.");
+    this.name = "AuthSessionExpiredError";
+  }
+}
+
 function readConfig(): FirebaseConfig | null {
   const apiKey = String(import.meta.env.VITE_FIREBASE_API_KEY ?? "").trim();
   const authDomain = String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "").trim();
@@ -96,13 +103,26 @@ function apiOrigin(): string {
 }
 
 async function bootstrap(user: User, demoToken?: string, organizationName?: string): Promise<AuthSnapshot> {
-  const token = await user.getIdToken();
-  const response = await fetch(`${apiOrigin()}/api/v1/auth/bootstrap`, {
+  let token = await user.getIdToken();
+  let response = await fetch(`${apiOrigin()}/api/v1/auth/bootstrap`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ demoToken: demoToken || undefined, organizationName: organizationName || undefined }),
   });
+  if (response.status === 401) {
+    try {
+      token = await user.getIdToken(true);
+    } catch {
+      throw new AuthSessionExpiredError();
+    }
+    response = await fetch(`${apiOrigin()}/api/v1/auth/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ demoToken: demoToken || undefined, organizationName: organizationName || undefined }),
+    });
+  }
   const payload = await response.json() as AuthSnapshot & { error?: string };
+  if (response.status === 401) throw new AuthSessionExpiredError();
   if (!response.ok) throw new Error(payload.error ?? "Could not finish account setup.");
   return payload;
 }
@@ -155,7 +175,11 @@ export function observeFirebaseUser(callback: (user: User | null) => void): () =
       // If browser storage is unavailable, still observe Firebase's in-memory
       // session so sign-in continues to work for the current tab.
       if (!active) return;
-      unsubscribe = onIdTokenChanged(getAuth(firebaseApp()), callback);
+      try {
+        unsubscribe = onIdTokenChanged(getAuth(firebaseApp()), callback);
+      } catch {
+        callback(null);
+      }
     });
 
   return () => {
@@ -169,8 +193,16 @@ export async function currentAuthSnapshot(organizationName?: string): Promise<Au
   const auth = await firebaseAuth();
   const user = auth.currentUser;
   if (!user) return null;
-  const token = await user.getIdToken();
-  const response = await fetch(`${apiOrigin()}/api/v1/auth/me`, { headers: { authorization: `Bearer ${token}` } });
+  let token = await user.getIdToken();
+  let response = await fetch(`${apiOrigin()}/api/v1/auth/me`, { headers: { authorization: `Bearer ${token}` } });
+  if (response.status === 401) {
+    try {
+      token = await user.getIdToken(true);
+    } catch {
+      throw new AuthSessionExpiredError();
+    }
+    response = await fetch(`${apiOrigin()}/api/v1/auth/me`, { headers: { authorization: `Bearer ${token}` } });
+  }
   const payload = await response.json().catch(() => ({})) as AuthSnapshot & { error?: string };
   if (response.status === 404) {
     // A Firebase user can outlive an interrupted first bootstrap. Repair that
@@ -178,12 +210,13 @@ export async function currentAuthSnapshot(organizationName?: string): Promise<Au
     // signed out.
     return bootstrap(user, undefined, organizationName);
   }
+  if (response.status === 401) throw new AuthSessionExpiredError();
   if (!response.ok) throw new Error(payload.error ?? "Could not restore the FrontDeskWise session.");
   return payload;
 }
 
-export async function currentFirebaseToken(): Promise<string> {
+export async function currentFirebaseToken(forceRefresh = false): Promise<string> {
   if (!firebaseAuthConfigured()) return "";
   const user = (await firebaseAuth()).currentUser;
-  return user ? user.getIdToken() : "";
+  return user ? user.getIdToken(forceRefresh) : "";
 }

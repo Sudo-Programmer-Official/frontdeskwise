@@ -11,6 +11,12 @@ function cleanPath(pathname) {
 function decodeSegment(value) {
     return value ? decodeURIComponent(value) : "";
 }
+function safeReturnTo(value) {
+    const candidate = value?.trim() ?? "";
+    if (!candidate || !candidate.startsWith("/") || candidate.startsWith("//") || candidate.includes("\\") || /[\r\n]/.test(candidate))
+        return undefined;
+    return candidate;
+}
 function testQuestionFromQuery(query, agentTab) {
     if (agentTab !== "test")
         return undefined;
@@ -38,11 +44,12 @@ export function parseRoute(location = window.location) {
     if (segments[0] === "auth") {
         if (segments[1] === "callback")
             return { kind: "auth-callback" };
+        const returnTo = safeReturnTo(query.get("returnTo"));
         if (segments[1] === "sign-up")
-            return { kind: "auth", mode: "signup" };
+            return { kind: "auth", mode: "signup", ...(returnTo ? { returnTo } : {}) };
         if (segments[1] === "forgot-password")
-            return { kind: "auth", mode: "forgot" };
-        return { kind: "auth", mode: "signin" };
+            return { kind: "auth", mode: "forgot", ...(returnTo ? { returnTo } : {}) };
+        return { kind: "auth", mode: "signin", ...(returnTo ? { returnTo } : {}) };
     }
     if (segments[0] === "agent") {
         const agentTab = segments[1] && agentTabs.has(segments[1]) ? segments[1] : "behavior";
@@ -132,8 +139,10 @@ export function routePath(route) {
         return `/${route.page}`;
     if (route.kind === "legal")
         return `/${route.page}`;
-    if (route.kind === "auth")
-        return `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
+    if (route.kind === "auth") {
+        const path = `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
+        return route.returnTo ? `${path}?returnTo=${encodeURIComponent(route.returnTo)}` : path;
+    }
     if (route.kind === "auth-callback")
         return "/auth/callback";
     if (route.kind === "agent-shortcut")

@@ -24,6 +24,7 @@ import {
   House,
   Inbox,
   LayoutDashboard,
+  LoaderCircle,
   Mail,
   MessageSquare,
   MoreHorizontal,
@@ -59,6 +60,7 @@ import {
   signInWithGoogleAndBootstrap,
   signOutFrontDeskWise,
   signUpAndBootstrap,
+  AuthSessionExpiredError,
   type AuthSnapshot,
 } from "./auth/firebase";
 import LegalPage from "./LegalPage.vue";
@@ -707,13 +709,38 @@ async function runWithGlobalLoading<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
+function isFirebaseSessionInvalid(error: unknown): boolean {
+  if (error instanceof AuthSessionExpiredError) return true;
+  const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  return ["auth/invalid-user-token", "auth/user-token-expired", "auth/user-disabled", "auth/user-not-found"].includes(code);
+}
+
+function withAuthorization(init: RequestInit | undefined, token: string): RequestInit {
+  const headers = new Headers(init?.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  return { ...init, headers };
+}
+
 async function trackedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   startGlobalLoading();
   try {
-    const response = await globalThis.fetch(input, init);
-    if (response.status === 401) {
-      notify("error", "Your session may have expired. Please sign in again.", "Session expired");
-    } else if (response.status >= 500) {
+    let response = await globalThis.fetch(input, init);
+    const hasFirebaseAuthorization = Boolean(firebaseToken.value && new Headers(init?.headers).has("authorization"));
+    if (response.status === 401 && hasFirebaseAuthorization) {
+      let refreshRetryCompleted = false;
+      try {
+        const refreshedToken = await currentFirebaseToken(true);
+        if (!refreshedToken) throw new AuthSessionExpiredError();
+        firebaseToken.value = refreshedToken;
+        response = await globalThis.fetch(input, withAuthorization(init, refreshedToken));
+        refreshRetryCompleted = true;
+      } catch (error) {
+        if (isFirebaseSessionInvalid(error)) redirectToSignIn();
+        else notifyError(error, "We couldn't refresh your session. Check your connection and try again.");
+      }
+      if (refreshRetryCompleted && response.status === 401) redirectToSignIn();
+    }
+    if (response.status >= 500) {
       notify("error", "The service couldn't complete that request. Please try again.");
     }
     return response;
@@ -746,6 +773,8 @@ const authPassword = ref("");
 const authOrganizationName = ref("");
 const authError = ref("");
 const authLoading = ref(false);
+const authInitializing = ref(firebaseAuthConfigured());
+let sessionRedirecting = false;
 const businessName = ref("");
 const businessLocation = ref("");
 const assistantName = ref("AI Front Desk");
@@ -1052,6 +1081,7 @@ const pageTitle = computed(() => {
 const adminOnlyMode = computed(() => Boolean(isSuperAdmin.value && authSnapshot.value && !availableBusinesses.value.length));
 const adminSurfaceMode = computed(() => Boolean(isSuperAdmin.value && authSnapshot.value && view.value === "admin"));
 const routeIsNotFound = computed(() => route.value.kind === "not-found");
+const authRequiresSignIn = computed(() => route.value.kind === "auth" && Boolean(route.value.returnTo));
 const adminSectionTitle = computed(() => adminSection.value === "organization-detail"
   ? adminOrganizationDetail.value?.organization.name ?? "Organization detail"
   : adminSection.value === "business-detail"
@@ -1236,7 +1266,7 @@ async function applyRouteState(nextRoute: AppRoute) {
   }
   if (nextRoute.kind === "onboarding") {
     if (!authSnapshot.value) {
-      openAuth("signin", false);
+      redirectToSignIn();
       return;
     }
     publicDemoMode.value = false;
@@ -1251,7 +1281,7 @@ async function applyRouteState(nextRoute: AppRoute) {
     publicDemoMode.value = false;
     adminSection.value = nextRoute.section;
     if (!authSnapshot.value) {
-      openAuth("signin", false);
+      redirectToSignIn();
       return;
     }
     if (!isSuperAdmin.value) {
@@ -1278,7 +1308,7 @@ async function applyRouteState(nextRoute: AppRoute) {
   if (nextRoute.kind === "agent-shortcut") {
     agentTab.value = nextRoute.agentTab;
     if (!authSnapshot.value && !demoAccessToken.value) {
-      openAuth("signin", false);
+      redirectToSignIn();
       return;
     }
     publicDemoMode.value = false;
@@ -1293,7 +1323,7 @@ async function applyRouteState(nextRoute: AppRoute) {
     const nextSlug = nextRoute.kind === "demo" ? nextRoute.demoId : nextRoute.businessSlug;
     if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
     if (!isPublic && !authSnapshot.value && !demoAccessToken.value) {
-      openAuth("signin", false);
+      redirectToSignIn();
       return;
     }
     const needsReload = demoSlug.value !== nextSlug || publicDemoMode.value !== isPublic || !workspaceStats.value;
@@ -1381,12 +1411,61 @@ function openHelpAndSupport() {
   openSupportRequest.value += 1;
 }
 
-function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = true) {
+function isProtectedRoute(candidate: AppRoute = route.value): boolean {
+  return candidate.kind === "agent-shortcut"
+    || candidate.kind === "onboarding"
+    || candidate.kind === "platform"
+    || candidate.kind === "workspace"
+    || candidate.kind === "workspace-settings";
+}
+
+function currentReturnTo(): string {
+  if (typeof window === "undefined") return routePath(route.value);
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
+function routeFromReturnTo(returnTo: string | undefined): AppRoute | null {
+  if (!returnTo || typeof window === "undefined") return null;
+  try {
+    const url = new URL(returnTo, window.location.origin);
+    if (url.origin !== window.location.origin || !url.pathname.startsWith("/") || url.pathname.startsWith("//")) return null;
+    const candidate = parseRoute({ pathname: url.pathname, search: url.search });
+    return isProtectedRoute(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function redirectToSignIn(returnTo = currentReturnTo()): void {
+  if (sessionRedirecting || route.value.kind === "auth") return;
+  sessionRedirecting = true;
+  authSnapshot.value = null;
+  firebaseToken.value = "";
+  isSuperAdmin.value = false;
+  clearWorkspaceState();
+  authMode.value = "signin";
+  authError.value = "";
+  authPassword.value = "";
+  authModalOpen.value = true;
+  const nextRoute: AppRoute = {
+    kind: "auth",
+    mode: "signin",
+    ...(isProtectedRoute(route.value) && returnTo ? { returnTo } : {}),
+  };
+  commitRoute(nextRoute, true);
+  void signOutFrontDeskWise().catch(() => undefined);
+}
+
+function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = true, requestedReturnTo?: string) {
   authMode.value = mode;
   authError.value = "";
   authPassword.value = "";
   authModalOpen.value = true;
-  if (syncRoute && (route.value.kind !== "auth" || route.value.mode !== mode)) commitRoute({ kind: "auth", mode });
+  const returnTo = requestedReturnTo
+    ?? (route.value.kind === "auth" ? route.value.returnTo : isProtectedRoute(route.value) ? currentReturnTo() : undefined);
+  if (syncRoute && (route.value.kind !== "auth" || route.value.mode !== mode || route.value.returnTo !== returnTo)) {
+    commitRoute({ kind: "auth", mode, ...(returnTo ? { returnTo } : {}) });
+  }
 }
 
 function openSettingsTab(tab: SettingsTab) {
@@ -1452,12 +1531,14 @@ async function submitAuth() {
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
     const mode = authMode.value;
+    const returnTo = route.value.kind === "auth" ? route.value.returnTo : undefined;
     authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => mode === "signup"
       ? signUpAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value)
       : signInAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value));
     firebaseToken.value = await currentFirebaseToken();
-    await settleAuthenticatedSession();
+    await settleAuthenticatedSession(returnTo);
     authModalOpen.value = false;
+    sessionRedirecting = false;
     authPassword.value = "";
     notifySuccess(mode === "signup" ? "Your workspace is ready." : "You're signed in.", mode === "signup" ? "Account created" : "Welcome back");
   } catch (error) {
@@ -1477,10 +1558,12 @@ async function submitGoogleAuth() {
   startGlobalLoading();
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
+    const returnTo = route.value.kind === "auth" ? route.value.returnTo : undefined;
     authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => signInWithGoogleAndBootstrap(demoToken, authOrganizationName.value));
     firebaseToken.value = await currentFirebaseToken();
-    await settleAuthenticatedSession();
+    await settleAuthenticatedSession(returnTo);
     authModalOpen.value = false;
+    sessionRedirecting = false;
     notifySuccess("You're signed in with Google.", "Welcome back");
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
@@ -1704,8 +1787,13 @@ async function refreshAuthenticatedSnapshot() {
   if (!firebaseToken.value) return;
   try {
     const snapshot = await currentAuthSnapshot();
-    if (snapshot) authSnapshot.value = snapshot;
-  } catch {
+    if (snapshot) {
+      authSnapshot.value = snapshot;
+      const refreshedToken = await currentFirebaseToken();
+      if (refreshedToken) firebaseToken.value = refreshedToken;
+    }
+  } catch (error) {
+    if (isFirebaseSessionInvalid(error)) redirectToSignIn();
     // Summary refresh must not turn a successful question/lead mutation into an error.
   }
 }
@@ -1757,14 +1845,22 @@ async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolea
   }
 }
 
-async function settleAuthenticatedSession(): Promise<void> {
+async function settleAuthenticatedSession(returnTo?: string): Promise<void> {
   if (!authSnapshot.value) return;
+  const returnRoute = routeFromReturnTo(returnTo);
+  if (returnRoute) route.value = returnRoute;
   isSuperAdmin.value = authSnapshot.value.user.isSuperAdmin;
   const hasBusiness = await syncAuthenticatedBusiness(authSnapshot.value);
   if (hasBusiness) await loadBilling();
   if (isSuperAdmin.value && (isPlatformRoute() || !hasBusiness)) await loadAdminOrganizations();
   if (isSuperAdmin.value && !hasBusiness) {
     navigateToAdminSection("overview");
+    return;
+  }
+  const requestedBusinessAvailable = returnRoute?.kind !== "workspace"
+    || authSnapshot.value.organizations.some((organization) => organization.businesses.some((business) => business.slug === returnRoute.businessSlug));
+  if (returnRoute && hasBusiness && requestedBusinessAvailable) {
+    commitRoute(returnRoute, true);
     return;
   }
   if (!hasBusiness) {
@@ -3431,7 +3527,9 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     firebaseToken.value = "";
     authSnapshot.value = null;
     isSuperAdmin.value = false;
-    if (isPlatformRoute()) openAuth("signin");
+    authInitializing.value = false;
+    if (route.value.kind === "auth") openAuth(route.value.mode, false, route.value.returnTo);
+    else if (isProtectedRoute()) redirectToSignIn();
     return;
   }
 
@@ -3440,13 +3538,22 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     const snapshot = await currentAuthSnapshot();
     if (!snapshot) throw new Error("Could not restore the FrontDeskWise account.");
     authSnapshot.value = snapshot;
-    await settleAuthenticatedSession();
+    firebaseToken.value = await currentFirebaseToken();
+    const returnTo = route.value.kind === "auth" ? route.value.returnTo : undefined;
+    await settleAuthenticatedSession(returnTo);
     authModalOpen.value = false;
+    sessionRedirecting = false;
   } catch (error) {
+    if (isFirebaseSessionInvalid(error)) {
+      authInitializing.value = false;
+      redirectToSignIn();
+      return;
+    }
     // Keep Firebase's session intact. A temporary API/CORS/network failure
     // must not sign the user out or erase their local identity.
     authError.value = friendlyAuthError(error, "Could not restore the FrontDeskWise session.");
-    if (isPlatformRoute()) openAuth("signin");
+  } finally {
+    authInitializing.value = false;
   }
 }
 
@@ -4159,7 +4266,6 @@ function updateDocumentMetadata() {
 
 watch(view, updateDocumentMetadata);
 onMounted(() => {
-  void runWithGlobalLoading(() => applyRouteState(route.value));
   updateDocumentMetadata();
   void consumeDemoLink();
   if (typeof window !== "undefined") {
@@ -4170,7 +4276,8 @@ onMounted(() => {
       }, 4200);
     }
     if (!firebaseAuthConfigured()) {
-      if (isPlatformRoute()) openAuth("signin");
+      authInitializing.value = false;
+      void runWithGlobalLoading(() => applyRouteState(route.value));
     } else {
       stopFirebaseObserver = observeFirebaseUser((user) => {
         void runWithGlobalLoading(() => restoreAuthenticatedSession(user));
@@ -4198,6 +4305,10 @@ function startMarketingDemo() {
 
 <template>
   <main class="app-shell" :aria-busy="globalLoading || authLoading">
+    <section v-if="authInitializing" class="auth-initializing" role="status" aria-live="polite">
+      <div class="auth-initializing-card"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><LoaderCircle :size="22" :stroke-width="1.8" class="auth-initializing-spinner" aria-hidden="true" /><p>Restoring your workspace…</p></div>
+    </section>
+    <template v-else>
     <section v-if="routeIsNotFound" class="not-found-shell">
       <div class="not-found-card"><p class="eyebrow">404</p><h1>That page is not available.</h1><p>Check the address or return to FrontDeskWise.</p><button class="primary-button" type="button" @click="openHome">Back to home</button></div>
     </section>
@@ -4774,9 +4885,9 @@ function startMarketingDemo() {
       </form>
     </div>
 
-    <div v-if="authModalOpen" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title" @click.self="authModalOpen = false">
+    <div v-if="authModalOpen" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title" @click.self="!authRequiresSignIn && (authModalOpen = false)">
       <form class="auth-card" @submit.prevent="authMode === 'forgot' ? resetPassword() : submitAuth()">
-        <button class="auth-close" type="button" aria-label="Close" @click="authModalOpen = false">×</button>
+        <button v-if="!authRequiresSignIn" class="auth-close" type="button" aria-label="Close" @click="authModalOpen = false">×</button>
         <p class="eyebrow">{{ authMode === 'signup' ? 'Save your AI front desk' : authMode === 'forgot' ? 'Account recovery' : 'Welcome back' }}</p>
         <h2 id="auth-title">{{ authMode === 'signup' ? 'Create your FrontDeskWise account' : authMode === 'forgot' ? 'Reset your password' : 'Sign in to FrontDeskWise' }}</h2>
         <p class="auth-copy">{{ authMode === 'signup' ? (publicDemoMode ? 'Your workspace stays attached to your new organization.' : 'Create your organization and add your first business.') : authMode === 'forgot' ? 'Enter your email and we will send password recovery instructions.' : 'Pick up where you left off across all your businesses.' }}</p>
@@ -4791,6 +4902,7 @@ function startMarketingDemo() {
       </form>
     </div>
 
+    </template>
     <AppFeedback :loading="globalLoading || authLoading" :toasts="feedbackToasts" @dismiss="dismissToast" />
   </main>
 </template>
