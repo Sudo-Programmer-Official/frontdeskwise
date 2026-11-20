@@ -1823,10 +1823,10 @@ const landingFaqs = [
 ];
 
 const landingCapabilities = [
-  { icon: "◎", tone: "blue", title: "Answers customers can trust", body: "Uses your website, documents, pricing, policies, and approved business knowledge — and knows when to hand off." },
-  { icon: "↗", tone: "orange", title: "Turns conversations into customers", body: "Captures leads, starts bookings, registrations, quotes, and appointments while visitors are ready to act." },
-  { icon: "◌", tone: "green", title: "Your team stays in control", body: "AI handles routine conversations. Staff can join whenever a customer needs a human." },
-  { icon: "ϟ", tone: "purple", title: "Works with your existing systems", body: "Connect your CRM, booking tools, calendar, email, webhooks, or MCP-powered tools." },
+  { icon: "◎", tone: "blue", title: "Grounded answers", body: "Uses your website, policies, pricing, and approved business knowledge.", previewType: "message", preview: "Our classes start at $45 per month.", status: "Answered from approved knowledge" },
+  { icon: "↗", tone: "orange", title: "Conversion actions", body: "Turns conversations into leads, bookings, quotes, and registrations.", previewType: "booking", preview: "Appointment request", previewMeta: "Sat, Dec 20 at 10:00 AM", status: "Booking created" },
+  { icon: "◌", tone: "green", title: "Human handoff", body: "Your team can step in anytime with the full conversation context.", previewType: "handoff", preview: "Sarah joined the conversation", previewMeta: "Team · 2:14 PM", status: "Team joined with full context" },
+  { icon: "ϟ", tone: "purple", title: "Connected systems", body: "Sends the right information to your CRM, booking tools, automations, email, or custom APIs (MCP).", previewType: "systems", preview: "HubSpot · Zapier · Make · Email", status: "Lead sent to HubSpot" },
 ];
 
 const landingIntegrations = [
@@ -4204,18 +4204,32 @@ function startMarketingDemo() {
         </div>
       </div>
 
-      <div class="landing-hero-note"><span>Illustrative sample flow</span><span>Answer grounded in approved knowledge</span><span>Use your own website to build a real workspace</span><button class="landing-text-link" type="button" @click="scrollLandingTo('how-it-works')">See the flow</button></div>
-
       <section class="landing-section landing-capabilities-section">
-        <div class="landing-section-heading"><p class="eyebrow">What FrontDeskWise does</p><h2>Built for answers, actions, and human judgment.</h2><p>One AI front desk helps visitors get useful answers, take the next step, and reach your team when the moment calls for it.</p></div>
-        <div class="landing-capability-grid"><article v-for="capability in landingCapabilities" :key="capability.title" class="landing-capability-card"><span :class="['landing-capability-icon', capability.tone]">{{ capability.icon }}</span><h3>{{ capability.title }}</h3><p>{{ capability.body }}</p></article></div>
+        <div class="landing-capability-top">
+          <div class="landing-capability-copy"><p class="eyebrow">What FrontDeskWise does</p><h2>Answers questions. Takes action. Brings in your team when needed.</h2><p>FrontDeskWise helps visitors get answers, take the next step, and reach a real person when it matters.</p><div class="landing-capability-benefits"><span><i>✓</i> Higher conversions</span><span><i>✓</i> Less manual work</span><span><i>✓</i> Happier customers</span></div></div>
+          <div class="landing-capability-demo" aria-label="Illustrative conversation becoming a business action">
+            <div class="landing-capability-browser"><div class="landing-capability-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="landing-capability-browser-url">yourbusiness.com</span></div><div class="landing-capability-chat"><div class="landing-capability-chat-head"><span class="mini-orb">✦</span><strong>FrontDeskWise</strong><span><i></i> Online</span></div><div class="landing-capability-chat-body"><div class="landing-capability-bubble visitor">Do you have Saturday appointments?</div><div class="landing-capability-bubble assistant"><span class="mini-orb">✦</span><span>Yes — we have Saturday appointments available. Would you like to book one now?</span></div><button class="landing-capability-booking" type="button"><span aria-hidden="true">▣</span> Book appointment</button></div></div></div>
+            <div class="landing-capability-action"><strong><span>ϟ</span> Conversation → Action</strong><div><i>✓</i> Answer from your knowledge</div><div><i>✓</i> Qualify the visitor</div><div><i>✓</i> Create booking / lead</div><div><i>✓</i> Notify your team if needed</div></div>
+          </div>
+        </div>
+        <div class="landing-capability-grid"><article v-for="capability in landingCapabilities" :key="capability.title" :class="['landing-capability-card', capability.tone]"><span :class="['landing-capability-icon', capability.tone]">{{ capability.icon }}</span><h3>{{ capability.title }}</h3><p>{{ capability.body }}</p><div :class="['landing-capability-preview', capability.previewType]"><template v-if="capability.previewType === 'message'"><span class="landing-capability-avatar">✦</span><strong>{{ capability.preview }}</strong></template><template v-else-if="capability.previewType === 'booking'"><span class="landing-capability-preview-icon">▣</span><span><strong>{{ capability.preview }}</strong><small>{{ capability.previewMeta }}</small></span><b>✓</b></template><template v-else-if="capability.previewType === 'handoff'"><span class="landing-capability-avatar human">S</span><span><strong>{{ capability.preview }}</strong><small>{{ capability.previewMeta }}</small></span></template><template v-else><strong>{{ capability.preview }}</strong></template></div><span class="landing-capability-status"><i>✓</i> {{ capability.status }}</span></article></div>
       </section>
 
       <section id="how-it-works" class="landing-section landing-conversion-section">
         <div class="landing-section-heading landing-section-heading-centered"><p class="eyebrow">The commercial story</p><h2>See the conversation turn into a next step.</h2><p>FrontDeskWise connects the moment a visitor asks a question to the outcome your business needs.</p></div>
         <div class="landing-flow-shell" aria-label="Illustrative customer conversion flow">
-          <div class="landing-flow-rail"><span class="landing-flow-progress"></span><article v-for="(step, index) in landingFlowSteps" :key="step.label" class="landing-flow-step"><span class="landing-flow-index">0{{ index + 1 }}</span><strong>{{ step.label }}</strong><small>{{ step.title }}</small><p>{{ step.body }}</p></article></div>
-          <div class="landing-flow-live-card"><span class="landing-flow-live-label"><i></i> Live illustrative flow</span><strong>Visitor intent stays attached to the conversation.</strong><div class="landing-flow-live-path"><span>Question</span><b>→</b><span>Answer</span><b>→</b><span>Action</span><b>→</b><span>Outcome</span></div><small>Every step can be reviewed, tested, and improved before it reaches customers.</small></div>
+          <div class="landing-flow-cards"><span class="landing-flow-progress" aria-hidden="true"></span><article v-for="(step, index) in landingFlowSteps" :key="step.label" :class="['landing-flow-step', `tone-${index}`]">
+            <div class="landing-flow-step-header"><span class="landing-flow-index">0{{ index + 1 }}</span><strong>{{ step.label }}</strong></div>
+            <div class="landing-flow-visual">
+              <div v-if="index === 0" class="landing-flow-question"><span class="landing-flow-person" aria-hidden="true">○</span><span>Do you have Saturday appointments?</span></div>
+              <div v-else-if="index === 1" class="landing-flow-answer"><span class="mini-orb" aria-hidden="true">✦</span><span>Yes — we have Saturday appointments available.</span></div>
+              <div v-else-if="index === 2" class="landing-flow-qualification"><span>✓ <b>Service: Consultation</b></span><span>✓ <b>Preferred: Saturday</b></span><span>✓ <b>Contact: Captured</b></span></div>
+              <div v-else-if="index === 3" class="landing-flow-convert"><strong><span aria-hidden="true">▣</span> Book appointment</strong><small>Sat, Dec 20 at 10:00 AM</small><b>✓ Appointment request sent</b></div>
+              <div v-else class="landing-flow-handoff"><span class="landing-flow-human-avatar" aria-hidden="true">S</span><span>Hi! I can help with that. I already have the details from your conversation.</span></div>
+            </div>
+            <div class="landing-flow-step-copy"><strong>{{ step.title }}</strong><p>{{ step.body }}</p></div>
+          </article></div>
+          <div class="landing-flow-live-card"><div class="landing-flow-live-copy"><span class="landing-flow-live-label"><i></i> Live illustrative flow</span><strong>Visitor intent stays attached to the conversation.</strong><small>Every step can be reviewed, tested, and improved before it reaches customers.</small></div><div class="landing-flow-live-path"><span><b>◌</b> Question <i>✓</i></span><b>→</b><span><b>▤</b> Answer <i>✓</i></span><b>→</b><span><b>▣</b> Action <i>✓</i></span><b>→</b><span><b>♧</b> Outcome <i>✓</i></span></div></div>
         </div>
       </section>
 

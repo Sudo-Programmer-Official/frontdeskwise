@@ -56,11 +56,10 @@ test("owner UI uses the shared product design language", () => {
 
 test("landing page presents an honest, conversion-ready product story", () => {
   for (const marker of [
-    "Illustrative sample flow",
+    "Live illustrative flow",
     "landing-flow-shell",
     "landingSampleMetrics",
     "landingFaqs",
-    "Answer grounded in approved knowledge",
     "Create your workspace",
   ]) {
     assert.ok(app.includes(marker), `missing landing experience marker: ${marker}`);

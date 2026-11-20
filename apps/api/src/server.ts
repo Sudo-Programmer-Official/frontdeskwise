@@ -6,7 +6,7 @@ import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
-import { CrawlError, crawlWebsite, normalisePublicUrl, type CrawledPage } from "./crawler.js";
+import { CrawlError, crawlWebsite, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
@@ -566,6 +566,11 @@ function httpError(statusCode: number, message: string): Error & { statusCode: n
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function isUniqueConstraintError(value: unknown, constraint: string): boolean {
+  const error = asRecord(value);
+  return error.code === "23505" && error.constraint === constraint;
 }
 
 function requiredString(value: unknown, field: string, maxLength = 500): string {
@@ -1621,18 +1626,19 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
       organizationId = organizationResult.rows[0].id;
     }
     const businessResult = await client.query<{ id: string }>(
-      `insert into businesses (id, name, slug, vertical, website_url, timezone, location,
+      `insert into businesses (id, name, slug, vertical, website_url, website_url_key, timezone, location,
                               organization_id, billing_mode, is_demo, is_internal_demo, billing_status, plan_key, billing_interval,
                               ownership_status, ownership_verification_method, ownership_verification_token_hash,
                               ownership_verification_expires_at, ownership_verified_at, ownership_verified_by_user_id,
                               trial_ends_at, current_period_ends_at, grace_ends_at, billing_provider,
                               provider_customer_id, provider_subscription_id, public_site_key,
                               widget_enabled, widget_last_loaded_at, widget_load_count)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
        on conflict (slug) do update set
          name = excluded.name,
          vertical = excluded.vertical,
          website_url = excluded.website_url,
+         website_url_key = excluded.website_url_key,
          location = excluded.location,
          organization_id = coalesce(businesses.organization_id, excluded.organization_id),
          billing_mode = excluded.billing_mode,
@@ -1664,6 +1670,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.slug,
         business.vertical,
         business.websiteUrl,
+        websiteIdentityKey(business.websiteUrl),
         "America/New_York",
         business.location,
         organizationId,
@@ -6667,6 +6674,16 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
     || organizationBilling.billing_status === "grace"
     || (organizationBilling.billing_status === "trial" && (!organizationBilling.trial_end_at || Date.parse(toIso(organizationBilling.trial_end_at)) > Date.now()));
   if (!access) throw httpError(402, "This organization needs an active subscription before adding another business");
+  const duplicateBusiness = await pool.query<{ name: string; slug: string }>(
+    `select name, slug
+     from businesses
+     where organization_id = $1 and (website_url_key = $2 or website_url = $2)
+     limit 1`,
+    [organizationResult.rows[0].id, websiteIdentityKey(websiteUrl)],
+  );
+  if (duplicateBusiness.rowCount) {
+    throw httpError(409, `This website is already registered as ${duplicateBusiness.rows[0].name}. Open the existing business instead.`);
+  }
   const businessCount = await pool.query<{ count: string }>("select count(*)::text as count from businesses where organization_id = $1", [organizationResult.rows[0].id]);
   if (Number(businessCount.rows[0].count) >= Number(organizationBilling.max_businesses ?? 1)) {
     throw httpError(402, "Your current plan has reached its business limit. Upgrade to add another business.");
@@ -6680,8 +6697,15 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
   const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
   business.billing = { ...business.billing, mode: "live", isDemo: false, status: "trial", planKey: "starter", trialEndsAt: trialEndFromNow() };
+  try {
+    await persistBusiness(business, organizationResult.rows[0].id);
+  } catch (error) {
+    if (isUniqueConstraintError(error, "businesses_organization_website_key_idx")) {
+      throw httpError(409, "This website was registered by another request. Open the existing business instead.");
+    }
+    throw error;
+  }
   businesses.set(slug, business);
-  await persistBusiness(business, organizationResult.rows[0].id);
   await pool.query(
     `insert into business_members (business_id, user_id, role)
      values ($1, $2, 'admin')

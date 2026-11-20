@@ -65,6 +65,15 @@ export function normalisePublicUrl(value: unknown): string {
   return url.toString();
 }
 
+export function websiteIdentityKey(value: unknown): string {
+  const normalized = normalisePublicUrl(value);
+  const url = new URL(normalized);
+  url.hostname = url.hostname.replace(/^www\./i, "");
+  url.searchParams.sort();
+  const pathname = url.pathname.replace(/\/+$/, "");
+  return `${url.hostname}${url.port ? `:${url.port}` : ""}${pathname}${url.search}`;
+}
+
 function decodeEntities(value: string): string {
   return value
     .replace(/&nbsp;/gi, " ")
