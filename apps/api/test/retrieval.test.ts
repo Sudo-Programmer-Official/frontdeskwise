@@ -14,11 +14,16 @@ const sources: RetrievalSource[] = [
   { id: "home", url: "https://sudo-programmer.com/", title: "Sudo Programmer | AI Automation for Growing Businesses", pageType: "web_page" },
   { id: "services", url: "https://sudo-programmer.com/services", title: "Services | Sudo Programmer", pageType: "service" },
   { id: "solutions", url: "https://sudo-programmer.com/solutions", title: "Solutions | Sudo Programmer", pageType: "service" },
+  { id: "voice", url: "https://sudo-programmer.com/blog/voice-reminders", title: "Voice reminders", pageType: "web_page" },
 ];
 
 test("classifies business service questions as services intent", () => {
   assert.equal(classifyQuestionIntent("What services does Sudo Programmer offer?"), "services");
   assert.equal(classifyQuestionIntent("What are your cancellation policy terms?"), "policy");
+  assert.equal(classifyQuestionIntent("What permissions does PlanCraftAI use?"), "permissions");
+  assert.equal(classifyQuestionIntent("Does PlanCraftAI work with calendars?"), "calendar");
+  assert.equal(classifyQuestionIntent("Does PlanCraftAI support reminders?"), "reminders");
+  assert.equal(classifyQuestionIntent("Can I create tasks using voice?"), "voice");
 });
 
 test("recognizes a homepage and keeps legal pages distinct", () => {
@@ -46,6 +51,12 @@ test("legal intent can still select Terms of Service", () => {
     { chunk: { sourceId: "services", content: "Our services include AI automation." }, score: 0.9, evidenceScore: 0.9 },
   ], sources, "policy");
   assert.equal(ranked[0]?.chunk.sourceId, "terms");
+});
+
+test("pricing and permissions do not fall back to unrelated web pages", () => {
+  const unrelated = { chunk: { sourceId: "voice", content: "Voice reminders help people review unfinished tasks." }, score: 0.95, evidenceScore: 0.9 };
+  assert.deepEqual(rankMatches([unrelated], sources, "pricing"), []);
+  assert.deepEqual(rankMatches([unrelated], sources, "policy"), []);
 });
 
 test("grounding verification fails closed on anything except SUPPORTED", () => {

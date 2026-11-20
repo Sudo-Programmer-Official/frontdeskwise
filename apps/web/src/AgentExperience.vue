@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, toRef, watch } from "vue";
+import { computed, nextTick, reactive, ref, toRef, watch } from "vue";
 import { ArrowRight, Check, CircleAlert, CircleCheck, GripVertical, Plus, X } from "@lucide/vue";
 import Button from "./components/ui/Button.vue";
 import Card from "./components/ui/Card.vue";
@@ -71,18 +71,29 @@ interface TestActionField {
 }
 
 interface TestAction {
+  id: string;
+  key: string;
   status: "active" | "completed";
+  captureMode: "conversational" | "form" | "hybrid";
+  nextField?: string;
+  linkUrl?: string;
+  linkLabel?: string;
   form?: { submitLabel: string; fields: TestActionField[] };
 }
 
-interface TestModel {
-  conversationId: string;
-  question: string;
-  answer: string;
+interface TestMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
   grounded: boolean;
   citations: Array<{ title?: string; url?: string; pageType?: string }>;
   action: TestAction | null;
   formValues: Record<string, string>;
+}
+
+interface TestModel {
+  conversationId: string;
+  messages: TestMessage[];
   suggestedQuestions: string[];
   isAsking: boolean;
 }
@@ -132,7 +143,7 @@ const emit = defineEmits<{
   (event: "start-verification", method: VerificationMethod): void;
   (event: "check-verification"): void;
   (event: "ask-question", question: string): void;
-  (event: "submit-action", values: Record<string, string>): void;
+  (event: "submit-action", payload: { messageId: string; actionId: string; values: Record<string, string> }): void;
   (event: "reset-conversation"): void;
   (event: "view-leads"): void;
   (event: "request-install-help", payload: InstallationSupportPayload): void;
@@ -153,7 +164,12 @@ const actionLabel = toRef(actionDraft, "label");
 const actionQuestion = toRef(actionDraft, "question");
 const logoPreview = ref(props.model.widgetLogoUrl);
 const logoFileName = ref("");
-const testPrompt = ref(props.test.question);
+const testPrompt = ref("");
+const testThread = ref<HTMLElement | null>(null);
+const sessionHasGroundedAnswer = computed(() => props.test.messages.some((message) => message.role === "assistant" && message.grounded));
+const sessionSourceCount = computed(() => new Set(props.test.messages.flatMap((message) => message.citations.map((citation) => citation.url || citation.title || ""))).size);
+const sessionHasAction = computed(() => props.test.messages.some((message) => Boolean(message.action)));
+const sessionHasCompletedAction = computed(() => props.test.messages.some((message) => message.action?.status === "completed"));
 const localSaved = ref(false);
 const installPlatform = ref<InstallPlatform>("custom");
 const verificationMethodDraft = ref<VerificationMethod>(props.verificationMethod);
@@ -203,8 +219,10 @@ watch(() => props.model, (model) => syncModel(model), { deep: true });
 watch(() => props.verificationMethod, (method) => {
   verificationMethodDraft.value = method;
 });
-watch(() => props.test.question, (question) => {
-  if (!testPrompt.value.trim()) testPrompt.value = question;
+watch(() => [props.test.messages.length, props.test.isAsking], () => {
+  void nextTick(() => {
+    if (testThread.value) testThread.value.scrollTop = testThread.value.scrollHeight;
+  });
 });
 watch(() => props.openSupportRequest, (signal) => {
   if (signal > 0) openSupportDrawer();
@@ -274,10 +292,12 @@ function ask(question = testPrompt.value): void {
   if (!trimmed || props.test.isAsking) return;
   testPrompt.value = trimmed;
   emit("ask-question", trimmed);
+  testPrompt.value = "";
 }
 
-function submitAction(): void {
-  emit("submit-action", { ...props.test.formValues });
+function submitAction(message: TestMessage): void {
+  if (!message.action) return;
+  emit("submit-action", { messageId: message.id, actionId: message.action.id, values: { ...message.formValues } });
 }
 
 function statusClass(ready: boolean): string {
@@ -389,8 +409,31 @@ function sendDeveloperInstructions(): void {
     </div>
 
     <div v-else-if="tab === 'test'" class="agent-test-layout">
-      <article class="test-conversation panel"><div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the real conversation path to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div><div class="test-thread"><div class="test-welcome"><span class="preview-orb" :style="{ background: agentDraft.widgetColor }"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>{{ agentDraft.assistantName || 'AI assistant' }}</strong><small>Answers from {{ businessName || 'your business' }} knowledge</small></div></div><div v-if="test.question" class="test-user-message">{{ test.question }}</div><div v-if="test.answer" class="test-answer-message"><div class="answer-meta"><span v-if="test.action" class="answer-badge grounded"><Check :size="13" :stroke-width="2" aria-hidden="true" /> {{ test.action.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', test.grounded ? 'grounded' : 'fallback']"><component :is="test.grounded ? CircleCheck : CircleAlert" :size="13" :stroke-width="2" aria-hidden="true" /> {{ test.grounded ? 'Grounded answer' : 'Safe fallback' }}</span></div><p>{{ test.answer }}</p><form v-if="test.action?.form" class="test-action-form" @submit.prevent="submitAction"><label v-for="field in test.action.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><select v-if="field.type === 'select'" v-model="test.formValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="test.formValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label><button class="primary-button small" type="submit" :disabled="test.isAsking">{{ test.isAsking ? 'Submitting…' : test.action.form.submitLabel }}</button></form><div v-if="test.citations.length" class="test-citations"><span>Sources ({{ test.citations.length }})</span><a v-for="citation in test.citations" :key="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></a></div></div><div v-else class="test-empty">Ask a question to see the live answer and its sources.</div></div><div v-if="test.suggestedQuestions.length" class="test-suggestions"><span>Try a common question</span><button v-for="suggestion in test.suggestedQuestions.slice(0, 4)" :key="suggestion" type="button" @click="ask(suggestion)">{{ suggestion }} <b>›</b></button></div><form class="test-composer" @submit.prevent="ask()"><input v-model="testPrompt" type="text" placeholder="e.g. What services do you offer?" aria-label="Test customer question" /><button class="primary-button small" type="submit" :disabled="test.isAsking || !testPrompt.trim()">{{ test.isAsking ? 'Checking…' : 'Send as visitor' }}</button></form></article>
-      <aside class="test-owner-panel panel"><div class="agent-section-heading"><div><p class="section-kicker">Owner checks</p><h3>What to verify</h3></div></div><div class="owner-check-list"><div><span :class="statusClass(Boolean(test.answer && test.grounded))">✓</span><span><strong>Grounded answers</strong><small>{{ test.answer && test.grounded ? 'Grounded in business knowledge' : 'Ask a knowledge question' }}</small></span></div><div><span :class="statusClass(test.citations.length > 0)">✓</span><span><strong>Sources</strong><small>{{ test.citations.length ? `${test.citations.length} source${test.citations.length === 1 ? '' : 's'}` : 'Sources appear with grounded answers' }}</small></span></div><div><span :class="statusClass(Boolean(test.action))">✓</span><span><strong>Action flows</strong><small>{{ test.action ? 'Action flow is running in the conversation' : 'Try a quick action or ask for help' }}</small></span></div><div><span :class="statusClass(Boolean(test.action?.status === 'completed'))">✓</span><span><strong>Completion</strong><small>{{ test.action?.status === 'completed' ? 'Test lead captured' : 'Submit the conversational form to verify' }}</small></span></div></div><div v-if="test.action?.status === 'completed'" class="test-success"><strong>✓ Test lead captured</strong><button class="text-button" type="button" @click="emit('view-leads')">View in Leads →</button></div><p class="test-owner-note">Internal details stay summarized here. Visitors only see the conversation.</p></aside>
+      <article class="test-conversation panel">
+        <div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the real conversation path to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div>
+        <div ref="testThread" class="test-thread">
+          <div class="test-welcome"><span class="preview-orb" :style="{ background: agentDraft.widgetColor }"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>{{ agentDraft.assistantName || 'AI assistant' }}</strong><small>Answers from {{ businessName || 'your business' }} knowledge</small></div></div>
+          <template v-if="test.messages.length">
+            <template v-for="message in test.messages" :key="message.id">
+              <div v-if="message.role === 'user'" class="test-user-message">{{ message.content }}</div>
+              <article v-else class="test-answer-message">
+                <div class="answer-meta"><span v-if="message.action" class="answer-badge grounded"><Check :size="13" :stroke-width="2" aria-hidden="true" /> {{ message.action.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', message.grounded ? 'grounded' : 'fallback']"><component :is="message.grounded ? CircleCheck : CircleAlert" :size="13" :stroke-width="2" aria-hidden="true" /> {{ message.grounded ? 'Grounded answer' : 'Safe fallback' }}</span></div>
+                <p>{{ message.content }}</p>
+                <form v-if="message.action?.form" class="test-action-form" @submit.prevent="submitAction(message)">
+                  <label v-for="field in message.action.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><select v-if="field.type === 'select'" v-model="message.formValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="message.formValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label>
+                  <button class="primary-button small" type="submit" :disabled="test.isAsking">{{ test.isAsking ? 'Submitting…' : message.action.form.submitLabel }}</button>
+                </form>
+                <div v-if="message.citations.length" class="test-citations"><span>Sources ({{ message.citations.length }})</span><a v-for="citation in message.citations" :key="`${message.id}-${citation.url || citation.title}`" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></a></div>
+              </article>
+            </template>
+            <div v-if="test.isAsking" class="test-typing" role="status" aria-label="Assistant is typing"><span></span><span></span><span></span></div>
+          </template>
+          <div v-else class="test-empty">Ask a question to see the live answer and its sources.</div>
+        </div>
+        <div v-if="test.suggestedQuestions.length" class="test-suggestions"><span>Try a common question</span><button v-for="suggestion in test.suggestedQuestions.slice(0, 4)" :key="suggestion" type="button" @click="ask(suggestion)">{{ suggestion }} <b>›</b></button></div>
+        <form class="test-composer" @submit.prevent="ask()"><input v-model="testPrompt" type="text" placeholder="e.g. What services do you offer?" aria-label="Test customer question" /><button class="primary-button small" type="submit" :disabled="test.isAsking || !testPrompt.trim()">{{ test.isAsking ? 'Checking…' : 'Send as visitor' }}</button></form>
+      </article>
+      <aside class="test-owner-panel panel"><div class="agent-section-heading"><div><p class="section-kicker">Owner checks</p><h3>What to verify</h3></div></div><div class="owner-check-list"><div><span :class="statusClass(sessionHasGroundedAnswer)">✓</span><span><strong>Grounded answers</strong><small>{{ sessionHasGroundedAnswer ? 'Grounded in business knowledge' : 'Ask a knowledge question' }}</small></span></div><div><span :class="statusClass(sessionSourceCount > 0)">✓</span><span><strong>Sources</strong><small>{{ sessionSourceCount ? `${sessionSourceCount} source${sessionSourceCount === 1 ? '' : 's'}` : 'Sources appear with grounded answers' }}</small></span></div><div><span :class="statusClass(sessionHasAction)">✓</span><span><strong>Action flows</strong><small>{{ sessionHasAction ? 'Action flow is running in the conversation' : 'Try a quick action or ask for help' }}</small></span></div><div><span :class="statusClass(sessionHasCompletedAction)">✓</span><span><strong>Completion</strong><small>{{ sessionHasCompletedAction ? 'Test lead captured' : 'Submit the conversational form to verify' }}</small></span></div></div><div v-if="sessionHasCompletedAction" class="test-success"><strong>✓ Test lead captured</strong><button class="text-button" type="button" @click="emit('view-leads')">View in Leads →</button></div><p class="test-owner-note">Internal details stay summarized here. Visitors only see the conversation.</p></aside>
     </div>
 
     <div v-else class="install-experience">
@@ -528,7 +571,7 @@ function sendDeveloperInstructions(): void {
 .action-preview-card .preview-action-button { margin-top: 10px; cursor: default; }
 .agent-test-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 22px; align-items: start; }
 .test-conversation, .test-owner-panel { padding: 22px; }
-.test-thread { display: grid; gap: 12px; min-height: 330px; margin-top: 20px; padding: 18px; border: 1px solid var(--agent-border); border-radius: 12px; background: #f8fafd; }
+.test-thread { display: grid; gap: 12px; min-height: 330px; max-height: 540px; margin-top: 20px; padding: 18px; overflow-y: auto; align-content: start; border: 1px solid var(--agent-border); border-radius: 12px; background: #f8fafd; scroll-behavior: smooth; }
 .test-welcome { padding-bottom: 14px; border-bottom: 1px solid var(--agent-border); }
 .test-welcome strong, .test-welcome small { display: block; }
 .test-welcome small { margin-top: 3px; color: var(--agent-muted); font-size: 11px; font-weight: 500; }
@@ -536,6 +579,11 @@ function sendDeveloperInstructions(): void {
 .test-user-message { justify-self: end; border-radius: 14px 8px 14px 14px; color: #fff; background: #1769e8; }
 .test-answer-message { color: #40516d; background: #fff; }
 .test-answer-message p { margin: 10px 0 0; white-space: pre-wrap; }
+.test-typing { display: inline-flex; gap: 4px; width: max-content; padding: 11px 13px; border-radius: 8px 14px 14px 14px; background: #fff; box-shadow: 0 4px 12px rgba(20, 42, 74, .05); }
+.test-typing span { width: 5px; height: 5px; border-radius: 50%; background: #7f91aa; animation: test-typing-bounce 1s infinite ease-in-out; }
+.test-typing span:nth-child(2) { animation-delay: .14s; }
+.test-typing span:nth-child(3) { animation-delay: .28s; }
+@keyframes test-typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
 .answer-meta { display: flex; gap: 7px; align-items: center; }
 .answer-badge { display: inline-flex; padding: 4px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
 .answer-badge.grounded { color: #08785d; background: #e7f8f1; }

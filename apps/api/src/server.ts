@@ -27,6 +27,7 @@ import {
   type ConversationActionState,
 } from "./action-flows.js";
 import {
+  answerabilityDecision,
   citationMatches,
   classifyQuestionIntent,
   rankMatches,
@@ -407,6 +408,16 @@ type EvaluationCase = {
   forbiddenPrimarySourceTypes?: string[];
 };
 
+type EvaluationScores = {
+  correctness: number;
+  relevance: number;
+  grounding: number;
+  citationQuality: number;
+  conciseness: number;
+  fallbackCorrectness: number;
+  hallucination: "pass" | "fail";
+};
+
 type EvaluationResult = {
   category: string;
   question: string;
@@ -419,6 +430,11 @@ type EvaluationResult = {
   answer: string;
   latencyMs: number;
   retrievalMode: string;
+  intent: RetrievalIntent;
+  retrievedPages: string[];
+  citations: Array<{ title: string; url: string; pageType: string }>;
+  topRetrievalScore: number;
+  scores: EvaluationScores;
   expectedSourceTypes?: string[];
   primarySourceType?: string;
   forbiddenPrimarySourceTypes?: string[];
@@ -3929,7 +3945,7 @@ function tokenise(value: string): string[] {
   // Keep business vocabulary searchable. Removing terms such as "school",
   // "program", or "lesson" makes ordinary customer questions look empty for
   // verticals where those words carry the meaning of the request.
-  const stopWords = new Set(["a", "an", "and", "are", "can", "do", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "the", "to", "we", "what", "when", "where", "you"]);
+  const stopWords = new Set(["a", "an", "and", "are", "can", "do", "does", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "the", "to", "we", "what", "when", "where", "you", "this", "with", "use", "using"]);
   return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((token) => token.length > 2 && !stopWords.has(token));
 }
 
@@ -3951,16 +3967,36 @@ type RetrievalMatch = { chunk: KnowledgeChunk; score: number; evidenceScore: num
 
 function retrievalTokens(question: string, intent: RetrievalIntent): string[] {
   const intentTerms: Record<RetrievalIntent, string[]> = {
-    services: ["service", "solution", "product", "automation", "development", "integration"],
+    services: ["service", "solution", "product", "feature", "capability", "automation", "development", "integration", "task", "reminder", "calendar", "planning", "schedule", "voice", "workflow", "workspace"],
     hours: ["hours", "open", "schedule", "availability"],
     contact: ["contact", "email", "phone", "call"],
-    pricing: ["price", "pricing", "cost", "rate", "fee", "quote"],
+    pricing: ["price", "pricing", "cost", "rate", "fee", "quote", "plan", "plans", "free", "month", "seat", "subscription"],
     location: ["location", "address", "directions", "area"],
     booking: ["book", "booking", "appointment", "reserve", "enroll", "schedule"],
-    policy: ["terms", "privacy", "cookie", "cancellation", "refund", "policy"],
+    permissions: ["permission", "permissions", "access", "role", "roles", "admin", "authorization"],
+    privacy: ["privacy", "private", "personal", "data", "security", "stored", "oauth", "token"],
+    support: ["support", "help", "technical", "login", "sign", "issue"],
+    policy: ["terms", "privacy", "cookie", "cancellation", "refund", "policy", "permission", "security", "data"],
+    reminders: ["reminder", "reminders", "unfinished", "recap", "task", "tasks", "planning"],
+    calendar: ["calendar", "calendars", "scheduling", "schedule", "sync", "outlook", "google"],
+    voice: ["voice", "dictation", "spoken", "speak", "audio"],
+    teams: ["team", "teams", "workspace", "collaboration", "collaborate", "users"],
+    unsupported: [],
     general: [],
   };
   return [...new Set([...tokenise(question), ...intentTerms[intent]])];
+}
+
+function contentEvidenceScore(content: string, question: string, intent: RetrievalIntent, lexicalScore: number | null, vectorScore: number | null): number {
+  const terms = retrievalTokens(question, intent).filter((term) => term !== "plancraftai");
+  const lower = content.toLowerCase();
+  const coverage = terms.length ? terms.filter((term) => lower.includes(term)).length / terms.length : 0;
+  const lexicalSignal = lexicalScore === null || !Number.isFinite(lexicalScore)
+    ? 0
+    : Math.min(1, 0.2 + lexicalScore * 0.35);
+  const lexicalEvidence = Math.max(coverage, lexicalSignal);
+  if (vectorScore === null || !Number.isFinite(vectorScore)) return lexicalEvidence;
+  return Math.max(0, Math.min(1, lexicalEvidence * 0.45 + Math.max(0, Math.min(1, vectorScore)) * 0.55));
 }
 
 function memoryRetrieval(business: Business, question: string): { matches: RetrievalMatch[]; mode: string } {
@@ -3969,7 +4005,7 @@ function memoryRetrieval(business: Business, question: string): { matches: Retri
   const matches = business.chunks.map((chunk) => {
     const lower = chunk.content.toLowerCase();
     const score = tokens.reduce((total, token) => total + (lower.includes(token) ? 1 : 0), 0);
-    return { chunk, score, evidenceScore: tokens.length ? score / tokens.length : 0 };
+    return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, question, intent, null, null) };
   }).filter((item) => item.score > 0);
   return { matches: rankMatches(matches, business.sources, intent), mode: "memory_lexical" };
 }
@@ -4031,9 +4067,12 @@ async function databaseRetrieval(business: Business, question: string): Promise<
         metadata: asRecord(row.metadata),
       },
       score: (lexicalRank ? 1 / (60 + lexicalRank) : 0) + (vectorRank ? 1 / (60 + vectorRank) : 0),
-      evidenceScore: Math.max(
-        Math.min(1, Number(row.lexical_score ?? 0) * 4),
-        Math.max(0, Math.min(1, Number(row.vector_score ?? 0))),
+      evidenceScore: contentEvidenceScore(
+        String(row.content),
+        question,
+        classifyQuestionIntent(question),
+        row.lexical_score === undefined || row.lexical_score === null ? null : Number(row.lexical_score),
+        row.vector_score === undefined || row.vector_score === null ? null : Number(row.vector_score),
       ),
     }));
 
@@ -4056,12 +4095,30 @@ function extractiveAnswer(
     .replace(/\s+/g, " ")
     .split(/(?<=[.!?])\s+/)
     .map((sentence) => sentence.trim())
-    .filter(Boolean));
+    .filter((sentence) => sentence.length >= 35)
+    .filter((sentence) => !/^(home|about|contact|pricing|features?|services?|blog|menu|learn more|read more)\b/i.test(sentence)));
   const useful = candidates.filter((sentence) => !/terms of service|privacy policy|cookie policy|acceptance of terms|govern your use/i.test(sentence));
-  const selected = intent === "services"
-    ? useful.filter((sentence) => serviceWordsForAnswer.test(sentence)).slice(0, 3)
-    : useful.slice(0, 2);
+  const answerSignals: Record<RetrievalIntent, RegExp> = {
+    services: /\b(service|solution|product|feature|capabilit|offer|provide|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team)\b/i,
+    hours: /\b(hour|open|close|schedule|available)\b/i,
+    contact: /\b(contact|email|phone|call|reach|message|visit)\b/i,
+    pricing: /\b(price|pricing|cost|rate|fee|quote|budget)\b/i,
+    location: /\b(location|located|address|direction|area|serve|visit)\b/i,
+    booking: /\b(book|booking|appointment|reserve|enroll|schedule)\b/i,
+    permissions: /\b(permission|access|role|admin|authorization)\b/i,
+    privacy: /\b(privacy|private|personal data|security|stored|oauth|token)\b/i,
+    support: /\b(support|help|technical|login|issue)\b/i,
+    policy: /\b(privacy|permission|security|data|terms|cookie|cancel|refund|policy)\b/i,
+    reminders: /\b(reminder|unfinished|recap|task|planning|daily plan)\b/i,
+    calendar: /\b(calendar|scheduling|schedule|sync|outlook|google)\b/i,
+    voice: /\b(voice|dictat|spoken|speak|audio)\b/i,
+    teams: /\b(team|workspace|collaborat|users|multiple people)\b/i,
+    unsupported: /$^/i,
+    general: /.+/i,
+  };
+  const selected = useful.filter((sentence) => answerSignals[intent].test(sentence)).slice(0, 3);
   const excerpt = (selected.length ? selected : useful).join(" ").slice(0, 460).trim();
+  if (!selected.length && ["pricing", "permissions", "privacy", "support", "policy", "contact", "location", "hours", "calendar", "reminders", "voice", "teams", "unsupported"].includes(intent)) return business.agentConfig.fallbackMessage;
   if (!excerpt) return business.agentConfig.fallbackMessage;
   if (intent === "services" && !/\b(offer|offers|provide|provides|services?|solutions?|products?)\b/i.test(excerpt)) {
     return `${business.name} offers the services described on its website: ${excerpt}`;
@@ -4072,7 +4129,7 @@ function extractiveAnswer(
   return excerpt;
 }
 
-const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|automation|development|application|integration|tool|tools|build|software)\b/i;
+const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|feature|features|capabilit|automation|development|application|integration|tool|tools|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team|build|software)\b/i;
 
 async function answerQuestion(business: Business, question: string, options: { recordGap?: boolean } = {}) {
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
@@ -4122,8 +4179,10 @@ async function answerQuestion(business: Business, question: string, options: { r
   const retrieval = await databaseRetrieval(business, question) ?? memoryRetrieval(business, question);
   const match = retrieval.matches[0];
   const secondMatch = retrieval.matches[1];
+  const answerability = answerabilityDecision(retrieval.matches, business.sources, intent);
+  const materiallyRelevant = answerability.answerable;
   const margin = secondMatch ? Math.min(0.12, Math.max(0, (match?.score ?? 0) - secondMatch.score) * 50) : 0.12;
-  const confidenceScore = match
+  const confidenceScore = materiallyRelevant && match
     ? Math.min(0.98, 0.35 + (match.evidenceScore * 0.5) + (retrieval.mode === "hybrid_rrf" ? 0.12 : 0.05) + margin)
     : 0;
   const confidenceBand: "high" | "medium" | "low" = confidenceScore >= 0.78 ? "high" : confidenceScore >= 0.55 ? "medium" : "low";
@@ -4131,12 +4190,13 @@ async function answerQuestion(business: Business, question: string, options: { r
     mode: retrieval.mode,
     intent,
     candidateCount: retrieval.matches.length,
-    topScore: match?.score ?? 0,
+    topScore: answerability.score,
+    answerability: answerability.reason,
   };
 
   const decision = routeQuestion({
     question,
-    hasMatch: Boolean(match),
+    hasMatch: materiallyRelevant,
     confidenceScore,
     candidateCount: retrieval.matches.length,
   });
@@ -4148,7 +4208,7 @@ async function answerQuestion(business: Business, question: string, options: { r
   let generationUsage: ModelUsage | null = null;
   let groundingCheckUsage: ModelUsage | null = null;
   let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" = "not_run";
-  if (match && confidenceBand !== "low" && decision.model) {
+  if (materiallyRelevant && match && confidenceBand !== "low" && decision.model) {
     try {
       generated = await generateGroundedAnswer({ question, context, decision, intent });
       generationUsage = generated?.usage ?? null;
@@ -4161,7 +4221,7 @@ async function answerQuestion(business: Business, question: string, options: { r
     } catch (error) {
       groundingCheckStatus = "failed";
       generated = null;
-      app.log.warn({ error: error instanceof Error ? error.message : "unknown model error", businessId: business.id, route: decision.route }, "Grounded synthesis or verification failed; using extractive fallback");
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown model error", businessId: business.id, route: decision.route }, "Grounded synthesis or verification failed; refusing to answer from unverified evidence");
     }
   }
   const fallbackUsage: ModelUsage = {
@@ -4193,8 +4253,9 @@ async function answerQuestion(business: Business, question: string, options: { r
     latencyMs: baseUsage.latencyMs + (groundingCheckUsage?.latencyMs ?? 0),
   };
   const enrichedRetrieval = { ...retrievalContract, ...modelUsage };
+  const modelGenerationFailed = Boolean(decision.model && (!generated || groundingCheckStatus !== "passed"));
 
-  if (!match || confidenceBand === "low") {
+  if (!materiallyRelevant || !match || confidenceBand === "low" || modelGenerationFailed) {
     const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question);
     return {
       answer: business.agentConfig.fallbackMessage,
@@ -4326,7 +4387,7 @@ function actionAnswerWithKnowledge(
   };
 }
 
-const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "policy"]);
+const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
 
 async function continueActionConversation(
   business: Business,
@@ -4609,7 +4670,7 @@ function customerAnswerPayload(result: ConversationAnswerResult) {
 }
 
 function evaluationCases(business: Business, requestedLimit: number): EvaluationCase[] {
-  const limit = Math.max(4, Math.min(20, requestedLimit));
+  const limit = Math.max(12, Math.min(20, requestedLimit));
   const cases: EvaluationCase[] = [];
   const seen = new Set<string>();
   const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
@@ -4625,6 +4686,83 @@ function evaluationCases(business: Business, requestedLimit: number): Evaluation
     return types.includes(type) && keywords.test(`${source.title} ${source.url} ${contentFor(source.id)}`);
   });
   const serviceSources = ["service", "solution", "product", "homepage", "case_study", "blog", "web_page"];
+  const regressionCases: EvaluationCase[] = [
+    {
+      category: "services",
+      question: `What services does ${business.name} offer?`,
+      expectation: hasEvidence(serviceSources, /\b(offer|provide|service|solution|product|feature|capabilit|automation|development|software|program|class|treatment)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "reminders",
+      question: `Does ${business.name} support reminders?`,
+      expectation: hasEvidence(["service", "solution", "product", "faq", "homepage", "web_page"], /\b(reminder|unfinished|recap|task)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["service", "solution", "product", "faq", "homepage", "web_page"],
+    },
+    {
+      category: "voice_task_capture",
+      question: "Can I create tasks using voice?",
+      expectation: hasEvidence(["service", "solution", "product", "faq", "homepage", "web_page"], /\b(voice|dictat|spoken|speak)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["service", "solution", "product", "faq", "homepage", "web_page"],
+    },
+    {
+      category: "calendar",
+      question: `Does ${business.name} work with calendars?`,
+      expectation: hasEvidence(["service", "solution", "product", "faq", "homepage", "web_page"], /\b(calendar|scheduling|schedule|sync|outlook|google)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["service", "solution", "product", "faq", "homepage", "web_page"],
+    },
+    {
+      category: "contact",
+      question: `How can I contact ${business.name}?`,
+      expectation: hasEvidence(["contact", "homepage", "about", "faq"], /\b(contact|email|phone|call|reach|message|visit)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["contact", "homepage", "about", "faq"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "pricing",
+      question: `What's the pricing for ${business.name}?`,
+      expectation: hasEvidence(["pricing", "service", "product", "faq", "homepage"], /\b(price|pricing|cost|rate|fee|quote|budget)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["pricing", "service", "product", "faq", "homepage"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "permissions",
+      question: `What permissions does ${business.name} use?`,
+      expectation: hasEvidence(["permissions", "privacy", "policy", "faq", "document"], /\b(permission|privacy|security|personal data|data usage|data protection)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["permissions", "privacy", "policy", "faq", "document"],
+    },
+    {
+      category: "daily_planning",
+      question: `Can ${business.name} plan my day?`,
+      expectation: hasEvidence(serviceSources, /\b(daily plan|daily planning|plan your day|planning|schedule)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+    },
+    {
+      category: "unfinished_reminders",
+      question: `Does ${business.name} help with unfinished reminders?`,
+      expectation: hasEvidence(serviceSources, /\b(unfinished|reminder|recap)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+    },
+    {
+      category: "teams",
+      question: `Can teams use ${business.name}?`,
+      expectation: hasEvidence(serviceSources, /\b(team|teams|workspace|collaborat|multiple users)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+    },
+    {
+      category: "unsupported_food_order",
+      question: `Can ${business.name} order food for me?`,
+      expectation: hasEvidence(serviceSources, /\border(?:s|ing)? food\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+    },
+    {
+      category: "unsupported_salesforce",
+      question: `Does ${business.name} integrate with Salesforce?`,
+      expectation: hasEvidence(serviceSources, /\bsalesforce\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+    },
+  ];
   const standardCases: EvaluationCase[] = [
     {
       category: "services",
@@ -4683,15 +4821,15 @@ function evaluationCases(business: Business, requestedLimit: number): Evaluation
     },
   ];
 
-  for (const evaluationCase of standardCases) {
+  for (const evaluationCase of [...regressionCases, ...standardCases]) {
     if (seen.has(evaluationCase.question.toLowerCase())) continue;
     seen.add(evaluationCase.question.toLowerCase());
     cases.push(evaluationCase);
-    if (cases.length >= limit - 1) break;
+    if (cases.length >= limit) break;
   }
 
   for (const source of readySources) {
-    if (cases.length >= limit - 1) break;
+    if (cases.length >= limit) break;
     const chunk = business.chunks.find((item) => item.sourceId === source.id);
     if (!chunk) continue;
     const terms = tokenise(chunk.content).slice(0, 5);
@@ -4731,9 +4869,25 @@ async function evaluateBusiness(business: Business, requestedLimit: number) {
       || (primarySourceType ? evaluationCase.expectedSourceTypes.includes(primarySourceType) : false);
     const forbiddenSourcePass = !primarySourceType || !evaluationCase.forbiddenPrimarySourceTypes?.includes(primarySourceType);
     const answerStylePass = answer.answer.split(/\s+/).filter(Boolean).length <= 120 && !/^based on\b/i.test(answer.answer.trim());
+    const intent = classifyQuestionIntent(evaluationCase.question);
     const passed = evaluationCase.expectation === "grounded"
       ? answer.grounded && answer.citations.length > 0 && answer.confidenceScore >= 0.55 && sourceTypePass && forbiddenSourcePass && answerStylePass
       : !answer.grounded && answer.citations.length === 0 && answer.confidenceBand === "low";
+    const scores: EvaluationScores = {
+      correctness: evaluationCase.expectation === "grounded"
+        ? answer.grounded && sourceTypePass ? 3 : answer.grounded ? 1 : 0
+        : !answer.grounded ? 3 : 0,
+      relevance: sourceTypePass && (evaluationCase.expectation === "grounded" ? answer.grounded : !answer.grounded) ? 3 : answer.grounded ? 1 : 0,
+      grounding: answer.grounded ? (answer.citations.length ? 3 : 1) : evaluationCase.expectation === "fallback" ? 3 : 1,
+      citationQuality: evaluationCase.expectation === "grounded"
+        ? answer.citations.length > 0 && sourceTypePass && forbiddenSourcePass ? 3 : answer.citations.length > 0 ? 1 : 0
+        : answer.citations.length === 0 ? 3 : 0,
+      conciseness: answerStylePass ? 3 : answer.answer.split(/\s+/).filter(Boolean).length <= 180 ? 2 : 1,
+      fallbackCorrectness: evaluationCase.expectation === "fallback"
+        ? !answer.grounded && answer.citations.length === 0 ? 3 : 0
+        : answer.grounded ? 3 : 0,
+      hallucination: evaluationCase.expectation === "fallback" && answer.grounded ? "fail" : "pass",
+    };
     results.push({
       category: evaluationCase.category,
       question: evaluationCase.question,
@@ -4746,6 +4900,11 @@ async function evaluateBusiness(business: Business, requestedLimit: number) {
       answer: answer.answer,
       latencyMs,
       retrievalMode: String(answer.retrieval?.mode ?? "unknown"),
+      intent,
+      retrievedPages: answer.citations.map((citation) => citation.title || citation.url),
+      citations: answer.citations.map((citation) => ({ title: citation.title, url: citation.url, pageType: citation.pageType })),
+      topRetrievalScore: Number(answer.retrieval?.topScore ?? 0),
+      scores,
       expectedSourceTypes: evaluationCase.expectedSourceTypes,
       primarySourceType,
       forbiddenPrimarySourceTypes: evaluationCase.forbiddenPrimarySourceTypes,

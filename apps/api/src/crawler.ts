@@ -89,10 +89,18 @@ function decodeEntities(value: string): string {
 function stripMarkup(html: string): string {
   return decodeEntities(
     html
-      .replace(/<(script|style|noscript|svg|template|nav|footer)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+      .replace(/<(script|style|noscript|svg|template|nav|footer|header|aside|form)[^>]*>[\s\S]*?<\/\1>/gi, " ")
       .replace(/<[^>]+>/g, " ")
       .replace(/[\u0000-\u001f]+/g, " "),
   ).replace(/\s+/g, " ").trim();
+}
+
+function isBoilerplateText(value: string): boolean {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return true;
+  if (/works best with javascript enabled|all rights reserved/i.test(text)) return true;
+  if (text.length <= 140 && /^(home|menu|navigation|learn more|read more|sign in|log in|try it free|start planning free|create workspace|review pricing|see (more|details|reminder engine)|explore (voice|recurring reminders)|launch the reminder engine)\b/i.test(text)) return true;
+  return false;
 }
 
 function extractTitle(html: string, fallback: string): string {
@@ -107,12 +115,14 @@ function extractPage(html: string, url: string): { title: string; sections: Sect
   const title = extractTitle(html, hostname);
   const sections: Section[] = [];
   const headingPath: string[] = [];
-  const blockPattern = /<(h[1-6]|p|li|dt|dd|td|th|address|article|section)[^>]*>([\s\S]*?)<\/\1>/gi;
+  // Do not match article/section wrappers. Matching wrappers swallows nested
+  // headings and paragraphs, leaving headings detached from their content.
+  const blockPattern = /<(h[1-6]|p|li|dt|dd|td|th|address)[^>]*>([\s\S]*?)<\/\1>/gi;
   let match: RegExpExecArray | null;
   while ((match = blockPattern.exec(html))) {
     const tag = match[1].toLowerCase();
     const text = stripMarkup(match[2]);
-    if (!text) continue;
+    if (!text || isBoilerplateText(text)) continue;
     if (/^h[1-6]$/.test(tag)) {
       const level = Number(tag.slice(1));
       headingPath.splice(level - 1);
@@ -135,30 +145,35 @@ function pageType(url: string, title: string): string {
   if (/faq|question/.test(value)) return "faq";
   if (/policy|cancel|terms|privacy|cookie|legal/.test(value)) return "policy";
   if (/location|contact|hours|about/.test(value)) return "location";
-  if (/service|solution|product|offering|program|class|menu|treatment/.test(value)) return "service";
+  if (/service|solution|product|feature|planner|task|reminder|recap|voice|calendar|workspace|team|offering|program|class|treatment/.test(value)) return "service";
   return "web_page";
 }
 
 function chunkSections(sections: Section[], pageTypeValue: string): CrawlChunk[] {
-  const chunks: CrawlChunk[] = [];
-  for (const section of sections) {
+  const wordsWithHeadings = sections.flatMap((section) => {
     const heading = section.headingPath.length ? `${section.headingPath.join(" > ")}\n` : "";
-    const words = `${heading}${section.text}`.split(/\s+/).filter(Boolean);
-    const step = Math.max(1, TARGET_CHUNK_TOKENS - CHUNK_OVERLAP_TOKENS);
-    for (let start = 0; start < words.length; start += step) {
-      const content = words.slice(start, start + TARGET_CHUNK_TOKENS).join(" ").trim();
-      if (content.length < 40) continue;
-      chunks.push({
-        content,
-        contentHash: hash(content),
-        metadata: {
-          headingPath: section.headingPath,
-          pageType: pageTypeValue,
-          tokenCount: content.split(/\s+/).length,
-          overlapTokens: CHUNK_OVERLAP_TOKENS,
-        },
-      });
-    }
+    return `${heading}${section.text}`.split(/\s+/).filter(Boolean).map((word) => ({ word, headingPath: section.headingPath }));
+  });
+  const words = wordsWithHeadings.map((item) => item.word);
+  const chunks: CrawlChunk[] = [];
+  const step = Math.max(1, TARGET_CHUNK_TOKENS - CHUNK_OVERLAP_TOKENS);
+  for (let start = 0; start < words.length; start += step) {
+    const end = Math.min(words.length, start + TARGET_CHUNK_TOKENS);
+    const slice = wordsWithHeadings.slice(start, end);
+    const content = slice.map((item) => item.word).join(" ").trim();
+    if (content.length < 24) continue;
+    const headingPath = slice.find((item) => item.headingPath.length)?.headingPath ?? [];
+    chunks.push({
+      content,
+      contentHash: hash(content),
+      metadata: {
+        headingPath,
+        pageType: pageTypeValue,
+        tokenCount: slice.length,
+        overlapTokens: start === 0 ? 0 : CHUNK_OVERLAP_TOKENS,
+      },
+    });
+    if (end >= words.length) break;
   }
   return chunks.slice(0, 100);
 }

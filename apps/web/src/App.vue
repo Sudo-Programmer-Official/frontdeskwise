@@ -193,6 +193,41 @@ interface ActionField {
   condition?: { field: string; equals?: string; notEquals?: string };
 }
 
+interface TestConversationAction {
+  id: string;
+  key: string;
+  status: "active" | "completed";
+  captureMode: "conversational" | "form" | "hybrid";
+  nextField?: string;
+  linkUrl?: string;
+  linkLabel?: string;
+  form?: {
+    submitLabel: string;
+    fields: Array<ActionField & { value?: string }>;
+  };
+}
+
+interface TestConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  grounded: boolean;
+  citations: Array<{ title?: string; url?: string; pageType?: string }>;
+  action: TestConversationAction | null;
+  formValues: Record<string, string>;
+}
+
+type TestAnswerPayload = {
+  error?: string;
+  answer?: string;
+  grounded?: boolean;
+  confidenceScore?: number;
+  confidenceBand?: "high" | "medium" | "low";
+  retrieval?: { mode?: string };
+  citations?: Array<{ title?: string; url?: string; pageType?: string }>;
+  action?: TestConversationAction;
+};
+
 interface ActionFlow {
   id: string;
   key: string;
@@ -282,6 +317,19 @@ interface ReadinessEvaluationCase {
   answer: string;
   latencyMs: number;
   retrievalMode: string;
+  intent?: string;
+  retrievedPages?: string[];
+  citations?: Array<{ title: string; url: string; pageType: string }>;
+  topRetrievalScore?: number;
+  scores?: {
+    correctness: number;
+    relevance: number;
+    grounding: number;
+    citationQuality: number;
+    conciseness: number;
+    fallbackCorrectness: number;
+    hallucination: "pass" | "fail";
+  };
 }
 
 interface ReadinessEvaluation {
@@ -720,8 +768,9 @@ function withAuthorization(init: RequestInit | undefined, token: string): Reques
   return { ...init, headers };
 }
 
-async function trackedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  startGlobalLoading();
+async function trackedFetch(input: RequestInfo | URL, init?: RequestInit, options: { globalLoading?: boolean } = {}): Promise<Response> {
+  const showGlobalLoading = options.globalLoading !== false;
+  if (showGlobalLoading) startGlobalLoading();
   try {
     let response = await globalThis.fetch(input, init);
     const hasFirebaseAuthorization = Boolean(firebaseToken.value && new Headers(init?.headers).has("authorization"));
@@ -747,8 +796,12 @@ async function trackedFetch(input: RequestInfo | URL, init?: RequestInit): Promi
     notifyError(error, "We couldn't reach FrontDeskWise. Check your connection and try again.");
     throw error;
   } finally {
-    stopGlobalLoading();
+    if (showGlobalLoading) stopGlobalLoading();
   }
+}
+
+function conversationFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return trackedFetch(input, init, { globalLoading: false });
 }
 
 const websiteUrl = ref("");
@@ -808,6 +861,7 @@ const savedMessage = ref("");
 const conversationId = ref("");
 const testQuestion = ref("");
 const routedTestQuestion = ref("");
+const testMessages = ref<TestConversationMessage[]>([]);
 const testAnswer = ref("");
 const answerSource = ref("");
 const answerGrounded = ref(false);
@@ -873,6 +927,7 @@ const integrationAccessToken = ref("");
 const integrationLoading = ref(false);
 const integrationError = ref("");
 const integrationMessage = ref("");
+const nativeIntegrationFormOpen = ref(false);
 const mcpProvider = ref<McpConnection["provider"]>("hubspot");
 const mcpDisplayName = ref("");
 const mcpServerUrl = ref("");
@@ -892,6 +947,9 @@ const actionConnectorProvider = computed(() => actionDraft.value?.completion.con
 const activeActionIntegrations = computed(() => integrations.value.filter((integration) => integration.connectionStatus === "active"
   && ((actionConnectorProvider.value === "generic_webhook" && integration.provider === "webhook")
     || (actionConnectorProvider.value === "hubspot" && integration.provider === "hubspot"))));
+const hubspotIntegration = computed(() => integrations.value.find((integration) => integration.provider === "hubspot") ?? null);
+const webhookIntegration = computed(() => integrations.value.find((integration) => integration.provider === "webhook") ?? null);
+const hubspotMcpConnection = computed(() => mcpConnections.value.find((connection) => connection.provider === "hubspot") ?? null);
 const actionTriggerText = ref("");
 const actionTriggerPhraseInput = ref("");
 const actionEditorStage = ref<ActionEditorStage>("trigger");
@@ -1175,18 +1233,7 @@ const agentModel = computed<AgentSaveModel>(() => ({
 
 const agentTestModel = computed(() => ({
   conversationId: conversationId.value,
-  question: testQuestion.value,
-  answer: testAnswer.value,
-  grounded: answerGrounded.value,
-  citations: answerCitations.value,
-  action: answerAction.value ? {
-    status: answerAction.value.status,
-    form: answerAction.value.form ? {
-      submitLabel: answerAction.value.form.submitLabel,
-      fields: answerAction.value.form.fields,
-    } : undefined,
-  } : null,
-  formValues: answerFormValues.value,
+  messages: testMessages.value,
   suggestedQuestions: suggestedQuestions.value,
   isAsking: isAsking.value,
 }));
@@ -1700,6 +1747,10 @@ function clearWorkspaceState() {
   verificationMessage.value = "";
   verificationError.value = "";
   conversationId.value = "";
+  testQuestion.value = "";
+  testMessages.value = [];
+  testAnswer.value = "";
+  answerGrounded.value = false;
   answerCitations.value = [];
   answerAction.value = null;
   answerFormValues.value = {};
@@ -1745,6 +1796,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   workspaceKnowledge.value = payload.knowledge ?? null;
   workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
   conversationId.value = "";
+  testMessages.value = [];
 }
 
 async function loadBusinessWorkspace(slug: string, publicOnly = false) {
@@ -1768,10 +1820,10 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
   }
 }
 
-async function refreshWorkspaceSummary() {
+async function refreshWorkspaceSummary(globalLoading = true) {
   if (!demoSlug.value || (!firebaseToken.value && !demoAccessToken.value)) return;
   try {
-    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}`), { headers: ownerHeaders() }, { globalLoading });
     const payload = await response.json() as WorkspacePayload;
     if (!response.ok) return;
     workspaceStats.value = payload.stats ?? null;
@@ -2379,12 +2431,12 @@ async function checkOwnershipVerification() {
   }
 }
 
-async function loadLeads() {
+async function loadLeads(globalLoading = true) {
   if (!firebaseToken.value && !demoAccessToken.value) return;
   leadsLoading.value = true;
   leadsError.value = "";
   try {
-    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads?limit=500`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/leads?limit=500`), { headers: ownerHeaders() }, { globalLoading });
     const payload = await response.json() as { leads?: Array<{ id: string; name?: string | null; email?: string | null; phone?: string | null; intent?: string | null; source?: string | null; notes?: string | null; metadata?: Record<string, unknown>; status?: string; createdAt?: string }>; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load leads.");
     leads.value = (payload.leads ?? []).map((lead) => ({
@@ -3831,6 +3883,28 @@ async function connectIntegration() {
   }
 }
 
+function openNativeIntegrationForm(provider: "webhook" | "hubspot") {
+  integrationProvider.value = provider;
+  integrationDisplayName.value = provider === "hubspot" ? "HubSpot" : "Automation webhook";
+  integrationError.value = "";
+  integrationMessage.value = "";
+  nativeIntegrationFormOpen.value = true;
+}
+
+function closeNativeIntegrationForm() {
+  nativeIntegrationFormOpen.value = false;
+  integrationError.value = "";
+  integrationMessage.value = "";
+}
+
+function mcpHasTool(connection: McpConnection | null, patterns: string[]): boolean {
+  if (!connection) return false;
+  return connection.tools.some((tool) => {
+    const searchable = `${tool.name} ${tool.title ?? ""} ${tool.description ?? ""}`.toLowerCase();
+    return patterns.some((pattern) => searchable.includes(pattern));
+  });
+}
+
 function mcpProviderName(provider: McpConnection["provider"]): string {
   return provider === "hubspot" ? "HubSpot" : provider === "zapier" ? "Zapier" : provider === "make" ? "Make" : "Custom MCP server";
 }
@@ -4013,9 +4087,33 @@ async function verifyWidgetInstall() {
   }
 }
 
+function testMessageId(role: TestConversationMessage["role"]): string {
+  return `test-${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function actionFormValues(action: TestConversationAction | null | undefined): Record<string, string> {
+  return Object.fromEntries((action?.form?.fields ?? []).map((field) => [field.key, field.value ?? ""]));
+}
+
+function appendTestAssistantMessage(payload: TestAnswerPayload): TestConversationMessage {
+  const message: TestConversationMessage = {
+    id: testMessageId("assistant"),
+    role: "assistant",
+    content: payload.answer ?? "",
+    grounded: Boolean(payload.grounded),
+    citations: payload.citations ?? [],
+    action: payload.action ?? null,
+    formValues: actionFormValues(payload.action),
+  };
+  testMessages.value.push(message);
+  return message;
+}
+
 async function askQuestion() {
-  if (!testQuestion.value.trim() || isAsking.value) return;
+  const question = testQuestion.value.trim();
+  if (!question || isAsking.value) return;
   isAsking.value = true;
+  testQuestion.value = "";
   testAnswer.value = "";
   answerSource.value = "";
   answerConfidence.value = 0;
@@ -4024,9 +4122,18 @@ async function askQuestion() {
   answerCitations.value = [];
   answerAction.value = null;
   answerFormValues.value = {};
+  testMessages.value.push({
+    id: testMessageId("user"),
+    role: "user",
+    content: question,
+    grounded: false,
+    citations: [],
+    action: null,
+    formValues: {},
+  });
   try {
     if (!publicDemoMode.value && !conversationId.value) {
-      const conversationResponse = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations`), {
+      const conversationResponse = await conversationFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations`), {
         method: "POST",
         headers: { "content-type": "application/json", ...ownerHeaders() },
         body: JSON.stringify({ sessionId: `dashboard-${Date.now()}` }),
@@ -4038,12 +4145,12 @@ async function askQuestion() {
     const endpoint = publicDemoMode.value
       ? `/api/v1/demo/${demoSlug.value}/public/test`
       : `/api/v1/demo/${demoSlug.value}/conversations/${conversationId.value}/messages`;
-    const response = await trackedFetch(apiUrl(endpoint), {
+    const response = await conversationFetch(apiUrl(endpoint), {
       method: "POST",
       headers: { "content-type": "application/json", ...(publicDemoMode.value ? {} : ownerHeaders()) },
-      body: JSON.stringify({ question: testQuestion.value }),
+      body: JSON.stringify({ question }),
     });
-    const payload = await response.json() as { error?: string; answer?: string; grounded?: boolean; confidenceScore?: number; confidenceBand?: "high" | "medium" | "low"; retrieval?: { mode?: string }; citations?: Array<{ title?: string; url?: string; pageType?: string }>; action?: { id: string; key: string; status: "active" | "completed"; captureMode: "conversational" | "form" | "hybrid"; nextField?: string; form?: { submitLabel: string; fields: Array<ActionField & { value?: string }> } } };
+    const payload = await response.json() as TestAnswerPayload;
     if (!response.ok) throw new Error(payload.error ?? "Could not answer that question.");
     testAnswer.value = payload.answer ?? "";
     answerGrounded.value = Boolean(payload.grounded);
@@ -4052,34 +4159,43 @@ async function askQuestion() {
     answerRetrievalMode.value = payload.retrieval?.mode ?? "";
     answerCitations.value = payload.citations ?? [];
     answerAction.value = payload.action ?? null;
-    answerFormValues.value = Object.fromEntries((payload.action?.form?.fields ?? []).map((field) => [field.key, field.value ?? ""]));
+    answerFormValues.value = actionFormValues(payload.action);
     answerSource.value = payload.citations?.[0]?.url ?? "";
-    if (!publicDemoMode.value) await Promise.all([refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
+    appendTestAssistantMessage(payload);
+    if (!publicDemoMode.value) await Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot()]);
   } catch (error) {
-    testAnswer.value = error instanceof Error ? error.message : "Could not answer that question.";
+    const message = error instanceof Error ? error.message : "Could not answer that question.";
+    testAnswer.value = message;
     answerGrounded.value = false;
+    appendTestAssistantMessage({ answer: message, grounded: false, citations: [] });
   } finally {
     isAsking.value = false;
   }
 }
 
-async function submitActionForm() {
-  if (!answerAction.value?.form || !answerAction.value.id || !conversationId.value || isAsking.value) return;
+async function submitActionForm(messageId: string, actionId: string, values: Record<string, string>) {
+  if (!conversationId.value || isAsking.value) return;
   isAsking.value = true;
   try {
-    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/conversations/" + conversationId.value + "/actions/" + answerAction.value.id + "/submit"), {
+    const response = await conversationFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversationId.value}/actions/${actionId}/submit`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
-      body: JSON.stringify({ values: answerFormValues.value }),
+      body: JSON.stringify({ values }),
     });
-    const payload = await response.json() as { error?: string; answer?: string; grounded?: boolean; citations?: Array<{ title?: string; url?: string; pageType?: string }>; action?: NonNullable<typeof answerAction.value> };
+    const payload = await response.json() as TestAnswerPayload;
     if (!response.ok) throw new Error(payload.error ?? "Could not submit this request.");
+    const sourceMessage = testMessages.value.find((message) => message.id === messageId);
+    if (sourceMessage) {
+      sourceMessage.action = payload.action ?? null;
+      sourceMessage.formValues = actionFormValues(payload.action);
+    }
     testAnswer.value = payload.answer ?? "";
     answerGrounded.value = Boolean(payload.grounded);
     answerCitations.value = payload.citations ?? [];
     answerAction.value = payload.action ?? null;
-    answerFormValues.value = Object.fromEntries((payload.action?.form?.fields ?? []).map((field) => [field.key, field.value ?? ""]));
-    await Promise.all([refreshWorkspaceSummary(), refreshAuthenticatedSnapshot(), loadLeads()]);
+    answerFormValues.value = actionFormValues(payload.action);
+    appendTestAssistantMessage(payload);
+    await Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot(), loadLeads(false)]);
   } catch (error) {
     leadsError.value = error instanceof Error ? error.message : "Could not submit this request.";
   } finally {
@@ -4178,14 +4294,15 @@ function askAgentQuestion(question: string) {
   void askQuestion();
 }
 
-function submitAgentAction(values: Record<string, string>) {
-  answerFormValues.value = values;
-  void submitActionForm();
+function submitAgentAction(payload: { messageId: string; actionId: string; values: Record<string, string> }) {
+  void submitActionForm(payload.messageId, payload.actionId, payload.values);
 }
 
 function resetAgentConversation() {
   conversationId.value = "";
   testQuestion.value = "";
+  routedTestQuestion.value = "";
+  testMessages.value = [];
   testAnswer.value = "";
   answerGrounded.value = false;
   answerCitations.value = [];
@@ -4214,7 +4331,11 @@ watch(view, (nextView, previousView) => {
     void loadActions();
     void loadIntegrations();
   }
-  if (nextView === "connections") { settingsTab.value = "integrations"; void loadMcpConnections(); }
+  if (nextView === "connections") {
+    settingsTab.value = "integrations";
+    void loadIntegrations();
+    void loadMcpConnections();
+  }
   if (nextView === "billing") { settingsTab.value = "billing"; void loadBilling(); }
   if (nextView === "settings" && settingsTab.value === "notifications") { void loadNotifications(); void loadNotificationPreferences(); }
   if (nextView === "settings" && !["general", "verification", "notifications"].includes(settingsTab.value)) settingsTab.value = "general";
@@ -4596,7 +4717,7 @@ function startMarketingDemo() {
         </div>
 
 
-        <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
+        <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads()">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
 
 
         <div v-else-if="view === 'knowledge'" class="view-content">
@@ -4612,7 +4733,7 @@ function startMarketingDemo() {
             <div v-else class="document-list"><div v-for="documentItem in organizationDocuments" :key="documentItem.id" class="document-row"><div><strong>{{ documentItem.fileName }}</strong><small>{{ documentItem.contentType }} · {{ formatDocumentSize(documentItem.sizeBytes) }} · {{ documentItem.status }}</small></div><div class="admin-actions"><button class="outline-button small" type="button" @click="downloadDocument(documentItem)">Download</button><button class="text-button" type="button" :disabled="documentsLoading" @click="deleteDocument(documentItem)">Remove</button></div></div></div>
           </article>
           <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
-          <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
+          <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
           <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon"><CircleCheck :size="24" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Your knowledge looks healthy.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button v-if="!knowledgeSourcesNeedAttention" class="primary-button small" type="button" @click="openAgentTest()">Test agent <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article>
           <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" :disabled="gap.status === 'resolved'" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><template v-if="gap.status === 'resolved'"><span class="gap-answer-saved">✓ Answer saved</span><button class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button></template><button v-else class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim()" @click="resolveKnowledgeGap(gap)">Approve answer</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Answer quality</p><h2>Recent answer checks</h2><p>Review confidence and whether each answer was grounded in your knowledge.</p></div></div>
@@ -4694,27 +4815,65 @@ function startMarketingDemo() {
         </div>
 
         <div v-else-if="view === 'connections'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect business systems for lookups and assistant tools. Completion actions stay in Actions.</p></div><div class="toolbar-actions"><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="mcpLoading" @click="loadMcpConnections">{{ mcpLoading ? 'Working…' : 'Refresh' }}</button></div></div>
-          <p v-if="mcpError" class="form-error">{{ mcpError }}</p>
-          <div class="dashboard-grid connection-setup-grid">
-            <article class="panel form-panel">
-              <div class="panel-heading"><div><p class="eyebrow">Three simple steps</p><h2>Connect an MCP server</h2><p>FrontDeskWise tests the connection and discovers available tools before saving anything.</p></div></div>
-              <div class="connection-steps"><div><span>1</span><p><strong>Choose your provider</strong><small>Use the provider where your customer data or workflows live.</small></p></div><div><span>2</span><p><strong>Paste the connection details</strong><small>The token is encrypted and never shown again.</small></p></div><div><span>3</span><p><strong>Review permissions</strong><small>Read-only tools start enabled. Other tools require your approval.</small></p></div></div>
-              <label>Provider<select v-model="mcpProvider"><option value="hubspot">HubSpot MCP</option><option value="zapier">Zapier MCP</option><option value="make">Make MCP</option><option value="custom">Custom MCP server</option></select></label>
-              <p class="form-help">{{ mcpProviderHelp(mcpProvider) }}</p>
-              <label>Connection name <span class="optional">optional</span><input v-model="mcpDisplayName" type="text" maxlength="120" :placeholder="`${mcpProviderName(mcpProvider)} workspace`" /></label>
-              <label>Server URL<input v-model="mcpServerUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://…" /></label>
-              <label>Access token <span class="optional">encrypted · never shown again</span><input v-model="mcpBearerToken" type="password" autocomplete="new-password" placeholder="Paste the token from your provider" /></label>
-              <p class="form-help">For this first connection flow, use the MCP URL and token supplied by the provider. OAuth buttons can be added provider-by-provider later without changing permissions or tool safety.</p>
-              <button class="primary-button" type="button" :disabled="mcpLoading || !mcpServerUrl.trim() || !mcpBearerToken.trim()" @click="connectMcpConnection">{{ mcpLoading ? 'Testing connection…' : 'Test & connect securely →' }}</button>
-            </article>
-            <article class="panel form-panel connection-explainer"><div class="panel-heading"><div><p class="eyebrow">What MCP is for</p><h2>Useful context for the assistant</h2><p>MCP is best for questions and follow-up work, not high-stakes completion steps.</p></div></div><div class="connection-use-list"><div><span class="check">✓</span><p><strong>Good fit</strong><small>Find an existing customer, check availability, search a CRM, or create a follow-up task.</small></p></div><div><span class="check">✓</span><p><strong>Still deterministic</strong><small>Bookings, enrollments, payments, and lead delivery stay in your configured action connectors.</small></p></div><div><span class="check">!</span><p><strong>Always controlled</strong><small>FrontDeskWise never runs every discovered tool automatically. Only allowed tools can be used.</small></p></div></div></article>
+          <div class="section-toolbar">
+            <div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect business systems for reliable delivery, then give the assistant only the extra context it needs.</p></div>
+            <div class="toolbar-actions"><span v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</span><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="integrationLoading || mcpLoading" @click="loadIntegrations(); loadMcpConnections()">{{ integrationLoading || mcpLoading ? 'Working…' : 'Refresh' }}</button></div>
           </div>
-          <article class="panel form-panel"><div class="panel-heading"><div><p class="eyebrow">Connected systems</p><h2>Review tool access</h2><p>Keep only the tools your assistant needs. Changing a permission takes effect after you save.</p></div></div><div v-if="!mcpConnections.length" class="diagnostics-empty">No MCP connections yet. Start with the guided connection above.</div><div v-for="connection in mcpConnections" :key="connection.id" class="mcp-connection-card"><div class="setup-row"><div><strong>{{ connection.displayName }}</strong><small>{{ mcpProviderName(connection.provider) }} · {{ connection.serverUrl }}</small></div><span :class="['status-pill', connection.connectionStatus === 'active' ? 'booked' : connection.connectionStatus === 'error' ? 'new' : 'qualified']">{{ connection.connectionStatus }}</span></div><p v-if="connection.lastError" class="form-error">{{ connection.lastError }}</p><div class="mcp-policy-note"><strong>{{ connection.tools.filter((tool) => tool.allowed).length }} of {{ connection.tools.length }} tools enabled</strong><span>Read-only tools are the safest default. Write or destructive tools should be enabled only when you understand the effect.</span></div><div v-if="connection.tools.length" class="mcp-tool-list"><label v-for="tool in connection.tools" :key="tool.name" class="mcp-tool-row"><input v-model="tool.allowed" type="checkbox" :disabled="mcpLoading" /><span><strong>{{ tool.title || tool.name }}</strong><small>{{ tool.description || tool.name }}</small><em :class="tool.destructive ? 'tool-risk-danger' : tool.approvalRequired ? 'tool-risk-review' : 'tool-risk-safe'">{{ tool.destructive ? 'Destructive · review carefully' : tool.approvalRequired ? 'Write action · explicit permission' : 'Read-only · safe default' }}</em></span></label></div><div v-else class="diagnostics-empty">No tools were advertised by this server.</div><div class="toolbar-actions"><button class="primary-button small" type="button" :disabled="mcpLoading" @click="saveMcpPermissions(connection)">Save permissions</button><button class="outline-button small" type="button" :disabled="mcpLoading" @click="testMcpConnection(connection)">Refresh tools</button><button class="text-button danger-text" type="button" :disabled="mcpLoading" @click="disconnectMcpConnection(connection)">Disconnect</button></div></div></article>
+          <p v-if="integrationError || mcpError" class="form-error">{{ integrationError || mcpError }}</p>
+
+          <div class="integration-model-banner">
+            <div class="integration-model-copy"><span class="integration-model-icon"><Cable :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">One integration model</p><h3>Business systems first. AI tools when they help.</h3><p>Use deterministic connectors for outcomes that must complete. Use MCP when the assistant needs flexible CRM context or follow-up tools.</p></div></div>
+            <div class="integration-decision-rule"><span>Decision rule</span><strong>Critical completion actions → Business integrations</strong><strong>Agent lookup & context → MCP</strong></div>
+          </div>
+
+          <section class="integration-section">
+            <div class="integration-section-heading"><div><p class="eyebrow">Business integrations</p><h2>Connected apps</h2><p>Native and API-based connections power lead delivery, CRM sync, notifications, and other guaranteed workflows.</p></div><button class="primary-button small" type="button" @click="openNativeIntegrationForm('hubspot')">+ Add business integration</button></div>
+            <div class="integration-card-grid">
+              <article class="panel business-integration-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo hubspot-logo"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path :d="siHubspot.path" /></svg></span><div><h3>HubSpot</h3><small>CRM · native API connection</small></div></div><span :class="['status-pill', hubspotIntegration?.connectionStatus === 'active' ? 'booked' : hubspotIntegration ? 'new' : 'qualified']">{{ hubspotIntegration ? formatLabel(hubspotIntegration.connectionStatus) : 'Not connected' }}</span></div>
+                <p class="integration-card-description">Send captured lead context to HubSpot while FrontDeskWise remains the source of truth.</p>
+                <div class="integration-subsection"><div class="integration-subsection-heading"><strong>CRM Sync</strong><span>{{ hubspotIntegration ? (hubspotIntegration.connectionStatus === 'active' ? 'Connected securely' : 'Needs attention') : 'Connect to enable delivery' }}</span></div><div class="integration-capability-list"><div><span>Create and update contacts</span><b :class="hubspotIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ hubspotIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Send lead data and lifecycle fields</span><b :class="hubspotIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ hubspotIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Attach conversation context</span><b :class="hubspotIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ hubspotIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div></div><div v-if="hubspotIntegration" class="integration-sync-summary"><span>{{ hubspotIntegration.sync.synced }} synced</span><span v-if="hubspotIntegration.sync.pending">{{ hubspotIntegration.sync.pending }} pending</span><span v-if="hubspotIntegration.sync.failed">{{ hubspotIntegration.sync.failed }} failed</span></div></div>
+                <div class="integration-subsection ai-access-subsection"><div class="integration-subsection-heading"><strong>AI Access</strong><span>{{ hubspotMcpConnection ? `${hubspotMcpConnection.tools.filter((tool) => tool.allowed).length} tools enabled` : 'Optional · MCP not connected' }}</span></div><div class="integration-capability-list"><div><span>Search contacts</span><b :class="mcpHasTool(hubspotMcpConnection, ['contact', 'search']) ? 'capability-check' : 'capability-pending'">{{ mcpHasTool(hubspotMcpConnection, ['contact', 'search']) ? '✓' : '—' }}</b></div><div><span>Read deals and tasks</span><b :class="mcpHasTool(hubspotMcpConnection, ['deal', 'task']) ? 'capability-check' : 'capability-pending'">{{ mcpHasTool(hubspotMcpConnection, ['deal', 'task']) ? '✓' : '—' }}</b></div><div><span>Create follow-up task</span><b :class="mcpHasTool(hubspotMcpConnection, ['task', 'create']) ? 'capability-check' : 'capability-pending'">{{ mcpHasTool(hubspotMcpConnection, ['task', 'create']) ? '✓' : '—' }}</b></div></div><small class="integration-subsection-note">AI access is configured separately below. MCP permissions never replace deterministic completion connectors.</small></div>
+                <p v-if="hubspotIntegration?.lastError" class="form-error">{{ hubspotIntegration.lastError }}</p>
+                <div class="integration-card-actions"><button v-if="!hubspotIntegration" class="primary-button small" type="button" @click="openNativeIntegrationForm('hubspot')">Connect HubSpot</button><template v-else><button class="outline-button small" type="button" :disabled="integrationLoading" @click="testIntegration(hubspotIntegration)">Test connection</button><button class="text-button danger-text" type="button" :disabled="integrationLoading" @click="disconnectIntegration(hubspotIntegration)">Disconnect</button></template></div>
+              </article>
+
+              <article class="panel business-integration-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo automation-logo"><Workflow :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Zapier / Make</h3><small>Automation · signed webhook</small></div></div><span :class="['status-pill', webhookIntegration?.connectionStatus === 'active' ? 'booked' : webhookIntegration ? 'new' : 'qualified']">{{ webhookIntegration ? formatLabel(webhookIntegration.connectionStatus) : 'Not connected' }}</span></div>
+                <p class="integration-card-description">Trigger an automation after a lead or action is saved. Use this for flexible workflows that do not need direct CRM semantics.</p>
+                <div class="integration-subsection"><div class="integration-subsection-heading"><strong>Automation delivery</strong><span>{{ webhookIntegration ? (webhookIntegration.connectionStatus === 'active' ? 'Connected securely' : 'Needs attention') : 'Connect to enable delivery' }}</span></div><div class="integration-capability-list"><div><span>Signed event payloads</span><b :class="webhookIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ webhookIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Retryable delivery queue</span><b :class="webhookIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ webhookIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Use from Actions</span><b :class="webhookIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ webhookIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div></div></div>
+                <p v-if="webhookIntegration?.lastError" class="form-error">{{ webhookIntegration.lastError }}</p>
+                <div class="integration-card-actions"><button v-if="!webhookIntegration" class="primary-button small" type="button" @click="openNativeIntegrationForm('webhook')">Connect automation</button><template v-else><button class="outline-button small" type="button" :disabled="integrationLoading" @click="testIntegration(webhookIntegration)">Test connection</button><button class="text-button danger-text" type="button" :disabled="integrationLoading" @click="disconnectIntegration(webhookIntegration)">Disconnect</button></template></div>
+              </article>
+
+              <article class="panel business-integration-card integration-card-muted"><div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><CalendarCheck :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Booking tools</h3><small>Calendly / custom booking endpoint</small></div></div><span class="status-pill qualified">Action connector</span></div><p class="integration-card-description">Keep bookings deterministic. Configure a booking link or supported completion connector inside Actions so the customer-facing confirmation stays reliable.</p><div class="integration-subsection"><div class="integration-subsection-heading"><strong>Completion actions</strong><span>Configured in Actions</span></div><div class="integration-capability-list"><div><span>Booking links</span><b class="capability-check">✓</b></div><div><span>Vendor HTTP connectors</span><b class="capability-check">✓</b></div><div><span>Lead saved before booking delivery</span><b class="capability-check">✓</b></div></div></div><div class="integration-card-actions"><button class="outline-button small" type="button" @click="view = 'actions'">Configure in Actions →</button></div></article>
+            </div>
+
+            <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>Connect a business integration</h3><p>FrontDeskWise tests the connection before saving credentials. Secrets are encrypted server-side and never returned to the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : 'Automation webhook'" /></label><label v-if="integrationProvider === 'hubspot'" class="integration-connect-wide">Private app access token <span class="optional">encrypted · never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the token from HubSpot" /><small>Use a HubSpot private app token for this connection. OAuth can be added provider-by-provider without changing the connector or safety model.</small></label><template v-else><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : 'Test & connect securely →' }}</button></div></div>
+          </section>
+
+          <section class="integration-section mcp-section">
+            <div class="integration-section-heading"><div><p class="eyebrow">AI tool connections (MCP)</p><h2>Give the assistant useful context</h2><p>MCP is for agent lookups and flexible follow-up tools. Every discovered tool is reviewed and permissioned separately.</p></div><span class="integration-section-badge"><Sparkles :size="14" :stroke-width="1.8" aria-hidden="true" /> Agent layer</span></div>
+            <div class="dashboard-grid connection-setup-grid">
+              <article class="panel form-panel">
+                <div class="panel-heading"><div><p class="eyebrow">Connect an AI tool source</p><h2>Connect an MCP server</h2><p>FrontDeskWise discovers available tools before saving anything.</p></div></div>
+                <div class="connection-steps"><div><span>1</span><p><strong>Choose your provider</strong><small>Use the service where the assistant needs context or tools.</small></p></div><div><span>2</span><p><strong>Paste the connection details</strong><small>The token is encrypted and never shown again.</small></p></div><div><span>3</span><p><strong>Review permissions</strong><small>Read-only tools start enabled. Other tools require your approval.</small></p></div></div>
+                <label>Provider<select v-model="mcpProvider"><option value="hubspot">HubSpot MCP</option><option value="zapier">Zapier MCP</option><option value="make">Make MCP</option><option value="custom">Custom MCP server</option></select></label>
+                <p class="form-help">{{ mcpProviderHelp(mcpProvider) }}</p>
+                <label>Connection name <span class="optional">optional</span><input v-model="mcpDisplayName" type="text" maxlength="120" :placeholder="`${mcpProviderName(mcpProvider)} workspace`" /></label>
+                <label>Server URL<input v-model="mcpServerUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://…" /></label>
+                <label>Access token <span class="optional">encrypted · never shown again</span><input v-model="mcpBearerToken" type="password" autocomplete="new-password" placeholder="Paste the token from your provider" /></label>
+                <p class="form-help">For this connection flow, use the MCP URL and token supplied by the provider. OAuth buttons can be added provider-by-provider without changing permissions or tool safety.</p>
+                <button class="primary-button" type="button" :disabled="mcpLoading || !mcpServerUrl.trim() || !mcpBearerToken.trim()" @click="connectMcpConnection">{{ mcpLoading ? 'Testing connection…' : 'Test & connect securely →' }}</button>
+              </article>
+              <article class="panel form-panel connection-explainer"><div class="panel-heading"><div><p class="eyebrow">What MCP is for</p><h2>Useful context for the assistant</h2><p>MCP is best for questions and follow-up work, not high-stakes completion steps.</p></div></div><div class="connection-use-list"><div><span class="check">✓</span><p><strong>Good fit</strong><small>Find an existing customer, check availability, search a CRM, or create a follow-up task.</small></p></div><div><span class="check">✓</span><p><strong>Still deterministic</strong><small>Bookings, enrollments, payments, and lead delivery stay in your configured action connectors.</small></p></div><div><span class="check">!</span><p><strong>Always controlled</strong><small>FrontDeskWise never runs every discovered tool automatically. Only allowed tools can be used.</small></p></div></div></article>
+            </div>
+            <article class="panel form-panel"><div class="panel-heading"><div><p class="eyebrow">Connected AI tools</p><h2>Review tool access</h2><p>Keep only the tools your assistant needs. Changing a permission takes effect after you save.</p></div></div><div v-if="!mcpConnections.length" class="diagnostics-empty">No MCP connections yet. Connect one above when the assistant needs external context.</div><div v-for="connection in mcpConnections" :key="connection.id" class="mcp-connection-card"><div class="setup-row"><div><strong>{{ connection.displayName }}</strong><small>{{ mcpProviderName(connection.provider) }} · {{ connection.serverUrl }}</small></div><span :class="['status-pill', connection.connectionStatus === 'active' ? 'booked' : connection.connectionStatus === 'error' ? 'new' : 'qualified']">{{ connection.connectionStatus }}</span></div><p v-if="connection.lastError" class="form-error">{{ connection.lastError }}</p><div class="mcp-policy-note"><strong>{{ connection.tools.filter((tool) => tool.allowed).length }} of {{ connection.tools.length }} tools enabled</strong><span>Read-only tools are the safest default. Write or destructive tools should be enabled only when you understand the effect.</span></div><div v-if="connection.tools.length" class="mcp-tool-list"><label v-for="tool in connection.tools" :key="tool.name" class="mcp-tool-row"><input v-model="tool.allowed" type="checkbox" :disabled="mcpLoading" /><span><strong>{{ tool.title || tool.name }}</strong><small>{{ tool.description || tool.name }}</small><em :class="tool.destructive ? 'tool-risk-danger' : tool.approvalRequired ? 'tool-risk-review' : 'tool-risk-safe'">{{ tool.destructive ? 'Destructive · review carefully' : tool.approvalRequired ? 'Write action · explicit permission' : 'Read-only · safe default' }}</em></span></label></div><div v-else class="diagnostics-empty">No tools were advertised by this server.</div><div class="toolbar-actions"><button class="primary-button small" type="button" :disabled="mcpLoading" @click="saveMcpPermissions(connection)">Save permissions</button><button class="outline-button small" type="button" :disabled="mcpLoading" @click="testMcpConnection(connection)">Refresh tools</button><button class="text-button danger-text" type="button" :disabled="mcpLoading" @click="disconnectMcpConnection(connection)">Disconnect</button></div></div></article>
+          </section>
         </div>
 
         <div v-else-if="view === 'analytics'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ showAllBusinesses ? 'all businesses' : (businessName || 'this business') }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh data</button></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ showAllBusinesses ? 'all businesses' : (businessName || 'this business') }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh data</button></div>
           <div class="metric-grid"><article class="metric-card blue-tint"><strong>{{ workspaceStats?.conversations ?? 0 }}</strong><span>Conversations</span><em>Recorded conversations</em></article><article class="metric-card green-tint"><strong>{{ workspaceStats?.leads ?? 0 }}</strong><span>Leads captured</span><em>Durable FrontDeskWise records</em></article><article class="metric-card orange-tint"><strong>{{ workspaceStats?.handoffs ?? 0 }}</strong><span>Human handoffs</span><em>{{ workspaceStats?.humanActive ?? 0 }} active with staff</em></article><article class="metric-card purple-tint"><strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong><span>Widget loads</span><em>Verified public installs</em></article></div>
           <article class="panel chart-panel analytics-chart"><div class="panel-heading"><div><h2>Activity by day</h2><p>Last 30 days · live records</p></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Analytics activity by day"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
           <article class="panel funnel-panel"><div class="panel-heading"><div><h2>Conversion funnels</h2><p>Flow starts, form progress, connector outcomes, and completion.</p></div></div><div v-if="workspaceStats?.conversionFunnels?.length" class="funnel-list"><div v-for="funnel in workspaceStats.conversionFunnels" :key="funnel.flowId" class="funnel-card"><div class="setup-row"><strong>{{ funnel.name }}</strong><span class="status-pill" :class="funnel.completionRate >= 60 ? 'booked' : funnel.completionRate >= 30 ? 'qualified' : 'new'">{{ funnel.completionRate }}% complete</span></div><div class="funnel-steps"><span>{{ funnel.started }} started</span><span>{{ funnel.formDisplayed }} reached form</span><span>{{ funnel.submitted }} submitted</span><span>{{ funnel.actionSucceeded }} action succeeded</span><span>{{ funnel.completed }} completed</span></div><small v-if="funnel.dropOffs.length">Biggest drop-off: {{ funnel.dropOffs[0].label }} · {{ funnel.dropOffs[0].count }}</small></div></div><div v-else class="diagnostics-empty">No action flow telemetry yet. Run a flow through the widget to see conversion data.</div></article>

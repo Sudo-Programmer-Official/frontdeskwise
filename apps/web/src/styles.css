@@ -1046,6 +1046,70 @@ button, input, textarea, select { font-family: var(--ds-font-body); }
 .product-shell .tool-risk-review { color: #aa6e08; background: #fff1d8; }
 .product-shell .tool-risk-danger { color: #b44343; background: #fde9e8; }
 
+.product-shell .integration-model-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, .75fr);
+  gap: 24px;
+  align-items: center;
+  margin-bottom: 32px;
+  padding: 20px 22px;
+  border: 1px solid #d7e6f5;
+  border-radius: 14px;
+  background: linear-gradient(110deg, #f5faff, #fffdf7);
+}
+.product-shell .integration-model-copy { display: flex; gap: 13px; align-items: flex-start; }
+.product-shell .integration-model-icon { display: grid; width: 38px; height: 38px; flex: 0 0 38px; place-items: center; border-radius: 11px; color: var(--ds-color-brand-600); background: #e3f0ff; }
+.product-shell .integration-model-copy h3 { margin: 0; color: var(--ds-color-ink-900); font-family: var(--ds-font-display); font-size: 18px; letter-spacing: -.035em; }
+.product-shell .integration-model-copy p:not(.eyebrow) { max-width: 680px; margin: 5px 0 0; color: var(--ds-color-ink-500); font-size: 12px; line-height: 1.55; }
+.product-shell .integration-decision-rule { display: grid; gap: 7px; padding-left: 22px; border-left: 1px solid #d7e6f5; }
+.product-shell .integration-decision-rule span { color: var(--ds-color-ink-400); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.product-shell .integration-decision-rule strong { color: var(--ds-color-ink-700); font-size: 11px; }
+.product-shell .integration-decision-rule strong:last-child { color: #7554a2; }
+.product-shell .integration-section { margin-top: 30px; }
+.product-shell .integration-section-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 18px; margin-bottom: 16px; }
+.product-shell .integration-section-heading h2 { margin: 0; color: var(--ds-color-ink-900); font-family: var(--ds-font-display); font-size: 20px; letter-spacing: -.04em; }
+.product-shell .integration-section-heading p:not(.eyebrow) { margin: 5px 0 0; color: var(--ds-color-ink-500); font-size: 12px; line-height: 1.5; }
+.product-shell .integration-section-badge { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #e1d9f1; border-radius: 999px; color: #7554a2; background: #faf7ff; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.product-shell .integration-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.product-shell .business-integration-card { display: flex; min-width: 0; flex-direction: column; gap: 15px; padding: 20px; }
+.product-shell .integration-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.product-shell .integration-provider { display: flex; min-width: 0; gap: 11px; align-items: center; }
+.product-shell .integration-provider-logo { display: grid; width: 38px; height: 38px; flex: 0 0 38px; place-items: center; border-radius: 10px; }
+.product-shell .integration-provider-logo svg { width: 20px; height: 20px; }
+.product-shell .hubspot-logo { color: #ff7a59; background: #fff0eb; }
+.product-shell .automation-logo { color: #7652a5; background: #f1ebfa; }
+.product-shell .booking-logo { color: #176ee1; background: #e8f2ff; }
+.product-shell .integration-provider h3 { margin: 0; color: var(--ds-color-ink-900); font-family: var(--ds-font-display); font-size: 16px; letter-spacing: -.03em; }
+.product-shell .integration-provider small { display: block; margin-top: 3px; overflow: hidden; color: var(--ds-color-ink-400); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.product-shell .integration-card-description { min-height: 45px; margin: 0; color: var(--ds-color-ink-500); font-size: 11px; line-height: 1.55; }
+.product-shell .integration-subsection { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--ds-color-border); }
+.product-shell .integration-subsection-heading { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.product-shell .integration-subsection-heading strong { color: var(--ds-color-ink-700); font-size: 11px; }
+.product-shell .integration-subsection-heading span { color: var(--ds-color-ink-400); font-size: 10px; text-align: right; }
+.product-shell .integration-capability-list { display: grid; gap: 8px; }
+.product-shell .integration-capability-list > div { display: flex; justify-content: space-between; gap: 10px; align-items: center; color: var(--ds-color-ink-500); font-size: 10px; line-height: 1.3; }
+.product-shell .integration-capability-list b { display: grid; width: 17px; height: 17px; flex: 0 0 17px; place-items: center; border-radius: 50%; font-size: 10px; }
+.product-shell .capability-check { color: #058d6b; background: #e1f9ef; }
+.product-shell .capability-pending { color: #9aa7b7; background: #f1f4f7; }
+.product-shell .integration-sync-summary { display: flex; flex-wrap: wrap; gap: 6px; color: var(--ds-color-ink-400); font-size: 10px; }
+.product-shell .integration-sync-summary span { padding: 4px 7px; border-radius: 999px; background: #f4f7fa; }
+.product-shell .ai-access-subsection { margin-top: 1px; border-top-color: #e7ddf2; }
+.product-shell .integration-subsection-note { color: var(--ds-color-ink-400); font-size: 10px; line-height: 1.45; }
+.product-shell .integration-card-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: auto; padding-top: 3px; }
+.product-shell .integration-card-muted { background: linear-gradient(180deg, #fff, #fbfcff); }
+.product-shell .integration-connect-panel { display: grid; gap: 18px; margin-top: 16px; padding: 22px; border-color: #cfe1f6; background: #fbfdff; }
+.product-shell .integration-connect-heading { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
+.product-shell .integration-connect-heading h3 { margin: 0; color: var(--ds-color-ink-900); font-family: var(--ds-font-display); font-size: 17px; letter-spacing: -.03em; }
+.product-shell .integration-connect-heading p:not(.eyebrow) { max-width: 700px; margin: 5px 0 0; color: var(--ds-color-ink-500); font-size: 11px; line-height: 1.5; }
+.product-shell .integration-connect-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.product-shell .integration-connect-grid > label { display: grid; gap: 7px; min-width: 0; color: var(--ds-color-ink-500); font-size: 11px; font-weight: 700; }
+.product-shell .integration-connect-grid > label > input,
+.product-shell .integration-connect-grid > label > select { width: 100%; }
+.product-shell .integration-connect-grid .integration-connect-wide { grid-column: 1 / -1; }
+.product-shell .integration-connect-grid small { color: var(--ds-color-ink-400); font-size: 10px; font-weight: 500; line-height: 1.45; }
+.product-shell .integration-connect-actions { display: flex; justify-content: flex-end; gap: 9px; align-items: center; }
+.product-shell .mcp-section { padding-top: 5px; }
+
 /* Settings quality pass: one form rhythm, one alignment model, every viewport. */
 .product-shell .settings-tabs {
   align-items: stretch;
@@ -1168,11 +1232,14 @@ button, input, textarea, select { font-family: var(--ds-font-body); }
   .product-shell .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .product-shell .team-invite-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .product-shell .team-invite-grid .toolbar-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .product-shell .integration-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
   .product-shell .conversation-inbox-grid { grid-template-columns: 1fr; }
   .product-shell .connection-setup-grid { grid-template-columns: 1fr; }
+  .product-shell .integration-model-banner { grid-template-columns: 1fr; }
+  .product-shell .integration-decision-rule { padding-top: 14px; padding-left: 0; border-top: 1px solid #d7e6f5; border-left: 0; }
 }
 
 @media (max-width: 760px) {
@@ -1184,6 +1251,13 @@ button, input, textarea, select { font-family: var(--ds-font-body); }
   .product-shell .team-row > .lead-name { grid-column: 1 / -1; }
   .product-shell .team-row > .lead-name small { display: block; }
   .product-shell .team-row > small:last-child { display: block; grid-column: 1 / -1; }
+  .product-shell .integration-card-grid, .product-shell .integration-connect-grid { grid-template-columns: 1fr; }
+  .product-shell .integration-connect-grid .integration-connect-wide { grid-column: auto; }
+  .product-shell .integration-section-heading, .product-shell .integration-connect-heading { display: block; }
+  .product-shell .integration-section-heading .primary-button, .product-shell .integration-connect-heading .text-button { margin-top: 13px; }
+  .product-shell .integration-model-banner { padding: 17px; }
+  .product-shell .integration-model-copy { display: block; }
+  .product-shell .integration-model-icon { margin-bottom: 10px; }
   .product-shell .verification-controls { grid-template-columns: 1fr; align-items: stretch; }
   .product-shell .verification-controls button { width: 100%; }
   .product-shell .lead-filters { align-items: stretch; flex-direction: column; }

@@ -172,6 +172,19 @@ test("application feedback is visible for async work and notifications", () => {
   assert.match(styles, /notification-trigger/);
 });
 
+test("Agent Test keeps conversation loading local to the chat thread", () => {
+  assert.match(app, /const testMessages = ref<TestConversationMessage\[\]>/);
+  assert.match(app, /function conversationFetch\(/);
+  assert.match(app, /globalLoading: false/);
+  assert.match(app, /testMessages\.value\.push\(\{\s*id: testMessageId\("user"\)/);
+  assert.match(agent, /class="test-thread"/);
+  assert.match(agent, /class="test-typing"/);
+  assert.match(agent, /sessionHasGroundedAnswer/);
+  assert.match(agent, /sessionHasCompletedAction/);
+  assert.match(agent, /submit-action/);
+  assert.match(agent, /\.test-thread/);
+});
+
 test("all Agent tabs keep the Agent shell on direct URLs and refresh", () => {
   for (const tab of ["behavior", "appearance", "quick-actions", "test", "install"]) {
     const pathname = `/app/british-swim-school-tampa-bay/agent/${tab}`;
