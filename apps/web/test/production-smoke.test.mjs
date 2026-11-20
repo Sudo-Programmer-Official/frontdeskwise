@@ -17,13 +17,26 @@ test("owner production controls remain present", () => {
     "/widget/verify",
     "Verify installation",
     "Export CSV",
-    "Actions & Flows",
-    "Connections",
+    "Actions",
+    "Integrations",
+    "settingsTabs",
+    "profile-menu",
     "Test & connect securely",
     "Review tool access",
   ]) {
     assert.ok(app.includes(control), `missing owner control: ${control}`);
   }
+  assert.match(app, /const navSections/);
+  assert.match(app, /label: "Customers"/);
+  assert.match(app, /label: "AI front desk"/);
+  assert.match(app, /label: "Business"/);
+  assert.match(app, /Your AI front desk is ready/);
+  assert.match(app, /sidebar-account/);
+  assert.match(app, /agent-tabs/);
+  assert.doesNotMatch(app, /Preview ↗/);
+  assert.doesNotMatch(app, />Edit agent</);
+  assert.doesNotMatch(app, /id: "conversations", label: "Conversations"/);
+  assert.doesNotMatch(app, /id: "billing", label: "Billing", icon:/);
 });
 
 test("owner UI uses the shared product design language", () => {

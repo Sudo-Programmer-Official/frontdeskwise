@@ -15,6 +15,8 @@ import {
 import LegalPage from "./LegalPage.vue";
 
 type View = "home" | "privacy" | "terms" | "overview" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin";
+type SettingsTab = "general" | "team" | "integrations" | "verification" | "billing";
+type AgentTab = "behavior" | "appearance" | "quick-actions" | "test" | "install";
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 
 interface Lead {
@@ -559,6 +561,11 @@ const billingSnapshot = ref<BillingSnapshot | null>(null);
 const billingLoading = ref(false);
 const billingError = ref("");
 const billingMessage = ref("");
+const settingsTab = ref<SettingsTab>("general");
+const agentTab = ref<AgentTab>("behavior");
+const profileMenuOpen = ref(false);
+const sidebarAccountMenuOpen = ref(false);
+const setupDismissed = ref(false);
 const showAllBusinesses = ref(false);
 const addBusinessOpen = ref(false);
 const addBusinessUrl = ref("");
@@ -634,20 +641,40 @@ const notificationMenuOpen = ref(false);
 const embeddingLoading = ref(false);
 const embeddingMessage = ref("");
 
-const navItems: Array<{ id: View; label: string; icon: string }> = [
-  { id: "overview", label: "Overview", icon: "⌂" },
-  { id: "inbox", label: "Inbox", icon: "✉" },
-  { id: "team", label: "Team", icon: "♙" },
-  { id: "conversations", label: "Conversations", icon: "◌" },
-  { id: "leads", label: "Leads", icon: "♧" },
-  { id: "knowledge", label: "Knowledge", icon: "▤" },
-  { id: "actions", label: "Actions & Flows", icon: "ϟ" },
-  { id: "connections", label: "Connections", icon: "↔" },
-  { id: "agent", label: "Agent & Widget", icon: "✦" },
-  { id: "analytics", label: "Analytics", icon: "◒" },
-  { id: "businesses", label: "Businesses", icon: "▦" },
-  { id: "settings", label: "Settings", icon: "⚙" },
-  { id: "billing", label: "Billing", icon: "$" },
+const navSections: Array<{ label?: string; items: Array<{ id: View; label: string; icon: string }> }> = [
+  { items: [{ id: "overview", label: "Overview", icon: "⌂" }] },
+  { label: "Customers", items: [
+    { id: "inbox", label: "Inbox", icon: "✉" },
+    { id: "leads", label: "Leads", icon: "♧" },
+    { id: "analytics", label: "Analytics", icon: "◒" },
+  ] },
+  { label: "AI front desk", items: [
+    { id: "knowledge", label: "Knowledge", icon: "▤" },
+    { id: "actions", label: "Actions", icon: "ϟ" },
+    { id: "agent", label: "Agent", icon: "✦" },
+  ] },
+  { label: "Business", items: [
+    { id: "businesses", label: "Businesses", icon: "▦" },
+    { id: "settings", label: "Settings", icon: "⚙" },
+  ] },
+];
+
+const navItems = navSections.flatMap((section) => section.items);
+
+const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
+  { id: "general", label: "General" },
+  { id: "team", label: "Team" },
+  { id: "integrations", label: "Integrations" },
+  { id: "verification", label: "Verification" },
+  { id: "billing", label: "Billing" },
+];
+
+const agentTabs: Array<{ id: AgentTab; label: string }> = [
+  { id: "behavior", label: "Behavior" },
+  { id: "appearance", label: "Appearance" },
+  { id: "quick-actions", label: "Quick actions" },
+  { id: "test", label: "Test" },
+  { id: "install", label: "Install" },
 ];
 
 const adminNavItems: Array<{ id: AdminSection; label: string; icon: string }> = [
@@ -663,6 +690,8 @@ const pageTitle = computed(() => {
   if (view.value === "privacy") return "Privacy Policy";
   if (view.value === "terms") return "Terms of Service";
   if (view.value === "admin") return "Admin control plane";
+  if (view.value === "conversations") return "Test Agent";
+  if (view.value === "team" || view.value === "connections" || view.value === "billing") return "Settings";
   return navItems.find((item) => item.id === view.value)?.label ?? "Overview";
 });
 
@@ -694,6 +723,30 @@ const trialDaysRemaining = computed(() => {
   return Math.max(0, Math.ceil((Date.parse(end) - Date.now()) / (24 * 60 * 60 * 1_000)));
 });
 const billingReadOnly = computed(() => Boolean(billingSnapshot.value && !billingSnapshot.value.billing.access.allowed && billingSnapshot.value.billing.mode !== "sandbox"));
+const settingsSurface = computed(() => ["settings", "team", "connections", "billing"].includes(view.value));
+const currentSettingsTab = computed<SettingsTab>(() => {
+  if (view.value === "team") return "team";
+  if (view.value === "connections") return "integrations";
+  if (view.value === "billing") return "billing";
+  return settingsTab.value;
+});
+const setupPercent = computed(() => workspaceStats.value?.setup.percent ?? 0);
+const setupComplete = computed(() => setupPercent.value >= 100);
+const setupDismissalKey = computed(() => `frontdeskwise:setup-dismissed:${authSnapshot.value?.activeOrganizationId ?? "public"}:${demoSlug.value || "workspace"}`);
+const showSetupCard = computed(() => !adminSurfaceMode.value && !setupDismissed.value && Boolean(workspaceStats.value || (authSnapshot.value && !availableBusinesses.value.length)));
+const setupNextAction = computed(() => {
+  if (!availableBusinesses.value.length) return "Add your first business";
+  if ((workspaceStats.value?.setup.completed ?? 0) < 2) return "Review your knowledge";
+  return "Test and publish your agent";
+});
+const workspaceAttention = computed(() => {
+  if (!setupDismissed.value) return null;
+  if (billingReadOnly.value) return { label: "Billing needs attention", action: "billing" as const };
+  if (ownershipVerification.value && ownershipVerification.value.status !== "verified") return { label: "Verify website ownership", action: "verification" as const };
+  if ((workspaceKnowledge.value?.failedSources ?? 0) > 0) return { label: "Review failed knowledge sources", action: "knowledge" as const };
+  if ((workspaceKnowledge.value?.pendingSources ?? 0) > 0) return { label: "Knowledge is still processing", action: "knowledge" as const };
+  return null;
+});
 const workspaceSelection = computed({
   get: () => showAllBusinesses.value ? "__all__" : demoSlug.value,
   set: (value: string) => {
@@ -712,11 +765,69 @@ function ownerHeaders(): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
+function hydrateSetupDismissal() {
+  if (typeof window === "undefined") return;
+  setupDismissed.value = window.localStorage.getItem(setupDismissalKey.value) === "1";
+}
+
+function dismissSetup() {
+  setupDismissed.value = true;
+  if (typeof window !== "undefined") window.localStorage.setItem(setupDismissalKey.value, "1");
+}
+
+function continueSetup() {
+  if (!availableBusinesses.value.length) {
+    openAddBusiness();
+    return;
+  }
+  view.value = (workspaceStats.value?.setup.completed ?? 0) < 2 ? "knowledge" : "agent";
+}
+
+function openWorkspaceAttention() {
+  const action = workspaceAttention.value?.action;
+  if (!action) return;
+  if (action === "knowledge") view.value = "knowledge";
+  else openSettingsTab(action);
+}
+
+function selectAgentTab(tab: AgentTab) {
+  agentTab.value = tab;
+  if (tab === "test") {
+    view.value = "conversations";
+    return;
+  }
+  if (typeof document === "undefined") return;
+  const formSections = Array.from(document.querySelectorAll<HTMLElement>(".agent-layout .form-section"));
+  const target = tab === "install"
+    ? document.querySelector<HTMLElement>(".install-panel")
+    : formSections[tab === "quick-actions" ? 2 : 0];
+  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function openAuth(mode: "signin" | "signup" = "signin") {
   authMode.value = mode;
   authError.value = "";
   authPassword.value = "";
   authModalOpen.value = true;
+}
+
+function openSettingsTab(tab: SettingsTab) {
+  settingsTab.value = tab;
+  profileMenuOpen.value = false;
+  sidebarAccountMenuOpen.value = false;
+  notificationMenuOpen.value = false;
+  if (tab === "team") view.value = "team";
+  else if (tab === "integrations") view.value = "connections";
+  else if (tab === "billing") view.value = "billing";
+  else view.value = "settings";
+}
+
+function navigateToWorkspaceView(nextView: View) {
+  profileMenuOpen.value = false;
+  sidebarAccountMenuOpen.value = false;
+  notificationMenuOpen.value = false;
+  if (nextView === "settings") openSettingsTab("general");
+  else view.value = nextView;
 }
 
 function isExpiredDemoSessionError(error: unknown): boolean {
@@ -795,6 +906,9 @@ async function signOut() {
   forgetDemoAccessToken();
   authSnapshot.value = null;
   firebaseToken.value = "";
+  profileMenuOpen.value = false;
+  sidebarAccountMenuOpen.value = false;
+  notificationMenuOpen.value = false;
   openHome();
 }
 
@@ -2811,21 +2925,24 @@ async function saveAgent() {
   window.setTimeout(() => (savedMessage.value = ""), 2600);
 }
 
+watch(() => setupDismissalKey.value, hydrateSetupDismissal, { immediate: true });
+
 watch(view, (nextView) => {
   if (nextView === "inbox") { void loadInbox(); void loadNotifications(); }
-  if (nextView === "team") void loadTeam();
+  if (nextView === "team") { settingsTab.value = "team"; void loadTeam(); }
   if (nextView === "knowledge") {
     void loadKnowledge();
     void loadDocuments();
   }
-  if (nextView === "agent") void loadWidgetInstall();
+  if (nextView === "agent") { agentTab.value = "behavior"; void loadWidgetInstall(); }
   if (nextView === "leads") void loadLeads();
   if (nextView === "actions") {
     void loadActions();
     void loadIntegrations();
   }
-  if (nextView === "connections") void loadMcpConnections();
-  if (nextView === "billing") void loadBilling();
+  if (nextView === "connections") { settingsTab.value = "integrations"; void loadMcpConnections(); }
+  if (nextView === "billing") { settingsTab.value = "billing"; void loadBilling(); }
+  if (nextView === "settings" && !["general", "verification"].includes(settingsTab.value)) settingsTab.value = "general";
   if (nextView === "admin") {
     void loadAdminOrganizations();
     void loadAdminUsers();
@@ -2973,24 +3090,35 @@ function openHome() {
           <button v-for="item in adminNavItems" :key="item.id" type="button" :class="['nav-item', { active: view === 'admin' && adminSection === item.id }]" @click="adminSection = item.id; view = 'admin'"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span></button>
         </nav>
         <nav v-else class="sidebar-nav" aria-label="Workspace navigation">
-          <button v-for="item in navItems" :key="item.id" type="button" :disabled="publicDemoMode && item.id !== 'overview'" :class="['nav-item', { active: view === item.id }]" @click="view = item.id"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'inbox' && inboxUnreadCount">{{ inboxUnreadCount }}</b><b v-else-if="item.id === 'conversations' && conversationCount">{{ conversationCount }}</b></button>
+          <div v-for="section in navSections" :key="section.label || 'overview'" class="nav-section">
+            <p v-if="section.label" class="nav-section-label">{{ section.label }}</p>
+            <button v-for="item in section.items" :key="item.id" type="button" :disabled="publicDemoMode && item.id !== 'overview'" :class="['nav-item', { active: view === item.id }]" @click="navigateToWorkspaceView(item.id)"><span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><b v-if="item.id === 'inbox' && inboxUnreadCount">{{ inboxUnreadCount }}</b></button>
+          </div>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon">⚙</span><span>Admin control plane</span></button>
         </nav>
         <div v-if="adminSurfaceMode" class="sidebar-bottom"><div class="admin-sidebar-note"><strong>Operations access</strong><small>Manage platform health, organizations, users, and demos from one place.</small></div><button v-if="!adminOnlyMode" class="sidebar-link" type="button" @click="view = 'overview'">← Back to workspace</button><button class="sidebar-link" type="button" @click="signOut">Sign out</button></div>
-        <div v-else class="sidebar-bottom"><div class="setup-card"><div class="setup-row"><span>Setup progress</span><strong>{{ workspaceStats?.setup.percent ?? 0 }}%</strong></div><div class="progress-bar"><span :style="{ width: `${workspaceStats?.setup.percent ?? 0}%` }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete</small></div><button class="sidebar-link" type="button" @click="openHome">← Back to landing page</button></div>
+        <div v-else class="sidebar-bottom"><div v-if="showSetupCard" class="setup-card"><template v-if="setupComplete"><div class="setup-row"><strong>Your AI front desk is ready ✓</strong><button class="sidebar-setup-dismiss" type="button" @click="dismissSetup">Dismiss</button></div><small>Everything is ready to test, publish, and install.</small></template><template v-else><div class="setup-row"><span>Setup progress</span><strong>{{ setupPercent }}%</strong></div><div class="progress-bar"><span :style="{ width: String(setupPercent) + '%' }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete · {{ setupNextAction }}</small><button class="sidebar-setup-action" type="button" @click="continueSetup">Continue setup</button></template></div><button v-if="workspaceAttention" class="sidebar-attention" type="button" @click="openWorkspaceAttention"><span>!</span><span><strong>Needs attention</strong><small>{{ workspaceAttention.label }}</small></span></button><div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div></div>
       </aside>
 
       <section class="content-area">
-        <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot && !adminSurfaceMode" class="notification-button" type="button" aria-label="Notifications" @click="notificationMenuOpen = !notificationMenuOpen">♧<b v-if="notificationUnreadCount">{{ notificationUnreadCount }}</b></button><button v-if="!adminSurfaceMode" class="outline-button" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Preview on website ↗</button><button v-if="!adminSurfaceMode" class="primary-button small" type="button" @click="publicDemoMode ? openAuth('signup') : view = 'agent'">Edit agent</button><button v-if="authSnapshot" class="text-button" type="button" @click="signOut">Sign out</button><span class="profile-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div></header>
+        <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="notificationMenuOpen = true; profileMenuOpen = false">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
-        <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>Keep your workspace, knowledge, and leads active by choosing a plan.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Upgrade →</button></div>
-        <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger"><span><strong>Your workspace is read-only</strong><small>Existing data is preserved. Restore billing to resume publishing and production lead capture.</small></span><button class="primary-button small" type="button" @click="view = 'billing'">Restore billing →</button></div>
+        <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
+        <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger compact"><span><strong>Your workspace is read-only</strong><small>· Restore billing to resume publishing</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Restore billing →</button></div>
+
+        <div v-if="!adminSurfaceMode && settingsSurface" class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button v-for="tab in settingsTabs" :key="tab.id" type="button" role="tab" :aria-selected="currentSettingsTab === tab.id" :class="['settings-tab', { active: currentSettingsTab === tab.id }]" @click="openSettingsTab(tab.id)">{{ tab.label }}</button>
+        </div>
+
+        <div v-if="!adminSurfaceMode && view === 'agent'" class="agent-tabs" role="tablist" aria-label="Agent sections">
+          <button v-for="tab in agentTabs" :key="tab.id" type="button" role="tab" :aria-selected="agentTab === tab.id" :class="['agent-tab', { active: agentTab === tab.id }]" @click="selectAgentTab(tab.id)">{{ tab.label }}</button>
+        </div>
 
         <div v-if="view === 'overview' && showAllBusinesses" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Organization overview</p><h2>All businesses</h2><p>One account, one subscription, and a clear view across every business you manage.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
           <div class="metric-grid aggregate-metric-grid"><article class="metric-card blue-tint"><span class="metric-icon blue">♧</span><strong>{{ aggregateMetrics.leads }}</strong><span>Total leads</span><em>Across all businesses</em></article><article class="metric-card green-tint"><span class="metric-icon green">▣</span><strong>{{ aggregateMetrics.bookings }}</strong><span>Booking actions</span><em>Across all businesses</em></article><article class="metric-card orange-tint"><span class="metric-icon orange">◌</span><strong>{{ aggregateMetrics.conversations }}</strong><span>Conversations</span><em>Last recorded totals</em></article><article class="metric-card purple-tint"><span class="metric-icon purple">▱</span><strong>{{ activeOrganization?.businesses.length ?? 0 }}</strong><span>Businesses</span><em>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }} plan</em></article></div>
           <article class="panel aggregate-business-panel"><div class="panel-heading"><div><h2>Businesses in {{ activeOrganization?.name ?? 'your organization' }}</h2><p>Switch context without creating another account.</p></div><span class="conversation-status">{{ formatLabel(activeOrganization?.billing.status ?? 'trial') }}</span></div><div class="aggregate-business-list"><div v-for="business in availableBusinesses" :key="business.id" class="aggregate-business-row"><div><strong>{{ business.name }}</strong><small>{{ business.websiteUrl ?? 'Website pending' }}</small></div><span>{{ formatLabel(business.role) }}</span><span class="status-pill qualified">{{ formatPlanLabel(business.planKey) }}</span><button class="outline-button small" type="button" @click="workspaceSelection = business.slug">Open →</button></div></div></article>
-          <article class="panel aggregate-billing-note"><p class="eyebrow">Shared billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }} · {{ activeOrganization?.billing.access.allowed ? 'Access enabled' : 'Read-only access' }}</h2><p>{{ activeOrganization?.billing.access.allowed ? 'All businesses share this organization subscription and its capacity.' : 'Billing needs attention before new businesses or write actions can be added.' }}</p><button class="text-button" type="button" @click="view = 'billing'">View billing →</button></article>
+          <article class="panel aggregate-billing-note"><p class="eyebrow">Shared billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }} · {{ activeOrganization?.billing.access.allowed ? 'Access enabled' : 'Read-only access' }}</h2><p>{{ activeOrganization?.billing.access.allowed ? 'All businesses share this organization subscription and its capacity.' : 'Billing needs attention before new businesses or write actions can be added.' }}</p><button class="text-button" type="button" @click="openSettingsTab('billing')">View billing →</button></article>
         </div>
 
         <div v-else-if="view === 'overview'" class="view-content">
@@ -3025,7 +3153,7 @@ function openHome() {
         </div>
 
         <div v-else-if="view === 'inbox'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Team support</p><h2>Team inbox</h2><p>See conversations that need people, take over safely, and keep the AI in the loop.</p></div><div class="toolbar-actions"><span v-if="inboxMessage" class="saved-message">✓ {{ inboxMessage }}</span><button class="outline-button small" type="button" :disabled="inboxLoading" @click="loadInbox">{{ inboxLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Customer conversations</p><h2>Inbox</h2><p>Review conversations that need your team and keep the AI in the loop.</p></div><div class="toolbar-actions"><span v-if="inboxMessage" class="saved-message">✓ {{ inboxMessage }}</span><button class="outline-button small" type="button" :disabled="inboxLoading" @click="loadInbox">{{ inboxLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
           <p v-if="inboxError" class="form-error">{{ inboxError }}</p>
           <div class="panel lead-filters"><label>Status<select v-model="inboxStatusFilter" @change="loadInbox"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option></select></label><label>Assignment<select v-model="inboxAssignmentFilter" @change="loadInbox"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span>{{ inboxConversations.length }} conversation{{ inboxConversations.length === 1 ? '' : 's' }} · {{ inboxUnreadCount }} unread visitor message{{ inboxUnreadCount === 1 ? '' : 's' }}</span></div>
           <div class="dashboard-grid conversation-inbox-grid"><article class="panel table-panel"><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div v-if="!inboxConversations.length" class="diagnostics-empty">No conversations match this view.</div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'AI_ACTIVE' ? 'new' : 'qualified']">{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount"> · {{ conversation.unreadCount }}</b></span><small>{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading"><div><p class="eyebrow">Conversation detail</p><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} · {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div class="inbox-message-thread"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="`${message.createdAt}-${index}`" :class="['message-thread-item', message.role]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}</small><p>{{ message.content }}</p></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><form class="question-form" @submit.prevent="sendInboxReply"><input v-model="inboxReply" type="text" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" /><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || inboxActionLoading">Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message"><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></article></div>
@@ -3042,7 +3170,7 @@ function openHome() {
 
         <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
 
-        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Make it yours</p><h2>Agent & widget</h2><p>Configure your assistant, then publish it to your website.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'overview'">Test conversation</button><button class="primary-button small" type="button" @click="saveAgent">{{ authSnapshot ? 'Save & publish' : 'Create account to publish' }}</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Assistant identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Widget behavior</h3><label>Opening size<select v-model="widgetDefaultMode"><option value="compact">Compact</option><option value="expanded">Expanded</option><option value="fullscreen">Full screen</option></select></label><label>Logo URL <span class="optional">optional · HTTPS only</span><input v-model="widgetLogoUrl" type="url" placeholder="https://example.com/logo.png" /></label><label class="toggle-row"><span>Allow visitors to expand the assistant</span><input v-model="widgetAllowExpand" type="checkbox" /></label><p class="form-help">Compact keeps the assistant beside the page. Expanded gives visitors more room for services, forms, and booking flows. On mobile it opens full screen automatically.</p></div><div class="form-section"><h3>Quick actions</h3><p class="form-help">Give visitors useful starting points before they type. Keep the labels short and the questions specific.</p><div class="quick-action-editor"><div v-for="(action, index) in widgetQuickActions" :key="index" class="quick-action-row"><label>Button {{ index + 1 }}<input v-model="action.label" type="text" maxlength="48" placeholder="Pricing" /></label><label>Question <input v-model="action.question" type="text" maxlength="300" placeholder="What does pricing look like?" /></label></div></div></div><div class="form-section"><h3>Proactive engagement</h3><label class="toggle-row"><span>Invite visitors before they click</span><input v-model="proactiveEnabled" type="checkbox" /></label><label>Proactive message<input v-model="proactiveMessage" type="text" maxlength="240" placeholder="Looking for the right service? I can help." /></label><label>Delay<select v-model.number="proactiveDelaySeconds"><option :value="10">10 seconds</option><option :value="20">20 seconds</option><option :value="30">30 seconds</option><option :value="60">60 seconds</option></select></label><div class="trigger-options"><span>Triggers</span><label><input v-model="proactiveTriggers" type="checkbox" value="delay" /> Time on page</label><label><input v-model="proactiveTriggers" type="checkbox" value="scroll" /> 70% scroll</label><label><input v-model="proactiveTriggers" type="checkbox" value="exit" /> Exit intent</label><label><input v-model="proactiveTriggers" type="checkbox" value="returning" /> Returning visitor</label></div><p class="form-help">The prompt appears once per page and respects the visitor’s close action.</p></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><div class="form-section"><h3>Privacy & trust</h3><label class="toggle-row"><span>Show AI assistant disclosure</span><input v-model="showAiDisclosure" type="checkbox" /></label><label class="toggle-row"><span>Require consent before lead capture</span><input v-model="requireLeadConsent" type="checkbox" /></label><label>Privacy notice URL <span class="optional">optional · HTTPS only</span><input v-model="privacyNoticeUrl" type="url" placeholder="https://yourbusiness.com/privacy" /></label><label>Conversation retention<select v-model.number="retentionDays"><option :value="30">30 days</option><option :value="60">60 days</option><option :value="90">90 days</option><option :value="365">1 year</option></select></label><p class="form-help">Consent is shown in the widget before details are sent. Retention controls are stored with this business and prepare the workspace for automated cleanup.</p></div></div></article><article :class="['panel', 'live-preview', { 'mobile-preview': widgetPreviewMode === 'mobile' }]" aria-label="Widget preview"><div class="preview-toolbar"><strong>Preview</strong><div class="preview-mode-toggle"><button type="button" :class="{ active: widgetPreviewMode === 'desktop' }" @click="widgetPreviewMode = 'desktop'">Desktop</button><button type="button" :class="{ active: widgetPreviewMode === 'mobile' }" @click="widgetPreviewMode = 'mobile'">Mobile</button></div></div><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ websiteUrl || 'Your website' }}</span></div><div class="preview-site"><div class="preview-site-nav"><strong>{{ businessName || 'Your business' }}</strong><span>Services　About　FAQs　Contact</span><button>Get started</button></div><div class="preview-site-hero"><div><h2>Help visitors<br />take the next step</h2><p>Grounded answers from {{ businessName || 'your website' }}.</p><button>Explore services →</button></div><div class="fake-swimmer">✦</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><template v-if="widgetQuickActions.length"><div v-for="action in widgetQuickActions.slice(0, 2)" :key="action.label" class="suggested-question">{{ action.label }} <span>›</span></div></template><div v-else class="preview-empty-question">Add quick actions to guide visitors.</div><button v-if="showLeadCapture" class="chat-cta" type="button">Request information</button><div class="chat-input">Ask a question… <span>➤</span></div></div></div></div></article></div><article class="panel install-panel"><div class="panel-heading"><div><p class="eyebrow">Publish anywhere</p><h2>Install your front desk</h2><p>Copy one snippet and paste it before <code>&lt;/body&gt;</code> on the business website.</p></div><span v-if="widgetInstallMessage" class="saved-message">✓ {{ widgetInstallMessage }}</span></div><template v-if="authSnapshot && widgetInstall"><div class="install-snippet"><code>{{ widgetInstall.snippet }}</code><button class="primary-button small" type="button" @click="copyWidgetSnippet">Copy snippet</button></div><div class="install-verification"><small class="install-note">Site key: {{ widgetInstall.siteKey }} · {{ widgetInstall.verification.loadCount }} detected load{{ widgetInstall.verification.loadCount === 1 ? '' : 's' }}</small><button class="outline-button small" type="button" :disabled="widgetVerificationLoading" @click="verifyWidgetInstall">{{ widgetVerificationLoading ? 'Checking…' : 'Verify installation' }}</button></div><p v-if="widgetVerificationMessage" class="conversation-status">{{ widgetVerificationMessage }}</p></template><div v-else-if="!authSnapshot" class="install-gate"><p>Sign in to generate a private install snippet for this business. The preview remains available without an account.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to install →</button></div><div v-else-if="ownershipVerification && ownershipVerification.status !== 'verified'" class="install-gate"><p>Verify website ownership before installing the live widget. This protects the business from unauthorized publishing.</p><button class="outline-button small" type="button" @click="view = 'settings'">Verify ownership →</button></div><div v-else-if="billingReadOnly" class="install-gate"><p>Your workspace is read-only until billing is restored. Existing preview data is safe, but live publishing is paused.</p><button class="outline-button small" type="button" @click="view = 'billing'">Review billing →</button></div><div v-else class="install-gate"><p>Your private install snippet is still loading. Refresh the page if it does not appear shortly.</p><button class="outline-button small" type="button" @click="void loadWidgetInstall()">Refresh install details</button></div></article></div>
+        <div v-else-if="view === 'agent'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">AI front desk</p><h2>Agent</h2><p>Configure how your assistant behaves, looks, and converts visitors.</p></div><div class="toolbar-actions"><span v-if="savedMessage" class="saved-message">✓ {{ savedMessage }}</span><button class="outline-button" type="button" @click="view = 'conversations'">Test agent</button><button class="primary-button small" type="button" @click="saveAgent">{{ authSnapshot ? 'Save & publish' : 'Create account to publish' }}</button></div></div><div class="agent-layout"><article class="panel form-panel"><div class="form-section"><h3>Assistant identity</h3><label>Assistant name<input v-model="assistantName" type="text" /></label><label>Welcome message<textarea v-model="welcomeMessage" rows="5"></textarea></label><label>Widget color<div class="color-row"><button v-for="color in ['#0d6efd','#18a999','#7447d9','#f27b35','#112c64']" :key="color" type="button" :class="['color-swatch', { selected: widgetColor === color }]" :style="{ background: color }" @click="widgetColor = color"></button></div></label></div><div class="form-section"><h3>Widget behavior</h3><label>Opening size<select v-model="widgetDefaultMode"><option value="compact">Compact</option><option value="expanded">Expanded</option><option value="fullscreen">Full screen</option></select></label><label>Logo URL <span class="optional">optional · HTTPS only</span><input v-model="widgetLogoUrl" type="url" placeholder="https://example.com/logo.png" /></label><label class="toggle-row"><span>Allow visitors to expand the assistant</span><input v-model="widgetAllowExpand" type="checkbox" /></label><p class="form-help">Compact keeps the assistant beside the page. Expanded gives visitors more room for services, forms, and booking flows. On mobile it opens full screen automatically.</p></div><div class="form-section"><h3>Quick actions</h3><p class="form-help">Give visitors useful starting points before they type. Keep the labels short and the questions specific.</p><div class="quick-action-editor"><div v-for="(action, index) in widgetQuickActions" :key="index" class="quick-action-row"><label>Button {{ index + 1 }}<input v-model="action.label" type="text" maxlength="48" placeholder="Pricing" /></label><label>Question <input v-model="action.question" type="text" maxlength="300" placeholder="What does pricing look like?" /></label></div></div></div><div class="form-section"><h3>Proactive engagement</h3><label class="toggle-row"><span>Invite visitors before they click</span><input v-model="proactiveEnabled" type="checkbox" /></label><label>Proactive message<input v-model="proactiveMessage" type="text" maxlength="240" placeholder="Looking for the right service? I can help." /></label><label>Delay<select v-model.number="proactiveDelaySeconds"><option :value="10">10 seconds</option><option :value="20">20 seconds</option><option :value="30">30 seconds</option><option :value="60">60 seconds</option></select></label><div class="trigger-options"><span>Triggers</span><label><input v-model="proactiveTriggers" type="checkbox" value="delay" /> Time on page</label><label><input v-model="proactiveTriggers" type="checkbox" value="scroll" /> 70% scroll</label><label><input v-model="proactiveTriggers" type="checkbox" value="exit" /> Exit intent</label><label><input v-model="proactiveTriggers" type="checkbox" value="returning" /> Returning visitor</label></div><p class="form-help">The prompt appears once per page and respects the visitor’s close action.</p></div><div class="form-section"><h3>Lead capture</h3><label class="toggle-row"><span>Collect lead information</span><input v-model="showLeadCapture" type="checkbox" /></label><label class="toggle-row"><span>Show booking action button</span><input v-model="showBookingAction" type="checkbox" /></label><div class="form-section"><h3>Privacy & trust</h3><label class="toggle-row"><span>Show AI assistant disclosure</span><input v-model="showAiDisclosure" type="checkbox" /></label><label class="toggle-row"><span>Require consent before lead capture</span><input v-model="requireLeadConsent" type="checkbox" /></label><label>Privacy notice URL <span class="optional">optional · HTTPS only</span><input v-model="privacyNoticeUrl" type="url" placeholder="https://yourbusiness.com/privacy" /></label><label>Conversation retention<select v-model.number="retentionDays"><option :value="30">30 days</option><option :value="60">60 days</option><option :value="90">90 days</option><option :value="365">1 year</option></select></label><p class="form-help">Consent is shown in the widget before details are sent. Retention controls are stored with this business and prepare the workspace for automated cleanup.</p></div></div></article><article :class="['panel', 'live-preview', { 'mobile-preview': widgetPreviewMode === 'mobile' }]" aria-label="Widget preview"><div class="preview-toolbar"><strong>Preview</strong><div class="preview-mode-toggle"><button type="button" :class="{ active: widgetPreviewMode === 'desktop' }" @click="widgetPreviewMode = 'desktop'">Desktop</button><button type="button" :class="{ active: widgetPreviewMode === 'mobile' }" @click="widgetPreviewMode = 'mobile'">Mobile</button></div></div><div class="preview-browser"><div class="preview-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ websiteUrl || 'Your website' }}</span></div><div class="preview-site"><div class="preview-site-nav"><strong>{{ businessName || 'Your business' }}</strong><span>Services　About　FAQs　Contact</span><button>Get started</button></div><div class="preview-site-hero"><div><h2>Help visitors<br />take the next step</h2><p>Grounded answers from {{ businessName || 'your website' }}.</p><button>Explore services →</button></div><div class="fake-swimmer">✦</div></div><div class="preview-chat" :style="{ '--accent': widgetColor }"><div class="chat-header"><span class="mini-orb">✦</span><span>{{ assistantName }}</span><span class="online-dot"></span></div><div class="chat-bubble">{{ welcomeMessage }}</div><template v-if="widgetQuickActions.length"><div v-for="action in widgetQuickActions.slice(0, 2)" :key="action.label" class="suggested-question">{{ action.label }} <span>›</span></div></template><div v-else class="preview-empty-question">Add quick actions to guide visitors.</div><button v-if="showLeadCapture" class="chat-cta" type="button">Request information</button><div class="chat-input">Ask a question… <span>➤</span></div></div></div></div></article></div><article class="panel install-panel"><div class="panel-heading"><div><p class="eyebrow">Publish anywhere</p><h2>Install your front desk</h2><p>Copy one snippet and paste it before <code>&lt;/body&gt;</code> on the business website.</p></div><span v-if="widgetInstallMessage" class="saved-message">✓ {{ widgetInstallMessage }}</span></div><template v-if="authSnapshot && widgetInstall"><div class="install-snippet"><code>{{ widgetInstall.snippet }}</code><button class="primary-button small" type="button" @click="copyWidgetSnippet">Copy snippet</button></div><div class="install-verification"><small class="install-note">Site key: {{ widgetInstall.siteKey }} · {{ widgetInstall.verification.loadCount }} detected load{{ widgetInstall.verification.loadCount === 1 ? '' : 's' }}</small><button class="outline-button small" type="button" :disabled="widgetVerificationLoading" @click="verifyWidgetInstall">{{ widgetVerificationLoading ? 'Checking…' : 'Verify installation' }}</button></div><p v-if="widgetVerificationMessage" class="conversation-status">{{ widgetVerificationMessage }}</p></template><div v-else-if="!authSnapshot" class="install-gate"><p>Sign in to generate a private install snippet for this business. The preview remains available without an account.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to install →</button></div><div v-else-if="ownershipVerification && ownershipVerification.status !== 'verified'" class="install-gate"><p>Verify website ownership before installing the live widget. This protects the business from unauthorized publishing.</p><button class="outline-button small" type="button" @click="openSettingsTab('verification')">Verify ownership →</button></div><div v-else-if="billingReadOnly" class="install-gate"><p>Your workspace is read-only until billing is restored. Existing preview data is safe, but live publishing is paused.</p><button class="outline-button small" type="button" @click="openSettingsTab('billing')">Review billing →</button></div><div v-else class="install-gate"><p>Your private install snippet is still loading. Refresh the page if it does not appear shortly.</p><button class="outline-button small" type="button" @click="void loadWidgetInstall()">Refresh install details</button></div></article></div>
 
         <div v-else-if="view === 'knowledge'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><div class="toolbar-actions"><span v-if="embeddingMessage" class="saved-message">✓ {{ embeddingMessage }}</span><button v-if="authSnapshot && availableBusinesses.length" class="outline-button small" type="button" :disabled="embeddingLoading" @click="reindexKnowledge">{{ embeddingLoading ? 'Re-indexing…' : 'Re-index knowledge' }}</button><button class="outline-button small" type="button" @click="loadKnowledge">{{ knowledgeLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
@@ -3065,7 +3193,7 @@ function openHome() {
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Reliable handoff</p><h2>Actions & conversation flows</h2><p>Configure the next-best question for each customer action, then deliver completed leads to the systems your team already uses.</p></div><span v-if="integrationLoading" class="conversation-status">Working…</span></div>
+          <div class="section-toolbar"><div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Define what your assistant can help customers do, then deliver completed outcomes to your team.</p></div><span v-if="integrationLoading" class="conversation-status">Working…</span></div>
           <p v-if="integrationError" class="form-error">{{ integrationError }}</p>
           <p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p>
           <p v-if="actionsError" class="form-error">{{ actionsError }}</p>
@@ -3098,7 +3226,7 @@ function openHome() {
         </div>
 
         <div v-else-if="view === 'connections'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Safe assistant connections</p><h2>Connections</h2><p>Connect business systems for lookups and assistant tools. Your completion actions still use the reliable delivery connectors in Actions & Flows.</p></div><div class="toolbar-actions"><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="mcpLoading" @click="loadMcpConnections">{{ mcpLoading ? 'Working…' : 'Refresh' }}</button></div></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect business systems for lookups and assistant tools. Completion actions stay in Actions.</p></div><div class="toolbar-actions"><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="mcpLoading" @click="loadMcpConnections">{{ mcpLoading ? 'Working…' : 'Refresh' }}</button></div></div>
           <p v-if="mcpError" class="form-error">{{ mcpError }}</p>
           <div class="dashboard-grid connection-setup-grid">
             <article class="panel form-panel">
@@ -3128,13 +3256,19 @@ function openHome() {
         <div v-else-if="view === 'businesses'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">One account · multiple businesses</p><h2>Businesses</h2><p>Manage every business under {{ activeOrganization?.name ?? 'your organization' }}.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
           <article class="panel table-panel"><div class="table-heading business-row"><span>Business</span><span>Website</span><span>Billing</span><span>Actions</span></div><div v-if="!availableBusinesses.length" class="diagnostics-empty">No businesses yet. Add your first public website to begin.</div><div v-for="business in availableBusinesses" :key="business.id" class="table-row business-row"><div><strong>{{ business.name }}</strong><small>{{ formatLabel(business.role) }} · {{ formatPlanLabel(business.planKey) }}</small></div><span>{{ business.websiteUrl || 'Website pending' }}</span><span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ formatLabel(business.billingStatus) }}</span></span><button class="outline-button small" type="button" @click="workspaceSelection = business.slug">Open →</button></div></article>
-          <article class="panel aggregate-billing-note"><p class="eyebrow">Shared organization billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h2><p>{{ availableBusinesses.length }} of {{ activeOrganization?.billing.plan.maxBusinesses ?? 1 }} business slots used. Add capacity from Billing when you are ready to grow.</p><button class="text-button" type="button" @click="view = 'billing'">View plan →</button></article>
+          <article class="panel aggregate-billing-note"><p class="eyebrow">Shared organization billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h2><p>{{ availableBusinesses.length }} of {{ activeOrganization?.billing.plan.maxBusinesses ?? 1 }} business slots used. Add capacity from Billing when you are ready to grow.</p><button class="text-button" type="button" @click="openSettingsTab('billing')">View plan →</button></article>
         </div>
 
         <div v-else-if="view === 'settings'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Account controls</p><h2>Settings</h2><p>Identity, organization, and access details for this FrontDeskWise account.</p></div></div>
-          <div class="settings-grid"><article class="panel settings-card"><p class="eyebrow">Signed-in account</p><h3>{{ authSnapshot?.user.name ?? 'FrontDeskWise user' }}</h3><p>{{ authSnapshot?.user.email ?? 'Not signed in' }}</p><small>Use your email or Google account to sign in. Password recovery is available from the sign-in screen.</small><button v-if="authSnapshot" class="outline-button small" type="button" @click="signOut">Sign out</button></article><article class="panel settings-card"><p class="eyebrow">Organization</p><h3>{{ activeOrganization?.name ?? 'Your organization' }}</h3><p>{{ formatLabel(activeOrganization?.role ?? 'owner') }} · {{ availableBusinesses.length }} businesses</p><small>One organization owns the businesses, assistant settings, knowledge, and billing relationship.</small><button class="outline-button small" type="button" @click="view = 'businesses'">Manage businesses →</button></article><article class="panel settings-card"><p class="eyebrow">Billing access</p><h3>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h3><p>{{ formatLabel(activeOrganization?.billing.status ?? 'trial') }} · {{ activeOrganization?.billing.access.allowed ? 'Write access enabled' : 'Read-only access' }}</p><small>Billing controls access to publishing, new businesses, and other write actions.</small><button class="outline-button small" type="button" @click="view = 'billing'">Open billing →</button></article></div>
-          <article v-if="authSnapshot && ownershipVerification" class="panel verification-panel"><div class="panel-heading"><div><p class="eyebrow">Website ownership</p><h2>{{ ownershipVerification.status === 'verified' ? 'Ownership verified' : 'Verify before publishing' }}</h2><p>{{ ownershipVerification.status === 'verified' ? 'This business can publish its widget and receive production leads.' : 'Verify the website connected to this business before installing the live widget.' }}</p></div><span :class="['status-pill', ownershipVerification.status === 'verified' ? 'booked' : ownershipVerification.status === 'rejected' ? 'new' : 'qualified']">{{ formatLabel(ownershipVerification.status) }}</span></div><div v-if="ownershipVerification.status !== 'verified'" class="verification-controls"><label>Method<select v-model="verificationMethod"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><button class="outline-button small" type="button" :disabled="verificationLoading" @click="requestOwnershipVerification">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethod !== 'email' && verificationMethod !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="checkOwnershipVerification">Check now</button></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="verificationMessage" class="saved-message">✓ {{ verificationMessage }}</p><p v-if="verificationError" class="form-error">{{ verificationError }}</p></article>
+          <template v-if="currentSettingsTab === 'general'">
+            <div class="section-toolbar"><div><p class="eyebrow">Workspace settings</p><h2>General</h2><p>Identity and access details for this FrontDeskWise workspace.</p></div></div>
+            <div class="settings-grid"><article class="panel settings-card"><p class="eyebrow">Signed-in account</p><h3>{{ authSnapshot?.user.name ?? 'FrontDeskWise user' }}</h3><p>{{ authSnapshot?.user.email ?? 'Not signed in' }}</p><small>Use your email or Google account to sign in. Password recovery is available from the sign-in screen.</small><button v-if="authSnapshot" class="outline-button small" type="button" @click="signOut">Sign out</button></article><article class="panel settings-card"><p class="eyebrow">Organization</p><h3>{{ activeOrganization?.name ?? 'Your organization' }}</h3><p>{{ formatLabel(activeOrganization?.role ?? 'owner') }} · {{ availableBusinesses.length }} businesses</p><small>One organization owns the businesses, assistant settings, knowledge, and billing relationship.</small><button class="outline-button small" type="button" @click="view = 'businesses'">Manage businesses →</button></article><article class="panel settings-card"><p class="eyebrow">Billing access</p><h3>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h3><p>{{ formatLabel(activeOrganization?.billing.status ?? 'trial') }} · {{ activeOrganization?.billing.access.allowed ? 'Write access enabled' : 'Read-only access' }}</p><small>Billing controls access to publishing, new businesses, and other write actions.</small><button class="outline-button small" type="button" @click="openSettingsTab('billing')">Open billing →</button></article></div>
+          </template>
+          <template v-else-if="currentSettingsTab === 'verification'">
+            <div class="section-toolbar"><div><p class="eyebrow">Website verification</p><h2>Verification</h2><p>Verify the website connected to this business before installing the live widget.</p></div></div>
+          </template>
+          <article v-if="authSnapshot && ownershipVerification && currentSettingsTab === 'verification'" class="panel verification-panel"><div class="panel-heading"><div><p class="eyebrow">Website ownership</p><h2>{{ ownershipVerification.status === 'verified' ? 'Ownership verified' : 'Verify before publishing' }}</h2><p>{{ ownershipVerification.status === 'verified' ? 'This business can publish its widget and receive production leads.' : 'Complete one verification method to protect production publishing.' }}</p></div><span :class="['status-pill', ownershipVerification.status === 'verified' ? 'booked' : ownershipVerification.status === 'rejected' ? 'new' : 'qualified']">{{ formatLabel(ownershipVerification.status) }}</span></div><div v-if="ownershipVerification.status !== 'verified'" class="verification-controls"><label>Method<select v-model="verificationMethod"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><button class="outline-button small" type="button" :disabled="verificationLoading" @click="requestOwnershipVerification">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethod !== 'email' && verificationMethod !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="checkOwnershipVerification">Check now</button></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="verificationMessage" class="saved-message">✓ {{ verificationMessage }}</p><p v-if="verificationError" class="form-error">{{ verificationError }}</p></article>
+          <article v-if="currentSettingsTab === 'verification' && !ownershipVerification" class="panel empty-view"><div class="empty-icon">✓</div><h2>Verification is loading</h2><p>We’re checking the website ownership state for this business.</p></article>
         </div>
 
         <div v-else-if="view === 'billing'" class="view-content">

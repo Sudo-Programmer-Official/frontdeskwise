@@ -38,7 +38,15 @@ The first control-plane slice is intentionally small and operational:
 
 The organization detail surface now adds business-level inspection and controlled billing interventions without duplicating owner-dashboard controls. It includes business ownership/billing status, source and outcome counts, organization members, trial/suspension actions, ownership approval, and reason-required plan overrides.
 
-Owner workspace alignment now uses the same tokens for dashboard cards, panels, form controls, focus states, and the Agent & Widget preview. The widget keeps its customer-facing visual treatment while sharing the same border, surface, typography, spacing, and focus rules. The owner workflow also uses the same interaction language for source lifecycle, lead operations, CRM disconnects, and explicit widget verification.
+Owner workspace alignment now uses the same tokens for dashboard cards, panels, form controls, focus states, and the Agent preview. The widget keeps its customer-facing visual treatment while sharing the same border, surface, typography, spacing, and focus rules. The owner workflow also uses the same interaction language for source lifecycle, lead operations, CRM disconnects, and explicit widget verification.
+
+The owner navigation is intentionally outcome-oriented:
+
+- **Operate** — Overview, Inbox, Leads, Analytics.
+- **Build** — Knowledge, Actions, Agent.
+- **Business** — Businesses, Settings.
+
+Team, Integrations, Verification, and Billing are Settings sections rather than daily destinations. Test Agent remains a contextual action from Agent and from readiness checks, so the sidebar does not turn every configuration surface into a peer destination.
 
 The shared product pass also standardizes sidebar density, business-switcher contrast, native select rendering, form control height, button hierarchy, status pills, and heading weights. Business names stay white and legible in the dark navigation; dropdown options use a light surface with dark text so the native menu remains readable.
 
