@@ -4204,13 +4204,19 @@ function startMarketingDemo() {
         </div>
       </div>
 
+      <div class="landing-story-strip" aria-label="FrontDeskWise customer journey">
+        <span class="landing-story-label">From question to outcome</span>
+        <span class="landing-story-step"><b>01</b> Question</span><i aria-hidden="true">→</i>
+        <span class="landing-story-step"><b>02</b> Answer</span><i aria-hidden="true">→</i>
+        <span class="landing-story-step"><b>03</b> Action</span><i aria-hidden="true">→</i>
+        <span class="landing-story-step"><b>04</b> Handoff</span>
+      </div>
+
       <section class="landing-section landing-capabilities-section">
-        <div class="landing-capability-top">
-          <div class="landing-capability-copy"><p class="eyebrow">What FrontDeskWise does</p><h2>Answers questions. Takes action. Brings in your team when needed.</h2><p>FrontDeskWise helps visitors get answers, take the next step, and reach a real person when it matters.</p><div class="landing-capability-benefits"><span><i>✓</i> Higher conversions</span><span><i>✓</i> Less manual work</span><span><i>✓</i> Happier customers</span></div></div>
-          <div class="landing-capability-demo" aria-label="Illustrative conversation becoming a business action">
-            <div class="landing-capability-browser"><div class="landing-capability-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="landing-capability-browser-url">yourbusiness.com</span></div><div class="landing-capability-chat"><div class="landing-capability-chat-head"><span class="mini-orb">✦</span><strong>FrontDeskWise</strong><span><i></i> Online</span></div><div class="landing-capability-chat-body"><div class="landing-capability-bubble visitor">Do you have Saturday appointments?</div><div class="landing-capability-bubble assistant"><span class="mini-orb">✦</span><span>Yes — we have Saturday appointments available. Would you like to book one now?</span></div><button class="landing-capability-booking" type="button"><span aria-hidden="true">▣</span> Book appointment</button></div></div></div>
-            <div class="landing-capability-action"><strong><span>ϟ</span> Conversation → Action</strong><div><i>✓</i> Answer from your knowledge</div><div><i>✓</i> Qualify the visitor</div><div><i>✓</i> Create booking / lead</div><div><i>✓</i> Notify your team if needed</div></div>
-          </div>
+        <div class="landing-section-heading landing-section-heading-centered landing-capabilities-heading">
+          <p class="eyebrow">What FrontDeskWise does</p>
+          <h2>Built to answer, qualify, act, and hand off.</h2>
+          <p>Everything your website needs to turn visitors into customers.</p>
         </div>
         <div class="landing-capability-grid"><article v-for="capability in landingCapabilities" :key="capability.title" :class="['landing-capability-card', capability.tone]"><span :class="['landing-capability-icon', capability.tone]">{{ capability.icon }}</span><h3>{{ capability.title }}</h3><p>{{ capability.body }}</p><div :class="['landing-capability-preview', capability.previewType]"><template v-if="capability.previewType === 'message'"><span class="landing-capability-avatar">✦</span><strong>{{ capability.preview }}</strong></template><template v-else-if="capability.previewType === 'booking'"><span class="landing-capability-preview-icon">▣</span><span><strong>{{ capability.preview }}</strong><small>{{ capability.previewMeta }}</small></span><b>✓</b></template><template v-else-if="capability.previewType === 'handoff'"><span class="landing-capability-avatar human">S</span><span><strong>{{ capability.preview }}</strong><small>{{ capability.previewMeta }}</small></span></template><template v-else><strong>{{ capability.preview }}</strong></template></div><span class="landing-capability-status"><i>✓</i> {{ capability.status }}</span></article></div>
       </section>

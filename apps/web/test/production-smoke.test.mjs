@@ -57,6 +57,7 @@ test("owner UI uses the shared product design language", () => {
 test("landing page presents an honest, conversion-ready product story", () => {
   for (const marker of [
     "Live illustrative flow",
+    "Built to answer, qualify, act, and hand off.",
     "landing-flow-shell",
     "landingSampleMetrics",
     "landingFaqs",
@@ -64,6 +65,7 @@ test("landing page presents an honest, conversion-ready product story", () => {
   ]) {
     assert.ok(app.includes(marker), `missing landing experience marker: ${marker}`);
   }
+  assert.doesNotMatch(app, /landing-capability-demo|Higher conversions|Less manual work|Happier customers/);
   assert.doesNotMatch(app, /featured-demo-links/);
   assert.doesNotMatch(app, /0 leads in sample workspace|0 booking actions/);
   assert.match(styles, /landing-industry-drift/);
