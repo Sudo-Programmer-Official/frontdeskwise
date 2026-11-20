@@ -25,6 +25,7 @@ export type AppRoute =
   | { kind: "marketing"; page: string }
   | { kind: "legal"; page: "privacy" | "terms" }
   | { kind: "auth"; mode: "signin" | "signup" | "forgot"; returnTo?: string }
+  | { kind: "auth-reset"; mode: "resetPassword"; oobCode?: string }
   | { kind: "auth-callback" }
   | { kind: "agent-shortcut"; agentTab: AgentRouteTab; testQuestion?: string }
   | { kind: "demo"; demoId: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
@@ -81,6 +82,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
   if (marketingRoutePaths.includes(path)) return { kind: "marketing", page: marketingRoutePaths.find((candidate) => candidate === path)?.slice(1) ?? "" };
   if (segments[0] === "auth") {
     if (segments[1] === "callback") return { kind: "auth-callback" };
+    if (segments[1] === "reset-password") return { kind: "auth-reset", mode: "resetPassword", ...(query.get("oobCode") ? { oobCode: query.get("oobCode") ?? undefined } : {}) };
     const returnTo = safeReturnTo(query.get("returnTo"));
     if (segments[1] === "sign-up") return { kind: "auth", mode: "signup", ...(returnTo ? { returnTo } : {}) };
     if (segments[1] === "forgot-password") return { kind: "auth", mode: "forgot", ...(returnTo ? { returnTo } : {}) };
@@ -158,6 +160,11 @@ export function routePath(route: AppRoute): string {
   if (route.kind === "auth") {
     const path = `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
     return route.returnTo ? `${path}?returnTo=${encodeURIComponent(route.returnTo)}` : path;
+  }
+  if (route.kind === "auth-reset") {
+    const params = new URLSearchParams({ mode: route.mode });
+    if (route.oobCode) params.set("oobCode", route.oobCode);
+    return `/auth/reset-password?${params.toString()}`;
   }
   if (route.kind === "auth-callback") return "/auth/callback";
   if (route.kind === "agent-shortcut") return appendTestQuestion(`/agent/${route.agentTab}`, route.agentTab === "test" ? route.testQuestion : undefined);

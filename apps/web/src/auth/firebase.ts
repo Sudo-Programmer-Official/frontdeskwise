@@ -4,12 +4,14 @@ import {
   createUserWithEmailAndPassword,
   getAuth,
   GoogleAuthProvider,
+  confirmPasswordReset,
   onIdTokenChanged,
   sendPasswordResetEmail,
   signInWithPopup,
   setPersistence,
   signInWithEmailAndPassword,
   signOut,
+  verifyPasswordResetCode,
   type User,
 } from "firebase/auth";
 
@@ -102,6 +104,13 @@ function apiOrigin(): string {
   return String(import.meta.env.VITE_API_ORIGIN ?? "").replace(/\/$/, "");
 }
 
+function passwordResetActionSettings() {
+  const configuredOrigin = String(import.meta.env.VITE_SITE_ORIGIN ?? "").trim().replace(/\/$/, "");
+  const origin = configuredOrigin || (typeof window !== "undefined" ? window.location.origin : "");
+  if (!origin) throw new Error("Password recovery is temporarily unavailable.");
+  return { url: `${origin}/auth/reset-password`, handleCodeInApp: false } as const;
+}
+
 async function bootstrap(user: User, demoToken?: string, organizationName?: string): Promise<AuthSnapshot> {
   let token = await user.getIdToken();
   let response = await fetch(`${apiOrigin()}/api/v1/auth/bootstrap`, {
@@ -154,7 +163,18 @@ export async function signOutFrontDeskWise(): Promise<void> {
 
 export async function sendFrontDeskWisePasswordReset(email: string): Promise<void> {
   if (!email.trim()) throw new Error("Enter your email first.");
-  await sendPasswordResetEmail(await firebaseAuth(), email.trim());
+  await sendPasswordResetEmail(await firebaseAuth(), email.trim(), passwordResetActionSettings());
+}
+
+export async function verifyFrontDeskWisePasswordResetCode(actionCode: string): Promise<string> {
+  if (!actionCode.trim()) throw new Error("This reset link is invalid or has expired.");
+  return verifyPasswordResetCode(await firebaseAuth(), actionCode.trim());
+}
+
+export async function confirmFrontDeskWisePasswordReset(actionCode: string, newPassword: string): Promise<void> {
+  if (!actionCode.trim()) throw new Error("This reset link is invalid or has expired.");
+  if (newPassword.length < 6) throw new Error("Use at least 6 characters for your new password.");
+  await confirmPasswordReset(await firebaseAuth(), actionCode.trim(), newPassword);
 }
 
 export function observeFirebaseUser(callback: (user: User | null) => void): () => void {

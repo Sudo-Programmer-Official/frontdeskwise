@@ -3,6 +3,15 @@ import { credentialsConfigured, decryptSecret, encryptSecret } from "./secrets.j
 
 export type CrmProvider = "hubspot" | "webhook";
 
+export type HubSpotCredentials = {
+  accessToken: string;
+  authType?: "oauth" | "pat";
+  refreshToken?: string;
+  expiresAt?: string;
+  scopes?: string[];
+  portalId?: string | null;
+};
+
 export type CrmLeadPayload = {
   eventId: string;
   eventType: "lead.created" | "integration.test";
@@ -38,6 +47,11 @@ export type CrmContactInput = {
   phone: string | null;
   name: string | null;
   intent: string | null;
+  source?: string | null;
+  pageUrl?: string | null;
+  conversationId?: string | null;
+  businessName?: string | null;
+  createdAt?: string | null;
 };
 
 export type CrmContactResult = {
@@ -51,7 +65,7 @@ export interface CrmAdapter {
   logActivity(input: { contactId: string; body: string }): Promise<void>;
 }
 
-class CrmRequestError extends Error {
+export class CrmRequestError extends Error {
   constructor(public readonly statusCode: number, message: string) {
     super(message);
   }
@@ -88,6 +102,20 @@ async function hubSpotRequest<T>(accessToken: string, path: string, init: Reques
   }
 }
 
+export function hubSpotApiVersion(): string {
+  const version = process.env.FRONTDESKWISE_HUBSPOT_API_VERSION?.trim() || "2026-09";
+  if (!/^\d{4}-\d{2}$/.test(version)) throw new Error("FRONTDESKWISE_HUBSPOT_API_VERSION must use YYYY-MM format");
+  return version;
+}
+
+function hubSpotObjectPath(objectType: string, suffix = ""): string {
+  return `/crm/objects/${hubSpotApiVersion()}/${objectType}${suffix}`;
+}
+
+function hubSpotAccountInfoPath(): string {
+  return `/account-info/${hubSpotApiVersion()}/details`;
+}
+
 function splitName(name: string | null): { firstName?: string; lastName?: string } {
   const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return {};
@@ -113,7 +141,7 @@ export class HubSpotAdapter implements CrmAdapter {
   constructor(private readonly accessToken: string) {}
 
   async testConnection(): Promise<CrmConnectionTest> {
-    const account = await hubSpotRequest<HubSpotAccountResponse>(this.accessToken, "/account-info/v3/details");
+    const account = await hubSpotRequest<HubSpotAccountResponse>(this.accessToken, hubSpotAccountInfoPath());
     return {
       ok: true,
       provider: "hubspot",
@@ -130,7 +158,7 @@ export class HubSpotAdapter implements CrmAdapter {
       input.phone ? { propertyName: "phone", value: input.phone } : null,
     ]) {
       if (!lookup) continue;
-      const search = await hubSpotRequest<HubSpotSearchResponse>(this.accessToken, "/crm/v3/objects/contacts/search", {
+      const search = await hubSpotRequest<HubSpotSearchResponse>(this.accessToken, hubSpotObjectPath("contacts", "/search"), {
         method: "POST",
         body: JSON.stringify({
           filterGroups: [{ filters: [{ propertyName: lookup.propertyName, operator: "EQ", value: lookup.value }] }],
@@ -143,22 +171,41 @@ export class HubSpotAdapter implements CrmAdapter {
     }
 
     if (existingId) {
-      await hubSpotRequest(this.accessToken, `/crm/v3/objects/contacts/${encodeURIComponent(existingId)}`, {
+      await hubSpotRequest(this.accessToken, `${hubSpotObjectPath("contacts")}/${encodeURIComponent(existingId)}`, {
         method: "PATCH",
         body: JSON.stringify({ properties }),
       });
       return { externalId: existingId, created: false };
     }
 
-    const created = await hubSpotRequest<HubSpotObjectResponse>(this.accessToken, "/crm/v3/objects/contacts", {
-      method: "POST",
-      body: JSON.stringify({ properties }),
-    });
-    return { externalId: created.id, created: true };
+    try {
+      const created = await hubSpotRequest<HubSpotObjectResponse>(this.accessToken, hubSpotObjectPath("contacts"), {
+        method: "POST",
+        body: JSON.stringify({ properties }),
+      });
+      return { externalId: created.id, created: true };
+    } catch (error) {
+      // A concurrent delivery can win the create race. Search once more before
+      // surfacing the failure so retries remain idempotent by email/phone.
+      if (!(error instanceof CrmRequestError) || error.statusCode !== 409) throw error;
+      const retryLookup = input.email ? { propertyName: "email", value: input.email } : input.phone ? { propertyName: "phone", value: input.phone } : null;
+      if (!retryLookup) throw error;
+      const search = await hubSpotRequest<HubSpotSearchResponse>(this.accessToken, hubSpotObjectPath("contacts", "/search"), {
+        method: "POST",
+        body: JSON.stringify({ filterGroups: [{ filters: [{ propertyName: retryLookup.propertyName, operator: "EQ", value: retryLookup.value }] }], limit: 1 }),
+      });
+      const existingAfterRace = search.results?.[0]?.id;
+      if (!existingAfterRace) throw error;
+      await hubSpotRequest(this.accessToken, `${hubSpotObjectPath("contacts")}/${encodeURIComponent(existingAfterRace)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ properties }),
+      });
+      return { externalId: existingAfterRace, created: false };
+    }
   }
 
   async logActivity(input: { contactId: string; body: string }): Promise<void> {
-    await hubSpotRequest(this.accessToken, "/crm/v3/objects/notes", {
+    await hubSpotRequest(this.accessToken, hubSpotObjectPath("notes"), {
       method: "POST",
       body: JSON.stringify({
         properties: { hs_note_body: input.body.slice(0, 4_000), hs_timestamp: new Date().toISOString() },
@@ -180,11 +227,11 @@ export function integrationEncryptionConfigured(): boolean {
   return credentialsConfigured();
 }
 
-export function encryptIntegrationCredentials(credentials: WebhookCredentials | { accessToken: string }): string {
+export function encryptIntegrationCredentials(credentials: WebhookCredentials | HubSpotCredentials): string {
   return encryptSecret(JSON.stringify(credentials));
 }
 
-export function decryptIntegrationCredentials(payload: string): WebhookCredentials & { accessToken?: string } {
+export function decryptIntegrationCredentials(payload: string): WebhookCredentials & Partial<HubSpotCredentials> {
   const parsed = JSON.parse(decryptSecret(payload)) as unknown;
   if (!parsed || typeof parsed !== "object") throw new Error("CRM credentials are invalid");
   return parsed as WebhookCredentials & { accessToken?: string };

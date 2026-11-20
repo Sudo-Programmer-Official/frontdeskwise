@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Activity,
+  ArrowLeft,
   ArrowDown,
   ArrowRight,
   BadgeCheck,
@@ -25,6 +26,7 @@ import {
   Inbox,
   LayoutDashboard,
   Mail,
+  Menu,
   MessageSquare,
   MoreHorizontal,
   Plus,
@@ -55,6 +57,8 @@ import {
   firebaseAuthConfigured,
   observeFirebaseUser,
   sendFrontDeskWisePasswordReset,
+  confirmFrontDeskWisePasswordReset,
+  verifyFrontDeskWisePasswordResetCode,
   signInAndBootstrap,
   signInWithGoogleAndBootstrap,
   signOutFrontDeskWise,
@@ -104,6 +108,9 @@ interface Integration {
   id: string;
   provider: string;
   displayName: string;
+  authType?: "oauth" | "pat";
+  accountId?: string | null;
+  accountName?: string | null;
   connectionStatus: "pending" | "active" | "error" | "disabled";
   lastTestedAt: string | null;
   lastError: string | null;
@@ -474,10 +481,19 @@ interface BillingSnapshot {
     status: string;
     planKey: string;
     interval: "month" | "year" | null;
+    currentPeriodStartAt: string | null;
     trialEndAt: string | null;
     currentPeriodEndAt: string | null;
     graceEndAt: string | null;
     providerCustomerId: string | null;
+    providerSubscriptionId: string | null;
+    stripeStatus: string | null;
+    checkoutStatus: string | null;
+    checkoutSessionId: string | null;
+    pendingPlanKey: string | null;
+    pendingBillingInterval: string | null;
+    cancelAtPeriodEnd: boolean;
+    lastPaymentStatus: string | null;
     amountCents: number | null;
     currency: string;
     access: { allowed: boolean; reason: string };
@@ -500,6 +516,11 @@ interface AdminOrganization {
   mode: string;
   mrrAmountCents: number | null;
   currency: string;
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  stripeSubscriptionStatus: string | null;
+  lastPaymentStatus: string | null;
+  cancelAtPeriodEnd: boolean;
   trialEndAt: string | null;
   conversationCount: number;
   leadCount: number;
@@ -522,6 +543,14 @@ interface AdminOrganizationDetail {
       provider: string | null;
       providerCustomerId: string | null;
       providerSubscriptionId: string | null;
+      providerPriceId?: string | null;
+      stripeStatus?: string | null;
+      checkoutStatus?: string | null;
+      checkoutSessionId?: string | null;
+      pendingPlanKey?: string | null;
+      pendingBillingInterval?: string | null;
+      cancelAtPeriodEnd?: boolean;
+      lastPaymentStatus?: string | null;
       amountCents: number | null;
       currency: string;
       access: { allowed: boolean; reason: string };
@@ -530,6 +559,7 @@ interface AdminOrganizationDetail {
     };
   };
   owners: Array<{ email: string; name: string; role: string }>;
+  billingTimeline: Array<{ eventKey: string; eventName: string; providerEventId: string | null; status: string; metadata: Record<string, unknown>; occurredAt: string | null }>;
   businesses: Array<{
     id: string;
     name: string;
@@ -852,8 +882,18 @@ const authEmail = ref("");
 const authPassword = ref("");
 const authOrganizationName = ref("");
 const authError = ref("");
+const authSuccess = ref("");
 const authLoading = ref(false);
 const authInitializing = ref(firebaseAuthConfigured());
+const resetActionCode = ref("");
+const resetEmail = ref("");
+const resetPasswordValue = ref("");
+const resetPasswordConfirmation = ref("");
+const resetReady = ref(false);
+const resetComplete = ref(false);
+const resetError = ref("");
+const resetLoading = ref(false);
+const mobileNavOpen = ref(false);
 let sessionRedirecting = false;
 const businessName = ref("");
 const businessLocation = ref("");
@@ -952,6 +992,7 @@ const integrationDisplayName = ref("CRM webhook");
 const integrationWebhookUrl = ref("");
 const integrationSigningSecret = ref("");
 const integrationAccessToken = ref("");
+const integrationManualMode = ref(false);
 const integrationLoading = ref(false);
 const integrationError = ref("");
 const integrationMessage = ref("");
@@ -989,6 +1030,7 @@ const billingSnapshot = ref<BillingSnapshot | null>(null);
 const billingLoading = ref(false);
 const billingError = ref("");
 const billingMessage = ref("");
+const billingFlow = ref<"idle" | "processing" | "complete" | "pending" | "cancelled">("idle");
 const settingsTab = ref<SettingsTab>("general");
 const agentTab = ref<AgentTab>("behavior");
 const profileMenuOpen = ref(false);
@@ -1173,6 +1215,7 @@ const pageTitle = computed(() => {
   if (route.value.kind === "marketing") return getMarketingPageByPath(`/${route.value.page}`)?.title ?? "FrontDeskWise";
   if (view.value === "privacy") return "Privacy Policy";
   if (view.value === "terms") return "Terms of Service";
+  if (route.value.kind === "auth-reset") return "Reset your password";
   if (view.value === "admin") return "Admin control plane";
   if (view.value === "conversations" || view.value === "agent") return "Agent";
   if (view.value === "team" || view.value === "connections" || view.value === "billing") return "Settings";
@@ -1347,6 +1390,12 @@ async function applyRouteState(nextRoute: AppRoute) {
     if (!authSnapshot.value) openAuth("signin", false);
     return;
   }
+  if (nextRoute.kind === "auth-reset") {
+    publicDemoMode.value = false;
+    authModalOpen.value = false;
+    await preparePasswordReset(nextRoute);
+    return;
+  }
   if (nextRoute.kind === "legal" || nextRoute.kind === "landing" || nextRoute.kind === "marketing") {
     publicDemoMode.value = false;
     return;
@@ -1457,6 +1506,7 @@ function openWorkspaceAttention() {
 
 function selectAgentTab(tab: AgentTab) {
   agentTab.value = tab;
+  mobileNavOpen.value = false;
   commitRoute(routeForView("agent"));
   if (tab === "install") void loadWidgetInstall();
 }
@@ -1537,6 +1587,7 @@ function redirectToSignIn(returnTo = currentReturnTo()): void {
   clearWorkspaceState();
   authMode.value = "signin";
   authError.value = "";
+  authSuccess.value = "";
   authPassword.value = "";
   authModalOpen.value = true;
   const nextRoute: AppRoute = {
@@ -1551,6 +1602,7 @@ function redirectToSignIn(returnTo = currentReturnTo()): void {
 function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = true, requestedReturnTo?: string) {
   authMode.value = mode;
   authError.value = "";
+  authSuccess.value = "";
   authPassword.value = "";
   authModalOpen.value = true;
   const returnTo = requestedReturnTo
@@ -1565,6 +1617,7 @@ function openSettingsTab(tab: SettingsTab) {
   profileMenuOpen.value = false;
   sidebarAccountMenuOpen.value = false;
   notificationMenuOpen.value = false;
+  mobileNavOpen.value = false;
   if (tab === "team") view.value = "team";
   else if (tab === "integrations") view.value = "connections";
   else if (tab === "billing") view.value = "billing";
@@ -1575,6 +1628,7 @@ function navigateToWorkspaceView(nextView: View) {
   profileMenuOpen.value = false;
   sidebarAccountMenuOpen.value = false;
   notificationMenuOpen.value = false;
+  mobileNavOpen.value = false;
   if (nextView === "settings") openSettingsTab("general");
   else view.value = nextView;
 }
@@ -1586,10 +1640,73 @@ function isExpiredDemoSessionError(error: unknown): boolean {
 
 function friendlyAuthError(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error ?? "");
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code ?? "").replace(/^firebase:\s*/i, "").toLowerCase()
+    : (message.match(/auth\/[a-z-]+/i)?.[0] ?? "").toLowerCase();
+  const messages: Record<string, string> = {
+    "auth/invalid-credential": "The email or password is incorrect.",
+    "auth/wrong-password": "The email or password is incorrect.",
+    "auth/user-not-found": "The email or password is incorrect.",
+    "auth/user-disabled": "This account has been disabled. Contact support.",
+    "auth/too-many-requests": "Too many attempts. Please try again later.",
+    "auth/network-request-failed": "We couldn't reach the sign-in service. Check your connection and try again.",
+    "auth/invalid-email": "Enter a valid email address.",
+    "auth/email-already-in-use": "An account already exists for this email. Try signing in instead.",
+    "auth/weak-password": "Choose a stronger password with at least 6 characters.",
+    "auth/popup-closed-by-user": "Google sign-in was cancelled. Try again or use email and password.",
+    "auth/expired-action-code": "This reset link has expired. Request a new one.",
+    "auth/invalid-action-code": "This reset link is invalid or has already been used.",
+  };
+  if (code && messages[code]) return messages[code];
   if (/Firebase web settings|Vercel environment|auth domain|SSL certificate/i.test(message)) {
     return "Sign-in is temporarily unavailable. Please try again later.";
   }
-  return message || fallback;
+  return fallback;
+}
+
+async function preparePasswordReset(nextRoute: Extract<AppRoute, { kind: "auth-reset" }>) {
+  resetActionCode.value = nextRoute.oobCode ?? "";
+  resetEmail.value = "";
+  resetPasswordValue.value = "";
+  resetPasswordConfirmation.value = "";
+  resetReady.value = false;
+  resetComplete.value = false;
+  resetError.value = "";
+  if (!resetActionCode.value) {
+    resetError.value = "This reset link is invalid or incomplete. Request a new one from the sign-in page.";
+    return;
+  }
+  try {
+    resetEmail.value = await verifyFrontDeskWisePasswordResetCode(resetActionCode.value);
+    resetReady.value = true;
+  } catch (error) {
+    resetError.value = friendlyAuthError(error, "This reset link is invalid or has expired. Request a new one.");
+  }
+}
+
+async function submitPasswordUpdate() {
+  if (resetLoading.value || !resetReady.value) return;
+  if (resetPasswordValue.value.length < 6) {
+    resetError.value = "Use at least 6 characters for your new password.";
+    return;
+  }
+  if (resetPasswordValue.value !== resetPasswordConfirmation.value) {
+    resetError.value = "The passwords do not match.";
+    return;
+  }
+  resetLoading.value = true;
+  resetError.value = "";
+  try {
+    await confirmFrontDeskWisePasswordReset(resetActionCode.value, resetPasswordValue.value);
+    resetComplete.value = true;
+    resetReady.value = false;
+    resetPasswordValue.value = "";
+    resetPasswordConfirmation.value = "";
+  } catch (error) {
+    resetError.value = friendlyAuthError(error, "We couldn't update your password. Request a new reset link and try again.");
+  } finally {
+    resetLoading.value = false;
+  }
 }
 
 function forgetDemoAccessToken() {
@@ -1612,13 +1729,16 @@ async function bootstrapAccountWithDemoRecovery(start: (demoToken?: string) => P
 }
 
 async function submitAuth() {
-  if (!authEmail.value.trim() || authPassword.value.length < 6 || authLoading.value) return;
+  if (authLoading.value) return;
   if (authMode.value === "forgot") {
+    if (!authEmail.value.trim()) return;
     await resetPassword();
     return;
   }
+  if (!authEmail.value.trim() || authPassword.value.length < 6) return;
   authLoading.value = true;
   authError.value = "";
+  authSuccess.value = "";
   startGlobalLoading();
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
@@ -1636,7 +1756,6 @@ async function submitAuth() {
   } catch (error) {
     const message = friendlyAuthError(error, "Could not finish sign-in.");
     authError.value = message;
-    notify("error", message, "Sign-in failed");
   } finally {
     authLoading.value = false;
     stopGlobalLoading();
@@ -1647,6 +1766,7 @@ async function submitGoogleAuth() {
   if (authLoading.value) return;
   authLoading.value = true;
   authError.value = "";
+  authSuccess.value = "";
   startGlobalLoading();
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
@@ -1663,7 +1783,6 @@ async function submitGoogleAuth() {
       ? "Google sign-in was cancelled. Try again or use email and password."
       : friendlyAuthError(error, "Could not finish Google sign-in.");
     authError.value = friendlyMessage;
-    notify("error", friendlyMessage, "Google sign-in failed");
   } finally {
     authLoading.value = false;
     stopGlobalLoading();
@@ -1683,7 +1802,7 @@ async function signOut() {
     openHome();
     notifySuccess("You have been signed out.", "Signed out");
   } catch (error) {
-    notify("error", error instanceof Error ? error.message : "Could not sign you out. Please try again.", "Sign-out failed");
+    notify("error", friendlyAuthError(error, "Could not sign you out. Please try again."), "Sign-out failed");
   } finally {
     stopGlobalLoading();
   }
@@ -1693,19 +1812,31 @@ async function resetPassword() {
   if (authLoading.value) return;
   authLoading.value = true;
   authError.value = "";
+  authSuccess.value = "";
   startGlobalLoading();
   try {
     await sendFrontDeskWisePasswordReset(authEmail.value);
-    authError.value = "Password reset instructions sent. Check your inbox.";
-    notifySuccess("Check your inbox for password recovery instructions.", "Email sent");
+    authSuccess.value = "Check your inbox for password recovery instructions.";
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not send password reset instructions.";
+    const message = friendlyAuthError(error, "Could not send password reset instructions.");
     authError.value = message;
-    notify("error", message, "Password reset failed");
   } finally {
     authLoading.value = false;
     stopGlobalLoading();
   }
+}
+
+function closeMobileNav() {
+  mobileNavOpen.value = false;
+  notificationMenuOpen.value = false;
+  profileMenuOpen.value = false;
+  sidebarAccountMenuOpen.value = false;
+}
+
+function closeInboxConversation() {
+  selectedInboxConversation.value = null;
+  inboxReply.value = "";
+  inboxNote.value = "";
 }
 
 function requireAccountForPublish() {
@@ -1948,7 +2079,10 @@ async function settleAuthenticatedSession(returnTo?: string): Promise<void> {
   if (returnRoute) route.value = returnRoute;
   isSuperAdmin.value = authSnapshot.value.user.isSuperAdmin;
   const hasBusiness = await syncAuthenticatedBusiness(authSnapshot.value);
-  if (hasBusiness) await loadBilling();
+  if (hasBusiness) {
+    await loadBilling();
+    await reconcileBillingReturn();
+  }
   if (isSuperAdmin.value && (isPlatformRoute() || !hasBusiness)) await loadAdminOrganizations();
   if (isSuperAdmin.value && !hasBusiness) {
     navigateToAdminSection("overview");
@@ -3341,6 +3475,68 @@ async function loadBilling() {
   }
 }
 
+function clearBillingReturnQuery() {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("billing");
+  url.searchParams.delete("session_id");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+async function waitForBillingState(expectedPlanKey?: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await loadBilling();
+    const billing = billingSnapshot.value?.billing;
+    const settled = billing?.status === "active"
+      && (!expectedPlanKey || billing.planKey === expectedPlanKey)
+      && billing.checkoutStatus !== "open";
+    if (settled) {
+      await Promise.all([refreshAuthenticatedSnapshot(), loadBilling()]);
+      return true;
+    }
+    if (attempt < 7) await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+  }
+  return false;
+}
+
+async function reconcileBillingReturn() {
+  if (typeof window === "undefined" || !authSnapshot.value) return;
+  const params = new URLSearchParams(window.location.search);
+  const billingReturn = params.get("billing");
+  if (billingReturn === "cancel") {
+    billingFlow.value = "cancelled";
+    billingMessage.value = "Checkout was canceled. Your current plan is unchanged.";
+    clearBillingReturnQuery();
+    return;
+  }
+  if (billingReturn !== "success") return;
+  billingFlow.value = "processing";
+  billingMessage.value = "Payment received. Activating your FrontDeskWise plan…";
+  const settled = await waitForBillingState();
+  if (settled) {
+    billingFlow.value = "complete";
+    billingMessage.value = "You’re all set — your FrontDeskWise plan is active.";
+    clearBillingReturnQuery();
+  } else {
+    billingFlow.value = "pending";
+    billingMessage.value = "Your payment was received. We’re finishing your subscription setup.";
+  }
+}
+
+async function retryBillingRefresh() {
+  billingFlow.value = "processing";
+  const params = typeof window === "undefined" ? null : new URLSearchParams(window.location.search);
+  if (params?.get("billing") === "success") {
+    await reconcileBillingReturn();
+    return;
+  }
+  const settled = await waitForBillingState(billingSnapshot.value?.billing.pendingPlanKey ?? undefined);
+  billingFlow.value = settled ? "complete" : "pending";
+  billingMessage.value = settled
+    ? "You’re all set — your FrontDeskWise plan is active."
+    : "Your plan change was received. We’re finishing the update; refresh in a moment.";
+}
+
 function formatPlanPrice(plan: BillingPlan): string {
   if (plan.amountCents === null) return "Contact us";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: plan.currency.toUpperCase(), maximumFractionDigits: 0 }).format(plan.amountCents / 100);
@@ -3921,8 +4117,19 @@ async function startCheckout(plan: BillingPlan) {
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ organizationId: authSnapshot.value.activeOrganizationId, planKey: plan.key, interval: "month" }),
     });
-    const payload = await response.json() as { url?: string; error?: string };
-    if (!response.ok || !payload.url) throw new Error(payload.error ?? "This plan is not ready for checkout yet.");
+    const payload = await response.json() as { url?: string | null; subscriptionUpdated?: boolean; planKey?: string; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "This plan is not ready for checkout yet.");
+    if (payload.subscriptionUpdated) {
+      billingFlow.value = "processing";
+      billingMessage.value = "Your plan change was received. Confirming the updated subscription…";
+      const settled = await waitForBillingState(payload.planKey ?? plan.key);
+      billingFlow.value = settled ? "complete" : "pending";
+      billingMessage.value = settled
+        ? "You’re all set — your FrontDeskWise plan is active."
+        : "Your plan change was received. We’re finishing the update; refresh in a moment.";
+      return;
+    }
+    if (!payload.url) throw new Error(payload.error ?? "This plan is not ready for checkout yet.");
     window.location.assign(payload.url);
   } catch (error) {
     billingError.value = error instanceof Error ? error.message : "Could not start checkout.";
@@ -3952,7 +4159,26 @@ async function openBillingPortal() {
 }
 
 async function connectIntegration() {
-  if ((integrationProvider.value === "webhook" ? !integrationWebhookUrl.value.trim() : !integrationAccessToken.value.trim()) || integrationLoading.value) return;
+  if (integrationLoading.value) return;
+  if (integrationProvider.value === "hubspot" && !integrationManualMode.value) {
+    integrationLoading.value = true;
+    integrationError.value = "";
+    integrationMessage.value = "";
+    try {
+      const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations/hubspot/connect`), {
+        method: "POST",
+        headers: ownerHeaders(),
+      });
+      const payload = await response.json() as { authorizationUrl?: string; error?: string };
+      if (!response.ok || !payload.authorizationUrl) throw new Error(payload.error ?? "Could not start HubSpot OAuth.");
+      window.location.assign(payload.authorizationUrl);
+    } catch (error) {
+      integrationError.value = error instanceof Error ? error.message : "Could not start HubSpot OAuth.";
+      integrationLoading.value = false;
+    }
+    return;
+  }
+  if ((integrationProvider.value === "webhook" ? !integrationWebhookUrl.value.trim() : !integrationAccessToken.value.trim())) return;
   integrationLoading.value = true;
   integrationError.value = "";
   integrationMessage.value = "";
@@ -3984,6 +4210,7 @@ async function connectIntegration() {
 function openNativeIntegrationForm(provider: "webhook" | "hubspot") {
   integrationProvider.value = provider;
   integrationDisplayName.value = provider === "hubspot" ? "HubSpot" : "Automation webhook";
+  integrationManualMode.value = false;
   integrationError.value = "";
   integrationMessage.value = "";
   nativeIntegrationFormOpen.value = true;
@@ -3991,6 +4218,7 @@ function openNativeIntegrationForm(provider: "webhook" | "hubspot") {
 
 function closeNativeIntegrationForm() {
   nativeIntegrationFormOpen.value = false;
+  integrationManualMode.value = false;
   integrationError.value = "";
   integrationMessage.value = "";
 }
@@ -4533,6 +4761,33 @@ function startMarketingDemo() {
     <section v-if="routeIsNotFound" class="not-found-shell">
       <div class="not-found-card"><p class="eyebrow">404</p><h1>That page is not available.</h1><p>Check the address or return to FrontDeskWise.</p><button class="primary-button" type="button" @click="openHome">Back to home</button></div>
     </section>
+    <section v-else-if="route.kind === 'auth-reset'" class="auth-reset-shell">
+      <div class="auth-reset-card">
+        <div class="auth-reset-brand"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></div>
+        <template v-if="resetComplete">
+          <div class="auth-reset-success-icon"><CircleCheck :size="28" :stroke-width="2" aria-hidden="true" /></div>
+          <p class="eyebrow">Account recovery</p>
+          <h1>Password updated</h1>
+          <p>Your password has been changed successfully.</p>
+          <button class="primary-button auth-submit" type="button" @click="openAuth('signin')">Sign in to FrontDeskWise</button>
+        </template>
+        <template v-else>
+          <p class="eyebrow">Account recovery</p>
+          <h1>Reset your password</h1>
+          <p v-if="resetReady">Choose a new password for {{ resetEmail }}.</p>
+          <p v-else>Use the recovery link from your email to continue.</p>
+          <form v-if="resetReady" class="auth-reset-form" @submit.prevent="submitPasswordUpdate">
+            <label>New password<input v-model="resetPasswordValue" type="password" autocomplete="new-password" minlength="6" required placeholder="At least 6 characters" /></label>
+            <label>Confirm new password<input v-model="resetPasswordConfirmation" type="password" autocomplete="new-password" minlength="6" required placeholder="Enter it again" /></label>
+            <p v-if="resetError" class="form-error" role="alert">{{ resetError }}</p>
+            <button class="primary-button auth-submit" type="submit" :disabled="resetLoading">{{ resetLoading ? 'Updating password…' : 'Update password' }}</button>
+          </form>
+          <div v-else-if="resetError" class="auth-reset-error" role="alert"><CircleAlert :size="20" :stroke-width="1.9" aria-hidden="true" /><p>{{ resetError }}</p></div>
+          <button v-if="!resetReady" class="outline-button auth-submit" type="button" @click="openAuth('forgot')">Request a new reset link</button>
+          <button class="text-button auth-switch" type="button" @click="openAuth('signin')">Back to sign in</button>
+        </template>
+      </div>
+    </section>
     <MarketingPage v-else-if="route.kind === 'marketing'" :page-path="`/${route.page}`" @start-demo="startMarketingDemo" />
     <section v-else-if="view === 'home'" class="marketing-shell landing-page">
       <header class="marketing-nav landing-nav">
@@ -4694,7 +4949,8 @@ function startMarketingDemo() {
       <LegalPage :kind="view === 'privacy' ? 'privacy' : 'terms'" />
     </section>
 
-    <section v-else :class="['product-shell', { 'admin-only-mode': adminSurfaceMode }]">
+    <section v-else :class="['product-shell', { 'admin-only-mode': adminSurfaceMode, 'mobile-nav-open': mobileNavOpen }]">
+      <div v-if="mobileNavOpen" class="mobile-nav-backdrop" aria-hidden="true" @click="closeMobileNav"></div>
       <aside class="sidebar">
         <button class="sidebar-brand" type="button" @click="openHome"><img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
         <div v-if="adminSurfaceMode" class="admin-identity-card"><span class="admin-identity-mark">SP</span><span><strong>Operations</strong><small>Super-admin access</small></span><span class="admin-identity-check"><BadgeCheck :size="16" :stroke-width="1.8" aria-hidden="true" /></span></div>
@@ -4714,10 +4970,21 @@ function startMarketingDemo() {
       </aside>
 
       <section class="content-area">
+        <header class="mobile-header">
+          <button class="mobile-header-icon" type="button" aria-label="Open navigation" :aria-expanded="mobileNavOpen" @click="mobileNavOpen = true"><Menu :size="21" :stroke-width="1.9" aria-hidden="true" /></button>
+          <button class="mobile-header-brand" type="button" @click="openHome"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
+          <button class="mobile-workspace-trigger" type="button" aria-label="Open workspace switcher" @click="mobileNavOpen = true"><span><strong>{{ businessName || (authSnapshot ? 'Workspace' : 'Demo workspace') }}</strong><small>{{ activeOrganization?.name ?? 'Business' }}</small></span><ChevronDown :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
+          <div class="mobile-header-actions">
+            <button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button>
+            <button class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" @click="mobileNavOpen = true; sidebarAccountMenuOpen = true">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</button>
+          </div>
+        </header>
+        <div v-if="notificationMenuOpen && authSnapshot" class="notification-menu mobile-notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div>
         <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
         <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger compact"><span><strong>Your workspace is read-only</strong><small>· Restore billing to resume publishing</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Restore billing →</button></div>
+        <div v-if="!adminSurfaceMode && billingFlow !== 'idle'" :class="['billing-return-banner', billingFlow === 'complete' ? 'success' : billingFlow === 'cancelled' ? 'neutral' : 'warning']" role="status" aria-live="polite"><span><strong>{{ billingMessage }}</strong><small v-if="billingFlow === 'processing'">We’ll keep checking for the signed Stripe webhook.</small><small v-else-if="billingFlow === 'pending'">Your data is safe. Refresh this page to check again.</small></span><button v-if="billingFlow === 'pending'" class="outline-button small" type="button" @click="void retryBillingRefresh()">Refresh</button></div>
 
         <div v-if="!adminSurfaceMode && settingsSurface" class="settings-tabs" role="tablist" aria-label="Settings sections">
           <button v-for="tab in settingsTabs" :key="tab.id" type="button" role="tab" :aria-selected="currentSettingsTab === tab.id" :class="['settings-tab', { active: currentSettingsTab === tab.id }]" @click="openSettingsTab(tab.id)">{{ tab.label }}</button>
@@ -4809,7 +5076,7 @@ function startMarketingDemo() {
           <div class="inbox-assignment-shortcuts" aria-label="Inbox assignment shortcuts"><span>Quick view</span><button type="button" :class="{ active: inboxAssignmentFilter === 'all' }" @click="inboxAssignmentFilter = 'all'; loadInbox()">All</button><button type="button" :class="{ active: inboxAssignmentFilter === 'unassigned' }" @click="inboxAssignmentFilter = 'unassigned'; loadInbox()">Unassigned</button><button v-if="authSnapshot?.user.id" type="button" :class="{ active: inboxAssignmentFilter === 'mine' }" @click="inboxAssignmentFilter = 'mine'; loadInbox()">Mine</button></div>
           <article v-if="selectedInboxConversation?.notes?.length" class="panel inbox-notes-panel"><div class="panel-heading"><div><p class="eyebrow">Staff only</p><h3>Internal notes</h3><p>These notes stay in the Inbox and are never sent to the visitor.</p></div></div><div class="internal-note-list"><div v-for="note in selectedInboxConversation.notes" :key="note.id" class="internal-note"><strong>{{ note.authorName || 'Team member' }}</strong><small>{{ new Date(note.createdAt).toLocaleString() }}</small><p>{{ note.content }}</p></div></div></article>
           <div class="panel lead-filters"><label>Status<select v-model="inboxStatusFilter" @change="loadInbox"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option></select></label><label>Assignment<select v-model="inboxAssignmentFilter" @change="loadInbox"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span>{{ inboxConversations.length }} conversation{{ inboxConversations.length === 1 ? '' : 's' }} · {{ inboxUnreadCount }} unread visitor message{{ inboxUnreadCount === 1 ? '' : 's' }}</span></div>
-          <div class="dashboard-grid conversation-inbox-grid"><article class="panel table-panel"><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div v-if="!inboxConversations.length" class="diagnostics-empty">No conversations match this view.</div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'AI_ACTIVE' ? 'new' : 'qualified']">{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount"> · {{ conversation.unreadCount }}</b></span><small>{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading"><div><p class="eyebrow">Conversation detail</p><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} · {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div class="inbox-message-thread"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="`${message.createdAt}-${index}`" :class="['message-thread-item', message.role]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}</small><p>{{ message.content }}</p></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><form class="question-form" @submit.prevent="sendInboxReply"><input v-model="inboxReply" type="text" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" /><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || inboxActionLoading">Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message"><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></article></div>
+          <div :class="['dashboard-grid', 'conversation-inbox-grid', { 'inbox-detail-open': selectedInboxConversation }]" ><article class="panel table-panel"><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div v-if="!inboxConversations.length" class="diagnostics-empty">No conversations match this view.</div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'AI_ACTIVE' ? 'new' : 'qualified']">{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount"> · {{ conversation.unreadCount }}</b></span><small>{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading"><div><button class="mobile-inbox-back" type="button" @click="closeInboxConversation"><ArrowLeft :size="16" :stroke-width="1.8" aria-hidden="true" /> Back to Inbox</button><p class="eyebrow">Conversation detail</p><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} · {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div class="inbox-message-thread"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="`${message.createdAt}-${index}`" :class="['message-thread-item', message.role]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}</small><p>{{ message.content }}</p></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><form class="question-form" @submit.prevent="sendInboxReply"><input v-model="inboxReply" type="text" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" /><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || inboxActionLoading">Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message"><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></article></div>
         </div>
 
         <div v-else-if="view === 'team'" class="view-content">
@@ -4933,8 +5200,9 @@ function startMarketingDemo() {
             <div class="integration-section-heading"><div><p class="eyebrow">Business integrations</p><h2>Connected apps</h2><p>Native and API-based connections power lead delivery, CRM sync, notifications, and other guaranteed workflows.</p></div><button class="primary-button small" type="button" @click="openNativeIntegrationForm('hubspot')">+ Add business integration</button></div>
             <div class="integration-card-grid">
               <article class="panel business-integration-card">
-                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo hubspot-logo"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path :d="siHubspot.path" /></svg></span><div><h3>HubSpot</h3><small>CRM · native API connection</small></div></div><span :class="['status-pill', hubspotIntegration?.connectionStatus === 'active' ? 'booked' : hubspotIntegration ? 'new' : 'qualified']">{{ hubspotIntegration ? formatLabel(hubspotIntegration.connectionStatus) : 'Not connected' }}</span></div>
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo hubspot-logo"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path :d="siHubspot.path" /></svg></span><div><h3>HubSpot</h3><small>CRM · native OAuth connection</small></div></div><span :class="['status-pill', hubspotIntegration?.connectionStatus === 'active' ? 'booked' : hubspotIntegration ? 'new' : 'qualified']">{{ hubspotIntegration?.connectionStatus === 'active' ? 'Connected ✓' : hubspotIntegration?.connectionStatus === 'error' ? 'Needs attention' : hubspotIntegration ? 'Connecting…' : 'Not connected' }}</span></div>
                 <p class="integration-card-description">Send captured lead context to HubSpot while FrontDeskWise remains the source of truth.</p>
+                <p v-if="hubspotIntegration?.accountName" class="integration-account-line">Account: {{ hubspotIntegration.accountName }}</p>
                 <div class="integration-subsection"><div class="integration-subsection-heading"><strong>CRM Sync</strong><span>{{ hubspotIntegration ? (hubspotIntegration.connectionStatus === 'active' ? 'Connected securely' : 'Needs attention') : 'Connect to enable delivery' }}</span></div><div class="integration-capability-list"><div><span>Create and update contacts</span><b :class="hubspotIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ hubspotIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Send lead data and lifecycle fields</span><b :class="hubspotIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ hubspotIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div><div><span>Attach conversation context</span><b :class="hubspotIntegration?.connectionStatus === 'active' ? 'capability-check' : 'capability-pending'">{{ hubspotIntegration?.connectionStatus === 'active' ? '✓' : '—' }}</b></div></div><div v-if="hubspotIntegration" class="integration-sync-summary"><span>{{ hubspotIntegration.sync.synced }} synced</span><span v-if="hubspotIntegration.sync.pending">{{ hubspotIntegration.sync.pending }} pending</span><span v-if="hubspotIntegration.sync.failed">{{ hubspotIntegration.sync.failed }} failed</span></div></div>
                 <div class="integration-subsection ai-access-subsection"><div class="integration-subsection-heading"><strong>AI Access</strong><span>{{ hubspotMcpConnection ? `${hubspotMcpConnection.tools.filter((tool) => tool.allowed).length} tools enabled` : 'Optional · MCP not connected' }}</span></div><div class="integration-capability-list"><div><span>Search contacts</span><b :class="mcpHasTool(hubspotMcpConnection, ['contact', 'search']) ? 'capability-check' : 'capability-pending'">{{ mcpHasTool(hubspotMcpConnection, ['contact', 'search']) ? '✓' : '—' }}</b></div><div><span>Read deals and tasks</span><b :class="mcpHasTool(hubspotMcpConnection, ['deal', 'task']) ? 'capability-check' : 'capability-pending'">{{ mcpHasTool(hubspotMcpConnection, ['deal', 'task']) ? '✓' : '—' }}</b></div><div><span>Create follow-up task</span><b :class="mcpHasTool(hubspotMcpConnection, ['task', 'create']) ? 'capability-check' : 'capability-pending'">{{ mcpHasTool(hubspotMcpConnection, ['task', 'create']) ? '✓' : '—' }}</b></div></div><small class="integration-subsection-note">AI access is configured separately below. MCP permissions never replace deterministic completion connectors.</small></div>
                 <p v-if="hubspotIntegration?.lastError" class="form-error">{{ hubspotIntegration.lastError }}</p>
@@ -4952,7 +5220,7 @@ function startMarketingDemo() {
               <article class="panel business-integration-card integration-card-muted"><div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><CalendarCheck :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Booking tools</h3><small>Calendly / custom booking endpoint</small></div></div><span class="status-pill qualified">Action connector</span></div><p class="integration-card-description">Keep bookings deterministic. Configure a booking link or supported completion connector inside Actions so the customer-facing confirmation stays reliable.</p><div class="integration-subsection"><div class="integration-subsection-heading"><strong>Completion actions</strong><span>Configured in Actions</span></div><div class="integration-capability-list"><div><span>Booking links</span><b class="capability-check">✓</b></div><div><span>Vendor HTTP connectors</span><b class="capability-check">✓</b></div><div><span>Lead saved before booking delivery</span><b class="capability-check">✓</b></div></div></div><div class="integration-card-actions"><button class="outline-button small" type="button" @click="view = 'actions'">Configure in Actions →</button></div></article>
             </div>
 
-            <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>Connect a business integration</h3><p>FrontDeskWise tests the connection before saving credentials. Secrets are encrypted server-side and never returned to the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : 'Automation webhook'" /></label><label v-if="integrationProvider === 'hubspot'" class="integration-connect-wide">Private app access token <span class="optional">encrypted · never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the token from HubSpot" /><small>Use a HubSpot private app token for this connection. OAuth can be added provider-by-provider without changing the connector or safety model.</small></label><template v-else><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : 'Test & connect securely →' }}</button></div></div>
+            <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>Connect a business integration</h3><p>FrontDeskWise keeps OAuth credentials server-side, encrypted at rest, and out of the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : 'Automation webhook'" /></label><div v-if="integrationProvider === 'hubspot' && !integrationManualMode" class="integration-connect-wide integration-oauth-callout"><strong>Connect with HubSpot OAuth</strong><p>Authorize FrontDeskWise to create or update contacts in the selected HubSpot account. You will return here after authorization.</p><button class="primary-button small" type="button" :disabled="integrationLoading" @click="connectIntegration">{{ integrationLoading ? 'Opening HubSpot…' : 'Connect HubSpot' }}</button><button class="text-button" type="button" @click="integrationManualMode = true">Advanced / Manual connection</button></div><label v-if="integrationProvider === 'hubspot' && integrationManualMode" class="integration-connect-wide">Private app or service key <span class="optional">encrypted · advanced</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the provider token" /><small>Use this only for an account-local manual connection. Customer installs should use OAuth.</small></label><template v-else-if="integrationProvider === 'webhook'"><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button v-if="integrationProvider === 'webhook' || integrationManualMode" class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : 'Test & connect securely →' }}</button></div></div>
           </section>
 
           <section class="integration-section mcp-section">
@@ -5011,15 +5279,16 @@ function startMarketingDemo() {
           <p v-if="billingError" class="form-error">{{ billingError }}</p>
           <p v-if="billingMessage" class="saved-message">✓ {{ billingMessage }}</p>
           <template v-if="billingSnapshot">
+            <div v-if="billingSnapshot.billing.providerCustomerId" class="billing-portal-callout"><div><p class="eyebrow">Subscription management</p><strong>{{ billingSnapshot.billing.status === 'active' ? 'Subscription is active — manage below.' : 'Manage your billing details in the Stripe portal.' }}</strong><p>Update payment methods, view invoices, or manage your subscription securely.</p></div><button class="outline-button small" type="button" :disabled="billingLoading" @click="openBillingPortal">Manage billing →</button></div>
             <div v-if="billingSnapshot.billing.status === 'grace'" class="billing-alert warning">Payment needs attention. Your organization remains available until {{ formatBillingDate(billingSnapshot.billing.graceEndAt) }}.</div>
             <div v-else-if="billingSnapshot.billing.status === 'cancelled' || billingSnapshot.billing.status === 'paused'" class="billing-alert danger">Billing is {{ billingSnapshot.billing.status }}. Existing data remains visible, but new paid actions and businesses are paused until billing is restored.</div>
             <div class="billing-summary-grid">
-              <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Current period ends {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small></article>
+              <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next payment: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small></article>
               <article class="panel billing-status-card"><p class="eyebrow">Business capacity</p><strong class="billing-big-number">{{ activeOrganization?.businesses.length ?? 0 }} <span>/ {{ billingSnapshot.billing.plan.maxBusinesses }}</span></strong><p>Businesses in this organization</p><div class="metric-progress"><span :style="{ width: `${Math.min(100, ((activeOrganization?.businesses.length ?? 0) / billingSnapshot.billing.plan.maxBusinesses) * 100)}%` }"></span></div></article>
               <article class="panel billing-status-card"><p class="eyebrow">Last 30 days</p><div class="billing-usage-stats"><span><strong>{{ billingSnapshot.usageLast30Days.conversations }}</strong> conversations</span><span><strong>{{ billingSnapshot.usageLast30Days.leads }}</strong> leads</span><span><strong>{{ billingSnapshot.usageLast30Days.bookings }}</strong> bookings</span></div></article>
             </div>
             <div class="section-toolbar billing-plans-heading"><div><p class="eyebrow">Flexible plans</p><h2>Choose the right operating level</h2><p>Pricing is organization-level. Client-specific founding terms are represented as a plan override, not a special code path.</p></div></div>
-            <div class="billing-plan-grid"><article v-for="plan in billingSnapshot.plans" :key="plan.key" :class="['panel', 'billing-plan-card', { selected: plan.key === billingSnapshot.billing.planKey }]" ><div class="billing-plan-top"><h3>{{ plan.displayName }}</h3><span v-if="plan.key === billingSnapshot.billing.planKey" class="status-pill booked">Current</span></div><strong class="billing-price">{{ formatPlanPrice(plan) }}<small v-if="plan.amountCents !== null">/mo</small></strong><p>{{ plan.description }}</p><div class="billing-plan-meta">Up to {{ plan.maxBusinesses }} {{ plan.maxBusinesses === 1 ? 'business' : 'businesses' }}</div><button v-if="plan.key !== billingSnapshot.billing.planKey" class="primary-button small" type="button" :disabled="billingLoading || !billingSnapshot.stripeConfigured || !plan.checkoutReady" @click="startCheckout(plan)">{{ !billingSnapshot.stripeConfigured ? 'Contact support' : plan.checkoutReady ? 'Start subscription →' : 'Unavailable' }}</button><span v-else class="saved-message">✓ Active plan</span></article></div>
+            <div class="billing-plan-grid"><article v-for="plan in billingSnapshot.plans" :key="plan.key" :class="['panel', 'billing-plan-card', { selected: plan.key === billingSnapshot.billing.planKey }]" ><div class="billing-plan-top"><h3>{{ plan.displayName }}</h3><span v-if="plan.key === billingSnapshot.billing.planKey" class="status-pill booked">Current</span></div><strong class="billing-price">{{ formatPlanPrice(plan) }}<small v-if="plan.amountCents !== null">/mo</small></strong><p>{{ plan.description }}</p><div class="billing-plan-meta">Up to {{ plan.maxBusinesses }} {{ plan.maxBusinesses === 1 ? 'business' : 'businesses' }}</div><button v-if="plan.key !== billingSnapshot.billing.planKey" class="primary-button small" type="button" :disabled="billingLoading || !billingSnapshot.stripeConfigured || !plan.checkoutReady" @click="startCheckout(plan)">{{ !billingSnapshot.stripeConfigured ? 'Contact support' : plan.checkoutReady ? (billingSnapshot.billing.status === 'active' ? 'Change to this plan →' : 'Start subscription →') : 'Unavailable' }}</button><span v-else class="saved-message">✓ Active plan</span></article></div>
             <p v-if="!billingSnapshot.stripeConfigured" class="billing-note">Online subscription checkout is not available for this workspace yet. <a href="mailto:hello@frontdeskwise.com">Contact support</a> to activate a plan.</p>
           </template>
           <article v-else class="panel empty-view"><div class="empty-icon"><DollarSign :size="30" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ billingError ? 'Billing unavailable' : 'Billing is loading' }}</h2><p>{{ billingError || 'Loading your organization plan and usage.' }}</p><button class="outline-button small" type="button" @click="loadBilling">{{ billingError ? 'Retry' : 'Refresh' }}</button></article>
@@ -5033,7 +5302,7 @@ function startMarketingDemo() {
             <div class="ds-stat-grid admin-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Building2 :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizations.length }}</strong><small>Organizations</small><em>{{ adminTrialCount }} on trial</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><UserCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminLeadTotal }}</strong><small>Leads captured</small><em>Across all tenants</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminConversationTotal }}</strong><small>Conversations</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminPausedCount + adminFailedDemoCount }}</strong><small>Needs attention</small><em>{{ adminDisabledUserCount }} disabled users</em></article></div>
             <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'installation-support'"><span>New installation requests</span><strong>{{ installationSupportSummary.new }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
           </template>
-          <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
+          <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }} · {{ organization.mrrAmountCents === null ? 'No MRR' : `$${(organization.mrrAmountCents / 100).toFixed(0)} MRR` }}</small><small v-if="organization.lastPaymentStatus || organization.cancelAtPeriodEnd">{{ organization.lastPaymentStatus ? `Payment ${organization.lastPaymentStatus}` : '' }}{{ organization.cancelAtPeriodEnd ? ' · cancellation scheduled' : '' }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
           <template v-if="adminSection === 'business-detail'">
             <div v-if="adminBusinessDetailLoading" class="ds-card admin-detail-loading">Loading business detail…</div>
             <template v-else-if="adminBusinessDetail">
@@ -5048,7 +5317,8 @@ function startMarketingDemo() {
               <div class="section-toolbar admin-detail-toolbar"><div><p class="eyebrow">Organization detail</p><h2>{{ adminOrganizationDetail.organization.name }}</h2><p>{{ adminOrganizationDetail.organization.slug }} · inspect business health and apply audited billing interventions.</p></div><div class="toolbar-actions"><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminDetailBillingAction('trial')">Extend trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminDetailBillingAction('suspend')">Suspend</button><button class="outline-button small" type="button" @click="adminSection = 'organizations'">← Back</button></div></div>
               <p v-if="adminBillingMessage" class="saved-message">✓ {{ adminBillingMessage }}</p>
               <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><DollarSign :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.organization.billing.plan.displayName }}</strong><small>Current plan</small><em>{{ adminOrganizationDetail.organization.billing.status }}</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><Building2 :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.businesses.length }} / {{ adminOrganizationDetail.organization.billing.plan.maxBusinesses }}</strong><small>Business capacity</small><em>{{ adminOrganizationDetail.organization.billing.access.allowed ? 'Write access' : 'Read-only' }}</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><UserCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.businesses.reduce((total, business) => total + business.leadCount, 0) }}</strong><small>Leads captured</small><em>Across businesses</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.businesses.reduce((total, business) => total + business.conversationCount, 0) }}</strong><small>Conversations</small><em>{{ adminOrganizationDetail.owners.length }} members</em></article></div>
-              <div class="admin-detail-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Businesses & access</p><h2>Business health</h2><p>Review ownership, billing projection, source coverage, and activity before taking action.</p></div></div><div v-if="!adminOrganizationDetail.businesses.length" class="diagnostics-empty">No businesses are attached to this organization.</div><div v-for="business in adminOrganizationDetail.businesses" :key="business.id" class="admin-business-detail-row"><div><strong>{{ business.name }}</strong><small>{{ business.websiteUrl }} · {{ business.slug }}</small></div><div class="admin-business-metrics"><span>{{ business.sourceCount }} sources</span><span>{{ business.leadCount }} leads</span><span>{{ business.conversationCount }} conversations</span></div><div class="admin-business-status"><span :class="['status-pill', business.ownershipStatus === 'verified' ? 'booked' : 'qualified']">{{ business.ownershipStatus }}</span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ business.billingStatus }}</span></div><button v-if="business.ownershipStatus !== 'verified'" class="outline-button small" type="button" :disabled="adminLoading" @click="approveAdminBusiness(business)">Approve ownership</button><span v-else class="saved-message">✓ Verified</span></div><div class="detail-subsection"><p class="eyebrow">Organization members</p><div v-for="owner in adminOrganizationDetail.owners" :key="`${owner.email}-${owner.role}`" class="detail-list-row"><span><strong>{{ owner.name || 'Unnamed user' }}</strong><small>{{ owner.email }}</small></span><span class="status-pill qualified">{{ owner.role }}</span></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Billing intervention</p><h2>Apply a controlled override</h2><p>Use a documented reason. This updates the organization and projected business billing state.</p></div></div><form class="admin-detail-form" @submit.prevent="saveAdminPlanOverride"><label>Plan<select v-model="adminOverridePlanKey"><option value="starter">Starter</option><option value="growth">Growth</option><option value="multi_business">Multi-Business</option><option value="portfolio">Portfolio</option></select></label><div class="admin-detail-form-grid"><label>Interval<select v-model="adminOverrideInterval"><option value="month">Monthly</option><option value="year">Yearly</option></select></label><label>Amount (cents)<input v-model="adminOverrideAmountCents" type="number" min="0" step="1" inputmode="numeric" /></label><label>Max businesses<input v-model="adminOverrideMaxBusinesses" type="number" min="1" step="1" inputmode="numeric" /></label></div><label>Reason<textarea v-model="adminOverrideReason" rows="3" placeholder="Founding customer pricing, service recovery, or approved exception"></textarea></label><button class="primary-button small" type="submit" :disabled="adminLoading">{{ adminLoading ? 'Saving…' : 'Save intervention →' }}</button></form><div class="billing-intervention-note"><strong>Current billing</strong><span>{{ adminOrganizationDetail.organization.billing.status }} · {{ adminOrganizationDetail.organization.billing.plan.displayName }} · {{ adminOrganizationDetail.organization.billing.amountCents === null ? 'No amount' : `$${(adminOrganizationDetail.organization.billing.amountCents / 100).toFixed(2)}` }}</span><small v-if="adminOrganizationDetail.organization.billing.override">Existing override: {{ adminOrganizationDetail.organization.billing.override.reason }}</small></div></article></div>
+              <div class="admin-detail-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Businesses & access</p><h2>Business health</h2><p>Review ownership, billing projection, source coverage, and activity before taking action.</p></div></div><div v-if="!adminOrganizationDetail.businesses.length" class="diagnostics-empty">No businesses are attached to this organization.</div><div v-for="business in adminOrganizationDetail.businesses" :key="business.id" class="admin-business-detail-row"><div><strong>{{ business.name }}</strong><small>{{ business.websiteUrl }} · {{ business.slug }}</small></div><div class="admin-business-metrics"><span>{{ business.sourceCount }} sources</span><span>{{ business.leadCount }} leads</span><span>{{ business.conversationCount }} conversations</span></div><div class="admin-business-status"><span :class="['status-pill', business.ownershipStatus === 'verified' ? 'booked' : 'qualified']">{{ business.ownershipStatus }}</span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ business.billingStatus }}</span></div><button v-if="business.ownershipStatus !== 'verified'" class="outline-button small" type="button" :disabled="adminLoading" @click="approveAdminBusiness(business)">Approve ownership</button><span v-else class="saved-message">✓ Verified</span></div><div class="detail-subsection"><p class="eyebrow">Organization members</p><div v-for="owner in adminOrganizationDetail.owners" :key="`${owner.email}-${owner.role}`" class="detail-list-row"><span><strong>{{ owner.name || 'Unnamed user' }}</strong><small>{{ owner.email }}</small></span><span class="status-pill qualified">{{ owner.role }}</span></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Billing intervention</p><h2>Apply a controlled override</h2><p>Use a documented reason. This updates the organization and projected business billing state.</p></div></div><form class="admin-detail-form" @submit.prevent="saveAdminPlanOverride"><label>Plan<select v-model="adminOverridePlanKey"><option value="starter">Starter</option><option value="growth">Growth</option><option value="multi_business">Multi-Business</option><option value="portfolio">Portfolio</option></select></label><div class="admin-detail-form-grid"><label>Interval<select v-model="adminOverrideInterval"><option value="month">Monthly</option><option value="year">Yearly</option></select></label><label>Amount (cents)<input v-model="adminOverrideAmountCents" type="number" min="0" step="1" inputmode="numeric" /></label><label>Max businesses<input v-model="adminOverrideMaxBusinesses" type="number" min="1" step="1" inputmode="numeric" /></label></div><label>Reason<textarea v-model="adminOverrideReason" rows="3" placeholder="Founding customer pricing, service recovery, or approved exception"></textarea></label><button class="primary-button small" type="submit" :disabled="adminLoading">{{ adminLoading ? 'Saving…' : 'Save intervention →' }}</button></form><div class="billing-intervention-note"><strong>Current billing</strong><span>{{ adminOrganizationDetail.organization.billing.status }} · {{ adminOrganizationDetail.organization.billing.plan.displayName }} · {{ adminOrganizationDetail.organization.billing.amountCents === null ? 'No amount' : `$${(adminOrganizationDetail.organization.billing.amountCents / 100).toFixed(2)}` }}</span><small v-if="adminOrganizationDetail.organization.billing.override">Existing override: {{ adminOrganizationDetail.organization.billing.override.reason }}</small><small v-if="adminOrganizationDetail.organization.billing.providerSubscriptionId">Stripe subscription {{ adminOrganizationDetail.organization.billing.providerSubscriptionId }} · {{ adminOrganizationDetail.organization.billing.lastPaymentStatus || 'payment pending' }}<span v-if="adminOrganizationDetail.organization.billing.cancelAtPeriodEnd"> · cancellation scheduled</span></small></div></article></div>
+              <article class="panel table-panel admin-timeline-panel"><div class="panel-heading"><div><p class="eyebrow">Subscription event timeline</p><h2>Billing audit</h2><p>Internal Stripe and lifecycle milestones for troubleshooting.</p></div></div><div v-if="!adminOrganizationDetail.billingTimeline.length" class="diagnostics-empty">No billing events recorded yet.</div><div v-for="event in adminOrganizationDetail.billingTimeline" :key="event.eventKey" class="detail-list-row"><span><strong>{{ formatLabel(event.eventName) }}</strong><small>{{ event.occurredAt ? new Date(event.occurredAt).toLocaleString() : 'Unknown time' }}</small></span><span class="status-pill" :class="event.status === 'sent' ? 'booked' : event.status === 'failed' ? 'new' : 'qualified'">{{ event.status }}</span></div></article>
             </template>
           </template>
           <article v-if="adminSection === 'users'" class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users & access</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
@@ -5156,8 +5426,9 @@ function startMarketingDemo() {
         <label>Email<input v-model="authEmail" type="email" autocomplete="email" required placeholder="name@company.com" /></label>
         <label v-if="authMode !== 'forgot'">Password<input v-model="authPassword" type="password" autocomplete="new-password" minlength="6" required placeholder="At least 6 characters" /></label>
         <label v-if="authMode === 'signup'">Organization name <span class="optional">optional</span><input v-model="authOrganizationName" type="text" placeholder="Your company" /></label>
-        <p v-if="authError" class="form-error">{{ authError }}</p>
-        <button class="primary-button auth-submit" type="submit" :disabled="authLoading">{{ authLoading ? 'Working…' : authMode === 'signup' ? 'Create account →' : authMode === 'forgot' ? 'Send reset instructions' : 'Sign in →' }}</button>
+        <div v-if="authSuccess" class="auth-success" role="status" aria-live="polite"><CircleCheck :size="20" :stroke-width="2" aria-hidden="true" /><span><strong>Reset email sent</strong><small>{{ authSuccess }}</small></span></div>
+        <p v-if="authError" class="form-error" role="alert">{{ authError }}</p>
+        <button class="primary-button auth-submit" type="submit" :disabled="authLoading">{{ authLoading ? 'Working…' : authMode === 'signup' ? 'Create account →' : authMode === 'forgot' ? (authSuccess ? 'Send again' : 'Send reset instructions') : 'Sign in →' }}</button>
         <template v-if="authMode !== 'forgot'"><div class="auth-divider"><span>or</span></div><button class="google-button" type="button" :disabled="authLoading" @click="submitGoogleAuth"><span class="google-mark">G</span> Continue with Google</button></template>
         <button v-if="authMode === 'signin'" class="text-button auth-switch" type="button" @click="openAuth('forgot')">Forgot password?</button>
         <button class="text-button auth-switch" type="button" @click="openAuth(authMode === 'signup' ? 'signin' : 'signup')">{{ authMode === 'signup' ? 'Already have an account? Sign in' : authMode === 'forgot' ? 'Back to sign in' : 'New to FrontDeskWise? Create an account' }}</button>

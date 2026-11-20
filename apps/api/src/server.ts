@@ -88,13 +88,23 @@ import {
   integrationEncryptionConfigured,
   sendWebhookEvent,
   validateWebhookUrl,
+  type HubSpotCredentials,
   type CrmLeadPayload,
 } from "./crm.js";
+import {
+  buildHubSpotAuthorizationUrl,
+  exchangeHubSpotAuthorizationCode,
+  hubSpotOAuthConfigured,
+  hubSpotOAuthRedirectUri,
+  refreshHubSpotAccessToken,
+  revokeHubSpotRefreshToken,
+  type HubSpotOAuthTokenSet,
+} from "./hubspot-oauth.js";
 import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from "./mcp.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
-app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
+await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const pool = createPoolFromEnv();
@@ -220,6 +230,10 @@ type BillingState = {
   provider: string | null;
   providerCustomerId: string | null;
   providerSubscriptionId: string | null;
+  stripeStatus?: string | null;
+  checkoutStatus?: string | null;
+  cancelAtPeriodEnd?: boolean;
+  lastPaymentStatus?: string | null;
 };
 
 type FirebaseAuthUser = {
@@ -645,6 +659,10 @@ function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+function oauthStateHash(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
 function optionalString(value: unknown, maxLength: number): string | null {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, maxLength) : null;
 }
@@ -707,12 +725,14 @@ async function queueLifecycleEvent(input: {
   recipientEmails?: string[];
   delaySeconds?: number;
   payload?: Record<string, unknown>;
-}): Promise<void> {
+}): Promise<number> {
   try {
-    await emitLifecycleEvent(pool, input);
-    scheduleLifecycleMessaging(250);
+    const queued = await emitLifecycleEvent(pool, input);
+    scheduleLifecycleMessaging(250, pool);
+    return queued;
   } catch (error) {
     app.log.warn({ eventType: input.eventType, eventKey: input.eventKey, error: error instanceof Error ? error.message : "unknown messaging error" }, "Lifecycle message could not be queued");
+    return 0;
   }
 }
 
@@ -844,6 +864,13 @@ function organizationBillingPayload(row: Record<string, unknown>): Record<string
     providerCustomerId: typeof row.stripe_customer_id === "string" ? row.stripe_customer_id : null,
     providerSubscriptionId: typeof row.stripe_subscription_id === "string" ? row.stripe_subscription_id : null,
     providerPriceId: typeof row.stripe_price_id === "string" ? row.stripe_price_id : null,
+    stripeStatus: typeof row.stripe_subscription_status === "string" ? row.stripe_subscription_status : null,
+    checkoutStatus: typeof row.stripe_checkout_status === "string" ? row.stripe_checkout_status : null,
+    checkoutSessionId: typeof row.stripe_checkout_session_id === "string" ? row.stripe_checkout_session_id : null,
+    pendingPlanKey: typeof row.pending_plan_key === "string" ? row.pending_plan_key : null,
+    pendingBillingInterval: typeof row.pending_billing_interval === "string" ? row.pending_billing_interval : null,
+    cancelAtPeriodEnd: row.cancel_at_period_end === true,
+    lastPaymentStatus: typeof row.last_payment_status === "string" ? row.last_payment_status : null,
     amountCents: effectiveAmount === null || effectiveAmount === undefined ? null : Number(effectiveAmount),
     currency: String(row.billing_currency ?? "usd"),
     access: organizationBillingAccess(row),
@@ -941,6 +968,9 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
               o.trial_start_at, o.trial_end_at, o.current_period_start_at,
               o.current_period_end_at, o.grace_end_at, o.billing_provider,
               o.stripe_customer_id, o.stripe_subscription_id, o.stripe_price_id,
+              o.stripe_checkout_session_id, o.stripe_checkout_status, o.pending_plan_key,
+              o.pending_billing_interval, o.stripe_subscription_status, o.cancel_at_period_end,
+              o.last_payment_status,
               o.billing_amount_cents, o.billing_currency,
               bp.display_name as plan_display_name, bp.description as plan_description,
               bp.monthly_amount_cents as plan_amount_cents, bp.max_businesses,
@@ -2451,18 +2481,46 @@ async function persistLead(business: Business, lead: Lead): Promise<Lead> {
 
 async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> {
   if (!pool) return;
-  const result = await pool.query<{ occurrence_count: number }>(
-    `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, last_seen_at, intent, reason)
-     values ($1, $2, 1, $3, $4, $5, $6, $7)
-     on conflict (business_id, question) do update set
-       occurrence_count = knowledge_gaps.occurrence_count + 1,
-       last_seen_at = excluded.last_seen_at,
-       intent = excluded.intent,
-       reason = excluded.reason
-     returning occurrence_count`,
-    [business.id, gap.question, gap.status, gap.approvedAnswer, gap.lastSeenAt, gap.intent, gap.reason],
-  );
-  gap.occurrenceCount = Number(result.rows[0].occurrence_count);
+  try {
+    const result = await pool.query<{ occurrence_count: number }>(
+      `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, last_seen_at, intent, reason)
+       values ($1, $2, 1, $3, $4, $5, $6, $7)
+       on conflict (business_id, question) do update set
+         occurrence_count = knowledge_gaps.occurrence_count + 1,
+         last_seen_at = excluded.last_seen_at,
+         intent = excluded.intent,
+         reason = excluded.reason
+       returning occurrence_count`,
+      [business.id, gap.question, gap.status, gap.approvedAnswer, gap.lastSeenAt, gap.intent, gap.reason],
+    );
+    gap.occurrenceCount = Number(result.rows[0].occurrence_count);
+    return;
+  } catch (error) {
+    if (!isMissingDatabaseColumn(error)) {
+      app.log.error({ error, businessId: business.id }, "Knowledge-gap diagnostics could not be persisted");
+      return;
+    }
+    // Keep answer requests compatible with an API rolling out ahead of the
+    // diagnostics migration. The repair migration will add these fields, but
+    // the legacy write still records the question while that catches up.
+    app.log.warn({ businessId: business.id }, "Knowledge-gap diagnostics columns are not available yet; using legacy schema");
+  }
+
+  try {
+    const legacyResult = await pool.query<{ occurrence_count: number }>(
+      `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, last_seen_at)
+       values ($1, $2, 1, $3, $4, $5)
+       on conflict (business_id, question) do update set
+         occurrence_count = knowledge_gaps.occurrence_count + 1,
+         last_seen_at = excluded.last_seen_at
+       returning occurrence_count`,
+      [business.id, gap.question, gap.status, gap.approvedAnswer, gap.lastSeenAt],
+    );
+    gap.occurrenceCount = Number(legacyResult.rows[0].occurrence_count);
+  } catch (error) {
+    // Diagnostics must never turn a valid customer answer into a 500.
+    app.log.error({ error, businessId: business.id }, "Legacy knowledge-gap diagnostics could not be persisted");
+  }
 }
 
 async function resolveKnowledgeGap(business: Business, question: string, approvedAnswer: string): Promise<KnowledgeGap> {
@@ -3092,9 +3150,14 @@ function billingReturnUrl(kind: "success" | "cancel" | "portal"): string {
     : kind === "cancel"
       ? process.env.FRONTDESKWISE_STRIPE_CANCEL_URL
       : process.env.FRONTDESKWISE_STRIPE_PORTAL_RETURN_URL;
-  if (configured?.trim()) return configured.trim();
+  if (configured?.trim()) {
+    const value = configured.trim();
+    return kind === "success" && !value.includes("CHECKOUT_SESSION_ID")
+      ? `${value}${value.includes("?") ? "&" : "?"}session_id={CHECKOUT_SESSION_ID}`
+      : value;
+  }
   const origin = (process.env.WEB_ORIGIN ?? "http://localhost:5173").split(",")[0].trim().replace(/\/$/, "");
-  return `${origin}/?billing=${kind}`;
+  return kind === "success" ? `${origin}/?billing=success&session_id={CHECKOUT_SESSION_ID}` : `${origin}/?billing=${kind}`;
 }
 
 function requireStripe(): Stripe {
@@ -3140,7 +3203,8 @@ function stripeBillingStatus(status: string): { status: BillingStatus; graceEndA
   if (status === "past_due" || status === "incomplete") {
     return { status: "grace", graceEndAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString() };
   }
-  if (status === "paused" || status === "unpaid" || status === "canceled") return { status: status === "paused" ? "paused" : "cancelled", graceEndAt: null };
+  if (status === "paused" || status === "unpaid") return { status: "paused", graceEndAt: null };
+  if (status === "canceled" || status === "incomplete_expired") return { status: "cancelled", graceEndAt: null };
   return { status: "grace", graceEndAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString() };
 }
 
@@ -3263,7 +3327,7 @@ async function resolveStripePrice(organizationId: string, planKey: string, inter
             opo.currency as override_currency
      from billing_plans bp
      left join organization_plan_overrides opo on opo.organization_id = $1 and opo.plan_key = bp.plan_key and (opo.ends_at is null or opo.ends_at > now())
-     where bp.plan_key = $2 and bp.active = true`,
+     where bp.plan_key = $2 and bp.active = true and bp.public = true`,
     [organizationId, planKey],
   );
   if (!result.rowCount) throw httpError(404, "That billing plan is not available");
@@ -3281,44 +3345,148 @@ async function resolveStripePrice(organizationId: string, planKey: string, inter
   };
 }
 
-async function updateOrganizationFromStripeSubscription(organizationId: string, subscription: Record<string, unknown>): Promise<void> {
-  if (!pool) return;
+type StripeSubscriptionSyncResult = {
+  previousStatus: BillingStatus;
+  status: BillingStatus;
+  previousPlanKey: string;
+  planKey: string;
+  subscriptionId: string | null;
+  stripeStatus: string;
+  cancelAtPeriodEnd: boolean;
+  currentPeriodEndAt: string | null;
+  changed: boolean;
+  ignoredAsStale: boolean;
+};
+
+async function updateOrganizationFromStripeSubscription(
+  organizationId: string,
+  subscription: Record<string, unknown>,
+  eventCreatedAt?: number,
+  eventId?: string,
+): Promise<StripeSubscriptionSyncResult | null> {
+  if (!pool) return null;
   const price = asRecord(asRecord(subscription.items).data instanceof Array ? (asRecord(subscription.items).data as unknown[])[0] : null);
   const priceObject = asRecord(price.price);
   const metadata = asRecord(subscription.metadata);
-  const statusResult = stripeBillingStatus(String(subscription.status ?? "active"));
+  const stripeStatus = String(subscription.status ?? "active");
+  const statusResult = stripeBillingStatus(stripeStatus);
   const interval = priceObject.recurring && typeof priceObject.recurring === "object"
     && (priceObject.recurring as { interval?: unknown }).interval === "year" ? "year" : "month";
+  const subscriptionId = stripeObjectId(subscription.id);
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const current = await client.query<Record<string, unknown>>(
+      `select billing_status, plan_key, stripe_subscription_id, stripe_subscription_event_created_at,
+              stripe_subscription_status, cancel_at_period_end, last_payment_status, grace_end_at
+       from organizations where id = $1 for update`,
+      [organizationId],
+    );
+    if (!current.rowCount) {
+      await client.query("commit");
+      return null;
+    }
+    const currentRow = current.rows[0];
+    const currentEventCreatedAt = currentRow.stripe_subscription_event_created_at === null || currentRow.stripe_subscription_event_created_at === undefined
+      ? null : Number(currentRow.stripe_subscription_event_created_at);
+    if (eventCreatedAt !== undefined
+      && currentEventCreatedAt !== null
+      && eventCreatedAt < currentEventCreatedAt
+      && String(currentRow.stripe_subscription_id ?? "") === String(subscriptionId ?? "")) {
+      await client.query("commit");
+      return {
+        previousStatus: String(currentRow.billing_status ?? "trial") as BillingStatus,
+        status: String(currentRow.billing_status ?? "trial") as BillingStatus,
+        previousPlanKey: String(currentRow.plan_key ?? "starter"),
+        planKey: String(currentRow.plan_key ?? "starter"),
+        subscriptionId,
+        stripeStatus: String(currentRow.stripe_subscription_status ?? stripeStatus),
+        cancelAtPeriodEnd: currentRow.cancel_at_period_end === true,
+        currentPeriodEndAt: null,
+        changed: false,
+        ignoredAsStale: true,
+      };
+    }
+
+    let planKey = "";
+    if (priceObject.id) {
+      const plan = await client.query<{ plan_key: string }>(
+        `select plan_key from billing_plans
+         where stripe_monthly_price_id = $1 or stripe_yearly_price_id = $1 limit 1`,
+        [stripeObjectId(priceObject.id)],
+      );
+      planKey = plan.rows[0]?.plan_key ?? "";
+      if (!planKey) {
+        const override = await client.query<{ plan_key: string }>(
+          `select plan_key from organization_plan_overrides
+           where organization_id = $1 and stripe_price_id = $2
+             and (ends_at is null or ends_at > now()) limit 1`,
+          [organizationId, stripeObjectId(priceObject.id)],
+        );
+        planKey = override.rows[0]?.plan_key ?? "";
+      }
+    }
+    if (!planKey) planKey = stripeMetadataString(metadata, "plan_key", "planKey");
+    const previousStatus = String(currentRow.billing_status ?? "trial") as BillingStatus;
+    const previousPlanKey = String(currentRow.plan_key ?? "starter");
+    const cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
+    const currentPeriodEndAt = stripeTimestamp(subscription.current_period_end);
+    const paymentStillFailed = currentRow.last_payment_status === "failed"
+      && String(currentRow.stripe_subscription_id ?? "") === String(subscriptionId ?? "")
+      && statusResult.status === "active";
+    const effectiveStatusResult = paymentStillFailed
+      ? { status: "grace" as BillingStatus, graceEndAt: currentRow.grace_end_at ? toIso(currentRow.grace_end_at) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString() }
+      : statusResult;
     await client.query(
       `update organizations
        set billing_mode = 'live', billing_status = $2, plan_key = coalesce(nullif($3, ''), plan_key),
            billing_interval = $4, trial_start_at = coalesce(trial_start_at, $5), trial_end_at = $6,
            current_period_start_at = $7, current_period_end_at = $8, grace_end_at = $9,
            billing_provider = 'stripe', stripe_customer_id = $10, stripe_subscription_id = $11,
-           stripe_price_id = $12, billing_amount_cents = $13, billing_currency = $14, updated_at = now()
+           stripe_price_id = $12, billing_amount_cents = $13, billing_currency = $14,
+           stripe_subscription_status = $15, stripe_subscription_event_created_at = coalesce($16, stripe_subscription_event_created_at),
+           stripe_last_event_id = coalesce($17, stripe_last_event_id), cancel_at_period_end = $18,
+           stripe_checkout_status = case when stripe_checkout_status = 'open' then 'complete' else stripe_checkout_status end,
+           subscription_activated_at = case when $2 = 'active' and billing_status <> 'active' then coalesce(subscription_activated_at, now()) else subscription_activated_at end,
+           pending_plan_key = case when nullif($3, '') is null or pending_plan_key = nullif($3, '') then null else pending_plan_key end,
+           pending_billing_interval = case when nullif($3, '') is null or pending_plan_key is null then null else pending_billing_interval end,
+           updated_at = now()
        where id = $1`,
       [
         organizationId,
-        statusResult.status,
-        stripeMetadataString(metadata, "plan_key", "planKey"),
+        effectiveStatusResult.status,
+        planKey,
         interval,
         stripeTimestamp(subscription.trial_start),
         stripeTimestamp(subscription.trial_end),
         stripeTimestamp(subscription.current_period_start),
-        stripeTimestamp(subscription.current_period_end),
-        statusResult.graceEndAt,
+        currentPeriodEndAt,
+        effectiveStatusResult.graceEndAt,
         stripeObjectId(subscription.customer),
-        stripeObjectId(subscription.id),
+        subscriptionId,
         stripeObjectId(priceObject.id),
         priceObject.unit_amount === null || priceObject.unit_amount === undefined ? null : Number(priceObject.unit_amount),
         typeof priceObject.currency === "string" ? priceObject.currency : "usd",
+        stripeStatus,
+        eventCreatedAt ?? null,
+        eventId ?? null,
+        cancelAtPeriodEnd,
       ],
     );
     await syncOrganizationBillingToBusinesses(client, organizationId);
     await client.query("commit");
+    return {
+      previousStatus,
+      status: effectiveStatusResult.status,
+      previousPlanKey,
+      planKey: planKey || previousPlanKey,
+      subscriptionId,
+      stripeStatus,
+      cancelAtPeriodEnd,
+      currentPeriodEndAt,
+      changed: previousStatus !== effectiveStatusResult.status || previousPlanKey !== (planKey || previousPlanKey),
+      ignoredAsStale: false,
+    };
   } catch (error) {
     await client.query("rollback");
     throw error;
@@ -3457,7 +3625,7 @@ async function processIntegrationOutbox(): Promise<void> {
       if (!claim.rowCount) break;
       const outbox = claim.rows[0];
       const integrationResult = await pool.query<Record<string, unknown>>(
-        `select id, provider, encrypted_credentials
+        `select id, provider, auth_type, encrypted_credentials
          from crm_integrations where id = $1 and business_id = $2`,
         [outbox.integration_id, outbox.business_id],
       );
@@ -3484,7 +3652,11 @@ async function processIntegrationOutbox(): Promise<void> {
           delivery = await sendWebhookEvent(credentials, payload, String(outbox.idempotency_key));
         } else {
           if (!credentials.accessToken || !payload.lead) throw new Error("HubSpot credentials or lead payload are missing");
-          const adapter = createCrmAdapter("hubspot", credentials.accessToken);
+          const accessToken = await hubSpotAccessTokenForIntegration(String(outbox.integration_id), {
+            ...credentials,
+            accessToken: credentials.accessToken,
+          });
+          const adapter = createCrmAdapter("hubspot", accessToken);
           const contact = await adapter.upsertContact({
             email: payload.lead.email,
             phone: payload.lead.phone,
@@ -3713,7 +3885,7 @@ async function processActionOutbox(): Promise<void> {
         const integrationId = typeof outbox.integration_id === "string" ? outbox.integration_id : null;
         if (integrationId) {
           const integration = await pool.query<Record<string, unknown>>(
-            "select provider, encrypted_credentials from crm_integrations where id = $1 and business_id = $2",
+            "select provider, auth_type, encrypted_credentials from crm_integrations where id = $1 and business_id = $2",
             [integrationId, businessId],
           );
           if (!integration.rowCount) throw new Error("Action connector integration is no longer available");
@@ -3724,7 +3896,11 @@ async function processActionOutbox(): Promise<void> {
             config.endpoint = credentials.webhookUrl;
             config.signingSecret = credentials.signingSecret;
           } else if (provider === "hubspot") {
-            config.accessToken = credentials.accessToken;
+            if (!credentials.accessToken) throw new Error("HubSpot credentials are not configured");
+            config.accessToken = await hubSpotAccessTokenForIntegration(integrationId, {
+              ...credentials,
+              accessToken: credentials.accessToken,
+            });
           }
         }
         const connector = createActionConnector(provider, config as Omit<ActionConnectorSettings, "provider">);
@@ -3776,6 +3952,9 @@ function integrationPayload(row: Record<string, unknown>) {
     id: String(row.id),
     provider: String(row.provider),
     displayName: String(row.display_name),
+    authType: row.auth_type === "oauth" ? "oauth" : "pat",
+    accountId: typeof row.provider_account_id === "string" ? row.provider_account_id : null,
+    accountName: typeof row.provider_account_name === "string" ? row.provider_account_name : null,
     connectionStatus: String(row.connection_status),
     lastTestedAt: row.last_tested_at ? toIso(row.last_tested_at) : null,
     lastError: typeof row.last_error === "string" ? row.last_error : null,
@@ -3786,6 +3965,41 @@ function integrationPayload(row: Record<string, unknown>) {
       failed: Number(row.sync_failed ?? 0),
     },
   };
+}
+
+function hubSpotCredentialsFromTokenSet(tokenSet: HubSpotOAuthTokenSet, existing?: HubSpotCredentials): HubSpotCredentials {
+  return {
+    authType: "oauth",
+    accessToken: tokenSet.accessToken,
+    refreshToken: tokenSet.refreshToken,
+    expiresAt: tokenSet.expiresAt,
+    scopes: tokenSet.scopes.length ? tokenSet.scopes : existing?.scopes ?? [],
+    portalId: tokenSet.portalId ?? existing?.portalId ?? null,
+  };
+}
+
+async function hubSpotAccessTokenForIntegration(integrationId: string, credentials: HubSpotCredentials): Promise<string> {
+  if (!credentials.accessToken?.trim()) throw new Error("HubSpot credentials are not configured");
+  if (credentials.authType !== "oauth") return credentials.accessToken;
+  const expiresAt = credentials.expiresAt ? Date.parse(credentials.expiresAt) : Number.NaN;
+  const refreshNeeded = !Number.isFinite(expiresAt) || expiresAt - Date.now() <= 120_000;
+  if (!refreshNeeded) return credentials.accessToken;
+  if (!credentials.refreshToken) throw new Error("HubSpot authorization has expired; reconnect the integration");
+  const refreshed = await refreshHubSpotAccessToken(credentials.refreshToken);
+  const updated = hubSpotCredentialsFromTokenSet(refreshed, credentials);
+  if (pool) {
+    await pool.query(
+      `update crm_integrations
+       set encrypted_credentials = $2,
+           access_token_expires_at = $3,
+           provider_scopes = $4,
+           provider_account_id = coalesce($5, provider_account_id),
+           updated_at = now()
+       where id = $1`,
+      [integrationId, encryptIntegrationCredentials(updated), updated.expiresAt, updated.scopes, updated.portalId],
+    );
+  }
+  return updated.accessToken;
 }
 
 function mcpConnectionPayload(row: Record<string, unknown>) {
@@ -5521,17 +5735,24 @@ async function persistConversationExchange(
   await recordOrganizationUsage(business, "llm_requests");
   await recordModelUsage(business, result.modelUsage);
   if (result.knowledgeGap) {
-    await persistGap(business, result.knowledgeGap);
-    const handoffSettings = await loadHandoffNotificationSettings(business);
-    if (handoffSettings.notifyKnowledgeGap) {
-      await notifyStaff(business, conversation, {
-        type: "knowledge_gap",
-        title: "Answer gap needs review",
-        body: `${business.name} received a question without enough verified information.`,
-        handoffTrigger: "knowledge_gap",
-        intent: result.knowledgeGap.intent,
-        lastMessage: userContent,
-      });
+    try {
+      await persistGap(business, result.knowledgeGap);
+      const handoffSettings = await loadHandoffNotificationSettings(business);
+      if (handoffSettings.notifyKnowledgeGap) {
+        await notifyStaff(business, conversation, {
+          type: "knowledge_gap",
+          title: "Answer gap needs review",
+          body: `${business.name} received a question without enough verified information.`,
+          handoffTrigger: "knowledge_gap",
+          intent: result.knowledgeGap.intent,
+          lastMessage: userContent,
+        });
+      }
+    } catch (error) {
+      // Gap tracking and optional alerts are observability work; they must not
+      // make the visitor-facing answer fail when a schema or mail provider is
+      // temporarily unavailable.
+      app.log.error({ error, businessId: business.id }, "Knowledge-gap follow-up failed after answer was generated");
     }
   }
   return result;
@@ -5647,9 +5868,22 @@ async function findOrganizationIdForStripeEvent(object: Record<string, unknown>)
   if (!pool) return null;
   const metadata = asRecord(object.metadata);
   const metadataOrganizationId = stripeMetadataString(metadata, "organization_id", "organizationId") || null;
-  if (metadataOrganizationId) return metadataOrganizationId;
   const customerId = stripeObjectId(object.customer);
   const subscriptionId = stripeObjectId(object.subscription) ?? stripeObjectId(object.id);
+  if (metadataOrganizationId) {
+    const scoped = await pool.query<{ id: string; stripe_customer_id: string | null; stripe_subscription_id: string | null }>(
+      "select id, stripe_customer_id, stripe_subscription_id from organizations where id = $1",
+      [metadataOrganizationId],
+    );
+    if (!scoped.rowCount) return null;
+    const row = scoped.rows[0];
+    if ((row.stripe_customer_id && customerId && row.stripe_customer_id !== customerId)
+      || (row.stripe_subscription_id && subscriptionId && row.stripe_subscription_id !== subscriptionId)) {
+      app.log.warn({ organizationId: metadataOrganizationId, customerId, subscriptionId }, "Ignoring Stripe event with mismatched organization mapping");
+      return null;
+    }
+    return metadataOrganizationId;
+  }
   const result = await pool.query<{ id: string }>(
     `select id from organizations
      where ($1::text is not null and stripe_customer_id = $1)
@@ -5658,6 +5892,20 @@ async function findOrganizationIdForStripeEvent(object: Record<string, unknown>)
     [customerId, subscriptionId],
   );
   return result.rows[0]?.id ?? null;
+}
+
+async function authoritativeStripeSubscription(object: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const subscriptionId = stripeObjectId(object.id) ?? stripeObjectId(object.subscription);
+  if (!subscriptionId || !stripe) return object;
+  try {
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    return subscription as unknown as Record<string, unknown>;
+  } catch (error) {
+    // A deleted subscription may no longer be retrievable. The signed event
+    // payload is still authoritative for the deletion transition.
+    app.log.warn({ subscriptionId, error: error instanceof Error ? error.message : "unknown error" }, "Stripe subscription could not be reloaded; using webhook payload");
+    return object;
+  }
 }
 
 async function queueOrganizationLifecycleEvent(input: {
@@ -5675,19 +5923,101 @@ async function queueOrganizationLifecycleEvent(input: {
       [input.organizationId],
     );
   }
+  const organization = await pool.query<Record<string, unknown>>(
+    `select o.name, o.billing_amount_cents, o.billing_currency, o.current_period_end_at,
+            bp.display_name as plan_display_name, bp.monthly_amount_cents, bp.max_businesses,
+            coalesce(opo.amount_cents, o.billing_amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
+            coalesce(opo.max_businesses, bp.max_businesses, 1) as effective_max_businesses,
+            owner.id as owner_id, owner.name as owner_name, owner.email as owner_email
+     from organizations o
+     left join billing_plans bp on bp.plan_key = o.plan_key
+     left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+     left join lateral (
+       select u.id, u.name, u.email from organization_members om join app_users u on u.id = om.user_id
+       where om.organization_id = o.id and om.role = 'owner' order by om.created_at limit 1
+     ) owner on true
+     where o.id = $1`,
+    [input.organizationId],
+  );
+  const organizationRow = organization.rows[0] ?? {};
   const business = await pool.query<{ id: string; name: string; slug: string }>(
     `select id, name, slug from businesses where organization_id = $1 order by created_at limit 1`,
     [input.organizationId],
   );
   const row = business.rows[0];
-  if (!row) return;
-  await queueLifecycleEvent({
+  const ownerId = typeof organizationRow.owner_id === "string" ? organizationRow.owner_id : null;
+  const ownerEmail = typeof organizationRow.owner_email === "string" ? organizationRow.owner_email : null;
+  if (!row && !ownerEmail) return;
+  const amount = organizationRow.effective_amount_cents === null || organizationRow.effective_amount_cents === undefined
+    ? null : Number(organizationRow.effective_amount_cents);
+  const interval = String(input.payload.billing_interval ?? "month") === "year" ? "year" : "month";
+  const nextRenewalDate = input.payload.next_renewal_date
+    ?? (organizationRow.current_period_end_at ? new Intl.DateTimeFormat("en-US", { dateStyle: "long" }).format(new Date(toIso(organizationRow.current_period_end_at))) : "Not scheduled");
+  const formatLifecycleDate = (value: unknown): string | null => {
+    if (typeof value !== "string" || !value.trim()) return null;
+    const timestamp = Date.parse(value);
+    return Number.isNaN(timestamp) ? value : new Intl.DateTimeFormat("en-US", { dateStyle: "long" }).format(new Date(timestamp));
+  };
+  const enrichedPayload = {
+    business_name: row?.name ?? String(organizationRow.name ?? "FrontDeskWise"),
+    organization_name: String(organizationRow.name ?? row?.name ?? "FrontDeskWise"),
+    customer_name: String(organizationRow.owner_name ?? "there"),
+    billing_email: String(organizationRow.owner_email ?? "your billing email"),
+    plan_name: String(organizationRow.plan_display_name ?? input.payload.plan_name ?? "FrontDeskWise"),
+    price_display: input.payload.price_display ?? (amount === null ? "Contact support" : `$${(amount / 100).toFixed(0)}/${interval}`),
+    businesses_included: input.payload.businesses_included ?? String(organizationRow.effective_max_businesses ?? organizationRow.max_businesses ?? 1),
+    next_renewal_date: nextRenewalDate,
+    status: input.payload.status ?? "Active",
+    dashboard_url: lifecycleAppUrl("/app"),
+    billing_url: lifecycleAppUrl("/app/settings/billing"),
+    support_url: process.env.FRONTDESKWISE_SUPPORT_URL?.trim() || "mailto:support@frontdeskwise.com",
+    ...input.payload,
+    ...(formatLifecycleDate(input.payload.access_end_at) ? { access_end_at: formatLifecycleDate(input.payload.access_end_at) } : {}),
+    ...(formatLifecycleDate(input.payload.grace_end_at) ? { grace_end_at: formatLifecycleDate(input.payload.grace_end_at) } : {}),
+  };
+  const queued = await queueLifecycleEvent({
     eventType: input.eventType,
     eventKey: input.eventKey,
     organizationId: input.organizationId,
-    businessId: row.id,
-    payload: { business_name: row.name, ...input.payload },
+    businessId: row?.id ?? null,
+    recipientUserId: ownerId,
+    recipientEmail: ownerEmail,
+    payload: enrichedPayload,
   });
+  if (input.eventType === "SUBSCRIPTION_ACTIVATED" && queued > 0) {
+    await pool.query(
+      `update organizations
+       set subscription_activation_email_queued_at = coalesce(subscription_activation_email_queued_at, now()), updated_at = now()
+       where id = $1`,
+      [input.organizationId],
+    );
+  }
+}
+
+async function recordBillingTimeline(input: {
+  organizationId: string | null;
+  eventKey: string;
+  eventName: string;
+  providerEventId?: string | null;
+  status?: "recorded" | "queued" | "sent" | "failed";
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  if (!pool || !input.organizationId) return;
+  try {
+    await pool.query(
+      `insert into billing_timeline_events
+         (organization_id, event_key, event_name, provider_event_id, status, metadata)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (organization_id, event_key) do update set
+         status = excluded.status,
+         provider_event_id = coalesce(excluded.provider_event_id, billing_timeline_events.provider_event_id),
+         metadata = billing_timeline_events.metadata || excluded.metadata`,
+      [input.organizationId, input.eventKey, input.eventName, input.providerEventId ?? null, input.status ?? "recorded", JSON.stringify(input.metadata ?? {})],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ organizationId: input.organizationId, eventName: input.eventName }, "Billing timeline migration is not available yet");
+  }
 }
 
 async function reconcileLifecycleBillingEvents(): Promise<void> {
@@ -5729,97 +6059,160 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
   // explicitly tagged for another product before recording them locally.
   if (eventApp && eventApp !== stripeAppMetadata) return;
   const organizationId = await findOrganizationIdForStripeEvent(object);
-  const inserted = await pool.query<{ id: string }>(
+  await pool.query(
     `insert into billing_events (organization_id, provider, event_id, event_type, livemode, payload)
      values ($1, 'stripe', $2, $3, $4, $5)
-     on conflict (provider, event_id) do nothing
-     returning id`,
+     on conflict (provider, event_id) do nothing`,
     [organizationId, event.id, event.type, event.livemode, JSON.stringify(event)],
   );
-  if (!inserted.rowCount) {
-    const existing = await pool.query<{ processed_at: string | null }>(
-      "select processed_at from billing_events where provider = 'stripe' and event_id = $1",
-      [event.id],
-    );
-    if (existing.rows[0]?.processed_at) return;
-  }
+  const claimed = await pool.query(
+    `update billing_events
+     set processing_started_at = now(), processing_attempts = processing_attempts + 1, last_error = null
+     where provider = 'stripe' and event_id = $1 and processed_at is null
+       and (processing_started_at is null or processing_started_at < now() - interval '15 minutes')
+     returning id`,
+    [event.id],
+  );
+  if (!claimed.rowCount) return;
 
   let resolvedOrganizationId = organizationId;
-  if (event.type === "checkout.session.completed") {
-    const customerId = stripeObjectId(object.customer);
-    const subscriptionId = stripeObjectId(object.subscription);
-    const metadata = asRecord(object.metadata);
-    if (resolvedOrganizationId && customerId) {
+  try {
+    if (event.type === "checkout.session.completed") {
+      const customerId = stripeObjectId(object.customer);
+      const subscriptionId = stripeObjectId(object.subscription);
+      const metadata = asRecord(object.metadata);
+      if (resolvedOrganizationId) {
+        await pool.query(
+          `update organizations
+           set billing_provider = 'stripe', stripe_customer_id = coalesce($2, stripe_customer_id),
+               stripe_subscription_id = coalesce($3, stripe_subscription_id),
+               stripe_checkout_session_id = $4, stripe_checkout_status = 'complete',
+               pending_plan_key = null, pending_billing_interval = null, pending_plan_change_at = null,
+               updated_at = now()
+           where id = $1`,
+          [resolvedOrganizationId, customerId, subscriptionId, stripeObjectId(object.id)],
+        );
+        await recordBillingTimeline({
+          organizationId: resolvedOrganizationId,
+          eventKey: `checkout.completed:${stripeObjectId(object.id) ?? event.id}`,
+          eventName: "checkout_completed",
+          providerEventId: event.id,
+          metadata: { subscriptionId, planKey: stripeMetadataString(metadata, "plan_key", "planKey") },
+        });
+      }
+      if (subscriptionId && resolvedOrganizationId) {
+        const subscription = await authoritativeStripeSubscription({ id: subscriptionId, customer: customerId });
+        const sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id);
+        if (sync?.status === "active" && sync.previousStatus !== "active") {
+          const activationKey = `stripe.subscription_activated:${sync.subscriptionId ?? subscriptionId}`;
+          await queueOrganizationLifecycleEvent({ organizationId: resolvedOrganizationId, eventType: "SUBSCRIPTION_ACTIVATED", eventKey: activationKey, payload: { status: "Active" } });
+          await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: activationKey, eventName: "subscription_activated", providerEventId: event.id, status: "queued", metadata: { planKey: sync.planKey } });
+        }
+      }
+    } else if (event.type.startsWith("customer.subscription.")) {
+      if (resolvedOrganizationId) {
+        const subscription = await authoritativeStripeSubscription(object);
+        const sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id);
+        if (sync && !sync.ignoredAsStale && sync.status === "active" && sync.previousStatus !== "active") {
+          const activationKey = `stripe.subscription_activated:${sync.subscriptionId ?? stripeObjectId(object.id) ?? event.id}`;
+          await queueOrganizationLifecycleEvent({ organizationId: resolvedOrganizationId, eventType: "SUBSCRIPTION_ACTIVATED", eventKey: activationKey, payload: { status: "Active" } });
+          await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: activationKey, eventName: "subscription_activated", providerEventId: event.id, status: "queued", metadata: { planKey: sync.planKey } });
+        } else if (sync && !sync.ignoredAsStale && event.type === "customer.subscription.updated" && sync.previousStatus === "active" && sync.status === "active" && sync.previousPlanKey !== sync.planKey) {
+          const updateKey = `stripe.subscription_updated:${sync.subscriptionId ?? stripeObjectId(object.id) ?? event.id}:${sync.planKey}`;
+          await queueOrganizationLifecycleEvent({ organizationId: resolvedOrganizationId, eventType: "SUBSCRIPTION_UPDATED", eventKey: updateKey, payload: { status: "Active" } });
+          await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: updateKey, eventName: "subscription_updated", providerEventId: event.id, status: "queued", metadata: { fromPlanKey: sync.previousPlanKey, planKey: sync.planKey } });
+        }
+        if (sync && event.type === "customer.subscription.deleted") {
+          await queueOrganizationLifecycleEvent({
+            organizationId: resolvedOrganizationId,
+            eventType: "SUBSCRIPTION_CANCELED",
+            eventKey: `stripe.subscription_canceled:${sync.subscriptionId ?? stripeObjectId(object.id) ?? event.id}`,
+            payload: { access_end_at: sync.currentPeriodEndAt || "the end of your current billing period" },
+          });
+          await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `subscription.canceled:${sync.subscriptionId ?? event.id}`, eventName: "subscription_canceled", providerEventId: event.id, metadata: { accessEndAt: sync.currentPeriodEndAt } });
+        }
+      }
+    } else if (event.type === "invoice.paid") {
+      const subscriptionId = stripeObjectId(object.subscription);
+      if (subscriptionId && stripe) {
+        const subscription = await authoritativeStripeSubscription({ id: subscriptionId, customer: object.customer });
+        resolvedOrganizationId ??= await findOrganizationIdForStripeEvent(subscription);
+        if (resolvedOrganizationId) {
+          let sync: StripeSubscriptionSyncResult | null = null;
+          if (Array.isArray(asRecord(subscription.items).data)) {
+            sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id);
+          }
+          await pool.query(
+            "update organizations set billing_status = 'active', last_payment_status = 'paid', grace_end_at = null, updated_at = now() where id = $1",
+            [resolvedOrganizationId],
+          );
+          if (sync && sync.previousStatus === "active" && sync.status === "active" && sync.previousPlanKey !== sync.planKey) {
+            const updateKey = `stripe.subscription_updated:${sync.subscriptionId ?? subscriptionId}:${sync.planKey}`;
+            await queueOrganizationLifecycleEvent({ organizationId: resolvedOrganizationId, eventType: "SUBSCRIPTION_UPDATED", eventKey: updateKey, payload: { status: "Active" } });
+            await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: updateKey, eventName: "subscription_updated", providerEventId: event.id, status: "queued", metadata: { fromPlanKey: sync.previousPlanKey, planKey: sync.planKey } });
+          }
+          await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `invoice.paid:${stripeObjectId(object.id) ?? event.id}`, eventName: "invoice_paid", providerEventId: event.id, metadata: { subscriptionId } });
+        }
+      } else if (resolvedOrganizationId) {
+        await pool.query("update organizations set billing_status = 'active', last_payment_status = 'paid', grace_end_at = null, updated_at = now() where id = $1", [resolvedOrganizationId]);
+        const client = await pool.connect();
+        try {
+          await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
+        } finally {
+          client.release();
+        }
+      }
+    } else if (event.type === "invoice.payment_failed" && resolvedOrganizationId) {
+      const graceEndAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
       await pool.query(
         `update organizations
-         set billing_mode = 'live', billing_status = 'active', billing_provider = 'stripe',
-             stripe_customer_id = $2, stripe_subscription_id = $3,
-             plan_key = coalesce(nullif($4, ''), plan_key), updated_at = now()
+         set billing_status = case when billing_status in ('cancelled', 'paused') then billing_status else 'grace' end,
+             grace_end_at = case when billing_status in ('cancelled', 'paused') then grace_end_at else $2 end,
+             billing_provider = 'stripe', last_payment_status = 'failed', updated_at = now()
          where id = $1`,
-        [resolvedOrganizationId, customerId, subscriptionId, stripeMetadataString(metadata, "plan_key", "planKey")],
+        [resolvedOrganizationId, graceEndAt],
       );
-    }
-    if (subscriptionId && stripe) {
-      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-      if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription as unknown as Record<string, unknown>);
-    }
-    if (resolvedOrganizationId) {
+      const client = await pool.connect();
+      try {
+        await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
+      } finally {
+        client.release();
+      }
       await queueOrganizationLifecycleEvent({
         organizationId: resolvedOrganizationId,
-        eventType: "SUBSCRIPTION_ACTIVATED",
-        eventKey: `stripe.subscription_activated:${event.id}`,
-        payload: { plan_name: stripeMetadataString(asRecord(object.metadata), "plan_key", "planKey") || "FrontDeskWise", dashboard_url: lifecycleAppUrl("/app") },
+        eventType: "PAYMENT_FAILED",
+        eventKey: `stripe.payment_failed:${stripeObjectId(object.id) ?? event.id}`,
+        payload: { grace_end_at: graceEndAt },
       });
+      await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `invoice.failed:${stripeObjectId(object.id) ?? event.id}`, eventName: "invoice_failed", providerEventId: event.id, metadata: { graceEndAt } });
     }
-  } else if (event.type.startsWith("customer.subscription.")) {
-    if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, object);
-    if (resolvedOrganizationId && event.type === "customer.subscription.deleted") {
-      await queueOrganizationLifecycleEvent({
-        organizationId: resolvedOrganizationId,
-        eventType: "SUBSCRIPTION_CANCELED",
-        eventKey: `stripe.subscription_canceled:${event.id}`,
-        payload: { access_end_at: stripeTimestamp(object.current_period_end) || "the end of your current billing period", billing_url: lifecycleAppUrl("/app/settings/billing") },
-      });
-    }
-  } else if (event.type === "invoice.paid") {
-    const subscriptionId = stripeObjectId(object.subscription);
-    if (subscriptionId && stripe) {
-      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-      resolvedOrganizationId ??= await findOrganizationIdForStripeEvent(subscription as unknown as Record<string, unknown>);
-      if (resolvedOrganizationId) await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription as unknown as Record<string, unknown>);
-    } else if (resolvedOrganizationId) {
-      await pool.query("update organizations set billing_status = 'active', grace_end_at = null, updated_at = now() where id = $1", [resolvedOrganizationId]);
-    }
-    if (resolvedOrganizationId) {
-      await queueOrganizationLifecycleEvent({
-        organizationId: resolvedOrganizationId,
-        eventType: "SUBSCRIPTION_ACTIVATED",
-        eventKey: `stripe.invoice_paid:${event.id}`,
-        payload: { plan_name: "FrontDeskWise", dashboard_url: lifecycleAppUrl("/app") },
-      });
-    }
-  } else if (event.type === "invoice.payment_failed" && resolvedOrganizationId) {
-    await pool.query(
-      `update organizations
-       set billing_status = 'grace', grace_end_at = $2, billing_provider = 'stripe', updated_at = now()
-       where id = $1`,
-      [resolvedOrganizationId, new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString()],
-    );
-    const client = await pool.connect();
-    try {
-      await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
-    } finally {
-      client.release();
-    }
-    await queueOrganizationLifecycleEvent({
-      organizationId: resolvedOrganizationId,
-      eventType: "PAYMENT_FAILED",
-      eventKey: `stripe.payment_failed:${event.id}`,
-      payload: { grace_end_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString(), billing_url: lifecycleAppUrl("/app/settings/billing") },
-    });
-  }
 
-  await pool.query("update billing_events set organization_id = coalesce(organization_id, $2), processed_at = now() where provider = 'stripe' and event_id = $1", [event.id, resolvedOrganizationId]);
+    await pool.query(
+      `update billing_events
+       set organization_id = coalesce(organization_id, $2), processed_at = now(), processing_started_at = null, last_error = null
+       where provider = 'stripe' and event_id = $1`,
+      [event.id, resolvedOrganizationId],
+    );
+  } catch (error) {
+    if (resolvedOrganizationId && (event.type === "checkout.session.completed" || event.type.startsWith("customer.subscription."))) {
+      await recordBillingTimeline({
+        organizationId: resolvedOrganizationId,
+        eventKey: `subscription.activation_failed:${event.id}`,
+        eventName: "subscription_activation_failed",
+        providerEventId: event.id,
+        status: "failed",
+        metadata: { error: error instanceof Error ? error.message : "Stripe subscription processing failed" },
+      }).catch(() => undefined);
+    }
+    await pool.query(
+      `update billing_events
+       set organization_id = coalesce(organization_id, $2), processing_started_at = null,
+           last_error = $3
+       where provider = 'stripe' and event_id = $1`,
+      [event.id, resolvedOrganizationId, (error instanceof Error ? error.message : "Stripe event processing failed").slice(0, 1_000)],
+    );
+    throw error;
+  }
 }
 
 app.addHook("onRequest", async (request, reply) => {
@@ -6120,6 +6513,63 @@ app.post("/api/v1/billing/checkout-session", async (request) => {
   } else {
     await client.customers.update(customerId, { metadata: customerMetadata });
   }
+
+  // One organization owns one subscription. A second Checkout Session for an
+  // existing paid organization would create duplicate subscriptions, so plan
+  // changes update the existing Stripe subscription and still wait for the
+  // signed webhook before changing FrontDeskWise state.
+  let existingSubscriptionId = typeof organization.stripe_subscription_id === "string" ? organization.stripe_subscription_id : null;
+  let existingSubscription: Stripe.Subscription | null = null;
+  if (existingSubscriptionId) {
+    try {
+      existingSubscription = await client.subscriptions.retrieve(existingSubscriptionId);
+      if (["canceled", "incomplete_expired"].includes(existingSubscription.status)) {
+        existingSubscription = null;
+        existingSubscriptionId = null;
+      }
+    } catch {
+      existingSubscription = null;
+      existingSubscriptionId = null;
+    }
+  }
+  if (!existingSubscription && customerId) {
+    const subscriptions = await client.subscriptions.list({ customer: customerId, status: "all", limit: 20 });
+    existingSubscription = subscriptions.data.find((candidate) => {
+      if (["canceled", "incomplete_expired"].includes(candidate.status)) return false;
+      const metadata = candidate.metadata ?? {};
+      return metadata.app === stripeAppMetadata && metadata.organization_id === String(organization.id);
+    }) ?? null;
+    existingSubscriptionId = existingSubscription?.id ?? null;
+  }
+  if (existingSubscription && existingSubscriptionId) {
+    const item = existingSubscription.items.data[0];
+    if (!item) throw httpError(409, "The current Stripe subscription has no billable item");
+    if (item.price.id === price.priceId && existingSubscription.cancel_at_period_end !== true) {
+      throw httpError(409, "This organization is already on that plan");
+    }
+    await client.subscriptions.update(existingSubscriptionId, {
+      items: [{ id: item.id, price: price.priceId }],
+      proration_behavior: "create_prorations",
+      cancel_at_period_end: false,
+      metadata: frontDeskWiseStripeMetadata(String(organization.id), planKey),
+    });
+    await pool?.query(
+      `update organizations
+       set stripe_customer_id = $2, stripe_subscription_id = $3, billing_provider = 'stripe',
+           pending_plan_key = $4, pending_billing_interval = $5, pending_plan_change_at = now(),
+           updated_at = now()
+       where id = $1`,
+      [organization.id, customerId, existingSubscriptionId, planKey, interval],
+    );
+    await recordBillingTimeline({
+      organizationId: String(organization.id),
+      eventKey: `subscription.change_requested:${existingSubscriptionId}:${planKey}`,
+      eventName: planKey === String(organization.plan_key ?? "") ? "subscription_reactivation_requested" : "subscription_update_requested",
+      metadata: { planKey, interval, priceId: price.priceId },
+    });
+    return { sessionId: null, url: null, subscriptionUpdated: true, subscriptionId: existingSubscriptionId, planKey, interval, amountCents: price.amountCents, currency: price.currency };
+  }
+
   const checkoutMetadata = frontDeskWiseStripeMetadata(String(organization.id), planKey, { appUserId: appUser.id });
   const session = await client.checkout.sessions.create({
     mode: "subscription",
@@ -6131,6 +6581,20 @@ app.post("/api/v1/billing/checkout-session", async (request) => {
     cancel_url: billingReturnUrl("cancel"),
     metadata: checkoutMetadata,
     subscription_data: { metadata: frontDeskWiseStripeMetadata(String(organization.id), planKey) },
+  });
+  await pool?.query(
+    `update organizations
+     set stripe_customer_id = $2, billing_provider = 'stripe',
+         stripe_checkout_session_id = $3, stripe_checkout_status = 'open', stripe_checkout_created_at = now(),
+         pending_plan_key = $4, pending_billing_interval = $5, pending_plan_change_at = now(), updated_at = now()
+     where id = $1`,
+    [organization.id, customerId, session.id, planKey, interval],
+  );
+  await recordBillingTimeline({
+    organizationId: String(organization.id),
+    eventKey: `checkout.started:${session.id}`,
+    eventName: "checkout_started",
+    metadata: { planKey, interval, priceId: price.priceId },
   });
   return { sessionId: session.id, url: session.url, planKey, interval, amountCents: price.amountCents, currency: price.currency };
 });
@@ -6147,6 +6611,7 @@ app.post("/api/v1/billing/portal-session", async (request) => {
     customer: organization.stripe_customer_id,
     return_url: billingReturnUrl("portal"),
   });
+  await recordBillingTimeline({ organizationId: String(organization.id), eventKey: `portal.opened:${session.id}`, eventName: "portal_opened", metadata: { customerId: organization.stripe_customer_id } });
   return { url: session.url };
 });
 
@@ -6495,6 +6960,8 @@ app.get("/api/v1/admin/organizations", async (request) => {
   const result = await pool.query<Record<string, unknown>>(
     `select o.id, o.name, o.slug, o.billing_mode, o.billing_status, o.plan_key,
             o.trial_end_at, o.current_period_end_at, o.billing_amount_cents, o.billing_currency,
+            o.stripe_customer_id, o.stripe_subscription_id, o.stripe_subscription_status,
+            o.last_payment_status, o.cancel_at_period_end,
             bp.display_name as plan_display_name, bp.monthly_amount_cents as plan_amount_cents,
             coalesce(opo.amount_cents, o.billing_amount_cents, bp.monthly_amount_cents) as mrr_amount_cents,
             (select string_agg(u.email, ', ' order by u.email)
@@ -6517,6 +6984,11 @@ app.get("/api/v1/admin/organizations", async (request) => {
       status: String(row.billing_status), mode: String(row.billing_mode),
       mrrAmountCents: row.mrr_amount_cents === null ? null : Number(row.mrr_amount_cents),
       currency: String(row.billing_currency ?? "usd"),
+      stripeCustomerId: typeof row.stripe_customer_id === "string" ? row.stripe_customer_id : null,
+      stripeSubscriptionId: typeof row.stripe_subscription_id === "string" ? row.stripe_subscription_id : null,
+      stripeSubscriptionStatus: typeof row.stripe_subscription_status === "string" ? row.stripe_subscription_status : null,
+      lastPaymentStatus: typeof row.last_payment_status === "string" ? row.last_payment_status : null,
+      cancelAtPeriodEnd: row.cancel_at_period_end === true,
       trialEndAt: nullableIso(row.trial_end_at), currentPeriodEndAt: nullableIso(row.current_period_end_at),
       conversationCount: Number(row.conversation_count ?? 0), leadCount: Number(row.lead_count ?? 0),
       lastActiveAt: nullableIso(row.last_active_at),
@@ -6688,9 +7160,18 @@ app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
     `select u.email, u.name, om.role from organization_members om join app_users u on u.id = om.user_id where om.organization_id = $1 order by om.role, u.email`,
     [organizationId],
   );
+  const timeline = await pool.query<Record<string, unknown>>(
+    `select event_key, event_name, provider_event_id, status, metadata, occurred_at
+     from billing_timeline_events where organization_id = $1 order by occurred_at desc limit 100`,
+    [organizationId],
+  );
   return {
     organization: { id: organizationId, name: String(result.rows[0].name), slug: String(result.rows[0].slug), billing: organizationBillingPayload(result.rows[0]) },
     owners: owners.rows,
+    billingTimeline: timeline.rows.map((event) => ({
+      eventKey: String(event.event_key), eventName: String(event.event_name), providerEventId: event.provider_event_id ? String(event.provider_event_id) : null,
+      status: String(event.status), metadata: asRecord(event.metadata), occurredAt: nullableIso(event.occurred_at),
+    })),
     businesses: businessesResult.rows.map((business) => ({
       id: String(business.id), name: String(business.name), slug: String(business.slug), websiteUrl: String(business.website_url),
       ownershipStatus: String(business.ownership_status ?? "pending"), billingStatus: String(business.billing_status ?? "trial"),
@@ -7724,7 +8205,8 @@ app.get("/api/v1/demo/:slug/integrations", async (request) => {
   await requireDemoOwner(business, request);
   if (!pool) return { integrations: [] };
   const result = await pool.query<Record<string, unknown>>(
-    `select i.id, i.provider, i.display_name, i.connection_status, i.last_tested_at, i.last_error,
+    `select i.id, i.provider, i.display_name, i.connection_status, i.auth_type, i.provider_account_id,
+            i.provider_account_name, i.last_tested_at, i.last_error,
             count(sr.id)::int as sync_total,
             count(sr.id) filter (where sr.sync_status = 'synced')::int as sync_synced,
             count(sr.id) filter (where sr.sync_status in ('pending', 'retrying'))::int as sync_pending,
@@ -7737,6 +8219,107 @@ app.get("/api/v1/demo/:slug/integrations", async (request) => {
     [business.id],
   );
   return { integrations: result.rows.map(integrationPayload) };
+});
+
+app.post("/api/v1/demo/:slug/integrations/hubspot/connect", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "HubSpot OAuth requires PostgreSQL storage");
+  if (!hubSpotOAuthConfigured()) throw httpError(503, "HubSpot OAuth is not configured on this environment yet");
+
+  const state = randomBytes(32).toString("base64url");
+  const redirectUri = hubSpotOAuthRedirectUri();
+  await pool.query("delete from hubspot_oauth_states where expires_at < now() or consumed_at is not null");
+  await pool.query(
+    `insert into hubspot_oauth_states
+       (state_hash, business_id, organization_id, initiating_user_id, initiating_user_type, redirect_uri, expires_at)
+     values ($1, $2, $3, $4, $5, $6, now() + interval '10 minutes')`,
+    [oauthStateHash(state), business.id, actor.organizationId, actor.id, actor.legacyDemo ? "workspace_user" : "app_user", redirectUri],
+  );
+  return { authorizationUrl: buildHubSpotAuthorizationUrl(state, redirectUri) };
+});
+
+app.get("/api/v1/integrations/hubspot/callback", async (request, reply) => {
+  const query = asRecord(request.query);
+  const state = optionalString(query.state, 500);
+  const code = optionalString(query.code, 4_000);
+  if (!pool) throw httpError(503, "HubSpot OAuth requires PostgreSQL storage");
+  if (!state) throw httpError(400, "HubSpot OAuth state is missing");
+
+  const client = await pool.connect();
+  let stateRow: { business_id: string; business_slug: string; redirect_uri: string } | null = null;
+  try {
+    await client.query("begin");
+    const result = await client.query<{ business_id: string; business_slug: string; redirect_uri: string }>(
+      `select hos.business_id, b.slug as business_slug, hos.redirect_uri
+       from hubspot_oauth_states hos
+       join businesses b on b.id = hos.business_id
+       where hos.state_hash = $1 and hos.consumed_at is null and hos.expires_at > now()
+       for update`,
+      [oauthStateHash(state)],
+    );
+    if (!result.rowCount) {
+      await client.query("rollback");
+      throw httpError(400, "HubSpot OAuth state is invalid or expired");
+    }
+    stateRow = result.rows[0];
+    await client.query("update hubspot_oauth_states set consumed_at = now() where state_hash = $1", [oauthStateHash(state)]);
+    await client.query("commit");
+  } catch (error) {
+    try { await client.query("rollback"); } catch { /* Preserve the original error. */ }
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const appRedirect = (status: string) => `${lifecycleAppUrl(`/app/${stateRow!.business_slug}/connections`)}?hubspot=${encodeURIComponent(status)}`;
+  const oauthError = optionalString(query.error_description, 300) ?? optionalString(query.error, 120);
+  if (oauthError) return reply.redirect(appRedirect("error"));
+  if (!code) return reply.redirect(appRedirect("error"));
+
+  try {
+    const tokenSet = await exchangeHubSpotAuthorizationCode(code, stateRow.redirect_uri);
+    const connection = await createCrmAdapter("hubspot", tokenSet.accessToken).testConnection();
+    const credentials = hubSpotCredentialsFromTokenSet(tokenSet);
+    const result = await pool.query<Record<string, unknown>>(
+      `insert into crm_integrations
+         (business_id, provider, display_name, connection_status, auth_type, provider_account_id,
+          provider_account_name, provider_scopes, access_token_expires_at, encrypted_credentials, config, last_tested_at, last_error)
+       values ($1, 'hubspot', 'HubSpot', 'active', 'oauth', $2, $3, $4, $5, $6, $7, now(), null)
+       on conflict (business_id, provider) do update set
+         display_name = excluded.display_name,
+         connection_status = 'active',
+         auth_type = 'oauth',
+         provider_account_id = excluded.provider_account_id,
+         provider_account_name = excluded.provider_account_name,
+         provider_scopes = excluded.provider_scopes,
+         access_token_expires_at = excluded.access_token_expires_at,
+         encrypted_credentials = excluded.encrypted_credentials,
+         config = excluded.config,
+         last_tested_at = now(),
+         last_error = null,
+         updated_at = now()
+       returning id`,
+      [
+        stateRow.business_id,
+        connection.portalId,
+        connection.accountName,
+        credentials.scopes,
+        credentials.expiresAt,
+        encryptIntegrationCredentials(credentials),
+        JSON.stringify({ delivery: "hubspot", idempotency: true, auth: "oauth" }),
+      ],
+    );
+    await queueLeadsForIntegration(await getBusiness(stateRow.business_slug), String(result.rows[0].id));
+    void processIntegrationOutbox();
+    return reply.redirect(appRedirect("connected"));
+  } catch (error) {
+    app.log.warn({ businessId: stateRow.business_id, error: integrationErrorMessage(error) }, "HubSpot OAuth callback failed");
+    return reply.redirect(appRedirect("error"));
+  }
 });
 
 app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
@@ -7761,7 +8344,7 @@ app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
     } catch {
       throw httpError(502, "HubSpot connection test failed. Check the private app or service key and try again.");
     }
-    encryptedCredentials = encryptIntegrationCredentials({ accessToken });
+    encryptedCredentials = encryptIntegrationCredentials({ accessToken, authType: "pat" });
     config = { delivery: "hubspot", idempotency: true };
   } else {
     let webhookUrl: string;
@@ -7776,18 +8359,20 @@ app.post("/api/v1/demo/:slug/integrations", async (request, reply) => {
     config = { delivery: "webhook", idempotency: true };
   }
   const result = await pool.query<Record<string, unknown>>(
-    `insert into crm_integrations (business_id, provider, display_name, connection_status, encrypted_credentials, config)
-     values ($1, $2, $3, 'pending', $4, $5)
+    `insert into crm_integrations (business_id, provider, display_name, connection_status, auth_type, encrypted_credentials, config)
+     values ($1, $2, $3, 'pending', $6, $4, $5)
      on conflict (business_id, provider) do update set
        display_name = excluded.display_name,
        connection_status = 'pending',
+       auth_type = excluded.auth_type,
        encrypted_credentials = excluded.encrypted_credentials,
        config = excluded.config,
        last_error = null,
        updated_at = now()
-     returning id, provider, display_name, connection_status, last_tested_at, last_error,
+     returning id, provider, display_name, connection_status, auth_type, provider_account_id, provider_account_name,
+       last_tested_at, last_error,
        0::int as sync_total, 0::int as sync_synced, 0::int as sync_pending, 0::int as sync_failed`,
-    [business.id, provider, displayName, encryptedCredentials, JSON.stringify(config)],
+    [business.id, provider, displayName, encryptedCredentials, JSON.stringify(config), "pat"],
   );
   return reply.code(201).send({ integration: integrationPayload(result.rows[0]), next: "Test the connection to activate delivery" });
 });
@@ -7800,7 +8385,7 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
   requireVerifiedBusiness(business);
   if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
   const integration = await pool.query<Record<string, unknown>>(
-    `select id, provider, encrypted_credentials from crm_integrations where id = $1 and business_id = $2`,
+    `select id, provider, auth_type, encrypted_credentials from crm_integrations where id = $1 and business_id = $2`,
     [requiredString(params.integrationId, "integrationId", 80), business.id],
   );
   if (!integration.rowCount) throw httpError(404, "CRM integration not found");
@@ -7809,6 +8394,7 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
     const encryptedCredentials = integration.rows[0].encrypted_credentials;
     if (typeof encryptedCredentials !== "string" || !encryptedCredentials) throw new Error("CRM credentials are not configured");
     const credentials = decryptIntegrationCredentials(encryptedCredentials);
+    let hubSpotConnection: { portalId: string | null; accountName: string | null } | null = null;
     if (integration.rows[0].provider === "webhook") {
       await sendWebhookEvent(
         credentials,
@@ -7817,11 +8403,18 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
       );
     } else {
       if (!credentials.accessToken) throw new Error("HubSpot credentials are not configured");
-      await createCrmAdapter("hubspot", credentials.accessToken).testConnection();
+      const hubSpotCredentials: HubSpotCredentials = { ...credentials, accessToken: credentials.accessToken };
+      const accessToken = await hubSpotAccessTokenForIntegration(String(integration.rows[0].id), hubSpotCredentials);
+      hubSpotConnection = await createCrmAdapter("hubspot", accessToken).testConnection();
     }
     await pool.query(
-      `update crm_integrations set connection_status = 'active', last_tested_at = now(), last_error = null, updated_at = now() where id = $1`,
-      [integration.rows[0].id],
+      `update crm_integrations
+       set connection_status = 'active',
+           provider_account_id = coalesce($2, provider_account_id),
+           provider_account_name = coalesce($3, provider_account_name),
+           last_tested_at = now(), last_error = null, updated_at = now()
+       where id = $1`,
+      [integration.rows[0].id, hubSpotConnection?.portalId ?? null, hubSpotConnection?.accountName ?? null],
     );
     await pool.query(
       `update integration_outbox
@@ -7881,6 +8474,19 @@ app.delete("/api/v1/demo/:slug/integrations/:integrationId", async (request) => 
   requireVerifiedBusiness(business);
   if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
   const integrationId = requiredString(params.integrationId, "integrationId", 80);
+  const existing = await pool.query<{ provider: string; auth_type: string; encrypted_credentials: string | null }>(
+    "select provider, auth_type, encrypted_credentials from crm_integrations where id = $1 and business_id = $2",
+    [integrationId, business.id],
+  );
+  if (!existing.rowCount) throw httpError(404, "CRM integration not found");
+  if (existing.rows[0].provider === "hubspot" && existing.rows[0].auth_type === "oauth" && existing.rows[0].encrypted_credentials) {
+    try {
+      const credentials = decryptIntegrationCredentials(existing.rows[0].encrypted_credentials);
+      if (credentials.refreshToken) await revokeHubSpotRefreshToken(credentials.refreshToken);
+    } catch (error) {
+      app.log.warn({ integrationId, error: integrationErrorMessage(error) }, "HubSpot token revocation failed during disconnect");
+    }
+  }
   const result = await pool.query(
     "delete from crm_integrations where id = $1 and business_id = $2 returning id",
     [integrationId, business.id],

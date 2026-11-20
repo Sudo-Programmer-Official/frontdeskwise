@@ -1,5 +1,5 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { browserLocalPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onIdTokenChanged, sendPasswordResetEmail, signInWithPopup, setPersistence, signInWithEmailAndPassword, signOut, } from "firebase/auth";
+import { browserLocalPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, confirmPasswordReset, onIdTokenChanged, sendPasswordResetEmail, signInWithPopup, setPersistence, signInWithEmailAndPassword, signOut, verifyPasswordResetCode, } from "firebase/auth";
 export class AuthSessionExpiredError extends Error {
     constructor() {
         super("Your FrontDeskWise session is no longer valid.");
@@ -33,6 +33,13 @@ async function firebaseAuth() {
 }
 function apiOrigin() {
     return String(import.meta.env.VITE_API_ORIGIN ?? "").replace(/\/$/, "");
+}
+function passwordResetActionSettings() {
+    const configuredOrigin = String(import.meta.env.VITE_SITE_ORIGIN ?? "").trim().replace(/\/$/, "");
+    const origin = configuredOrigin || (typeof window !== "undefined" ? window.location.origin : "");
+    if (!origin)
+        throw new Error("Password recovery is temporarily unavailable.");
+    return { url: `${origin}/auth/reset-password`, handleCodeInApp: false };
 }
 async function bootstrap(user, demoToken, organizationName) {
     let token = await user.getIdToken();
@@ -86,7 +93,19 @@ export async function signOutFrontDeskWise() {
 export async function sendFrontDeskWisePasswordReset(email) {
     if (!email.trim())
         throw new Error("Enter your email first.");
-    await sendPasswordResetEmail(await firebaseAuth(), email.trim());
+    await sendPasswordResetEmail(await firebaseAuth(), email.trim(), passwordResetActionSettings());
+}
+export async function verifyFrontDeskWisePasswordResetCode(actionCode) {
+    if (!actionCode.trim())
+        throw new Error("This reset link is invalid or has expired.");
+    return verifyPasswordResetCode(await firebaseAuth(), actionCode.trim());
+}
+export async function confirmFrontDeskWisePasswordReset(actionCode, newPassword) {
+    if (!actionCode.trim())
+        throw new Error("This reset link is invalid or has expired.");
+    if (newPassword.length < 6)
+        throw new Error("Use at least 6 characters for your new password.");
+    await confirmPasswordReset(await firebaseAuth(), actionCode.trim(), newPassword);
 }
 export function observeFirebaseUser(callback) {
     if (!firebaseAuthConfigured())

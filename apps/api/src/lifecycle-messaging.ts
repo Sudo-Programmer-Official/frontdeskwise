@@ -10,6 +10,7 @@ export type LifecycleEventType =
   | "TRIAL_ENDING_SOON"
   | "TRIAL_EXPIRED"
   | "SUBSCRIPTION_ACTIVATED"
+  | "SUBSCRIPTION_UPDATED"
   | "PAYMENT_FAILED"
   | "SUBSCRIPTION_CANCELED"
   | "TEAM_INVITED"
@@ -42,6 +43,7 @@ export type LifecycleTemplate = {
   body: string;
   ctaLabel: string | null;
   ctaUrl: string | null;
+  secondaryCtas: Array<{ label: string; url: string }>;
   footer: string;
   variables: string[];
   status: "draft" | "active" | "disabled";
@@ -123,20 +125,26 @@ export function interpolateTemplate(source: string, variables: Record<string, un
   });
 }
 
-export function renderLifecycleEmail(template: Pick<LifecycleTemplate, "subject" | "previewText" | "heading" | "body" | "ctaLabel" | "ctaUrl" | "footer">, variables: Record<string, unknown>): { subject: string; text: string; html: string } {
+export function renderLifecycleEmail(template: Pick<LifecycleTemplate, "subject" | "previewText" | "heading" | "body" | "ctaLabel" | "ctaUrl" | "footer"> & Partial<Pick<LifecycleTemplate, "secondaryCtas">>, variables: Record<string, unknown>): { subject: string; text: string; html: string } {
   const subject = interpolateTemplate(template.subject, variables).trim();
   const previewText = interpolateTemplate(template.previewText, variables).trim();
   const heading = interpolateTemplate(template.heading, variables).trim();
   const body = interpolateTemplate(template.body, variables).trim();
   const ctaLabel = template.ctaLabel ? interpolateTemplate(template.ctaLabel, variables).trim() : "";
   const ctaUrl = template.ctaUrl ? interpolateTemplate(template.ctaUrl, variables).trim() : "";
+  const secondaryCtas = (template.secondaryCtas ?? [])
+    .map((cta) => ({ label: interpolateTemplate(cta.label, variables).trim(), url: interpolateTemplate(cta.url, variables).trim() }))
+    .filter((cta) => cta.label && cta.url);
   const footer = interpolateTemplate(template.footer, variables).trim();
-  const textParts = [heading, body, ctaLabel && ctaUrl ? `${ctaLabel}: ${ctaUrl}` : "", footer].filter(Boolean);
+  const textParts = [heading, body, ctaLabel && ctaUrl ? `${ctaLabel}: ${ctaUrl}` : "", ...secondaryCtas.map((cta) => `${cta.label}: ${cta.url}`), footer].filter(Boolean);
   const htmlBody = body.split(/\n+/).map((line) => `<p style="margin:0 0 16px">${htmlEscape(line)}</p>`).join("");
   const htmlCta = ctaLabel && ctaUrl
     ? `<p style="margin:24px 0"><a href="${htmlEscape(ctaUrl)}" style="display:inline-block;background:#173b35;color:#fff;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:600">${htmlEscape(ctaLabel)}</a></p>`
     : "";
-  const html = `<!doctype html><html><body style="margin:0;background:#f5f7f6;color:#15211e;font-family:Arial,sans-serif"><div style="max-width:600px;margin:32px auto;padding:32px;background:#fff;border:1px solid #e4eae7;border-radius:16px"><p style="color:#6c7974;font-size:12px;margin:0 0 20px">${htmlEscape(previewText)}</p><h1 style="font-size:26px;line-height:1.2;margin:0 0 20px">${htmlEscape(heading)}</h1>${htmlBody}${htmlCta}<p style="color:#6c7974;font-size:12px;line-height:1.5;border-top:1px solid #e4eae7;padding-top:20px;margin-top:28px">${htmlEscape(footer)}</p></div></body></html>`;
+  const htmlSecondaryCtas = secondaryCtas.length
+    ? `<p style="margin:18px 0 0">${secondaryCtas.map((cta) => `<a href="${htmlEscape(cta.url)}" style="display:inline-block;color:#173b35;margin:0 16px 10px 0;font-weight:600">${htmlEscape(cta.label)} →</a>`).join("")}</p>`
+    : "";
+  const html = `<!doctype html><html><body style="margin:0;background:#f5f7f6;color:#15211e;font-family:Arial,sans-serif"><div style="max-width:600px;margin:32px auto;padding:32px;background:#fff;border:1px solid #e4eae7;border-radius:16px"><p style="color:#6c7974;font-size:12px;margin:0 0 20px">${htmlEscape(previewText)}</p><h1 style="font-size:26px;line-height:1.2;margin:0 0 20px">${htmlEscape(heading)}</h1>${htmlBody}${htmlCta}${htmlSecondaryCtas}<p style="color:#6c7974;font-size:12px;line-height:1.5;border-top:1px solid #e4eae7;padding-top:20px;margin-top:28px">${htmlEscape(footer)}</p></div></body></html>`;
   return { subject, text: textParts.join("\n\n"), html };
 }
 
@@ -146,6 +154,12 @@ function templatePayload(row: Record<string, unknown>): LifecycleTemplate {
     : [];
   const category = row.category === "operational" || row.category === "account" ? row.category : "transactional";
   const status = row.status === "draft" || row.status === "disabled" ? row.status : "active";
+  const secondaryCtas = Array.isArray(row.secondary_ctas)
+    ? row.secondary_ctas
+      .map((value) => record(value))
+      .filter((value) => typeof value.label === "string" && typeof value.url === "string")
+      .map((value) => ({ label: String(value.label), url: String(value.url) }))
+    : [];
   return {
     templateKey: String(row.template_key),
     name: String(row.name),
@@ -157,6 +171,7 @@ function templatePayload(row: Record<string, unknown>): LifecycleTemplate {
     body: String(row.body),
     ctaLabel: typeof row.cta_label === "string" ? row.cta_label : null,
     ctaUrl: typeof row.cta_url === "string" ? row.cta_url : null,
+    secondaryCtas,
     footer: String(row.footer ?? ""),
     variables,
     status,
@@ -292,12 +307,14 @@ function deliveryError(error: unknown): string {
 
 let lifecycleOutboxRunning = false;
 let lifecycleOutboxTimer: NodeJS.Timeout | null = null;
+let lifecycleOutboxPool: Pool | null = null;
 
-export function scheduleLifecycleMessaging(delayMs = 250): void {
+export function scheduleLifecycleMessaging(delayMs = 250, pool: Pool | null = null): void {
+  if (pool) lifecycleOutboxPool = pool;
   if (lifecycleOutboxTimer) return;
   lifecycleOutboxTimer = setTimeout(() => {
     lifecycleOutboxTimer = null;
-    void processLifecycleMessagingOutbox().catch(() => undefined);
+    void processLifecycleMessagingOutbox(lifecycleOutboxPool).catch(() => undefined);
   }, Math.max(250, Math.min(delayMs, 60_000)));
 }
 
@@ -312,6 +329,8 @@ export async function scheduleNextLifecycleMessaging(pool: Pool | null): Promise
 }
 
 export async function processLifecycleMessagingOutbox(pool: Pool | null = null): Promise<void> {
+  if (pool) lifecycleOutboxPool = pool;
+  pool = pool ?? lifecycleOutboxPool;
   if (!pool || lifecycleOutboxRunning) return;
   lifecycleOutboxRunning = true;
   try {
@@ -331,7 +350,7 @@ export async function processLifecycleMessagingOutbox(pool: Pool | null = null):
            where d.id = candidate.id
            returning d.*
          )
-         select claimed.*, t.subject, t.preview_text, t.heading, t.body, t.cta_label, t.cta_url, t.footer, t.status as template_status
+         select claimed.*, t.subject, t.preview_text, t.heading, t.body, t.cta_label, t.cta_url, t.secondary_ctas, t.footer, t.status as template_status
          from claimed join message_templates t on t.template_key = claimed.template_key`,
       );
       if (!claim.rowCount) break;
@@ -357,6 +376,10 @@ export async function processLifecycleMessagingOutbox(pool: Pool | null = null):
           body: String(delivery.body),
           ctaLabel: typeof delivery.cta_label === "string" ? delivery.cta_label : null,
           ctaUrl: typeof delivery.cta_url === "string" ? delivery.cta_url : null,
+          secondaryCtas: Array.isArray(delivery.secondary_ctas) ? delivery.secondary_ctas
+            .map((value) => record(value))
+            .filter((value) => typeof value.label === "string" && typeof value.url === "string")
+            .map((value) => ({ label: String(value.label), url: String(value.url) })) : [],
           footer: String(delivery.footer ?? ""),
         }, record(delivery.payload));
         const sendResult = await sendTransactionalEmail({
@@ -373,6 +396,13 @@ export async function processLifecycleMessagingOutbox(pool: Pool | null = null):
            where id = $1`,
           [delivery.id, sendResult.provider, sendResult.providerMessageId],
         );
+        if (delivery.event_type === "SUBSCRIPTION_ACTIVATED" || delivery.event_type === "SUBSCRIPTION_UPDATED") {
+          await pool.query(
+            `update billing_timeline_events set status = 'sent'
+             where organization_id = $1 and event_key = $2`,
+            [delivery.organization_id ?? null, delivery.event_key],
+          ).catch(() => undefined);
+        }
       } catch (error) {
         const message = deliveryError(error);
         const attempts = Number(delivery.attempts);
@@ -386,6 +416,13 @@ export async function processLifecycleMessagingOutbox(pool: Pool | null = null):
            where id = $1`,
           [delivery.id, retry ? "deferred" : "failed", retry ? delaySeconds : 0, message],
         );
+        if (!retry && (delivery.event_type === "SUBSCRIPTION_ACTIVATED" || delivery.event_type === "SUBSCRIPTION_UPDATED")) {
+          await pool.query(
+            `update billing_timeline_events set status = 'failed', metadata = metadata || $3::jsonb
+             where organization_id = $1 and event_key = $2`,
+            [delivery.organization_id ?? null, delivery.event_key, JSON.stringify({ failureReason: message })],
+          ).catch(() => undefined);
+        }
       }
     }
   } finally {

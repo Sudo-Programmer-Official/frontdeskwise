@@ -67,7 +67,7 @@ The public widget posts conversion events to `POST /api/v1/widget/:siteKey/telem
 
 MCP is available as a separate assistant-tool connection path under the owner dashboard’s Connections screen. Owners connect a provider-issued MCP URL and token, FrontDeskWise discovers the available tools, and read-only tools are enabled by default. Write or destructive tools require explicit permission; deterministic completion actions continue using the existing connector and retry architecture.
 
-Demo creation now performs a bounded same-site crawl (up to 20 pages, depth 2), stores canonical URLs/page types/crawl status, and creates a 48-hour demo owner session with a hashed token in PostgreSQL. The tenant starts in `billing_mode = sandbox`, `is_demo = true`, `billing_status = trial`, and `plan_key = demo`; live checkout is intentionally not enabled yet.
+Demo creation now performs a bounded same-site crawl (up to 20 pages, depth 2), stores canonical URLs/page types/crawl status, and creates a 48-hour demo owner session with a hashed token in PostgreSQL. The tenant starts in `billing_mode = sandbox`, `is_demo = true`, `billing_status = trial`, and `plan_key = demo`; live checkout is enabled only when matched Stripe test/live secrets, webhook signing, and configured recurring Price IDs are present on the API.
 
 The ingestion chunker targets approximately 520 tokens with 80-token overlap and preserves heading/page-type metadata. Owner routes now require the issued demo bearer token. Retrieval uses tenant-scoped PostgreSQL full-text search immediately and will add reciprocal-rank hybrid results when the optional embedding worker populates pgvector vectors.
 

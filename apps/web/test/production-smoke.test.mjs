@@ -16,6 +16,7 @@ const router = await readFile(resolve(here, "../src/router/index.ts"), "utf8");
 const marketing = JSON.parse(await readFile(resolve(here, "../src/marketing-pages.json"), "utf8"));
 const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vue"), "utf8");
 const metadataScript = await readFile(resolve(here, "../scripts/generate-site-metadata.mjs"), "utf8");
+const index = await readFile(resolve(here, "../index.html"), "utf8");
 
 test("owner production controls remain present", () => {
   const ownerSurface = `${app}\n${agent}`;
@@ -141,6 +142,31 @@ test("application navigation is route-driven and refresh-safe", () => {
   assert.match(app, /window\.history\[replace \? "replaceState" : "pushState"\]/);
   assert.match(app, /window\.addEventListener\("popstate", handleRouteChange\)/);
   assert.match(app, /Keep control-plane and onboarding deep links stable/);
+});
+
+test("responsive shell and auth recovery contracts are present", () => {
+  assert.match(index, /name="viewport" content="width=device-width, initial-scale=1(?:\.0)?"/);
+  for (const marker of [
+    "mobile-header",
+    "mobile-nav-backdrop",
+    "mobile-nav-open",
+    "inbox-detail-open",
+    "env(safe-area-inset-top)",
+    "env(safe-area-inset-bottom)",
+    "overflow-x: clip",
+    "@media (max-width: 1023px)",
+    "@media (max-width: 640px)",
+  ]) {
+    assert.ok(styles.includes(marker), `missing responsive contract: ${marker}`);
+  }
+  assert.match(app, /<Menu/);
+  assert.match(app, /Back to Inbox/);
+  assert.match(app, /confirmFrontDeskWisePasswordReset/);
+  assert.match(app, /auth-success/);
+  assert.doesNotMatch(app, /authError\.value = "Password reset instructions sent/);
+  const resetRoute = parseRoute({ pathname: "/auth/reset-password", search: "?mode=resetPassword&oobCode=example-code" });
+  assert.deepEqual(resetRoute, { kind: "auth-reset", mode: "resetPassword", oobCode: "example-code" });
+  assert.equal(routePath(resetRoute), "/auth/reset-password?mode=resetPassword&oobCode=example-code");
 });
 
 test("invalid sessions refresh once and preserve the deep return route", () => {

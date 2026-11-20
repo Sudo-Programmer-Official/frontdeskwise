@@ -103,6 +103,14 @@ VITE_FIREBASE_APP_ID=...
 VITE_API_ORIGIN=https://api.frontdeskwise.com
 ```
 
+Password recovery is handled by the web app at `/auth/reset-password`. The client sends Firebase an `ActionCodeSettings` continue URL, verifies the one-time `oobCode`, and completes the reset with `confirmPasswordReset`; it never stores reset tokens or passwords. The Firebase Auth email template must be configured to use the deployed FrontDeskWise action-handler URL, and the deployed site origin must be listed under Firebase Authorized Domains. Until `auth.frontdeskwise.com` has a Connected status and valid certificate in Firebase, keep `VITE_FIREBASE_AUTH_DOMAIN` on the provisioned `frontdeskwise-7846c.firebaseapp.com` value. Once the custom domain is verified, set the web build variable to `auth.frontdeskwise.com` and test both sign-in and password recovery on mobile before promoting it.
+
+The Firebase Console production checklist for this flow is:
+
+- Password reset template: From name `FrontDeskWise`, subject `Reset your FrontDeskWise password`, CTA `Reset password`, with concise recovery copy and no raw-URL-only presentation.
+- Email action handler: configure the password-reset template to open `https://www.frontdeskwise.com/auth/reset-password` (or the current `VITE_SITE_ORIGIN`) so the branded handler receives `mode`, `oobCode`, and the project `apiKey` query parameters.
+- Authorized domains: allow the deployed web origins and the configured Firebase auth domain. Confirm the custom `auth.frontdeskwise.com` domain has Connected status and a valid certificate before changing the Vercel variable.
+
 Render needs only:
 
 ```env

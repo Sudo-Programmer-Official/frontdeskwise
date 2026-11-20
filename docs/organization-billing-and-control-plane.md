@@ -55,6 +55,18 @@ behavior can be reviewed without coupling application access checks to Stripe.
 
 `billing_events` is idempotent on `(provider, event_id)`. A webhook is recorded before processing and marked with `processed_at` after the organization update succeeds. Stripe retries can therefore be safely acknowledged after a previously processed event.
 
+Migration `034_subscription_purchase_lifecycle.sql` completes the purchase
+lifecycle with checkout intent/status, payment status, cancellation-at-period-end,
+pending plan changes, Stripe subscription event ordering, and an internal
+`billing_timeline_events` audit trail. Webhook processing claims an event before
+work begins, releases the claim on failure for Stripe retry, and marks it
+processed only after the organization and business projections converge.
+
+The customer return URL is informational only. It includes the Checkout Session
+ID for correlation, but the web app polls `GET /api/v1/billing` until the signed
+webhook has persisted the active plan. A delayed webhook produces a pending
+message rather than a false paid state.
+
 ## API surfaces
 
 Customer-authenticated:
@@ -75,6 +87,12 @@ Super-admin:
 - `POST /api/v1/admin/organizations/:organizationId/suspend`
 - `POST /api/v1/admin/organizations/:organizationId/plan-override`
 - `DELETE /api/v1/admin/organizations/:organizationId/plan-override`
+
+For an organization that already has a non-canceled Stripe subscription, a plan
+change updates that subscription's price. It does not create a second
+subscription. Downgrades are immediate in V1 with Stripe proration; existing
+businesses are retained and only future business creation is limited by the new
+entitlement.
 
 The initial super-admin bootstrap uses a verified Firebase identity plus the server-only `FRONTDESKWISE_SUPER_ADMIN_EMAILS` allowlist. The first successful admin request inserts that user into `super_admin_users`; subsequent authorization comes from the database record.
 
@@ -202,6 +220,10 @@ The webhook verifies Stripe's signature against the raw request body. The secret
 - Confirm adding a business works within the plan limit and returns a clear upgrade error at the limit.
 - Configure one Stripe test price and confirm Checkout redirects correctly.
 - Complete a Stripe test subscription and confirm the webhook changes the organization to `active`.
+- Replay the same webhook and confirm there is still one subscription state and one activation email delivery.
+- Change Starter → Growth and Growth → Multi-Business, then confirm the same Stripe subscription, plan, entitlements, UI, and admin timeline converge.
+- Schedule cancellation at period end and confirm access remains active until the period end.
+- Send a test payment failure, confirm `grace` state plus dashboard warning and payment email, then send `invoice.paid` and confirm recovery.
 - Open Customer Portal and verify the return URL.
 - Send a test payment failure and confirm `grace` state plus dashboard visibility.
 - Sign in with the allowlisted super-admin account and verify organization metrics plus trial/suspend actions.
@@ -225,8 +247,13 @@ The current repository contains the following working pieces:
 - organization-level trial and plan state;
 - organization business-capacity enforcement;
 - Stripe Checkout, Portal, and webhook boundaries;
+- webhook-claimed checkout, subscription, invoice, cancellation, and recovery
+  transitions with subscription-scoped activation-email idempotency;
+- asynchronous branded subscription confirmation and plan-change email templates
+  with retryable delivery records;
 - daily organization usage counters;
 - customer Billing view;
+- customer return-page polling and a Super Admin billing timeline;
 - protected super-admin organization list and trial/suspend actions;
 - plan override API for founding or negotiated pricing.
 - audited demo request records and super-admin demo operations;

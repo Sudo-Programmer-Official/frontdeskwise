@@ -7,6 +7,7 @@ const server = await readFile(resolve(process.cwd(), "src/server.ts"), "utf8");
 const settingsMigration = await readFile(resolve(process.cwd(), "../../infra/db/030_handoff_notification_settings.sql"), "utf8");
 const templateMigration = await readFile(resolve(process.cwd(), "../../infra/db/031_human_handoff_template.sql"), "utf8");
 const gapTemplateMigration = await readFile(resolve(process.cwd(), "../../infra/db/032_knowledge_gap_template.sql"), "utf8");
+const gapRepairMigration = await readFile(resolve(process.cwd(), "../../infra/db/033_knowledge_gap_diagnostics_repair.sql"), "utf8");
 
 test("handoff storage and delivery are business-scoped and actionable", () => {
   assert.match(settingsMigration, /create table if not exists business_notification_settings/);
@@ -14,8 +15,12 @@ test("handoff storage and delivery are business-scoped and actionable", () => {
   assert.match(templateMigration, /Customer waiting for help — FrontDeskWise/);
   assert.match(templateMigration, /Open conversation/);
   assert.match(gapTemplateMigration, /knowledge_gap/);
+  assert.match(gapRepairMigration, /add column if not exists intent/);
+  assert.match(gapRepairMigration, /add column if not exists reason/);
   assert.match(server, /\/notification-settings/);
   assert.match(server, /inbox_url: lifecycleAppUrl\(`\/app\/\$\{business\.slug\}\/inbox\?conversation=/);
+  assert.match(server, /using legacy schema/);
+  assert.match(server, /Knowledge-gap follow-up failed after answer was generated/);
 });
 
 test("takeover and staff replies use explicit state and transaction boundaries", () => {

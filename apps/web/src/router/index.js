@@ -44,6 +44,8 @@ export function parseRoute(location = window.location) {
     if (segments[0] === "auth") {
         if (segments[1] === "callback")
             return { kind: "auth-callback" };
+        if (segments[1] === "reset-password")
+            return { kind: "auth-reset", mode: "resetPassword", ...(query.get("oobCode") ? { oobCode: query.get("oobCode") ?? undefined } : {}) };
         const returnTo = safeReturnTo(query.get("returnTo"));
         if (segments[1] === "sign-up")
             return { kind: "auth", mode: "signup", ...(returnTo ? { returnTo } : {}) };
@@ -142,6 +144,12 @@ export function routePath(route) {
     if (route.kind === "auth") {
         const path = `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
         return route.returnTo ? `${path}?returnTo=${encodeURIComponent(route.returnTo)}` : path;
+    }
+    if (route.kind === "auth-reset") {
+        const params = new URLSearchParams({ mode: route.mode });
+        if (route.oobCode)
+            params.set("oobCode", route.oobCode);
+        return `/auth/reset-password?${params.toString()}`;
     }
     if (route.kind === "auth-callback")
         return "/auth/callback";
