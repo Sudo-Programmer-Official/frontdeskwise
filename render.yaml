@@ -23,6 +23,8 @@ services:
         value: /etc/secrets/rds-ca.pem
       - key: FRONTDESKWISE_CREDENTIAL_KEY
         sync: false
+      - key: FRONTDESKWISE_JACKRABBIT_API_BASE_URL
+        sync: false
       - key: WEB_ORIGIN
         value: https://frontdeskwise.com,https://www.frontdeskwise.com,https://app.frontdeskwise.com
       - key: FRONTDESKWISE_PUBLIC_API_ORIGIN

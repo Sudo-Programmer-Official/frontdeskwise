@@ -14,7 +14,7 @@ The adapter merges both read models by class ID, so a FrontDeskWise action can r
 
 ## Local certification
 
-For local certification without a saved business connection, put the Customer API token in the local `apps/api/.env` only. Do not paste it into chat, commit it, or print it in logs. The application resolves a stored business connection first and allows the environment fallback only outside production (or when `FRONTDESKWISE_JACKRABBIT_ALLOW_ENV_FALLBACK=true`). Then run:
+For local certification without a saved business connection, put the Customer API token in the local `apps/api/.env` only. Do not paste it into chat, commit it, or print it in logs. The application resolves a stored business connection first and allows the environment fallback only outside production. Then run:
 
 ```bash
 npm --prefix apps/api run jackrabbit:certify

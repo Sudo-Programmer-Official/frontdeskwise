@@ -4065,7 +4065,7 @@ type ResolvedJackrabbitCredentials = {
 };
 
 function jackrabbitEnvironmentFallbackAllowed(): boolean {
-  return process.env.NODE_ENV !== "production" || process.env.FRONTDESKWISE_JACKRABBIT_ALLOW_ENV_FALLBACK === "true";
+  return process.env.NODE_ENV !== "production";
 }
 
 /** Resolve stored credentials first; the environment fallback is for local certification only. */
