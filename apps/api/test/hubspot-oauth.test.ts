@@ -44,7 +44,7 @@ test("HubSpot authorization URL uses configured redirect and least-privilege sco
     assert.equal(url.origin, "https://app.hubspot.com");
     assert.equal(url.pathname, "/oauth/authorize");
     assert.equal(url.searchParams.get("state"), "opaque-state");
-    assert.equal(url.searchParams.get("redirect_uri"), environment.redirectUri);
+    assert.equal(url.searchParams.get("redirect_uri"), "https://api.example.test/api/v1/integrations/hubspot/callback");
     assert.equal(url.searchParams.get("scope"), "oauth crm.objects.contacts.read crm.objects.contacts.write");
   } finally {
     restoreOAuthEnvironment();
