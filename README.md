@@ -23,6 +23,8 @@ Business URL → instant personalized demo → lead capture → owner dashboard 
 - URL crawling into bounded source text and tenant-scoped knowledge chunks.
 - Grounded conversation testing with source citations, fallback gaps, and lead capture.
 - Durable lead events with encrypted CRM webhook delivery, idempotency, retry, and sync status.
+- Owner-configured completion connectors with a durable action retry queue; failed external delivery never removes the saved lead.
+- Conversion telemetry for flow starts, field progress, forms, action outcomes, handoffs, booking links, and abandonment.
 
 ## Run locally
 
@@ -52,10 +54,18 @@ With `DATABASE_URL` set, demo workspaces, sources, conversations, knowledge gaps
 - `POST /api/v1/demo-access/exchange` with the `accessToken` returned by demo creation
 - `POST /api/v1/demo/:slug/conversations`
 - `POST /api/v1/demo/:slug/conversations/:conversationId/messages`
+- `GET /api/v1/demo/:slug/actions` and `POST/PUT/DELETE /api/v1/demo/:slug/actions...` for owner-configured conversation flows
+- `POST /api/v1/demo/:slug/conversations/:conversationId/actions/:actionId/submit` for compact form completion
 - `POST /api/v1/demo/:slug/leads`
 - `GET /api/v1/demo/:slug/knowledge-gaps`
 
 CRM delivery is configured from the owner dashboard with `POST /api/v1/demo/:slug/integrations` and tested with the integration test endpoint. The API stores the lead first, then asynchronously delivers a signed webhook or syncs a HubSpot contact. Set `FRONTDESKWISE_CREDENTIAL_KEY` through the staging/production secret manager before enabling CRM connections; no provider secret belongs in source control.
+
+Flows can optionally run a completion connector after the lead is saved. The current owner UI supports email-to-team, HubSpot, and the generic signed webhook connector; the latter is the fast path for Jackrabbit, Square, Mindbody, Calendly, or another vendor through Zapier, Make, or a business-owned endpoint. `action_outbox` retries delivery independently of the lead record.
+
+The public widget posts conversion events to `POST /api/v1/widget/:siteKey/telemetry`. Events are stored in `conversion_events` with tenant, conversation, flow, field, source-page, device, and timestamp context. Workspace analytics exposes the resulting flow funnel and field drop-offs.
+
+MCP is available as a separate assistant-tool connection path under the owner dashboard’s Connections screen. Owners connect a provider-issued MCP URL and token, FrontDeskWise discovers the available tools, and read-only tools are enabled by default. Write or destructive tools require explicit permission; deterministic completion actions continue using the existing connector and retry architecture.
 
 Demo creation now performs a bounded same-site crawl (up to 20 pages, depth 2), stores canonical URLs/page types/crawl status, and creates a 48-hour demo owner session with a hashed token in PostgreSQL. The tenant starts in `billing_mode = sandbox`, `is_demo = true`, `billing_status = trial`, and `plan_key = demo`; live checkout is intentionally not enabled yet.
 

@@ -11,6 +11,8 @@ The current API exposes:
 - `GET /api/v1/demo/:slug`
 - `POST /api/v1/demo/:slug/conversations`
 - `POST /api/v1/demo/:slug/conversations/:conversationId/messages` for grounded answers or fallback gaps.
+- `GET /api/v1/demo/:slug/actions` and `POST/PUT/DELETE /api/v1/demo/:slug/actions...` for owner-configured capture flows.
+- `POST /api/v1/demo/:slug/conversations/:conversationId/actions/:actionId/submit` for inline or hybrid form completion.
 - `GET /api/v1/demo/:slug/knowledge-gaps`
 - `POST /api/v1/demo/:slug/knowledge-gaps/resolve`
 - `GET /api/v1/demo/:slug/retrieval-diagnostics`
@@ -25,12 +27,25 @@ The current API exposes:
 - `POST /api/v1/demo/:slug/integrations/:integrationId/test`
 - `POST /api/v1/demo/:slug/integrations/:integrationId/retry`
 - `GET /api/v1/demo/:slug/integrations/:integrationId/syncs`
+- `GET /api/v1/demo/:slug/mcp-connections`
+- `POST /api/v1/demo/:slug/mcp-connections` to test, discover, and save an encrypted MCP connection
+- `POST /api/v1/demo/:slug/mcp-connections/:connectionId/test`
+- `PATCH /api/v1/demo/:slug/mcp-connections/:connectionId/tools` to save the explicit tool allowlist
+- `DELETE /api/v1/demo/:slug/mcp-connections/:connectionId`
+- `GET /api/v1/demo/:slug/inbox` for business-scoped staff inbox filters and conversation summaries.
+- `GET /api/v1/demo/:slug/conversations/:conversationId` for staff conversation detail, events, and private notes.
+- `POST /api/v1/demo/:slug/conversations/:conversationId/takeover` to claim a conversation for human takeover.
+- `POST /api/v1/demo/:slug/conversations/:conversationId/assign`, `/return-to-ai`, `/resolve`, `/messages/human`, `/ai-assist`, and `/notes` for deterministic staff operations.
+- `GET /api/v1/demo/:slug/team`, `POST /api/v1/demo/:slug/team/invite`, and `PATCH /api/v1/demo/:slug/team/:userId` for business-scoped team access.
+- `GET /api/v1/demo/:slug/notifications` and `POST /api/v1/demo/:slug/notifications/:notificationId/read` for the in-app notification center.
 
 Public widget routes use the generated site key rather than a tenant slug:
 
 - `GET /api/v1/widget/:siteKey/config`
 - `POST /api/v1/widget/:siteKey/conversations`
 - `POST /api/v1/widget/:siteKey/conversations/:conversationId/messages`
+- `POST /api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionId/submit`
+- `GET /api/v1/widget/:siteKey/conversations/:conversationId` for visitor-safe status and human-message polling.
 - `POST /api/v1/widget/:siteKey/leads`
 
 Dashboard-only reads, including `GET /api/v1/demo/:slug`, demo test conversations, dashboard lead capture, booking actions, integrations, and agent configuration require `Authorization: Bearer <demo-token>` (or `X-FrontDeskWise-Demo-Token`). Public visitor conversation, lead capture, and booking routes use the generated widget site key instead.
@@ -49,7 +64,9 @@ Lead capture persists the contact, provenance, consent timestamp, bounded campai
 
 CRM credentials are encrypted with AES-256-GCM using `FRONTDESKWISE_CREDENTIAL_KEY`, are never returned to the dashboard, and must be injected through a secret manager. The current adapters are a signed webhook and HubSpot private-app token; OAuth and additional native adapters can be added behind the same contract later.
 
+MCP connections use the same encryption key but a separate `mcp_connections` table. The first guided UI supports HubSpot, Zapier, Make, and custom MCP servers through a provider-issued server URL and bearer token. Connection setup discovers the tool catalog, enables read-only tools by default, and requires explicit owner permission for write or destructive tools. OAuth handshakes and agent-runtime tool execution are intentionally separate follow-up work; critical lead, booking, and enrollment actions remain on deterministic connectors.
+
 The database config rejects URLs targeting another database name, normalizes the sibling service’s `postgresql+asyncpg` format, and handles RDS SSL explicitly. Credentials should be injected through the environment or a secret manager; do not commit a real `.env` file.
 
-In production, the API fails closed unless PostgreSQL, the CRM encryption key, OpenAI, explicit web/widget origins, and an RDS CA value are configured. `DATABASE_SSL_CA_FILE` reads a PEM bundle from a runtime file such as Render's `/etc/secrets/rds-ca.pem`; `DATABASE_SSL_CA` accepts PEM and `DATABASE_SSL_CA_BASE64` is a local alternative. Requests receive a request ID and process-local rate-limit headers; add an edge/WAF limit before horizontal scaling.
+In production, the API fails closed unless PostgreSQL, the CRM encryption key, OpenAI, Stripe secrets, explicit web/widget origins, and an RDS CA value are configured. `DATABASE_SSL_CA_FILE` reads a PEM bundle from a runtime file such as Render's `/etc/secrets/rds-ca.pem`; `DATABASE_SSL_CA` accepts PEM and `DATABASE_SSL_CA_BASE64` is a local alternative. Requests receive a request ID and process-local rate-limit headers; add an edge/WAF limit before horizontal scaling.
 

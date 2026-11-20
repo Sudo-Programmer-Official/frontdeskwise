@@ -10,6 +10,7 @@
     "dev": "vite",
     "prebuild": "node scripts/generate-site-metadata.mjs",
     "build": "vue-tsc -b && vite build",
+    "test": "node --test test/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

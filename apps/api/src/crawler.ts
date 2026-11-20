@@ -118,9 +118,9 @@ function pageType(url: string, title: string): string {
   const value = `${url} ${title}`.toLowerCase();
   if (/price|pricing|cost|rate/.test(value)) return "pricing";
   if (/faq|question/.test(value)) return "faq";
-  if (/policy|cancel|terms|privacy/.test(value)) return "policy";
+  if (/policy|cancel|terms|privacy|cookie|legal/.test(value)) return "policy";
   if (/location|contact|hours|about/.test(value)) return "location";
-  if (/service|program|class|menu|treatment/.test(value)) return "service";
+  if (/service|solution|product|offering|program|class|menu|treatment/.test(value)) return "service";
   return "web_page";
 }
 

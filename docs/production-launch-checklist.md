@@ -36,6 +36,8 @@ Configure the app name, home page, privacy policy, terms URL, and developer cont
 - Private S3 document upload/download plus PDF, DOCX, spreadsheet, and text extraction are implemented; SES is used for super-admin and demo-request notifications.
 - Website ownership verification gates live publishing and production lead capture while internal sandbox demos remain pre-verified.
 - The frontend API origin is build-time configurable and is no longer coupled to the Vercel origin.
+- The widget supports configurable proactive prompts, anonymous 24-hour visitor continuity, short quick actions, responsive shell modes, AI disclosure, consent notice, and owner-configured retention.
+- Owners can delete individual lead records; scheduled retention cleanup removes expired conversations and leads according to the business setting.
 
 ## Launch items
 
@@ -95,6 +97,12 @@ Create the private S3 bucket and least-privilege runtime identity, configure buc
 - Connect a webhook or HubSpot sandbox and verify sync, retry, idempotency, and no credential exposure.
 - Verify a website ownership method, then install the widget; confirm an unverified claimed business is blocked from production lead capture.
 - Upload a private document, confirm extraction creates searchable chunks, and verify the S3 bucket remains private.
+- Refresh/remove a website source, update a lead status and note, export the filtered lead list, and disconnect a CRM integration.
+- Check the Agent & Widget desktop/mobile previews and verify the installed widget from the owner dashboard after the first live load.
+- Enable proactive engagement in a staging business, verify delay/scroll/exit/returning triggers fire at most once per page, and confirm closing the prompt does not interrupt the widget.
+- Reopen the widget with the same browser profile and confirm the anonymous visitor resumes the recent conversation without exposing an identity to the browser.
+- Enable required lead consent, verify the notice appears before lead/action submission, and verify the API rejects a submission without consent.
+- Delete a disposable lead record as an owner and confirm it is absent from the dashboard/export; verify retention cleanup uses the configured business window.
 - Sign in as `hello@frontdeskwise.com` and confirm `/platform` shows live organization/demo request data and SES test delivery.
 - Confirm `robots.txt`, `sitemap.xml`, canonical metadata, mobile layout, and `api.frontdeskwise.com` network calls.
 - Configure database backups/restore verification, alerting, log retention, PII deletion/retention policy, and a scheduled recrawl plan.

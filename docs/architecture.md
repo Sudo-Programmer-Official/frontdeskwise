@@ -4,12 +4,13 @@ This document describes the architecture implemented in the current FrontDeskWis
 
 ## Architecture status
 
-The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, lead capture, knowledge-gap approval, demo billing state, widget installation, and durable CRM lead delivery.
+The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, lead capture, knowledge-gap approval, configurable action flows, business-scoped team access, durable human handoff, staff notifications, assignments, internal notes, demo billing state, widget installation, and durable CRM lead delivery.
 
 The remaining intentionally limited areas are:
 
 - Additional CRM OAuth adapters and provider-specific field mapping beyond the current HubSpot and signed-webhook adapters.
 - Scheduled recrawls, change detection, and production CDN verification.
+- SMS/Slack notification channels and multi-channel realtime transport; the current handoff path uses in-app notifications, optional SES email, and visitor polling.
 
 Firebase authentication, Stripe checkout/webhooks/customer portal, S3 private document storage with PDF/DOCX/spreadsheet extraction, SES transactional mail, website ownership verification, and the super-admin demo operations are implemented behind their required environment configuration.
 
@@ -24,7 +25,7 @@ flowchart LR
   api["Fastify API"]
   database[("PostgreSQL + pgvector")]
   embeddings["Optional embedding provider"]
-  outbox["CRM outbox worker"]
+  outbox["CRM + action outbox workers"]
   crm["CRM / automation webhook"]
   identity["Identity SDK adapter"]
   billing["Stripe billing"]
@@ -54,7 +55,7 @@ flowchart LR
 | Embedding client | `apps/api/src/embeddings.ts` | Optional provider calls and vector formatting |
 | Database adapter | `apps/api/src/database.ts` | Database-name guard, SSL normalization, PostgreSQL pool creation |
 | Migration runner | `apps/api/src/migrate.ts` | Ordered, checksum-verified, advisory-locked migrations |
-| Database schema | `infra/db/001_initial.sql` through `018_model_routing_observability.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, private document processing, and model usage diagnostics |
+| Database schema | `infra/db/001_initial.sql` through `020_human_handoff_inbox.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, private document processing, model usage diagnostics, team access, handoff state, notifications, assignments, and internal notes |
 
 ## Primary flow: URL to demo
 
@@ -118,7 +119,7 @@ Current retrieval behavior:
 
 An owner-approved answer is reused for the exact normalized question and marked as `approved_answer` retrieval. This is a controlled answer override, not an untracked prompt edit.
 
-## Primary flow: lead capture and CRM delivery
+## Primary flow: lead capture, completion actions, and CRM delivery
 
 ```mermaid
 sequenceDiagram
@@ -139,6 +140,10 @@ sequenceDiagram
 ```
 
 FrontDeskWise is the source of truth for contact details, attribution, consent, and lead status. `crm_integrations` stores only encrypted credentials and non-secret configuration. `integration_outbox` is the durable delivery queue; `crm_sync_records` is the per-lead projection and audit state. A unique integration/idempotency key prevents duplicate deliveries across retries or multiple API instances. See [data-and-integrations.md](data-and-integrations.md) for the field inventory and adapter contract.
+
+An action flow may also define a completion connector. The flow persists its lead first, creates an `action_outbox` job with an idempotency key, and returns the configured safe completion message. A separate worker executes the connector and records `ACTION_SUCCEEDED` or `ACTION_FAILED`; retry exhaustion is visible to operators without changing the lead. Connector implementations include generic signed webhooks, email, HubSpot, and vendor HTTP adapters for Jackrabbit, Square, Mindbody, and Calendly.
+
+The widget emits `conversion_events` for flow starts, field views/completions/abandonment, form display/submission, action outcomes, CTA clicks, handoff requests, lead capture, booking-link opens, and conversation abandonment. Funnel summaries are derived from those events per business and flow.
 
 ## Owner access boundary
 
@@ -184,9 +189,13 @@ businesses
 ├── workspace_users
 │   └── demo_access_sessions
 ├── conversations
-│   └── conversation_messages
+│   ├── conversation_messages
+│   ├── conversation_assignments
+│   ├── conversation_events
+│   └── internal_notes
 ├── leads
 │   └── lead_events
+├── notifications
 ├── crm_integrations
 │   ├── integration_outbox
 │   └── crm_sync_records
@@ -312,6 +321,12 @@ The current chain is:
 016_business_ownership_verification.sql
 017_document_ingestion.sql
 018_model_routing_observability.sql
+019_action_flows.sql
+020_human_handoff_inbox.sql
+021_action_connectors_and_conversion_telemetry.sql
+022_widget_shell_preferences.sql
+023_proactive_privacy_preferences.sql
+024_mcp_connections.sql
 ```
 
 The database adapter rejects connection URLs aimed at another database name and normalizes the sibling service's `postgresql+asyncpg` format without copying credentials into FrontDeskWise.
@@ -332,13 +347,14 @@ The database adapter rejects connection URLs aimed at another database name and 
 - Durable lead events and retryable CRM webhook delivery.
 - HubSpot contact upsert adapter with optional capture-note activity.
 - Stripe sandbox/live checkout, Customer Portal, signed webhook reconciliation, and plan entitlements.
+- Guided MCP connections with encrypted tokens, discovered tool catalogs, and per-business allowlists.
 
 ### Planned next
 
 - Scheduled recrawls and content change detection.
 - Per-tenant usage budgets and configurable cost alerts.
 - Widget script verification and production CDN delivery.
-- Additional native CRM adapters, OAuth, richer field mapping, and provider rate-limit handling.
+- MCP tool-call runtime wiring, provider OAuth handshakes, additional native CRM adapters, richer field mapping, and provider rate-limit handling.
 
 ## Related documents
 

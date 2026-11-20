@@ -6,12 +6,33 @@ import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
-import { crawlWebsite, normalisePublicUrl, type CrawledPage } from "./crawler.js";
+import { CrawlError, crawlWebsite, normalisePublicUrl, type CrawledPage } from "./crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingsConfigured, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
-import { generateGroundedAnswer, routeQuestion, type ModelUsage } from "./model-routing.js";
+import { generateGroundedAnswer, routeQuestion, verifyGroundedAnswer, type ModelUsage } from "./model-routing.js";
+import {
+  ACTION_TEMPLATES,
+  actionTemplate,
+  createActionState,
+  defaultActionFlows,
+  detectAction,
+  fieldPrompt,
+  formFields,
+  nextActionField,
+  nextConversationalField,
+  validateFieldValue,
+  type ActionFlow,
+  type ConversationActionState,
+} from "./action-flows.js";
+import {
+  citationMatches,
+  classifyQuestionIntent,
+  rankMatches,
+  sourceSemanticType,
+  type RetrievalIntent,
+} from "./retrieval.js";
 import {
   allowedDocumentTypeList,
   createDocumentDownload,
@@ -27,6 +48,13 @@ import {
   storageConfigurationMessage,
 } from "./storage.js";
 import { notifySuperAdmins, sendTransactionalEmail, sesConfigured, sesConfigurationMessage, superAdminEmails } from "./email.js";
+import { isExplicitHumanRequest } from "./handoff-policy.js";
+import {
+  createActionConnector,
+  type ActionConnectorProvider,
+  type ActionConnectorSettings,
+  type ActionInput,
+} from "./action-connectors.js";
 import {
   decryptIntegrationCredentials,
   createCrmAdapter,
@@ -36,6 +64,8 @@ import {
   validateWebhookUrl,
   type CrmLeadPayload,
 } from "./crm.js";
+import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from "./mcp.js";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
 app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
@@ -71,6 +101,8 @@ function validateProductionConfiguration(): void {
     ["DATABASE_URL", process.env.DATABASE_URL],
     ["FRONTDESKWISE_CREDENTIAL_KEY", process.env.FRONTDESKWISE_CREDENTIAL_KEY],
     ["OPENAI_API_KEY", process.env.OPENAI_API_KEY],
+    ["STRIPE_SECRET_KEY", process.env.STRIPE_SECRET_KEY],
+    ["STRIPE_WEBHOOK_SECRET", process.env.STRIPE_WEBHOOK_SECRET],
     ["WEB_ORIGIN", process.env.WEB_ORIGIN],
     ["FRONTDESKWISE_PUBLIC_API_ORIGIN", process.env.FRONTDESKWISE_PUBLIC_API_ORIGIN],
     ["FRONTDESKWISE_WIDGET_ORIGIN", process.env.FRONTDESKWISE_WIDGET_ORIGIN],
@@ -89,6 +121,14 @@ function validateProductionConfiguration(): void {
 
 validateProductionConfiguration();
 
+type WidgetMode = "compact" | "expanded" | "fullscreen";
+type ProactiveTrigger = "delay" | "scroll" | "exit" | "returning";
+
+type WidgetQuickAction = {
+  label: string;
+  question: string;
+};
+
 type AgentConfig = {
   assistantName: string;
   welcomeMessage: string;
@@ -96,6 +136,18 @@ type AgentConfig = {
   collectLeads: boolean;
   showBookingAction: boolean;
   fallbackMessage: string;
+  widgetDefaultMode: WidgetMode;
+  widgetAllowExpand: boolean;
+  widgetQuickActions: WidgetQuickAction[];
+  widgetLogoUrl: string | null;
+  proactiveEnabled: boolean;
+  proactiveDelaySeconds: number;
+  proactiveMessage: string;
+  proactiveTriggers: ProactiveTrigger[];
+  requireLeadConsent: boolean;
+  privacyNoticeUrl: string | null;
+  retentionDays: number;
+  showAiDisclosure: boolean;
 };
 
 type Source = {
@@ -103,6 +155,7 @@ type Source = {
   url: string;
   canonicalUrl: string;
   title: string;
+  contentType: string;
   pageType: string;
   crawlStatus: "queued" | "crawling" | "ready" | "failed";
   contentHash: string;
@@ -167,8 +220,25 @@ type DemoAuditInput = {
   metadata?: Record<string, unknown>;
 };
 
+type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED";
+type TeamRole = "owner" | "admin" | "staff" | "viewer";
+type ConversationEventType =
+  | "AI_HANDOFF_REQUESTED"
+  | "STAFF_NOTIFIED"
+  | "STAFF_ASSIGNED"
+  | "HUMAN_JOINED"
+  | "MESSAGE_SENT_BY_HUMAN"
+  | "RETURNED_TO_AI"
+  | "CONVERSATION_RESOLVED"
+  | "VISITOR_REPLIED"
+  | "INTERNAL_NOTE_ADDED"
+  | "AI_RESPONSE_SENT";
+
 type Message = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "human" | "system";
+  kind?: "message" | "system" | "internal_note";
+  authorUserId?: string;
+  authorName?: string;
   content: string;
   grounded?: boolean;
   sourceUrl?: string;
@@ -177,6 +247,7 @@ type Message = {
   citations?: Array<{ title: string; url: string; sourceId?: string; chunkId?: string; pageType?: string }>;
   retrieval?: {
     mode: string;
+    intent?: RetrievalIntent;
     candidateCount: number;
     topScore?: number;
     route?: string;
@@ -195,7 +266,91 @@ type Conversation = {
   sessionId: string;
   leadCaptured: boolean;
   actionTaken: string | null;
+  actionState?: ConversationActionState;
+  status: ConversationStatus;
+  assignedUserId: string | null;
+  assignedAt: string | null;
+  handoffReason: string | null;
+  handoffRequestedAt: string | null;
+  humanJoinedAt: string | null;
+  resolvedAt: string | null;
+  unreadCount: number;
+  lastActivityAt: string;
   messages: Message[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ConversationEvent = {
+  id: string;
+  businessId: string;
+  conversationId: string;
+  eventType: ConversationEventType;
+  actorUserId: string | null;
+  actorType: "visitor" | "ai" | "staff" | "system";
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+type ConversionEventType =
+  | "FLOW_STARTED"
+  | "FIELD_VIEWED"
+  | "FIELD_COMPLETED"
+  | "FIELD_ABANDONED"
+  | "FORM_DISPLAYED"
+  | "FORM_SUBMITTED"
+  | "ACTION_STARTED"
+  | "ACTION_SUCCEEDED"
+  | "ACTION_FAILED"
+  | "FLOW_COMPLETED"
+  | "CTA_CLICKED"
+  | "HANDOFF_REQUESTED"
+  | "LEAD_CAPTURED"
+  | "BOOKING_LINK_OPENED"
+  | "CONVERSATION_ABANDONED";
+
+type ConversionEvent = {
+  id: string;
+  organizationId: string | null;
+  businessId: string;
+  conversationId: string | null;
+  flowId: string | null;
+  fieldId: string | null;
+  event: ConversionEventType;
+  timestamp: string;
+  sourcePage: string | null;
+  device: string | null;
+  metadata: Record<string, unknown>;
+};
+
+const conversionEventTypes = new Set<ConversionEventType>([
+  "FLOW_STARTED", "FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED",
+  "FORM_DISPLAYED", "FORM_SUBMITTED", "ACTION_STARTED", "ACTION_SUCCEEDED",
+  "ACTION_FAILED", "FLOW_COMPLETED", "CTA_CLICKED", "HANDOFF_REQUESTED",
+  "LEAD_CAPTURED", "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED",
+]);
+
+type Notification = {
+  id: string;
+  organizationId: string | null;
+  businessId: string;
+  userId: string | null;
+  type: string;
+  conversationId: string | null;
+  leadId: string | null;
+  title: string;
+  body: string;
+  readAt: string | null;
+  createdAt: string;
+};
+
+type InternalNote = {
+  id: string;
+  businessId: string;
+  conversationId: string;
+  authorUserId: string;
+  authorName?: string;
+  content: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -214,6 +369,7 @@ type Lead = {
   consentAt: string | null;
   idempotencyKey: string | null;
   metadata: Record<string, unknown>;
+  notes?: string;
   createdAt: string;
 };
 
@@ -231,6 +387,8 @@ type EvaluationCase = {
   category: string;
   question: string;
   expectation: EvaluationExpectation;
+  expectedSourceTypes?: string[];
+  forbiddenPrimarySourceTypes?: string[];
 };
 
 type EvaluationResult = {
@@ -245,6 +403,9 @@ type EvaluationResult = {
   answer: string;
   latencyMs: number;
   retrievalMode: string;
+  expectedSourceTypes?: string[];
+  primarySourceType?: string;
+  forbiddenPrimarySourceTypes?: string[];
 };
 
 type Business = {
@@ -262,7 +423,12 @@ type Business = {
   ownershipVerifiedByUserId: string | null;
   sources: Source[];
   chunks: KnowledgeChunk[];
+  actions: ActionFlow[];
   conversations: Map<string, Conversation>;
+  conversationEvents: ConversationEvent[];
+  conversionEvents: ConversionEvent[];
+  notifications: Notification[];
+  internalNotes: InternalNote[];
   leads: Lead[];
   knowledgeGaps: Map<string, KnowledgeGap>;
   agentConfig: AgentConfig;
@@ -289,13 +455,85 @@ function isInternalDemoSlug(slug: string): boolean {
   return INTERNAL_DEMO_SLUGS.has(slug);
 }
 
+function defaultQuickActions(businessName: string): WidgetQuickAction[] {
+  return [
+    { label: "Explore services", question: `What services does ${businessName} offer?` },
+    { label: "Pricing", question: "What does pricing look like?" },
+    { label: "Get started", question: "How do I get started?" },
+    { label: "Ask a question", question: "" },
+  ];
+}
+
+function normalizedWidgetMode(value: unknown): WidgetMode {
+  return value === "expanded" || value === "fullscreen" ? value : "compact";
+}
+
+function normalizedWidgetQuickActions(value: unknown, businessName: string): WidgetQuickAction[] {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      candidate = null;
+    }
+  }
+  if (!Array.isArray(candidate)) return defaultQuickActions(businessName);
+  const actions = candidate
+    .map((item): WidgetQuickAction | null => {
+      const record = asRecord(item);
+      const label = typeof record.label === "string" ? record.label.trim().slice(0, 48) : "";
+      const question = typeof record.question === "string" ? record.question.trim().slice(0, 300) : "";
+      return label ? { label, question } : null;
+    })
+    .filter((item): item is WidgetQuickAction => Boolean(item))
+    .slice(0, 4);
+  return actions.length ? actions : defaultQuickActions(businessName);
+}
+
+function normalizedProactiveTriggers(value: unknown): ProactiveTrigger[] {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      candidate = null;
+    }
+  }
+  if (!Array.isArray(candidate)) return ["delay", "scroll", "exit"];
+  const allowed = new Set<ProactiveTrigger>(["delay", "scroll", "exit", "returning"]);
+  const triggers = candidate.filter((item): item is ProactiveTrigger => typeof item === "string" && allowed.has(item as ProactiveTrigger));
+  return [...new Set(triggers)];
+}
+
+function normalizedProactiveDelay(value: unknown): number {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? Math.max(10, Math.min(120, Math.round(seconds))) : 20;
+}
+
+function normalizedRetentionDays(value: unknown): number {
+  const days = Number(value);
+  return [30, 60, 90, 365].includes(days) ? days : 90;
+}
+
 const defaultConfig = (businessName: string): AgentConfig => ({
   assistantName: `${businessName} Assistant`,
-  welcomeMessage: "Hi! 👋 I can answer questions from this business's website and help you get started.",
+  welcomeMessage: `Hi! I’m the ${businessName} assistant. I can answer questions, help you choose a service, or get you started.`,
   widgetColor: "#0d6efd",
   collectLeads: true,
   showBookingAction: true,
   fallbackMessage: "I do not have enough information to answer that confidently. I can take your details and have the team follow up.",
+  widgetDefaultMode: "compact",
+  widgetAllowExpand: true,
+  widgetQuickActions: defaultQuickActions(businessName),
+  widgetLogoUrl: null,
+  proactiveEnabled: false,
+  proactiveDelaySeconds: 20,
+  proactiveMessage: "Looking for the right service? I can help.",
+  proactiveTriggers: ["delay", "scroll", "exit"],
+  requireLeadConsent: false,
+  privacyNoticeUrl: null,
+  retentionDays: 90,
+  showAiDisclosure: true,
 });
 
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
@@ -536,7 +774,12 @@ function organizationDocumentPayload(row: Record<string, unknown>): Record<strin
 async function authSnapshot(userId: string, activeOrganizationId: string | null = null): Promise<Record<string, unknown>> {
   if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
   const [userResult, organizationResult, businessResult] = await Promise.all([
-    pool.query<Record<string, unknown>>("select id, email, name from app_users where id = $1 and status = 'active'", [userId]),
+    pool.query<Record<string, unknown>>(
+      `select u.id, u.email, u.name,
+              exists (select 1 from super_admin_users sa where sa.user_id = u.id and sa.status = 'active') as is_super_admin
+       from app_users u where u.id = $1 and u.status = 'active'`,
+      [userId],
+    ),
     pool.query<Record<string, unknown>>(
       `select o.id, o.name, o.slug, om.role,
               o.billing_mode, o.billing_status, o.plan_key, o.billing_interval,
@@ -604,7 +847,10 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
     },
   }));
   return {
-    user: { id: String(userResult.rows[0].id), email: String(userResult.rows[0].email), name: String(userResult.rows[0].name) },
+    user: {
+      id: String(userResult.rows[0].id), email: String(userResult.rows[0].email), name: String(userResult.rows[0].name),
+      isSuperAdmin: Boolean(userResult.rows[0].is_super_admin),
+    },
     organizations,
     activeOrganizationId: activeOrganizationId && organizations.some((organization) => organization.id === activeOrganizationId)
       ? activeOrganizationId
@@ -731,6 +977,7 @@ async function bootstrapAuthenticatedUser(
 }
 
 function leadFromRow(row: Record<string, unknown>): Lead {
+  const metadata = asRecord(row.metadata);
   return {
     id: String(row.id),
     conversationId: typeof row.conversation_id === "string" ? row.conversation_id : null,
@@ -744,8 +991,83 @@ function leadFromRow(row: Record<string, unknown>): Lead {
     referrer: typeof row.referrer === "string" ? row.referrer : null,
     consentAt: row.consent_at ? toIso(row.consent_at) : null,
     idempotencyKey: typeof row.idempotency_key === "string" ? row.idempotency_key : null,
-    metadata: asRecord(row.metadata),
+    metadata,
+    notes: typeof metadata.notes === "string" ? metadata.notes : undefined,
     createdAt: toIso(row.created_at),
+  };
+}
+
+function actionConnectorFromValue(value: unknown): ActionConnectorSettings | undefined {
+  const source = asRecord(value);
+  const provider = source.provider;
+  if (provider !== "generic_webhook" && provider !== "email" && provider !== "hubspot"
+      && provider !== "jackrabbit" && provider !== "square" && provider !== "mindbody" && provider !== "calendly") {
+    return undefined;
+  }
+  const integrationId = optionalString(source.integrationId, 120);
+  const recipients = Array.isArray(source.recipients)
+    ? source.recipients.filter((item): item is string => typeof item === "string" && item.includes("@")).map((item) => item.trim().toLowerCase()).slice(0, 20)
+    : undefined;
+  const endpoint = optionalString(source.endpoint, 2_000);
+  return {
+    provider,
+    ...(integrationId ? { integrationId } : {}),
+    ...(recipients?.length ? { recipients } : {}),
+    ...(endpoint ? { endpoint } : {}),
+  };
+}
+
+function mcpProviderFromValue(value: unknown): McpProvider | undefined {
+  return value === "hubspot" || value === "zapier" || value === "make" || value === "custom" ? value : undefined;
+}
+
+function mcpToolsFromValue(value: unknown): McpTool[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is McpTool => {
+    const tool = asRecord(item);
+    return typeof tool.name === "string" && Boolean(tool.name.trim());
+  }).slice(0, 200) as McpTool[];
+}
+
+function mcpCredentials(token: string): string {
+  return encryptSecret(JSON.stringify({ bearerToken: token }));
+}
+
+function mcpBearerToken(payload: string): string {
+  const credentials = asRecord(JSON.parse(decryptSecret(payload)));
+  const token = optionalString(credentials.bearerToken, 4_000);
+  if (!token) throw new Error("MCP credentials are not configured");
+  return token;
+}
+
+function actionFromRow(row: Record<string, unknown>): ActionFlow {
+  const completion = asRecord(row.completion);
+  const connector = actionConnectorFromValue(completion.connector);
+  return {
+    id: String(row.id),
+    key: String(row.action_key),
+    name: String(row.name),
+    description: String(row.description ?? ""),
+    triggerPhrases: Array.isArray(row.trigger_phrases) ? row.trigger_phrases.filter((item): item is string => typeof item === "string") : [],
+    triggerIntents: Array.isArray(row.trigger_intents) ? row.trigger_intents.filter((item): item is string => typeof item === "string") : [],
+    captureMode: row.capture_mode === "conversational" || row.capture_mode === "form" || row.capture_mode === "hybrid" ? row.capture_mode : "auto",
+    fields: Array.isArray(row.fields) ? row.fields as ActionFlow["fields"] : [],
+    completion: {
+      createLead: completion.createLead !== false,
+      leadStatus: completion.leadStatus === "qualified" || completion.leadStatus === "booked" ? completion.leadStatus : "new",
+      message: typeof completion.message === "string" ? completion.message : "Thanks — the team has your request.",
+      submitLabel: typeof completion.submitLabel === "string" ? completion.submitLabel : undefined,
+      linkUrl: typeof completion.linkUrl === "string" ? completion.linkUrl : undefined,
+      linkLabel: typeof completion.linkLabel === "string" ? completion.linkLabel : undefined,
+      notifyStaff: completion.notifyStaff !== false,
+      requiresStaff: completion.requiresStaff === true,
+      notifyChannels: Array.isArray(completion.notifyChannels) ? completion.notifyChannels.filter((item): item is "in_app" | "email" => item === "in_app" || item === "email") : ["in_app", "email"],
+      notifyTargets: Array.isArray(completion.notifyTargets) ? completion.notifyTargets.filter((item): item is "owner" | "business_team" | "assigned_staff" => item === "owner" || item === "business_team" || item === "assigned_staff") : ["business_team"],
+      ...(connector ? { connector } : {}),
+    },
+    enabled: row.enabled !== false,
+    createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
+    updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
   };
 }
 
@@ -823,6 +1145,7 @@ function makeBusiness(input: {
     url: page.url,
     canonicalUrl: page.canonicalUrl,
     title: page.title,
+    contentType: "web_page",
     pageType: page.pageType,
     crawlStatus: "ready",
     contentHash: page.contentHash,
@@ -835,6 +1158,7 @@ function makeBusiness(input: {
     contentHash: chunk.contentHash,
     metadata: chunk.metadata,
   })));
+  const websiteContent = chunks.map((chunk) => chunk.content).join(" ");
 
   return {
     id: randomUUID(),
@@ -851,7 +1175,12 @@ function makeBusiness(input: {
     ownershipVerifiedByUserId: null,
     sources,
     chunks,
+    actions: defaultActionFlows(input.name, websiteContent, (key) => randomUUID()),
     conversations: new Map(),
+    conversationEvents: [],
+    conversionEvents: [],
+    notifications: [],
+    internalNotes: [],
     leads: [],
     knowledgeGaps: new Map(),
     agentConfig: defaultConfig(input.name),
@@ -876,6 +1205,46 @@ function makeBusiness(input: {
     },
     createdAt: now,
   };
+}
+
+function websiteSourcesFromPages(pages: CrawledPage[]): { sources: Source[]; chunks: KnowledgeChunk[] } {
+  const sources: Source[] = pages.map((page) => ({
+    id: randomUUID(),
+    url: page.url,
+    canonicalUrl: page.canonicalUrl,
+    title: page.title,
+    contentType: "web_page",
+    pageType: page.pageType,
+    crawlStatus: "ready",
+    contentHash: page.contentHash,
+    lastCrawledAt: page.lastCrawledAt,
+  }));
+  const chunks = pages.flatMap((page, index) => page.chunks.map((chunk) => ({
+    id: randomUUID(),
+    sourceId: sources[index].id,
+    content: chunk.content,
+    contentHash: chunk.contentHash,
+    metadata: chunk.metadata,
+  })));
+  return { sources, chunks };
+}
+
+async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): Promise<void> {
+  const previousWebsiteSourceIds = new Set(
+    business.sources.filter((source) => source.contentType === "web_page").map((source) => source.id),
+  );
+  const website = websiteSourcesFromPages(pages);
+  business.sources = business.sources.filter((source) => source.contentType !== "web_page").concat(website.sources);
+  business.chunks = business.chunks.filter((chunk) => !previousWebsiteSourceIds.has(chunk.sourceId)).concat(website.chunks);
+  if (!pool) return;
+  await pool.query(
+    `delete from knowledge_chunks
+     where business_id = $1
+       and source_id in (select id from business_sources where business_id = $1 and content_type = 'web_page')`,
+    [business.id],
+  );
+  await pool.query("delete from business_sources where business_id = $1 and content_type = 'web_page'", [business.id]);
+  await persistBusiness(business);
 }
 
 function seedDefaultBusiness(): Business {
@@ -1292,7 +1661,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
       const originalSourceId = source.id;
       const sourceResult = await client.query<{ id: string }>(
         `insert into business_sources (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
-         values ($1, $2, $3, $4, $5, 'web_page', $6, 'ready', $7, $8)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          on conflict (business_id, content_hash) do update set
            source_url = excluded.source_url,
            canonical_url = excluded.canonical_url,
@@ -1302,7 +1671,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            last_crawled_at = excluded.last_crawled_at,
            error_message = null
          returning id`,
-        [source.id, business.id, source.url, source.canonicalUrl, source.title, source.pageType, source.contentHash, source.lastCrawledAt],
+        [source.id, business.id, source.url, source.canonicalUrl, source.title, source.contentType, source.pageType, source.crawlStatus, source.contentHash, source.lastCrawledAt],
       );
       source.id = sourceResult.rows[0].id;
       for (const chunk of business.chunks.filter((item) => item.sourceId === originalSourceId)) {
@@ -1319,9 +1688,42 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
       }
     }
 
+    for (const action of business.actions) {
+      await client.query(
+        `insert into business_actions
+           (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, completion, enabled, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         on conflict (business_id, action_key) do update set
+           name = excluded.name,
+           description = excluded.description,
+           trigger_phrases = excluded.trigger_phrases,
+           trigger_intents = excluded.trigger_intents,
+           capture_mode = excluded.capture_mode,
+           fields = excluded.fields,
+           completion = excluded.completion,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at`,
+        [
+          action.id,
+          business.id,
+          action.key,
+          action.name,
+          action.description,
+          JSON.stringify(action.triggerPhrases),
+          JSON.stringify(action.triggerIntents),
+          action.captureMode,
+          JSON.stringify(action.fields),
+          JSON.stringify(action.completion),
+          action.enabled,
+          action.createdAt,
+          action.updatedAt,
+        ],
+      );
+    }
+
     await client.query(
-      `insert into agent_configs (business_id, assistant_name, welcome_message, widget_color, collect_leads, show_booking_action, fallback_message)
-       values ($1, $2, $3, $4, $5, $6, $7)
+      `insert into agent_configs (business_id, assistant_name, welcome_message, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        on conflict (business_id) do update set
          assistant_name = excluded.assistant_name,
          welcome_message = excluded.welcome_message,
@@ -1329,6 +1731,18 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
          collect_leads = excluded.collect_leads,
          show_booking_action = excluded.show_booking_action,
          fallback_message = excluded.fallback_message,
+         widget_default_mode = excluded.widget_default_mode,
+         widget_allow_expand = excluded.widget_allow_expand,
+         widget_quick_actions = excluded.widget_quick_actions,
+         widget_logo_url = excluded.widget_logo_url,
+         proactive_enabled = excluded.proactive_enabled,
+         proactive_delay_seconds = excluded.proactive_delay_seconds,
+         proactive_message = excluded.proactive_message,
+         proactive_triggers = excluded.proactive_triggers,
+         require_lead_consent = excluded.require_lead_consent,
+         privacy_notice_url = excluded.privacy_notice_url,
+         retention_days = excluded.retention_days,
+         show_ai_disclosure = excluded.show_ai_disclosure,
          updated_at = now()`,
       [
         business.id,
@@ -1338,6 +1752,18 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.agentConfig.collectLeads,
         business.agentConfig.showBookingAction,
         business.agentConfig.fallbackMessage,
+        business.agentConfig.widgetDefaultMode,
+        business.agentConfig.widgetAllowExpand,
+        JSON.stringify(business.agentConfig.widgetQuickActions),
+        business.agentConfig.widgetLogoUrl,
+        business.agentConfig.proactiveEnabled,
+        business.agentConfig.proactiveDelaySeconds,
+        business.agentConfig.proactiveMessage,
+        JSON.stringify(business.agentConfig.proactiveTriggers),
+        business.agentConfig.requireLeadConsent,
+        business.agentConfig.privacyNoticeUrl,
+        business.agentConfig.retentionDays,
+        business.agentConfig.showAiDisclosure,
       ],
     );
     await client.query("commit");
@@ -1369,12 +1795,13 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   if (!businessResult.rowCount) return null;
   const row = businessResult.rows[0];
   const businessId = String(row.id);
-  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, configResult] = await Promise.all([
+  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult] = await Promise.all([
     pool.query<Record<string, unknown>>("select * from business_sources where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from knowledge_chunks where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from conversations where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from leads where business_id = $1 order by created_at desc", [businessId]),
     pool.query<Record<string, unknown>>("select * from knowledge_gaps where business_id = $1 order by occurrence_count desc", [businessId]),
+    pool.query<Record<string, unknown>>("select * from business_actions where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from agent_configs where business_id = $1", [businessId]),
   ]);
   const conversationIds = conversationResult.rows.map((item) => String(item.id));
@@ -1386,7 +1813,10 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     const conversationId = String(message.conversation_id);
     const messages = messagesByConversation.get(conversationId) ?? [];
     messages.push({
-      role: message.role === "user" ? "user" : "assistant",
+      role: message.role === "user" ? "user" : message.role === "human" ? "human" : message.role === "system" ? "system" : "assistant",
+      kind: message.kind === "system" || message.kind === "internal_note" ? message.kind : "message",
+      authorUserId: typeof message.author_user_id === "string" ? message.author_user_id : undefined,
+      authorName: typeof message.author_name === "string" ? message.author_name : undefined,
       content: String(message.content),
       grounded: typeof message.grounded === "boolean" ? message.grounded : undefined,
       sourceUrl: typeof message.source_url === "string" ? message.source_url : undefined,
@@ -1397,6 +1827,29 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       createdAt: toIso(message.created_at),
     });
     messagesByConversation.set(conversationId, messages);
+  }
+  let conversionEvents: ConversionEvent[] = [];
+  try {
+    const eventResult = await pool.query<Record<string, unknown>>(
+      "select * from conversion_events where business_id = $1 order by occurred_at desc limit 10_000",
+      [businessId],
+    );
+    conversionEvents = eventResult.rows.map((event) => ({
+      id: String(event.id),
+      organizationId: typeof event.organization_id === "string" ? event.organization_id : null,
+      businessId,
+      conversationId: typeof event.conversation_id === "string" ? event.conversation_id : null,
+      flowId: typeof event.flow_id === "string" ? event.flow_id : null,
+      fieldId: typeof event.field_id === "string" ? event.field_id : null,
+      event: conversionEventTypes.has(String(event.event) as ConversionEventType) ? String(event.event) as ConversionEventType : "CTA_CLICKED",
+      timestamp: toIso(event.occurred_at),
+      sourcePage: typeof event.source_page === "string" ? event.source_page : null,
+      device: typeof event.device === "string" ? event.device : null,
+      metadata: asRecord(event.metadata),
+    }));
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Conversion events table is not available yet");
   }
   const config = configResult.rows[0];
   const loaded: Business = {
@@ -1422,6 +1875,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       url: String(source.source_url),
       canonicalUrl: String(source.canonical_url ?? source.source_url),
       title: String(source.title ?? "Website source"),
+      contentType: String(source.content_type ?? "web_page"),
       pageType: String(source.page_type ?? "web_page"),
       crawlStatus: source.crawl_status === "queued" || source.crawl_status === "crawling" || source.crawl_status === "failed" ? source.crawl_status : "ready",
       contentHash: String(source.content_hash ?? ""),
@@ -1434,6 +1888,13 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       contentHash: String(chunk.content_hash),
       metadata: asRecord(chunk.metadata),
     })),
+    actions: actionResult.rows.length
+      ? actionResult.rows.map(actionFromRow)
+      : defaultActionFlows(
+        String(row.name),
+        chunkResult.rows.map((chunk) => String(chunk.content ?? "")).join(" "),
+        (key) => randomUUID(),
+      ),
     conversations: new Map(conversationResult.rows.map((conversation) => {
       const id = String(conversation.id);
       return [id, {
@@ -1441,11 +1902,29 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         sessionId: String(conversation.session_id),
         leadCaptured: Boolean(conversation.lead_captured),
         actionTaken: typeof conversation.action_taken === "string" ? conversation.action_taken : null,
+        status: conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF"
+          || conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "RESOLVED"
+          ? conversation.status : "AI_ACTIVE",
+        assignedUserId: typeof conversation.assigned_user_id === "string" ? conversation.assigned_user_id : null,
+        assignedAt: conversation.assigned_at ? toIso(conversation.assigned_at) : null,
+        handoffReason: typeof conversation.handoff_reason === "string" ? conversation.handoff_reason : null,
+        handoffRequestedAt: conversation.handoff_requested_at ? toIso(conversation.handoff_requested_at) : null,
+        humanJoinedAt: conversation.human_joined_at ? toIso(conversation.human_joined_at) : null,
+        resolvedAt: conversation.resolved_at ? toIso(conversation.resolved_at) : null,
+        unreadCount: Number(conversation.unread_count ?? 0),
+        lastActivityAt: conversation.last_activity_at ? toIso(conversation.last_activity_at) : toIso(conversation.updated_at),
+        actionState: conversation.action_state && typeof conversation.action_state === "object"
+          ? asRecord(conversation.action_state) as ConversationActionState
+          : undefined,
         messages: messagesByConversation.get(id) ?? [],
         createdAt: toIso(conversation.created_at),
         updatedAt: toIso(conversation.updated_at),
       } satisfies Conversation];
     })),
+    conversationEvents: [],
+    conversionEvents,
+    notifications: [],
+    internalNotes: [],
     leads: leadResult.rows.map(leadFromRow),
     knowledgeGaps: new Map(gapResult.rows.map((gap) => [
       String(gap.question).toLowerCase().replace(/\s+/g, " ").trim(),
@@ -1464,6 +1943,18 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       collectLeads: Boolean(config.collect_leads),
       showBookingAction: Boolean(config.show_booking_action),
       fallbackMessage: String(config.fallback_message),
+      widgetDefaultMode: normalizedWidgetMode(config.widget_default_mode),
+      widgetAllowExpand: config.widget_allow_expand !== false,
+      widgetQuickActions: normalizedWidgetQuickActions(config.widget_quick_actions, String(row.name)),
+      widgetLogoUrl: typeof config.widget_logo_url === "string" && config.widget_logo_url.trim() ? config.widget_logo_url.trim() : null,
+      proactiveEnabled: config.proactive_enabled === true,
+      proactiveDelaySeconds: normalizedProactiveDelay(config.proactive_delay_seconds),
+      proactiveMessage: typeof config.proactive_message === "string" && config.proactive_message.trim() ? config.proactive_message.trim() : defaultConfig(String(row.name)).proactiveMessage,
+      proactiveTriggers: normalizedProactiveTriggers(config.proactive_triggers),
+      requireLeadConsent: config.require_lead_consent === true,
+      privacyNoticeUrl: typeof config.privacy_notice_url === "string" && config.privacy_notice_url.trim() ? config.privacy_notice_url.trim() : null,
+      retentionDays: normalizedRetentionDays(config.retention_days),
+      showAiDisclosure: config.show_ai_disclosure !== false,
     } : defaultConfig(String(row.name)),
     billing: {
       mode: (row.organization_billing_mode ?? row.billing_mode) === "live" ? "live" : "sandbox",
@@ -1493,12 +1984,61 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
 
 async function persistConversation(business: Business, conversation: Conversation): Promise<void> {
   if (!pool) return;
-  await pool.query(
-    `insert into conversations (id, business_id, session_id, lead_captured, action_taken, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7)
-     on conflict (id) do update set lead_captured = excluded.lead_captured, action_taken = excluded.action_taken, updated_at = excluded.updated_at`,
-    [conversation.id, business.id, conversation.sessionId, conversation.leadCaptured, conversation.actionTaken, conversation.createdAt, conversation.updatedAt],
-  );
+  const params = [
+    conversation.id,
+    business.id,
+    conversation.sessionId,
+    conversation.leadCaptured,
+    conversation.actionTaken,
+    conversation.actionState ? JSON.stringify(conversation.actionState) : null,
+    conversation.status,
+    conversation.assignedUserId,
+    conversation.assignedAt,
+    conversation.handoffReason,
+    conversation.handoffRequestedAt,
+    conversation.humanJoinedAt,
+    conversation.resolvedAt,
+    conversation.unreadCount,
+    conversation.lastActivityAt,
+    conversation.createdAt,
+    conversation.updatedAt,
+  ];
+  try {
+    await pool.query(
+      `insert into conversations
+         (id, business_id, session_id, lead_captured, action_taken, action_state, status, assigned_user_id,
+          assigned_at, handoff_reason, handoff_requested_at, human_joined_at, resolved_at, unread_count,
+          last_activity_at, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       on conflict (id) do update set
+         lead_captured = excluded.lead_captured,
+         action_taken = excluded.action_taken,
+         action_state = excluded.action_state,
+         status = excluded.status,
+         assigned_user_id = excluded.assigned_user_id,
+         assigned_at = excluded.assigned_at,
+         handoff_reason = excluded.handoff_reason,
+         handoff_requested_at = excluded.handoff_requested_at,
+         human_joined_at = excluded.human_joined_at,
+         resolved_at = excluded.resolved_at,
+         unread_count = excluded.unread_count,
+         last_activity_at = excluded.last_activity_at,
+         updated_at = excluded.updated_at`,
+      params,
+    );
+  } catch (error) {
+    if (!isMissingDatabaseColumn(error)) throw error;
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error", conversationId: conversation.id }, "Action state column is not available yet");
+    await pool.query(
+      `insert into conversations (id, business_id, session_id, lead_captured, action_taken, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $16, $17)
+       on conflict (id) do update set
+         lead_captured = excluded.lead_captured,
+         action_taken = excluded.action_taken,
+         updated_at = excluded.updated_at`,
+      params,
+    );
+  }
 }
 
 type UsageMetric = "conversations" | "leads" | "bookings" | "llm_requests";
@@ -1540,6 +2080,11 @@ function isMissingDatabaseColumn(error: unknown): boolean {
   return code === "42703";
 }
 
+function isMissingDatabaseTable(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  return (error as { code?: unknown }).code === "42P01";
+}
+
 async function persistMessage(conversation: Conversation, message: Message): Promise<void> {
   if (!pool) return;
   const retrieval = message.retrieval;
@@ -1559,6 +2104,8 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
     retrieval?.outputTokens ?? 0,
     retrieval?.estimatedCostUsd ?? null,
     retrieval?.latencyMs ?? null,
+    message.authorUserId ?? null,
+    message.kind ?? "message",
     message.createdAt,
   ];
 
@@ -1566,8 +2113,8 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
     await pool.query(
       `insert into conversation_messages
          (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
-          model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+          model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, author_user_id, kind, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       params,
     );
     return;
@@ -1578,12 +2125,14 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
 
   // Keep message persistence compatible with a rolling deployment where the
   // API has been updated before migrations 007/018 have reached the database.
+  const legacyParams = [...params];
+  legacyParams[1] = message.role === "user" ? "user" : "assistant";
   try {
     await pool.query(
       `insert into conversation_messages
          (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      params.slice(0, 9).concat(params[15]),
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $18)`,
+      legacyParams,
     );
     return;
   } catch (error) {
@@ -1594,7 +2143,7 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
   await pool.query(
     `insert into conversation_messages (conversation_id, role, content, created_at)
      values ($1, $2, $3, $4)`,
-    [conversation.id, message.role, message.content, message.createdAt],
+    [conversation.id, message.role === "user" ? "user" : "assistant", message.content, message.createdAt],
   );
 }
 
@@ -1718,8 +2267,8 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
 async function persistAgentConfig(business: Business): Promise<void> {
   if (!pool) return;
   await pool.query(
-    `insert into agent_configs (business_id, assistant_name, welcome_message, widget_color, collect_leads, show_booking_action, fallback_message)
-     values ($1, $2, $3, $4, $5, $6, $7)
+    `insert into agent_configs (business_id, assistant_name, welcome_message, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
      on conflict (business_id) do update set
        assistant_name = excluded.assistant_name,
        welcome_message = excluded.welcome_message,
@@ -1727,8 +2276,20 @@ async function persistAgentConfig(business: Business): Promise<void> {
        collect_leads = excluded.collect_leads,
        show_booking_action = excluded.show_booking_action,
        fallback_message = excluded.fallback_message,
+       widget_default_mode = excluded.widget_default_mode,
+       widget_allow_expand = excluded.widget_allow_expand,
+       widget_quick_actions = excluded.widget_quick_actions,
+       widget_logo_url = excluded.widget_logo_url,
+       proactive_enabled = excluded.proactive_enabled,
+       proactive_delay_seconds = excluded.proactive_delay_seconds,
+       proactive_message = excluded.proactive_message,
+       proactive_triggers = excluded.proactive_triggers,
+       require_lead_consent = excluded.require_lead_consent,
+       privacy_notice_url = excluded.privacy_notice_url,
+       retention_days = excluded.retention_days,
+       show_ai_disclosure = excluded.show_ai_disclosure,
        updated_at = now()`,
-    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage],
+    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure],
   );
 }
 
@@ -2021,9 +2582,214 @@ async function requireAuthenticatedBusinessOwner(business: Business, request: Fa
   if (!result.rowCount) throw httpError(403, "Your account does not have owner access to this business");
 }
 
+const teamRoleRank: Record<TeamRole, number> = { viewer: 1, staff: 2, admin: 3, owner: 4 };
+
+async function requireBusinessTeamAccess(
+  business: Business,
+  request: FastifyRequest,
+  minimumRole: TeamRole = "viewer",
+): Promise<{ id: string; email: string; name: string; role: TeamRole; organizationId: string | null; legacyDemo?: boolean }> {
+  const token = bearerToken(request);
+  if (!token) throw httpError(401, "A team member access token is required");
+  const tokenHash = hashAccessToken(token);
+
+  if (!pool) {
+    const session = memoryDemoAccess.get(tokenHash);
+    if (!session || session.slug !== business.slug || session.businessId !== business.id || Date.parse(session.expiresAt) <= Date.now()) {
+      throw httpError(401, "Team member access is invalid or expired");
+    }
+    if (teamRoleRank.owner < teamRoleRank[minimumRole]) throw httpError(403, "You do not have permission to access this business");
+    return { id: "demo-owner", email: "owner@demo.frontdeskwise.local", name: "Demo Owner", role: "owner", organizationId: null, legacyDemo: true };
+  }
+
+  // Demo links are owner-scoped and remain useful for the internal seeded UI.
+  const demoResult = await pool.query<Record<string, unknown>>(
+    `select u.id, u.email, u.name, u.role, b.organization_id
+     from demo_access_sessions s
+     join workspace_users u on u.id = s.user_id
+     join businesses b on b.id = s.business_id
+     where s.token_hash = $1 and s.business_id = $2 and s.revoked_at is null
+       and s.expires_at > now() and u.status = 'active' and u.role in ('owner', 'admin')`,
+    [tokenHash, business.id],
+  );
+  if (demoResult.rowCount) {
+    return {
+      id: String(demoResult.rows[0].id),
+      email: String(demoResult.rows[0].email),
+      name: String(demoResult.rows[0].name),
+      role: String(demoResult.rows[0].role ?? "owner") === "admin" ? "admin" : "owner",
+      organizationId: typeof demoResult.rows[0].organization_id === "string" ? demoResult.rows[0].organization_id : null,
+      legacyDemo: true,
+    };
+  }
+
+  const authUser = await requireFirebaseAuth(request);
+  const result = await pool.query<Record<string, unknown>>(
+    `select u.id, u.email, u.name, b.organization_id,
+            case when om.role = 'owner' then 'owner'
+                 when om.role = 'admin' then 'admin'
+                 else coalesce(bm.role, 'viewer') end as effective_role
+     from app_users u
+     join businesses b on b.id = $2
+     left join organization_members om on om.organization_id = b.organization_id and om.user_id = u.id
+     left join business_members bm on bm.business_id = b.id and bm.user_id = u.id
+     where u.identity_subject = $1 and u.status = 'active'
+       and (om.role in ('owner', 'admin') or bm.role in ('staff', 'viewer', 'admin'))
+     limit 1`,
+    [authUser.identitySubject, business.id],
+  );
+  if (!result.rowCount) throw httpError(403, "Your account does not have access to this business");
+  const row = result.rows[0];
+  const role = (row.effective_role === "owner" || row.effective_role === "admin" || row.effective_role === "staff") ? row.effective_role : "viewer";
+  if (teamRoleRank[role] < teamRoleRank[minimumRole]) throw httpError(403, "Your team role does not allow this action");
+  return {
+    id: String(row.id),
+    email: String(row.email),
+    name: String(row.name ?? authUser.name),
+    role,
+    organizationId: typeof row.organization_id === "string" ? row.organization_id : null,
+    legacyDemo: false,
+  };
+}
+
 function requireWritableBusiness(business: Business): void {
   const access = billingAccess(business.billing);
   if (!access.allowed) throw httpError(402, "This workspace is read-only until billing is restored");
+}
+
+function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
+  const body = asRecord(input);
+  const template = typeof body.templateKey === "string" ? actionTemplate(body.templateKey.trim()) : null;
+  const base = existing ?? (template ? {
+    ...template,
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  } : null);
+  if (!base) {
+    const key = optionalString(body.key, 80);
+    if (!key) throw httpError(400, "action key is required");
+    const now = new Date().toISOString();
+    return normalizedAction({
+      ...body,
+      name: body.name ?? key.replace(/[_-]+/g, " "),
+      fields: Array.isArray(body.fields) ? body.fields : [],
+      completion: asRecord(body.completion),
+    }, {
+      id: randomUUID(),
+      key,
+      name: key,
+      description: "",
+      triggerPhrases: [],
+      triggerIntents: [],
+      captureMode: "auto",
+      fields: [],
+      completion: { createLead: true, leadStatus: "new", message: "Thanks — the team has your request.", notifyStaff: true, notifyChannels: ["in_app", "email"], notifyTargets: ["business_team"] },
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  const allowedTypes = new Set(["text", "email", "phone", "select", "date", "number"]);
+  const sourceFields = Array.isArray(body.fields) ? body.fields : base.fields;
+  const fields = sourceFields.map((value, index) => {
+    const source = asRecord(value);
+    const type = typeof source.type === "string" && allowedTypes.has(source.type) ? source.type : "text";
+    const key = (optionalString(source.key, 80) ?? ("field_" + (index + 1))).replace(/[^a-zA-Z0-9_-]/g, "_");
+    const options = Array.isArray(source.options)
+      ? source.options.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 120)).slice(0, 30)
+      : undefined;
+    const conditionSource = asRecord(source.condition);
+    const conditionField = optionalString(conditionSource.field, 80);
+    const condition = conditionField ? {
+      field: conditionField,
+      ...(optionalString(conditionSource.equals, 120) ? { equals: optionalString(conditionSource.equals, 120) as string } : {}),
+      ...(optionalString(conditionSource.notEquals, 120) ? { notEquals: optionalString(conditionSource.notEquals, 120) as string } : {}),
+    } : undefined;
+    return {
+      id: optionalString(source.id, 120) ?? key,
+      key,
+      label: optionalString(source.label, 160) ?? key,
+      type: type as ActionFlow["fields"][number]["type"],
+      required: source.required !== false,
+      visibility: source.visibility === "hidden" ? "hidden" as const : "visible" as const,
+      question: optionalString(source.question, 500) ?? ("What is your " + key.replace(/[_-]+/g, " ") + "?"),
+      ...(options?.length ? { options } : {}),
+      ...(condition ? { condition } : {}),
+    };
+  });
+  const sourceCompletion = asRecord(body.completion);
+  const leadStatus = sourceCompletion.leadStatus === "qualified" || sourceCompletion.leadStatus === "booked" ? sourceCompletion.leadStatus : base.completion.leadStatus;
+  const submitLabel = optionalString(sourceCompletion.submitLabel, 160) ?? base.completion.submitLabel;
+  const linkUrl = optionalString(sourceCompletion.linkUrl, 2_000) ?? base.completion.linkUrl;
+  const linkLabel = optionalString(sourceCompletion.linkLabel, 160) ?? base.completion.linkLabel;
+  const connector = actionConnectorFromValue(sourceCompletion.connector) ?? base.completion.connector;
+  const now = new Date().toISOString();
+  return {
+    id: existing?.id ?? base.id,
+    key: (optionalString(body.key, 80) ?? base.key).replace(/[^a-zA-Z0-9_-]/g, "_"),
+    name: optionalString(body.name, 160) ?? base.name,
+    description: optionalString(body.description, 1_000) ?? base.description,
+    triggerPhrases: (Array.isArray(body.triggerPhrases) ? body.triggerPhrases : base.triggerPhrases)
+      .filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 200)).slice(0, 30),
+    triggerIntents: (Array.isArray(body.triggerIntents) ? body.triggerIntents : base.triggerIntents)
+      .filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 100)).slice(0, 20),
+    captureMode: body.captureMode === "conversational" || body.captureMode === "form" || body.captureMode === "hybrid"
+      ? body.captureMode
+      : base.captureMode,
+    fields,
+    completion: {
+      createLead: typeof sourceCompletion.createLead === "boolean" ? sourceCompletion.createLead : base.completion.createLead,
+      leadStatus,
+      message: optionalString(sourceCompletion.message, 1_000) ?? base.completion.message,
+      ...(submitLabel ? { submitLabel } : {}),
+      ...(linkUrl ? { linkUrl } : {}),
+      ...(linkLabel ? { linkLabel } : {}),
+      notifyStaff: typeof sourceCompletion.notifyStaff === "boolean" ? sourceCompletion.notifyStaff : base.completion.notifyStaff,
+      requiresStaff: typeof sourceCompletion.requiresStaff === "boolean" ? sourceCompletion.requiresStaff : base.completion.requiresStaff,
+      notifyChannels: Array.isArray(sourceCompletion.notifyChannels) ? sourceCompletion.notifyChannels.filter((item): item is "in_app" | "email" => item === "in_app" || item === "email") : base.completion.notifyChannels,
+      notifyTargets: Array.isArray(sourceCompletion.notifyTargets) ? sourceCompletion.notifyTargets.filter((item): item is "owner" | "business_team" | "assigned_staff" => item === "owner" || item === "business_team" || item === "assigned_staff") : base.completion.notifyTargets,
+      ...(connector ? { connector } : {}),
+    },
+    enabled: typeof body.enabled === "boolean" ? body.enabled : base.enabled,
+    createdAt: existing?.createdAt ?? base.createdAt,
+    updatedAt: now,
+  };
+}
+
+async function persistAction(business: Business, action: ActionFlow): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    `insert into business_actions
+       (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, completion, enabled, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     on conflict (business_id, action_key) do update set
+       name = excluded.name,
+       description = excluded.description,
+       trigger_phrases = excluded.trigger_phrases,
+       trigger_intents = excluded.trigger_intents,
+       capture_mode = excluded.capture_mode,
+       fields = excluded.fields,
+       completion = excluded.completion,
+       enabled = excluded.enabled,
+       updated_at = excluded.updated_at`,
+    [
+      action.id,
+      business.id,
+      action.key,
+      action.name,
+      action.description,
+      JSON.stringify(action.triggerPhrases),
+      JSON.stringify(action.triggerIntents),
+      action.captureMode,
+      JSON.stringify(action.fields),
+      JSON.stringify(action.completion),
+      action.enabled,
+      action.createdAt,
+      action.updatedAt,
+    ],
+  );
 }
 
 function requireVerifiedBusiness(business: Business): void {
@@ -2221,7 +2987,22 @@ async function billingSnapshotForUser(userId: string, organizationId: string | n
        from organization_usage_daily
        where organization_id = $1 and usage_date >= current_date - 30`,
       [organization.id],
-    ),
+    ).catch(async (error) => {
+      if (!isMissingDatabaseColumn(error)) throw error;
+      // Migration 018 adds the cost column. Keep billing readable during a
+      // rolling deploy where the API is ahead of the database migration.
+      return pool.query<Record<string, unknown>>(
+        `select coalesce(sum(conversations), 0)::integer as conversations,
+                coalesce(sum(leads), 0)::integer as leads,
+                coalesce(sum(bookings), 0)::integer as bookings,
+                coalesce(sum(llm_requests), 0)::integer as llm_requests,
+                coalesce(sum(llm_input_tokens), 0)::bigint as llm_input_tokens,
+                coalesce(sum(llm_output_tokens), 0)::bigint as llm_output_tokens
+         from organization_usage_daily
+         where organization_id = $1 and usage_date >= current_date - 30`,
+        [organization.id],
+      );
+    }),
   ]);
   return {
     organization: { id: String(organization.id), name: String(organization.name), slug: String(organization.slug), role: String(organization.role) },
@@ -2549,6 +3330,199 @@ async function processIntegrationOutbox(): Promise<void> {
   }
 }
 
+function actionInputFromCompletion(
+  business: Business,
+  action: ActionFlow,
+  conversation: Conversation,
+  state: ConversationActionState,
+  lead: Lead | null,
+): ActionInput {
+  return {
+    idempotencyKey: `action.completed:${conversation.id}:${action.id}`,
+    tenant: { id: business.id, slug: business.slug, name: business.name },
+    conversationId: conversation.id,
+    flow: { id: action.id, key: action.key, name: action.name },
+    values: state.values,
+    lead: lead ? {
+      id: lead.id,
+      name: lead.name,
+      email: lead.email,
+      phone: lead.phone,
+      intent: lead.intent,
+      status: lead.status,
+    } : null,
+    completedAt: state.completedAt ?? new Date().toISOString(),
+  };
+}
+
+async function enqueueActionExecution(
+  business: Business,
+  action: ActionFlow,
+  conversation: Conversation,
+  state: ConversationActionState,
+  lead: Lead | null,
+): Promise<void> {
+  const settings = action.completion.connector;
+  if (!settings) return;
+  const input = actionInputFromCompletion(business, action, conversation, state, lead);
+  const emailRecipients = settings.provider === "email" && (!settings.recipients || settings.recipients.length === 0)
+    ? (await staffRecipients(business)).map((recipient) => recipient.email)
+    : settings.recipients;
+  const connectorConfig: Record<string, unknown> = {
+    ...(emailRecipients ? { recipients: emailRecipients } : {}),
+    ...(settings.endpoint ? { endpoint: settings.endpoint } : {}),
+    ...(settings.accessToken ? { accessToken: settings.accessToken } : {}),
+    ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
+  };
+  const integrationId = settings.integrationId ?? null;
+  if (settings.provider === "generic_webhook" || settings.provider === "hubspot") {
+    if (!integrationId) throw new Error(`${settings.provider} action connector requires a connected integration`);
+    if (pool) {
+      const integration = await pool.query<{ provider: string; connection_status: string }>(
+        "select provider, connection_status from crm_integrations where id = $1 and business_id = $2",
+        [integrationId, business.id],
+      );
+      const expectedProvider = settings.provider === "generic_webhook" ? "webhook" : "hubspot";
+      if (!integration.rowCount || integration.rows[0].provider !== expectedProvider) throw new Error("Action connector integration does not match the selected provider");
+      if (integration.rows[0].connection_status !== "active") throw new Error("Action connector integration is not active");
+    }
+  }
+  if (!pool) {
+    // In-memory mode is for local UI work. Execute only when the connector has
+    // enough non-secret configuration to do so; connected integrations are a
+    // PostgreSQL feature and are intentionally not emulated in memory.
+    if (settings.provider === "email" || settings.endpoint) {
+      await createActionConnector(settings.provider, connectorConfig).execute(input);
+    }
+    await recordConversionEvent(business, {
+      event: "ACTION_SUCCEEDED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { provider: settings.provider, inMemory: true },
+    });
+    return;
+  }
+  await pool.query(
+    `insert into action_outbox
+       (business_id, action_id, conversation_id, lead_id, integration_id, connector_provider, connector_config, idempotency_key, payload)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     on conflict (business_id, idempotency_key) do nothing`,
+    [business.id, action.id, conversation.id, lead?.id ?? null, integrationId, settings.provider, JSON.stringify(connectorConfig), input.idempotencyKey, JSON.stringify(input)],
+  );
+  void processActionOutbox();
+}
+
+let actionOutboxRunning = false;
+let actionOutboxTimer: NodeJS.Timeout | null = null;
+
+function scheduleActionOutbox(delayMs: number): void {
+  if (actionOutboxTimer) return;
+  actionOutboxTimer = setTimeout(() => {
+    actionOutboxTimer = null;
+    void processActionOutbox();
+  }, Math.max(250, Math.min(delayMs, 60_000)));
+}
+
+async function scheduleNextActionOutbox(): Promise<void> {
+  if (!pool || actionOutboxTimer) return;
+  const next = await pool.query<{ delay_ms: string | null }>(
+    `select extract(epoch from (min(next_attempt_at) - now())) * 1000 as delay_ms
+     from action_outbox where status in ('queued', 'retrying')`,
+  );
+  const delayMs = next.rows[0]?.delay_ms === null || next.rows[0]?.delay_ms === undefined ? null : Number(next.rows[0].delay_ms);
+  if (delayMs !== null && Number.isFinite(delayMs)) scheduleActionOutbox(Math.max(250, delayMs));
+}
+
+async function actionBusinessForId(businessId: string): Promise<Business | null> {
+  if (!pool) return null;
+  const result = await pool.query<{ slug: string }>("select slug from businesses where id = $1", [businessId]);
+  return result.rows[0] ? getBusiness(result.rows[0].slug) : null;
+}
+
+async function processActionOutbox(): Promise<void> {
+  if (!pool || actionOutboxRunning) return;
+  actionOutboxRunning = true;
+  try {
+    while (true) {
+      const claim = await pool.query<Record<string, unknown>>(
+        `with candidate as (
+           select id from action_outbox
+           where ((status in ('queued', 'retrying') and next_attempt_at <= now())
+              or (status = 'running' and coalesce(last_attempt_at, created_at) < now() - interval '15 minutes'))
+           order by created_at for update skip locked limit 1
+         )
+         update action_outbox outbox
+         set status = 'running', attempts = attempts + 1, last_attempt_at = now(), updated_at = now()
+         from candidate where outbox.id = candidate.id returning outbox.*`,
+      );
+      if (!claim.rowCount) break;
+      const outbox = claim.rows[0];
+      const provider = String(outbox.connector_provider) as ActionConnectorProvider;
+      const businessId = String(outbox.business_id);
+      const business = await actionBusinessForId(businessId);
+      try {
+        const config = asRecord(outbox.connector_config);
+        const integrationId = typeof outbox.integration_id === "string" ? outbox.integration_id : null;
+        if (integrationId) {
+          const integration = await pool.query<Record<string, unknown>>(
+            "select provider, encrypted_credentials from crm_integrations where id = $1 and business_id = $2",
+            [integrationId, businessId],
+          );
+          if (!integration.rowCount) throw new Error("Action connector integration is no longer available");
+          const encryptedCredentials = integration.rows[0].encrypted_credentials;
+          if (typeof encryptedCredentials !== "string" || !encryptedCredentials) throw new Error("Action connector credentials are not configured");
+          const credentials = decryptIntegrationCredentials(encryptedCredentials);
+          if (provider === "generic_webhook") {
+            config.endpoint = credentials.webhookUrl;
+            config.signingSecret = credentials.signingSecret;
+          } else if (provider === "hubspot") {
+            config.accessToken = credentials.accessToken;
+          }
+        }
+        const connector = createActionConnector(provider, config as Omit<ActionConnectorSettings, "provider">);
+        const input = asRecord(outbox.payload) as unknown as ActionInput;
+        const delivery = await connector.execute(input);
+        await pool.query(
+          `update action_outbox
+           set status = 'succeeded', delivered_at = now(), remote_object_id = $2, remote_url = $3, last_error = null, updated_at = now()
+           where id = $1`,
+          [outbox.id, delivery.remoteObjectId ?? null, delivery.remoteUrl ?? null],
+        );
+        if (business) await recordConversionEvent(business, {
+          event: "ACTION_SUCCEEDED",
+          conversationId: String(outbox.conversation_id),
+          flowId: String(outbox.action_id),
+          metadata: { provider, attempts: Number(outbox.attempts), remoteObjectId: delivery.remoteObjectId ?? null },
+        });
+      } catch (error) {
+        const message = integrationErrorMessage(error);
+        const attempts = Number(outbox.attempts);
+        const maxAttempts = Number(outbox.max_attempts);
+        const retry = attempts < maxAttempts;
+        const delaySeconds = Math.min(900, 2 ** Math.max(0, attempts - 1) * 10);
+        await pool.query(
+          `update action_outbox
+           set status = $2, next_attempt_at = now() + ($3 * interval '1 second'), last_error = $4, updated_at = now()
+           where id = $1`,
+          [outbox.id, retry ? "retrying" : "failed", retry ? delaySeconds : 0, message],
+        );
+        if (business) await recordConversionEvent(business, {
+          event: "ACTION_FAILED",
+          conversationId: String(outbox.conversation_id),
+          flowId: String(outbox.action_id),
+          metadata: { provider, attempts, retrying: retry, error: message },
+        });
+        app.log.warn({ actionOutboxId: outbox.id, businessId, attempts, retry, error: message }, "Action connector delivery failed");
+      }
+    }
+  } finally {
+    actionOutboxRunning = false;
+    void scheduleNextActionOutbox().catch((error: unknown) => {
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown action outbox scheduling error" }, "Action outbox scheduling failed");
+    });
+  }
+}
+
 function integrationPayload(row: Record<string, unknown>) {
   return {
     id: String(row.id),
@@ -2564,6 +3538,87 @@ function integrationPayload(row: Record<string, unknown>) {
       failed: Number(row.sync_failed ?? 0),
     },
   };
+}
+
+function mcpConnectionPayload(row: Record<string, unknown>) {
+  const tools = mcpToolsFromValue(row.tool_catalog);
+  const allowedTools = Array.isArray(row.allowed_tools)
+    ? row.allowed_tools.filter((item): item is string => typeof item === "string").slice(0, 200)
+    : [];
+  return {
+    id: String(row.id),
+    provider: String(row.provider),
+    displayName: String(row.display_name),
+    serverUrl: String(row.server_url),
+    connectionStatus: String(row.connection_status),
+    protocolVersion: String(row.protocol_version ?? "2025-06-18"),
+    lastTestedAt: row.last_tested_at ? toIso(row.last_tested_at) : null,
+    lastSuccessfulCallAt: row.last_successful_call_at ? toIso(row.last_successful_call_at) : null,
+    lastError: typeof row.last_error === "string" ? row.last_error : null,
+    tools: toolPermissions(tools, allowedTools),
+  };
+}
+
+function conversionFunnelPayload(business: Business) {
+  const flows = new Map<string, {
+    flowId: string;
+    flowKey: string;
+    name: string;
+    started: number;
+    formDisplayed: number;
+    submitted: number;
+    actionSucceeded: number;
+    completed: number;
+    fields: Map<string, { viewed: number; completed: number; abandoned: number }>;
+  }>();
+  for (const event of business.conversionEvents) {
+    if (!event.flowId) continue;
+    const action = business.actions.find((candidate) => candidate.id === event.flowId);
+    const flow = flows.get(event.flowId) ?? {
+      flowId: event.flowId,
+      flowKey: action?.key ?? event.flowId,
+      name: action?.name ?? "Conversation flow",
+      started: 0,
+      formDisplayed: 0,
+      submitted: 0,
+      actionSucceeded: 0,
+      completed: 0,
+      fields: new Map(),
+    };
+    if (event.event === "FLOW_STARTED") flow.started += 1;
+    if (event.event === "FORM_DISPLAYED") flow.formDisplayed += 1;
+    if (event.event === "FORM_SUBMITTED") flow.submitted += 1;
+    if (event.event === "ACTION_SUCCEEDED") flow.actionSucceeded += 1;
+    if (event.event === "FLOW_COMPLETED") flow.completed += 1;
+    if (event.fieldId && ["FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED"].includes(event.event)) {
+      const field = flow.fields.get(event.fieldId) ?? { viewed: 0, completed: 0, abandoned: 0 };
+      if (event.event === "FIELD_VIEWED") field.viewed += 1;
+      if (event.event === "FIELD_COMPLETED") field.completed += 1;
+      if (event.event === "FIELD_ABANDONED") field.abandoned += 1;
+      flow.fields.set(event.fieldId, field);
+    }
+    flows.set(event.flowId, flow);
+  }
+  return [...flows.values()].map((flow) => ({
+    flowId: flow.flowId,
+    flowKey: flow.flowKey,
+    name: flow.name,
+    started: flow.started,
+    formDisplayed: flow.formDisplayed,
+    submitted: flow.submitted,
+    actionSucceeded: flow.actionSucceeded,
+    completed: flow.completed,
+    completionRate: flow.started ? Math.round((flow.completed / flow.started) * 100) : 0,
+    dropOffs: [...flow.fields.entries()]
+      .map(([fieldId, field]) => ({
+        fieldId,
+        label: business.actions.find((candidate) => candidate.id === flow.flowId)?.fields.find((candidate) => candidate.key === fieldId || candidate.id === fieldId)?.label ?? fieldId,
+        count: Math.max(field.abandoned, field.viewed - field.completed),
+      }))
+      .filter((field) => field.count > 0)
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 5),
+  }));
 }
 
 function workspacePayload(business: Business) {
@@ -2659,8 +3714,10 @@ function workspacePayload(business: Business) {
       failedSources: failedSourceCount,
       status: readinessStatus,
       sources: business.sources.map((source) => ({
+        id: source.id,
         title: source.title,
         url: source.url,
+        contentType: source.contentType,
         pageType: source.pageType,
         crawlStatus: source.crawlStatus,
         lastCrawledAt: source.lastCrawledAt,
@@ -2680,6 +3737,7 @@ function workspacePayload(business: Business) {
       bookingClicks: conversations.filter((conversation) => conversation.actionTaken === "booking").length,
       unansweredQuestions: gapCount,
       widgetLoads: business.widget.loadCount,
+      conversionFunnels: conversionFunnelPayload(business),
       trend,
       topQuestions,
       actions: gapList.filter((gap) => gap.status === "open").sort((left, right) => right.occurrenceCount - left.occurrenceCount).slice(0, 5).map((gap) => ({
@@ -2687,6 +3745,8 @@ function workspacePayload(business: Business) {
         count: gap.occurrenceCount,
         status: gap.status,
       })),
+      handoffs: conversations.filter((conversation) => conversation.status !== "AI_ACTIVE").length,
+      humanActive: conversations.filter((conversation) => conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED").length,
       setup: {
         completed: setupSteps.filter(Boolean).length,
         total: setupSteps.length,
@@ -2706,6 +3766,35 @@ function publicWorkspacePayload(business: Business) {
     suggestedQuestions: payload.suggestedQuestions,
     knowledge: payload.knowledge,
     stats: payload.stats,
+  };
+}
+
+function inboxMessagePayload(message: Message) {
+  return {
+    role: message.role,
+    kind: message.kind ?? "message",
+    authorUserId: message.authorUserId ?? null,
+    authorName: message.authorName ?? null,
+    content: message.content,
+    grounded: message.grounded ?? null,
+    citations: message.citations ?? [],
+    createdAt: message.createdAt,
+  };
+}
+
+function inboxConversationPayload(business: Business, conversation: Conversation) {
+  const lead = business.leads.find((item) => item.conversationId === conversation.id) ?? null;
+  return {
+    ...conversationStatusPayload(conversation),
+    sessionId: conversation.sessionId,
+    leadCaptured: conversation.leadCaptured,
+    actionTaken: conversation.actionTaken,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    lead,
+    lastMessage: conversation.messages.filter((message) => message.kind !== "internal_note").at(-1)
+      ? inboxMessagePayload(conversation.messages.filter((message) => message.kind !== "internal_note").at(-1) as Message)
+      : null,
   };
 }
 
@@ -2733,20 +3822,35 @@ function rememberGap(business: Business, question: string): KnowledgeGap {
 
 type RetrievalMatch = { chunk: KnowledgeChunk; score: number; evidenceScore: number };
 
+function retrievalTokens(question: string, intent: RetrievalIntent): string[] {
+  const intentTerms: Record<RetrievalIntent, string[]> = {
+    services: ["service", "solution", "product", "automation", "development", "integration"],
+    hours: ["hours", "open", "schedule", "availability"],
+    contact: ["contact", "email", "phone", "call"],
+    pricing: ["price", "pricing", "cost", "rate", "fee", "quote"],
+    location: ["location", "address", "directions", "area"],
+    booking: ["book", "booking", "appointment", "reserve", "enroll", "schedule"],
+    policy: ["terms", "privacy", "cookie", "cancellation", "refund", "policy"],
+    general: [],
+  };
+  return [...new Set([...tokenise(question), ...intentTerms[intent]])];
+}
+
 function memoryRetrieval(business: Business, question: string): { matches: RetrievalMatch[]; mode: string } {
-  const tokens = tokenise(question);
+  const intent = classifyQuestionIntent(question);
+  const tokens = retrievalTokens(question, intent);
   const matches = business.chunks.map((chunk) => {
     const lower = chunk.content.toLowerCase();
     const score = tokens.reduce((total, token) => total + (lower.includes(token) ? 1 : 0), 0);
     return { chunk, score, evidenceScore: tokens.length ? score / tokens.length : 0 };
-  }).filter((item) => item.score > 0).sort((left, right) => right.score - left.score).slice(0, 8);
-  return { matches, mode: "memory_lexical" };
+  }).filter((item) => item.score > 0);
+  return { matches: rankMatches(matches, business.sources, intent), mode: "memory_lexical" };
 }
 
 async function databaseRetrieval(business: Business, question: string): Promise<{ matches: RetrievalMatch[]; mode: string } | null> {
   if (!pool) return null;
   try {
-    const lexicalQuery = tokenise(question).map((token) => `${token}:*`).join(" | ");
+    const lexicalQuery = retrievalTokens(question, classifyQuestionIntent(question)).map((token) => `${token}:*`).join(" | ");
     const lexicalResult = await pool.query<Record<string, unknown>>(
       `select id, source_id, content, content_hash, metadata,
               ts_rank_cd(search_vector, to_tsquery('simple', $2)) as lexical_score
@@ -2804,10 +3908,10 @@ async function databaseRetrieval(business: Business, question: string): Promise<
         Math.min(1, Number(row.lexical_score ?? 0) * 4),
         Math.max(0, Math.min(1, Number(row.vector_score ?? 0))),
       ),
-    })).sort((left, right) => right.score - left.score).slice(0, 8);
+    }));
 
     return {
-      matches,
+      matches: rankMatches(matches, business.sources, classifyQuestionIntent(question)),
       mode: vectorResult.rowCount ? "hybrid_rrf" : "postgres_full_text",
     };
   } catch (error) {
@@ -2815,6 +3919,33 @@ async function databaseRetrieval(business: Business, question: string): Promise<
     return null;
   }
 }
+
+function extractiveAnswer(
+  business: Business,
+  matches: RetrievalMatch[],
+  intent: RetrievalIntent,
+): string {
+  const candidates = matches.flatMap(({ chunk }) => chunk.content
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean));
+  const useful = candidates.filter((sentence) => !/terms of service|privacy policy|cookie policy|acceptance of terms|govern your use/i.test(sentence));
+  const selected = intent === "services"
+    ? useful.filter((sentence) => serviceWordsForAnswer.test(sentence)).slice(0, 3)
+    : useful.slice(0, 2);
+  const excerpt = (selected.length ? selected : useful).join(" ").slice(0, 460).trim();
+  if (!excerpt) return business.agentConfig.fallbackMessage;
+  if (intent === "services" && !/\b(offer|offers|provide|provides|services?|solutions?|products?)\b/i.test(excerpt)) {
+    return `${business.name} offers the services described on its website: ${excerpt}`;
+  }
+  if (intent === "services" && !/\b(if you|tell me|help)\b/i.test(excerpt)) {
+    return `${excerpt} If you tell me what you’re trying to automate or build, I can point you to the most relevant service.`;
+  }
+  return excerpt;
+}
+
+const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|automation|development|application|integration|tool|tools|build|software)\b/i;
 
 async function answerQuestion(business: Business, question: string, options: { recordGap?: boolean } = {}) {
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
@@ -2860,6 +3991,7 @@ async function answerQuestion(business: Business, question: string, options: { r
       modelUsage,
     };
   }
+  const intent = classifyQuestionIntent(question);
   const retrieval = await databaseRetrieval(business, question) ?? memoryRetrieval(business, question);
   const match = retrieval.matches[0];
   const secondMatch = retrieval.matches[1];
@@ -2870,6 +4002,7 @@ async function answerQuestion(business: Business, question: string, options: { r
   const confidenceBand: "high" | "medium" | "low" = confidenceScore >= 0.78 ? "high" : confidenceScore >= 0.55 ? "medium" : "low";
   const retrievalContract = {
     mode: retrieval.mode,
+    intent,
     candidateCount: retrieval.matches.length,
     topScore: match?.score ?? 0,
   };
@@ -2885,21 +4018,52 @@ async function answerQuestion(business: Business, question: string, options: { r
     return `[${source?.title ?? "Business source"}] ${chunk.content.slice(0, 1_200)}`;
   }).join("\n\n");
   let generated: Awaited<ReturnType<typeof generateGroundedAnswer>> = null;
+  let generationUsage: ModelUsage | null = null;
+  let groundingCheckUsage: ModelUsage | null = null;
+  let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" = "not_run";
   if (match && confidenceBand !== "low" && decision.model) {
     try {
-      generated = await generateGroundedAnswer({ question, context, decision });
+      generated = await generateGroundedAnswer({ question, context, decision, intent });
+      generationUsage = generated?.usage ?? null;
+      if (generated) {
+        const groundingCheck = await verifyGroundedAnswer({ question, answer: generated.answer, context });
+        groundingCheckUsage = groundingCheck.usage;
+        groundingCheckStatus = groundingCheck.grounded ? "passed" : "rejected";
+        if (!groundingCheck.grounded) generated = null;
+      }
     } catch (error) {
-      app.log.warn({ error: error instanceof Error ? error.message : "unknown model error", businessId: business.id, route: decision.route }, "Grounded model answer failed; using extractive fallback");
+      groundingCheckStatus = "failed";
+      generated = null;
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown model error", businessId: business.id, route: decision.route }, "Grounded synthesis or verification failed; using extractive fallback");
     }
   }
-  const modelUsage: ModelUsage = generated?.usage ?? {
+  const fallbackUsage: ModelUsage = {
     route: decision.route,
     model: decision.model,
-    reason: decision.model ? "extractive_fallback_or_unconfigured" : "llm_not_configured",
+    reason: "extractive_fallback_or_unconfigured",
     inputTokens: 0,
     outputTokens: 0,
     estimatedCostUsd: decision.route === "tier0" ? 0 : null,
     latencyMs: 0,
+  };
+  const baseUsage = generationUsage ?? fallbackUsage;
+  const modelUsage: ModelUsage = {
+    ...baseUsage,
+    reason: groundingCheckStatus === "rejected"
+      ? "grounding_check_rejected"
+      : groundingCheckStatus === "failed"
+        ? "grounding_check_failed"
+        : generationUsage
+          ? generationUsage.reason
+          : decision.model
+            ? "extractive_fallback_or_unconfigured"
+            : "llm_not_configured",
+    inputTokens: baseUsage.inputTokens + (groundingCheckUsage?.inputTokens ?? 0),
+    outputTokens: baseUsage.outputTokens + (groundingCheckUsage?.outputTokens ?? 0),
+    estimatedCostUsd: baseUsage.estimatedCostUsd === null || groundingCheckUsage?.estimatedCostUsd === null
+      ? null
+      : (baseUsage.estimatedCostUsd ?? 0) + (groundingCheckUsage?.estimatedCostUsd ?? 0),
+    latencyMs: baseUsage.latencyMs + (groundingCheckUsage?.latencyMs ?? 0),
   };
   const enrichedRetrieval = { ...retrievalContract, ...modelUsage };
 
@@ -2917,7 +4081,7 @@ async function answerQuestion(business: Business, question: string, options: { r
     };
   }
 
-  const citations = retrieval.matches.slice(0, 3).map(({ chunk }) => {
+  const citations = citationMatches(retrieval.matches, business.sources, intent, 2).map(({ chunk }) => {
     const source = business.sources.find((item) => item.id === chunk.sourceId);
     return source ? {
       title: source.title,
@@ -2940,10 +4104,8 @@ async function answerQuestion(business: Business, question: string, options: { r
     };
   }
 
-  const source = business.sources.find((item) => item.id === match.chunk.sourceId);
-  const excerpt = match.chunk.content.length > 420 ? `${match.chunk.content.slice(0, 417).trim()}…` : match.chunk.content;
   return {
-    answer: `Based on ${source?.title ?? "the business website"}: ${excerpt}`,
+    answer: extractiveAnswer(business, retrieval.matches.slice(0, 4), intent),
     grounded: true,
     citations,
     knowledgeGap: null,
@@ -2954,6 +4116,371 @@ async function answerQuestion(business: Business, question: string, options: { r
   };
 }
 
+type AnswerResult = Awaited<ReturnType<typeof answerQuestion>>;
+
+type ActionFormSchema = {
+  submitLabel: string;
+  fields: Array<ActionFlow["fields"][number] & { value?: string }>;
+};
+
+type ConversationAnswerResult = AnswerResult & {
+  handoff?: {
+    status: ConversationStatus;
+    reason: string;
+  };
+  action?: {
+    id: string;
+    key: string;
+    status: "active" | "completed";
+    captureMode: ConversationActionState["captureMode"];
+    nextField?: string;
+    linkUrl?: string;
+    linkLabel?: string;
+    form?: ActionFormSchema;
+  };
+};
+
+function actionFormSchema(action: ActionFlow, state: ConversationActionState): ActionFormSchema {
+  return {
+    submitLabel: action.completion.submitLabel ?? action.completion.linkLabel ?? "Submit request",
+    fields: formFields(action, state).map((field) => ({ ...field, value: state.values[field.key] ?? "" })),
+  };
+}
+
+function actionStatePayload(action: ActionFlow, state: ConversationActionState): ConversationAnswerResult["action"] {
+  const next = nextConversationalField(action, state);
+  const showForm = state.status === "active" && (Boolean(state.formShown) || state.captureMode === "form");
+  return {
+    id: action.id,
+    key: action.key,
+    status: state.status,
+    captureMode: state.captureMode,
+    ...(next ? { nextField: next.key } : {}),
+    ...(state.status === "completed" && action.completion.linkUrl
+      ? { linkUrl: action.completion.linkUrl, linkLabel: action.completion.linkLabel ?? action.completion.submitLabel ?? "Continue" }
+      : {}),
+    ...(showForm ? { form: actionFormSchema(action, state) } : {}),
+  };
+}
+
+function actionAnswer(action: ActionFlow, state: ConversationActionState, answer: string): ConversationAnswerResult {
+  const modelUsage: ModelUsage = {
+    route: "tier0",
+    model: null,
+    reason: "deterministic_action_flow",
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+    latencyMs: 0,
+  };
+  return {
+    answer,
+    grounded: false,
+    citations: [],
+    knowledgeGap: null,
+    confidenceScore: 1,
+    confidenceBand: "high",
+    retrieval: { mode: "action_flow", candidateCount: 0, topScore: 1, ...modelUsage },
+    modelUsage,
+    action: actionStatePayload(action, state),
+  };
+}
+
+function actionAnswerWithKnowledge(
+  result: AnswerResult,
+  action: ActionFlow,
+  state: ConversationActionState,
+  prompt: string,
+): ConversationAnswerResult {
+  return {
+    ...result,
+    answer: result.answer + "\n\n" + prompt,
+    action: actionStatePayload(action, state),
+  };
+}
+
+const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "policy"]);
+
+async function continueActionConversation(
+  business: Business,
+  conversation: Conversation,
+  question: string,
+): Promise<ConversationAnswerResult | null> {
+  let action = conversation.actionState
+    ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
+    : null;
+
+  if (!action || conversation.actionState?.status === "completed") {
+    action = detectAction(business.actions, question);
+    if (!action) return null;
+    const state = createActionState(action);
+    conversation.actionState = state;
+    await recordConversionEvent(business, {
+      event: "FLOW_STARTED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { flowKey: action.key },
+    });
+    const next = nextConversationalField(action, state);
+    if (state.captureMode === "form" || !next) {
+      state.formShown = true;
+      await recordConversionEvent(business, {
+        event: "FORM_DISPLAYED",
+        conversationId: conversation.id,
+        flowId: action.id,
+      });
+      const formMessage = "Absolutely — I can help with that. Just leave your details and the team can take it from here.";
+      if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
+        const knowledge = await answerQuestion(business, question);
+        return actionAnswerWithKnowledge(knowledge, action, state, formMessage);
+      }
+      return actionAnswer(action, state, formMessage);
+    }
+    await recordConversionEvent(business, {
+      event: "FIELD_VIEWED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      fieldId: next.key,
+    });
+    if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
+      const knowledge = await answerQuestion(business, question);
+      return actionAnswerWithKnowledge(knowledge, action, state, fieldPrompt(next));
+    }
+    return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + fieldPrompt(next));
+  }
+
+  const state = conversation.actionState ?? createActionState(action);
+  conversation.actionState = state;
+  if (!state.captureMode || !Array.isArray(state.conversationalKeys)) {
+    const defaults = createActionState(action, state.startedAt);
+    state.captureMode = defaults.captureMode;
+    state.conversationalKeys = defaults.conversationalKeys;
+  }
+  if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
+    const knowledge = await answerQuestion(business, question);
+    const current = nextConversationalField(action, state);
+    if (state.formShown) {
+      await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+    } else if (current) {
+      await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: current.key });
+    }
+    return actionAnswerWithKnowledge(knowledge, action, state, state.formShown ? "The form is ready below." : current ? fieldPrompt(current) : "The form is ready below.");
+  }
+  if (state.formShown) {
+    return actionAnswer(action, state, "Please complete the form below to continue.");
+  }
+
+  const current = nextConversationalField(action, state);
+  if (!current) {
+    if (state.captureMode === "hybrid") {
+      state.formShown = true;
+      await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+      return actionAnswer(action, state, "Almost done — just leave your details below.");
+    }
+    return completeActionConversation(business, conversation, action, state);
+  }
+
+  const skipOptional = !current.required && /^(skip|no thanks|none|not now|prefer not to say)$/i.test(question.trim());
+  if (skipOptional) {
+    state.skipped = [...new Set([...(state.skipped ?? []), current.key])];
+  } else {
+    const validation = validateFieldValue(current, question);
+    if (!validation.value) {
+      return actionAnswer(action, state, (validation.error ?? ("Please share your " + current.label.toLowerCase() + ".")) + " " + fieldPrompt(current));
+    }
+    state.values[current.key] = validation.value;
+    await recordConversionEvent(business, {
+      event: "FIELD_COMPLETED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      fieldId: current.key,
+    });
+  }
+  const next = nextConversationalField(action, state);
+  if (next) {
+    await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: next.key });
+    return actionAnswer(action, state, "Thanks — " + fieldPrompt(next));
+  }
+
+  if (state.captureMode === "hybrid") {
+    state.formShown = true;
+    await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+    return actionAnswer(action, state, "Almost done — just leave your details below.");
+  }
+
+  return completeActionConversation(business, conversation, action, state);
+}
+
+async function completeActionConversation(
+  business: Business,
+  conversation: Conversation,
+  action: ActionFlow,
+  state: ConversationActionState,
+): Promise<ConversationAnswerResult> {
+  state.status = "completed";
+  state.completedAt = new Date().toISOString();
+  state.formShown = false;
+  conversation.actionTaken = action.key;
+  let answer = action.completion.message;
+  let persistedLead: Lead | null = null;
+  if (action.completion.createLead) {
+    const values = state.values;
+    const email = values.email ?? null;
+    const phone = values.phone ?? null;
+    if (email || phone) {
+      const lead: Lead = {
+        id: randomUUID(),
+        conversationId: conversation.id,
+        name: values.name ?? values.parent_name ?? null,
+        email,
+        phone,
+        intent: action.name,
+        status: action.completion.leadStatus,
+        source: "action_flow",
+        pageUrl: null,
+        referrer: null,
+        consentAt: null,
+        idempotencyKey: "action:" + conversation.id + ":" + action.id,
+        metadata: { actionKey: action.key, actionId: action.id, fields: values },
+        createdAt: new Date().toISOString(),
+      };
+      const persisted = await persistLead(business, lead);
+      persistedLead = persisted;
+      const existingIndex = business.leads.findIndex((item) => item.id === persisted.id || item.idempotencyKey === persisted.idempotencyKey);
+      if (existingIndex >= 0) business.leads.splice(existingIndex, 1);
+      business.leads.unshift(persisted);
+      conversation.leadCaptured = true;
+      await recordConversionEvent(business, {
+        event: "LEAD_CAPTURED",
+        conversationId: conversation.id,
+        flowId: action.id,
+        metadata: { leadId: persisted.id, actionKey: action.key },
+      });
+    }
+  }
+  if (action.completion.linkUrl) {
+    answer += "\n\n" + (action.completion.linkLabel ?? "Continue") + ": " + action.completion.linkUrl;
+  }
+  if (action.completion.notifyStaff || action.completion.requiresStaff) {
+    const now = new Date().toISOString();
+    if (action.completion.requiresStaff) {
+      conversation.status = "WAITING_FOR_STAFF";
+      conversation.handoffReason = `Action requires staff: ${action.name}`;
+      conversation.handoffRequestedAt = now;
+      conversation.lastActivityAt = now;
+      await recordConversionEvent(business, {
+        event: "HANDOFF_REQUESTED",
+        conversationId: conversation.id,
+        flowId: action.id,
+        metadata: { reason: conversation.handoffReason },
+      });
+      await recordConversationEvent(business, conversation, "AI_HANDOFF_REQUESTED", "ai", null, { actionId: action.id, actionKey: action.key });
+    }
+    await notifyStaff(business, conversation, {
+      type: action.completion.requiresStaff ? "action_staff_required" : "lead_created",
+      title: action.completion.requiresStaff ? `${action.name} needs staff` : `New ${action.name} request`,
+      body: `${business.name} received a completed ${action.name.toLowerCase()} flow.`,
+      leadId: business.leads.find((lead) => lead.conversationId === conversation.id)?.id ?? null,
+      channels: action.completion.notifyChannels,
+      targets: action.completion.notifyTargets,
+    });
+    await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { actionId: action.id, actionKey: action.key });
+  }
+  await recordConversionEvent(business, {
+    event: "FLOW_COMPLETED",
+    conversationId: conversation.id,
+    flowId: action.id,
+    metadata: { flowKey: action.key, leadCaptured: Boolean(persistedLead) },
+  });
+  if (action.completion.connector) {
+    await recordConversionEvent(business, {
+      event: "ACTION_STARTED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { provider: action.completion.connector.provider },
+    });
+    try {
+      await enqueueActionExecution(business, action, conversation, state, persistedLead);
+    } catch (error) {
+      const message = integrationErrorMessage(error);
+      await recordConversionEvent(business, {
+        event: "ACTION_FAILED",
+        conversationId: conversation.id,
+        flowId: action.id,
+        metadata: { provider: action.completion.connector.provider, error: message, queued: false },
+      });
+      app.log.warn({ businessId: business.id, actionId: action.id, error: message }, "Action connector could not be queued; lead remains persisted");
+    }
+  } else {
+    await recordConversionEvent(business, {
+      event: "ACTION_STARTED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { provider: "frontdeskwise" },
+    });
+    await recordConversionEvent(business, {
+      event: "ACTION_SUCCEEDED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { provider: "frontdeskwise" },
+    });
+  }
+  if (action.completion.leadStatus === "booked") await recordOrganizationUsage(business, "bookings");
+  return actionAnswer(action, state, answer);
+}
+
+async function submitActionForm(
+  business: Business,
+  conversation: Conversation,
+  actionId: string,
+  rawValues: Record<string, unknown>,
+): Promise<ConversationAnswerResult> {
+  const state = conversation.actionState;
+  const action = business.actions.find((candidate) => candidate.id === actionId);
+  if (!action || !state || state.actionId !== actionId || state.status === "completed") {
+    throw httpError(400, "This action form is no longer active");
+  }
+  await recordConversionEvent(business, {
+    event: "FORM_SUBMITTED",
+    conversationId: conversation.id,
+    flowId: action.id,
+  });
+  for (const field of formFields(action, state)) {
+    const raw = rawValues[field.key];
+    const supplied = typeof raw === "string" ? raw : raw === null || raw === undefined ? "" : String(raw);
+    if (!supplied.trim()) {
+      if (field.required) return actionAnswer(action, state, "Please complete " + field.label.toLowerCase() + " below.");
+      state.skipped = [...new Set([...(state.skipped ?? []), field.key])];
+      continue;
+    }
+    const validation = validateFieldValue(field, supplied);
+    if (!validation.value) return actionAnswer(action, state, validation.error ?? ("Please check " + field.label.toLowerCase() + "."));
+    state.values[field.key] = validation.value;
+    await recordConversionEvent(business, {
+      event: "FIELD_COMPLETED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      fieldId: field.key,
+    });
+  }
+  const remaining = nextActionField(action, state);
+  if (remaining) {
+    state.formShown = true;
+    return actionAnswer(action, state, "One more detail is needed below.");
+  }
+  return completeActionConversation(business, conversation, action, state);
+}
+
+function customerAnswerPayload(result: ConversationAnswerResult) {
+  return {
+    answer: result.answer,
+    grounded: result.grounded,
+    citations: result.citations,
+    ...(result.handoff ? { handoff: result.handoff } : {}),
+    ...(result.action ? { action: result.action } : {}),
+  };
+}
+
 function evaluationCases(business: Business, requestedLimit: number): EvaluationCase[] {
   const limit = Math.max(4, Math.min(20, requestedLimit));
   const cases: EvaluationCase[] = [];
@@ -2961,7 +4488,83 @@ function evaluationCases(business: Business, requestedLimit: number): Evaluation
   const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
   if (!readySources.length) return cases;
 
+  const contentFor = (sourceId: string) => business.chunks
+    .filter((chunk) => chunk.sourceId === sourceId)
+    .map((chunk) => chunk.content)
+    .join(" ")
+    .toLowerCase();
+  const hasEvidence = (types: string[], keywords: RegExp) => readySources.some((source) => {
+    const type = sourceSemanticType(source);
+    return types.includes(type) && keywords.test(`${source.title} ${source.url} ${contentFor(source.id)}`);
+  });
+  const serviceSources = ["service", "solution", "product", "homepage", "case_study", "blog", "web_page"];
+  const standardCases: EvaluationCase[] = [
+    {
+      category: "services",
+      question: `What services does ${business.name} offer?`,
+      expectation: hasEvidence(serviceSources, /\b(offer|provide|service|solution|product|automation|development|software|program|class|treatment)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "hours",
+      question: `What are ${business.name}'s hours?`,
+      expectation: hasEvidence(["contact", "homepage", "faq"], /\b(hours?|open|opening|close|schedule)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["contact", "homepage", "faq"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "contact",
+      question: `How do I contact ${business.name}?`,
+      expectation: hasEvidence(["contact", "homepage", "about", "faq"], /\b(contact|email|phone|call|reach|message|visit)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["contact", "homepage", "about", "faq"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "pricing",
+      question: "How much does a service cost?",
+      expectation: hasEvidence(["pricing", "service", "faq"], /\b(price|pricing|cost|rate|fee|quote|budget)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["pricing", "service", "faq"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "location",
+      question: `Where is ${business.name} located?`,
+      expectation: hasEvidence(["contact", "homepage", "about"], /\b(location|located|address|directions|area|serve|visit)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["contact", "homepage", "about"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "booking",
+      question: `How do I book with ${business.name}?`,
+      expectation: hasEvidence(["service", "contact", "homepage", "faq"], /\b(book|booking|appointment|reserve|enroll|schedule|sign up)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["service", "contact", "homepage", "faq"],
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "offer_check",
+      question: `Does ${business.name} offer this service?`,
+      expectation: hasEvidence(serviceSources, /\b(offer|provide|service|solution|product|program|class|treatment)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: serviceSources,
+      forbiddenPrimarySourceTypes: ["policy"],
+    },
+    {
+      category: "cancellation_policy",
+      question: `What is ${business.name}'s cancellation policy?`,
+      expectation: hasEvidence(["policy", "faq", "pricing"], /\b(cancel|cancellation|refund|return|policy)\b/i) ? "grounded" : "fallback",
+      expectedSourceTypes: ["policy", "faq", "pricing"],
+    },
+  ];
+
+  for (const evaluationCase of standardCases) {
+    if (seen.has(evaluationCase.question.toLowerCase())) continue;
+    seen.add(evaluationCase.question.toLowerCase());
+    cases.push(evaluationCase);
+    if (cases.length >= limit - 1) break;
+  }
+
   for (const source of readySources) {
+    if (cases.length >= limit - 1) break;
     const chunk = business.chunks.find((item) => item.sourceId === source.id);
     if (!chunk) continue;
     const terms = tokenise(chunk.content).slice(0, 5);
@@ -2970,8 +4573,7 @@ function evaluationCases(business: Business, requestedLimit: number): Evaluation
     const key = question.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    cases.push({ category: source.pageType || "website_content", question, expectation: "grounded" });
-    if (cases.length >= limit - 1) break;
+    cases.push({ category: source.pageType || "website_content", question, expectation: "grounded", expectedSourceTypes: [sourceSemanticType(source)] });
   }
 
   // Every readiness run includes one deliberately unsupported prompt. A safe
@@ -2993,8 +4595,17 @@ async function evaluateBusiness(business: Business, requestedLimit: number) {
     const startedAt = Date.now();
     const answer = await answerQuestion(business, evaluationCase.question, { recordGap: false });
     const latencyMs = Date.now() - startedAt;
+    const citationTypes = answer.citations.map((citation) => {
+      const source = business.sources.find((item) => item.id === citation.sourceId);
+      return source ? sourceSemanticType(source) : undefined;
+    }).filter((type): type is string => Boolean(type));
+    const primarySourceType = citationTypes[0];
+    const sourceTypePass = !evaluationCase.expectedSourceTypes?.length
+      || (primarySourceType ? evaluationCase.expectedSourceTypes.includes(primarySourceType) : false);
+    const forbiddenSourcePass = !primarySourceType || !evaluationCase.forbiddenPrimarySourceTypes?.includes(primarySourceType);
+    const answerStylePass = answer.answer.split(/\s+/).filter(Boolean).length <= 120 && !/^based on\b/i.test(answer.answer.trim());
     const passed = evaluationCase.expectation === "grounded"
-      ? answer.grounded && answer.citations.length > 0 && answer.confidenceScore >= 0.55
+      ? answer.grounded && answer.citations.length > 0 && answer.confidenceScore >= 0.55 && sourceTypePass && forbiddenSourcePass && answerStylePass
       : !answer.grounded && answer.citations.length === 0 && answer.confidenceBand === "low";
     results.push({
       category: evaluationCase.category,
@@ -3008,6 +4619,9 @@ async function evaluateBusiness(business: Business, requestedLimit: number) {
       answer: answer.answer,
       latencyMs,
       retrievalMode: String(answer.retrieval?.mode ?? "unknown"),
+      expectedSourceTypes: evaluationCase.expectedSourceTypes,
+      primarySourceType,
+      forbiddenPrimarySourceTypes: evaluationCase.forbiddenPrimarySourceTypes,
     });
   }
 
@@ -3042,13 +4656,258 @@ function maybeConversation(business: Business, conversationId: string): Conversa
   return conversation;
 }
 
+function conversationStatusPayload(conversation: Conversation) {
+  return {
+    id: conversation.id,
+    status: conversation.status,
+    assignedUserId: conversation.assignedUserId,
+    handoffReason: conversation.handoffReason,
+    unreadCount: conversation.unreadCount,
+    lastActivityAt: conversation.lastActivityAt,
+  };
+}
+
+async function businessOrganizationId(business: Business): Promise<string | null> {
+  if (!pool) return null;
+  const result = await pool.query<{ organization_id: string }>("select organization_id from businesses where id = $1", [business.id]);
+  return result.rows[0]?.organization_id ?? null;
+}
+
+async function recordConversationEvent(
+  business: Business,
+  conversation: Conversation,
+  eventType: ConversationEventType,
+  actorType: ConversationEvent["actorType"],
+  actorUserId: string | null = null,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  const event: ConversationEvent = {
+    id: randomUUID(),
+    businessId: business.id,
+    conversationId: conversation.id,
+    eventType,
+    actorUserId,
+    actorType,
+    metadata,
+    createdAt: new Date().toISOString(),
+  };
+  business.conversationEvents.unshift(event);
+  if (!pool) return;
+  try {
+    await pool.query(
+      `insert into conversation_events
+         (id, business_id, conversation_id, event_type, actor_user_id, actor_type, metadata, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [event.id, business.id, conversation.id, event.eventType, actorUserId, actorType, JSON.stringify(metadata), event.createdAt],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error" }, "Conversation event table is not available yet");
+  }
+}
+
+function normalizeTelemetryDevice(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "mobile" || normalized === "tablet" || normalized === "desktop" ? normalized : null;
+}
+
+async function recordConversionEvent(
+  business: Business,
+  input: {
+    event: ConversionEventType;
+    conversationId?: string | null;
+    flowId?: string | null;
+    fieldId?: string | null;
+    sourcePage?: string | null;
+    device?: string | null;
+    metadata?: Record<string, unknown>;
+    timestamp?: string | null;
+  },
+): Promise<void> {
+  if (!conversionEventTypes.has(input.event)) return;
+  const timestampCandidate = input.timestamp ? Date.parse(input.timestamp) : NaN;
+  const timestamp = Number.isNaN(timestampCandidate) ? new Date().toISOString() : new Date(timestampCandidate).toISOString();
+  const event: ConversionEvent = {
+    id: randomUUID(),
+    organizationId: null,
+    businessId: business.id,
+    conversationId: input.conversationId ?? null,
+    flowId: input.flowId ?? null,
+    fieldId: input.fieldId ?? null,
+    event: input.event,
+    timestamp,
+    sourcePage: input.sourcePage?.slice(0, 2_000) ?? null,
+    device: normalizeTelemetryDevice(input.device),
+    metadata: input.metadata ?? {},
+  };
+  business.conversionEvents.unshift(event);
+  if (business.conversionEvents.length > 10_000) business.conversionEvents.length = 10_000;
+  if (!pool) return;
+  try {
+    const organizationId = await businessOrganizationId(business);
+    event.organizationId = organizationId;
+    if (!organizationId) return;
+    await pool.query(
+      `insert into conversion_events
+         (id, organization_id, business_id, conversation_id, flow_id, field_id, event, occurred_at, source_page, device, metadata)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [event.id, organizationId, business.id, event.conversationId, event.flowId, event.fieldId, event.event, event.timestamp, event.sourcePage, event.device, JSON.stringify(event.metadata)],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: business.id }, "Conversion events table is not available yet");
+  }
+}
+
+async function staffRecipients(business: Business): Promise<Array<{ id: string; email: string; name: string; role: "owner" | "admin" | "staff" }>> {
+  if (!pool) return [];
+  const result = await pool.query<Record<string, unknown>>(
+    `select distinct u.id, u.email, u.name,
+            case when om.role = 'owner' then 'owner' when om.role = 'admin' or bm.role = 'admin' then 'admin' else 'staff' end as effective_role
+     from app_users u
+     join businesses b on b.id = $1
+     left join organization_members om on om.organization_id = b.organization_id and om.user_id = u.id
+     left join business_members bm on bm.business_id = b.id and bm.user_id = u.id
+     where u.status = 'active'
+       and (om.role in ('owner', 'admin') or bm.role in ('admin', 'staff'))
+     order by u.email`,
+    [business.id],
+  );
+  return result.rows.map((row) => ({ id: String(row.id), email: String(row.email), name: String(row.name ?? "Team member"), role: row.effective_role === "owner" ? "owner" : row.effective_role === "admin" ? "admin" : "staff" }));
+}
+
+async function notifyStaff(
+  business: Business,
+  conversation: Conversation,
+  input: { type: string; title: string; body: string; leadId?: string | null; channels?: Array<"in_app" | "email">; targets?: Array<"owner" | "business_team" | "assigned_staff"> },
+): Promise<void> {
+  const recipients = await staffRecipients(business);
+  const channels = input.channels?.length ? input.channels : ["in_app", "email"];
+  const targets = input.targets?.length ? input.targets : ["business_team"];
+  const filteredRecipients = recipients.filter((recipient) => {
+    if (targets.includes("business_team")) return true;
+    if (targets.includes("owner") && recipient.role === "owner") return true;
+    if (targets.includes("assigned_staff") && conversation.assignedUserId === recipient.id) return true;
+    return false;
+  });
+  const organizationId = await businessOrganizationId(business);
+  const createdAt = new Date().toISOString();
+  for (const recipient of filteredRecipients) {
+    const notification: Notification = {
+      id: randomUUID(),
+      organizationId,
+      businessId: business.id,
+      userId: recipient.id,
+      type: input.type,
+      conversationId: conversation.id,
+      leadId: input.leadId ?? null,
+      title: input.title,
+      body: input.body,
+      readAt: null,
+      createdAt,
+    };
+    if (channels.includes("in_app")) business.notifications.unshift(notification);
+    if (pool && channels.includes("in_app")) {
+      try {
+        await pool.query(
+          `insert into notifications
+             (id, organization_id, business_id, user_id, type, conversation_id, lead_id, title, body, created_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [notification.id, organizationId, business.id, recipient.id, input.type, conversation.id, input.leadId ?? null, input.title, input.body, createdAt],
+        );
+      } catch (error) {
+        if (!isMissingDatabaseTable(error)) throw error;
+        app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error" }, "Notification table is not available yet");
+      }
+    }
+  }
+  if (sesConfigured() && channels.includes("email") && filteredRecipients.length) {
+    try {
+      await sendTransactionalEmail({
+        to: filteredRecipients.map((recipient) => recipient.email),
+        subject: `${business.name}: ${input.title}`,
+        text: `${input.body}\n\nOpen the FrontDeskWise inbox to respond.`,
+        replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO,
+      });
+    } catch (error) {
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown email error", businessId: business.id }, "Staff notification email failed");
+    }
+  }
+}
+
+function handoffAnswer(business: Business, reason: string): ConversationAnswerResult {
+  const modelUsage: ModelUsage = {
+    route: "tier0",
+    model: null,
+    reason: "deterministic_handoff",
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+    latencyMs: 0,
+  };
+  return {
+    answer: "Absolutely — I’ve notified the team. Someone will join this conversation as soon as possible.",
+    grounded: false,
+    citations: [],
+    knowledgeGap: null,
+    confidenceScore: 1,
+    confidenceBand: "high",
+    retrieval: { mode: "handoff", candidateCount: 0, topScore: 1, ...modelUsage },
+    modelUsage,
+    handoff: { status: "WAITING_FOR_STAFF", reason },
+  };
+}
+
+async function requestHandoff(business: Business, conversation: Conversation, reason: string): Promise<ConversationAnswerResult> {
+  const now = new Date().toISOString();
+  conversation.status = "HANDOFF_REQUESTED";
+  conversation.handoffReason = reason;
+  conversation.handoffRequestedAt = now;
+  conversation.lastActivityAt = now;
+  await recordConversionEvent(business, {
+    event: "HANDOFF_REQUESTED",
+    conversationId: conversation.id,
+    metadata: { reason },
+  });
+  await recordConversationEvent(business, conversation, "AI_HANDOFF_REQUESTED", "visitor", null, { reason });
+  await persistConversation(business, conversation);
+  await notifyStaff(business, conversation, {
+    type: "handoff_requested",
+    title: "Human help requested",
+    body: `${business.name} has a visitor waiting for a team member. Reason: ${reason}`,
+  });
+  await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { reason });
+  conversation.status = "WAITING_FOR_STAFF";
+  conversation.lastActivityAt = new Date().toISOString();
+  await persistConversation(business, conversation);
+  return handoffAnswer(business, reason);
+}
+
 async function startConversation(business: Business, sessionId: string | null): Promise<Conversation> {
   const now = new Date().toISOString();
+  const normalizedSessionId = sessionId?.trim() ? sessionId.trim().slice(0, 160) : null;
+  if (normalizedSessionId) {
+    const recentConversation = [...business.conversations.values()]
+      .filter((conversation) => conversation.sessionId === normalizedSessionId && conversation.status !== "RESOLVED")
+      .filter((conversation) => Date.parse(conversation.lastActivityAt) >= Date.now() - 24 * 60 * 60 * 1_000)
+      .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))[0];
+    if (recentConversation) return recentConversation;
+  }
   const conversation: Conversation = {
     id: randomUUID(),
-    sessionId: sessionId?.trim() ? sessionId.trim().slice(0, 160) : randomUUID(),
+    sessionId: normalizedSessionId ?? randomUUID(),
     leadCaptured: false,
     actionTaken: null,
+    status: "AI_ACTIVE",
+    assignedUserId: null,
+    assignedAt: null,
+    handoffReason: null,
+    handoffRequestedAt: null,
+    humanJoinedAt: null,
+    resolvedAt: null,
+    unreadCount: 0,
+    lastActivityAt: now,
     messages: [],
     createdAt: now,
     updatedAt: now,
@@ -3059,10 +4918,32 @@ async function startConversation(business: Business, sessionId: string | null): 
   return conversation;
 }
 
-async function recordConversationQuestion(business: Business, conversation: Conversation, question: string) {
-  const result = await answerQuestion(business, question);
+async function purgeExpiredCustomerData(): Promise<void> {
+  for (const business of businesses.values()) {
+    const cutoff = Date.now() - business.agentConfig.retentionDays * 24 * 60 * 60 * 1_000;
+    for (const [conversationId, conversation] of business.conversations) {
+      if (Date.parse(conversation.lastActivityAt) < cutoff) business.conversations.delete(conversationId);
+    }
+    business.leads = business.leads.filter((lead) => Date.parse(lead.createdAt) >= cutoff);
+    if (!pool) continue;
+    try {
+      await pool.query("delete from conversations where business_id = $1 and last_activity_at < $2", [business.id, new Date(cutoff).toISOString()]);
+      await pool.query("delete from leads where business_id = $1 and created_at < $2", [business.id, new Date(cutoff).toISOString()]);
+    } catch (error) {
+      if (!isMissingDatabaseColumn(error) && !isMissingDatabaseTable(error)) throw error;
+      app.log.warn({ businessId: business.id }, "Retention cleanup skipped until the latest schema is available");
+    }
+  }
+}
+
+async function persistConversationExchange(
+  business: Business,
+  conversation: Conversation,
+  userContent: string,
+  result: ConversationAnswerResult,
+): Promise<ConversationAnswerResult> {
   const now = new Date().toISOString();
-  const userMessage: Message = { role: "user", content: question, createdAt: now };
+  const userMessage: Message = { role: "user", content: userContent, createdAt: now };
   const assistantMessage: Message = {
     role: "assistant",
     content: result.answer,
@@ -3076,13 +4957,69 @@ async function recordConversationQuestion(business: Business, conversation: Conv
   };
   conversation.messages.push(userMessage, assistantMessage);
   conversation.updatedAt = now;
+  conversation.lastActivityAt = now;
+  if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "WAITING_FOR_STAFF") {
+    conversation.unreadCount += 1;
+    await recordConversationEvent(business, conversation, "VISITOR_REPLIED", "visitor", null, { contentLength: userContent.length });
+    if (conversation.status === "HUMAN_ACTIVE" && conversation.assignedUserId) {
+      await notifyStaff(business, conversation, {
+        type: "visitor_replied",
+        title: "Visitor replied",
+        body: `${business.name} has a new visitor message in an active conversation.`,
+      });
+    }
+  }
   await persistMessage(conversation, userMessage);
   await persistMessage(conversation, assistantMessage);
   await persistConversation(business, conversation);
+  if (!result.handoff && conversation.status === "AI_ACTIVE") {
+    await recordConversationEvent(business, conversation, "AI_RESPONSE_SENT", "ai", null, { grounded: result.grounded });
+  }
   await recordOrganizationUsage(business, "llm_requests");
   await recordModelUsage(business, result.modelUsage);
   if (result.knowledgeGap) await persistGap(business, result.knowledgeGap);
   return result;
+}
+
+async function recordConversationQuestion(business: Business, conversation: Conversation, question: string) {
+  if (conversation.status === "RESOLVED") {
+    conversation.status = "AI_ACTIVE";
+    conversation.resolvedAt = null;
+  }
+  if (isExplicitHumanRequest(question) && conversation.status !== "HUMAN_ACTIVE") {
+    const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member");
+    return persistConversationExchange(business, conversation, question, result);
+  }
+  if (conversation.status === "HUMAN_ACTIVE") {
+    const result = {
+      ...handoffAnswer(business, "Human takeover is active"),
+      answer: "Your message has been sent to the team. A team member will reply here shortly.",
+      handoff: { status: "HUMAN_ACTIVE" as const, reason: "Human takeover is active" },
+    };
+    return persistConversationExchange(business, conversation, question, result);
+  }
+  const result: ConversationAnswerResult = await continueActionConversation(business, conversation, question) ?? await answerQuestion(business, question);
+  if (!result.handoff && result.confidenceBand === "low" && question.trim().length > 12) {
+    const fallback = await requestHandoff(business, conversation, "The assistant could not answer confidently");
+    return persistConversationExchange(business, conversation, question, fallback);
+  }
+  return persistConversationExchange(business, conversation, question, result);
+}
+
+async function recordActionFormSubmission(
+  business: Business,
+  conversation: Conversation,
+  actionId: string,
+  values: Record<string, unknown>,
+) {
+  const result = await submitActionForm(business, conversation, actionId, values);
+  const action = business.actions.find((candidate) => candidate.id === actionId);
+  return persistConversationExchange(
+    business,
+    conversation,
+    action ? "Submitted " + action.name + " details." : "Submitted action details.",
+    result,
+  );
 }
 
 const seededBusinesses = [
@@ -3112,6 +5049,10 @@ if (pool) {
 await syncStripePlanPrices();
 await resumeEmbeddingJobs();
 void processIntegrationOutbox();
+void processActionOutbox();
+void purgeExpiredCustomerData();
+const retentionCleanupTimer = setInterval(() => { void purgeExpiredCustomerData(); }, 60 * 60 * 1_000);
+retentionCleanupTimer.unref?.();
 
 async function requireSuperAdmin(request: FastifyRequest): Promise<AppUser> {
   const { authUser, appUser } = await authenticatedAppUser(request);
@@ -3228,7 +5169,7 @@ app.addHook("onRequest", async (request, reply) => {
   reply.header("Access-Control-Allow-Origin", allowOrigin);
   reply.header("Vary", "Origin");
   reply.header("Access-Control-Allow-Headers", "content-type, authorization, idempotency-key, x-frontdeskwise-demo-token");
-  reply.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   reply.header("Access-Control-Expose-Headers", "X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset");
   reply.header("Access-Control-Max-Age", "600");
   reply.header("X-Request-Id", request.id);
@@ -3254,6 +5195,7 @@ app.get("/health", async () => ({
   storage: pool ? "postgres" : "memory",
   objectStorageConfigured: storageConfigured(),
   emailConfigured: sesConfigured(),
+  stripeConfigured: Boolean(stripe),
 }));
 
 app.get("/ready", async (_request, reply) => {
@@ -3266,6 +5208,7 @@ app.get("/ready", async (_request, reply) => {
       database: "ready",
       objectStorageConfigured: storageConfigured(),
       emailConfigured: sesConfigured(),
+      stripeConfigured: Boolean(stripe),
     };
   } catch {
     return reply.code(503).send({ ok: false, service: "frontdeskwise-api", reason: "database_unavailable" });
@@ -3592,7 +5535,7 @@ app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
     `select o.*, bp.display_name as plan_display_name, bp.description as plan_description,
             bp.max_businesses, coalesce(opo.amount_cents, bp.monthly_amount_cents) as effective_amount_cents,
             coalesce(opo.max_businesses, bp.max_businesses) as effective_max_businesses,
-            opo.reason as override_reason
+            opo.billing_interval as override_interval, opo.reason as override_reason
      from organizations o
      left join billing_plans bp on bp.plan_key = o.plan_key
      left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
@@ -3600,7 +5543,14 @@ app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
     [organizationId],
   );
   if (!result.rowCount) throw httpError(404, "Organization not found");
-  const businessesResult = await pool.query<Record<string, unknown>>("select id, name, slug, website_url, updated_at from businesses where organization_id = $1 order by created_at", [organizationId]);
+  const businessesResult = await pool.query<Record<string, unknown>>(
+    `select b.id, b.name, b.slug, b.website_url, b.ownership_status, b.billing_status, b.plan_key, b.updated_at,
+            (select count(*) from business_sources bs where bs.business_id = b.id)::integer as source_count,
+            (select count(*) from conversations c where c.business_id = b.id)::integer as conversation_count,
+            (select count(*) from leads l where l.business_id = b.id)::integer as lead_count
+     from businesses b where b.organization_id = $1 order by b.created_at`,
+    [organizationId],
+  );
   const owners = await pool.query<{ email: string; name: string; role: string }>(
     `select u.email, u.name, om.role from organization_members om join app_users u on u.id = om.user_id where om.organization_id = $1 order by om.role, u.email`,
     [organizationId],
@@ -3608,7 +5558,12 @@ app.get("/api/v1/admin/organizations/:organizationId", async (request) => {
   return {
     organization: { id: organizationId, name: String(result.rows[0].name), slug: String(result.rows[0].slug), billing: organizationBillingPayload(result.rows[0]) },
     owners: owners.rows,
-    businesses: businessesResult.rows.map((business) => ({ id: String(business.id), name: String(business.name), slug: String(business.slug), websiteUrl: String(business.website_url), updatedAt: nullableIso(business.updated_at) })),
+    businesses: businessesResult.rows.map((business) => ({
+      id: String(business.id), name: String(business.name), slug: String(business.slug), websiteUrl: String(business.website_url),
+      ownershipStatus: String(business.ownership_status ?? "pending"), billingStatus: String(business.billing_status ?? "trial"),
+      planKey: String(business.plan_key ?? "starter"), sourceCount: Number(business.source_count ?? 0),
+      conversationCount: Number(business.conversation_count ?? 0), leadCount: Number(business.lead_count ?? 0), updatedAt: nullableIso(business.updated_at),
+    })),
   };
 });
 
@@ -3708,6 +5663,8 @@ app.post("/api/v1/admin/organizations/:organizationId/plan-override", async (req
      where id = $1`,
     [organizationId, planKey, interval, amountCents, stripePriceId],
   );
+  const client = await pool.connect();
+  try { await syncOrganizationBillingToBusinesses(client, organizationId); } finally { client.release(); }
   return { ok: true, organizationId, planKey, interval, amountCents, maxBusinesses, stripePriceId, reason };
 });
 
@@ -4196,7 +6153,7 @@ app.post("/api/v1/demo/:slug/public/test", async (request) => {
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   // Public samples are intentionally read-only: prospects can test the agent,
   // but their questions do not mutate the seeded demo's conversations or gaps.
-  return { ...await answerQuestion(business, question, { recordGap: false }), businessName: business.name };
+  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false })), businessName: business.name };
 });
 
 app.get("/api/v1/demo/:slug", async (request) => {
@@ -4262,6 +6219,49 @@ app.post("/api/v1/demo/:slug/knowledge/reindex", async (request) => {
   if (!jobId) return { status: "succeeded", message: "All knowledge chunks already have embeddings" };
   void processEmbeddingJob(business, jobId);
   return { status: "queued", jobId, model: embeddingModel() };
+});
+
+app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (request) => {
+  const params = request.params as { slug?: string; sourceId?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  const sourceId = requiredString(params.sourceId, "sourceId", 120);
+  const source = business.sources.find((item) => item.id === sourceId);
+  if (!source) throw httpError(404, "Knowledge source not found");
+  if (source.contentType !== "web_page") throw httpError(400, "Uploaded documents cannot be re-crawled from their source URL");
+  source.crawlStatus = "crawling";
+  await persistBusiness(business);
+  try {
+    const crawled = await crawlWebsite(normalisePublicUrl(business.websiteUrl));
+    await replaceWebsiteSources(business, crawled.pages);
+    await enqueueAndRunEmbeddingJob(business);
+    return { status: "ready", sourceCount: business.sources.filter((item) => item.contentType === "web_page").length };
+  } catch (error) {
+    const current = business.sources.find((item) => item.id === sourceId);
+    if (current) {
+      current.crawlStatus = "failed";
+      await persistBusiness(business);
+    }
+    throw error instanceof CrawlError ? error : httpError(422, "The website could not be re-crawled yet");
+  }
+});
+
+app.delete("/api/v1/demo/:slug/knowledge/sources/:sourceId", async (request) => {
+  const params = request.params as { slug?: string; sourceId?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  const sourceId = requiredString(params.sourceId, "sourceId", 120);
+  const sourceIndex = business.sources.findIndex((item) => item.id === sourceId);
+  if (sourceIndex < 0) throw httpError(404, "Knowledge source not found");
+  const [source] = business.sources.splice(sourceIndex, 1);
+  business.chunks = business.chunks.filter((chunk) => chunk.sourceId !== sourceId);
+  if (pool) {
+    await pool.query("delete from knowledge_chunks where business_id = $1 and source_id = $2", [business.id, sourceId]);
+    await pool.query("delete from business_sources where business_id = $1 and id = $2", [business.id, sourceId]);
+  }
+  return { ok: true, sourceId: source.id };
 });
 
 app.get("/api/v1/demo/:slug/verification", async (request) => {
@@ -4352,6 +6352,22 @@ app.get("/api/v1/demo/:slug/widget/install", async (request) => {
     enabled: business.widget.enabled,
     scriptUrl,
     snippet: `<script async src="${scriptUrl}" data-site="${business.widget.siteKey}"${apiAttribute}></script>`,
+    verification: { lastLoadedAt: business.widget.lastLoadedAt, loadCount: business.widget.loadCount },
+  };
+});
+
+app.post("/api/v1/demo/:slug/widget/verify", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  const detected = Boolean(business.widget.lastLoadedAt && business.widget.loadCount > 0);
+  return {
+    verified: detected,
+    message: detected
+      ? "Widget detected on the website. Installation is live."
+      : "No widget load detected yet. Add the snippet to the published website, then try again.",
     verification: { lastLoadedAt: business.widget.lastLoadedAt, loadCount: business.widget.loadCount },
   };
 });
@@ -4511,6 +6527,173 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/retry", async (request)
   return { ok: true, queued: result.rowCount ?? 0 };
 });
 
+app.delete("/api/v1/demo/:slug/integrations/:integrationId", async (request) => {
+  const params = request.params as { slug?: string; integrationId?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "CRM integrations require PostgreSQL storage");
+  const integrationId = requiredString(params.integrationId, "integrationId", 80);
+  const result = await pool.query(
+    "delete from crm_integrations where id = $1 and business_id = $2 returning id",
+    [integrationId, business.id],
+  );
+  if (!result.rowCount) throw httpError(404, "CRM integration not found");
+  return { ok: true, integrationId };
+});
+
+app.get("/api/v1/demo/:slug/mcp-connections", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  if (!pool) return { connections: [] };
+  const result = await pool.query<Record<string, unknown>>(
+    `select id, provider, display_name, server_url, protocol_version, connection_status,
+            tool_catalog, allowed_tools, last_tested_at, last_successful_call_at, last_error
+     from mcp_connections
+     where business_id = $1
+     order by created_at`,
+    [business.id],
+  );
+  return { connections: result.rows.map(mcpConnectionPayload) };
+});
+
+app.post("/api/v1/demo/:slug/mcp-connections", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "MCP connections require PostgreSQL storage");
+  if (!integrationEncryptionConfigured()) throw httpError(503, "Secure connection storage is not configured on this environment yet");
+  const body = asRecord(request.body);
+  const provider = mcpProviderFromValue(body.provider);
+  if (!provider) throw httpError(400, "Choose a supported MCP provider");
+  const displayName = optionalString(body.displayName, 120) ?? `${provider === "hubspot" ? "HubSpot" : provider === "zapier" ? "Zapier" : provider === "make" ? "Make" : "Custom"} MCP`;
+  const serverUrl = requiredString(body.serverUrl, "serverUrl", 2_000);
+  const bearerToken = requiredString(body.bearerToken, "bearerToken", 4_000);
+  const protocolVersion = optionalString(body.protocolVersion, 40) ?? "2025-06-18";
+  let tools: McpTool[];
+  try {
+    tools = await createMcpClient({ serverUrl, bearerToken, protocolVersion }).listTools();
+  } catch (error) {
+    throw httpError(502, `Could not connect to this MCP server. ${integrationErrorMessage(error)}`);
+  }
+  const defaultAllowedTools = toolPermissions(tools)
+    .filter((tool) => tool.readOnly && !tool.destructive)
+    .map((tool) => tool.name);
+  const result = await pool.query<Record<string, unknown>>(
+    `insert into mcp_connections
+       (business_id, provider, display_name, server_url, encrypted_credentials, protocol_version,
+        connection_status, tool_catalog, allowed_tools, last_tested_at, last_error)
+     values ($1, $2, $3, $4, $5, $6, 'active', $7, $8, now(), null)
+     on conflict (business_id, provider, server_url) do update set
+       display_name = excluded.display_name,
+       encrypted_credentials = excluded.encrypted_credentials,
+       protocol_version = excluded.protocol_version,
+       connection_status = 'active',
+       tool_catalog = excluded.tool_catalog,
+       allowed_tools = excluded.allowed_tools,
+       last_tested_at = now(),
+       last_error = null,
+       updated_at = now()
+     returning id, provider, display_name, server_url, protocol_version, connection_status,
+       tool_catalog, allowed_tools, last_tested_at, last_successful_call_at, last_error`,
+    [business.id, provider, displayName, serverUrl, mcpCredentials(bearerToken), protocolVersion, JSON.stringify(tools), JSON.stringify(defaultAllowedTools)],
+  );
+  return reply.code(201).send({ connection: mcpConnectionPayload(result.rows[0]), message: "Connected. Read-only tools are enabled; review permissions before using anything else." });
+});
+
+app.post("/api/v1/demo/:slug/mcp-connections/:connectionId/test", async (request) => {
+  const params = request.params as { slug?: string; connectionId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "MCP connections require PostgreSQL storage");
+  const connection = await pool.query<Record<string, unknown>>(
+    `select id, provider, display_name, server_url, encrypted_credentials, protocol_version,
+            connection_status, tool_catalog, allowed_tools, last_tested_at, last_successful_call_at, last_error
+     from mcp_connections where id = $1 and business_id = $2`,
+    [requiredString(params.connectionId, "connectionId", 80), business.id],
+  );
+  if (!connection.rowCount) throw httpError(404, "MCP connection not found");
+  const row = connection.rows[0];
+  try {
+    const tools = await createMcpClient({
+      serverUrl: String(row.server_url),
+      bearerToken: mcpBearerToken(String(row.encrypted_credentials)),
+      protocolVersion: String(row.protocol_version ?? "2025-06-18"),
+    }).listTools();
+    const names = new Set(tools.map((tool) => tool.name));
+    const allowedTools = Array.isArray(row.allowed_tools)
+      ? row.allowed_tools.filter((item): item is string => typeof item === "string" && names.has(item))
+      : toolPermissions(tools).filter((tool) => tool.readOnly && !tool.destructive).map((tool) => tool.name);
+    const updated = await pool.query<Record<string, unknown>>(
+      `update mcp_connections
+       set connection_status = 'active', tool_catalog = $2, allowed_tools = $3,
+           last_tested_at = now(), last_error = null, updated_at = now()
+       where id = $1
+       returning id, provider, display_name, server_url, protocol_version, connection_status,
+         tool_catalog, allowed_tools, last_tested_at, last_successful_call_at, last_error`,
+      [row.id, JSON.stringify(tools), JSON.stringify(allowedTools)],
+    );
+    return { connection: mcpConnectionPayload(updated.rows[0]), message: "Connection is healthy and the tool list is up to date." };
+  } catch (error) {
+    const message = integrationErrorMessage(error);
+    await pool.query(
+      `update mcp_connections set connection_status = 'error', last_tested_at = now(), last_error = $2, updated_at = now() where id = $1`,
+      [row.id, message],
+    );
+    throw httpError(502, "MCP connection test failed. Check the server URL and access token.");
+  }
+});
+
+app.patch("/api/v1/demo/:slug/mcp-connections/:connectionId/tools", async (request) => {
+  const params = request.params as { slug?: string; connectionId?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "MCP connections require PostgreSQL storage");
+  const body = asRecord(request.body);
+  if (!Array.isArray(body.allowedTools)) throw httpError(400, "allowedTools must be an array");
+  const requested = body.allowedTools.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 200);
+  const connection = await pool.query<Record<string, unknown>>(
+    `select id, provider, display_name, server_url, protocol_version, connection_status,
+            tool_catalog, allowed_tools, last_tested_at, last_successful_call_at, last_error
+     from mcp_connections where id = $1 and business_id = $2`,
+    [requiredString(params.connectionId, "connectionId", 80), business.id],
+  );
+  if (!connection.rowCount) throw httpError(404, "MCP connection not found");
+  const available = new Set(mcpToolsFromValue(connection.rows[0].tool_catalog).map((tool) => tool.name));
+  const allowedTools = requested.filter((tool) => available.has(tool));
+  const updated = await pool.query<Record<string, unknown>>(
+    `update mcp_connections set allowed_tools = $2, updated_at = now()
+     where id = $1
+     returning id, provider, display_name, server_url, protocol_version, connection_status,
+       tool_catalog, allowed_tools, last_tested_at, last_successful_call_at, last_error`,
+    [connection.rows[0].id, JSON.stringify(allowedTools)],
+  );
+  return { connection: mcpConnectionPayload(updated.rows[0]), message: "Tool permissions saved." };
+});
+
+app.delete("/api/v1/demo/:slug/mcp-connections/:connectionId", async (request) => {
+  const params = request.params as { slug?: string; connectionId?: string };
+  const business = await getBusiness(params.slug);
+  await requireAuthenticatedBusinessOwner(business, request);
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "MCP connections require PostgreSQL storage");
+  const result = await pool.query(
+    "delete from mcp_connections where id = $1 and business_id = $2 returning id",
+    [requiredString(params.connectionId, "connectionId", 80), business.id],
+  );
+  if (!result.rowCount) throw httpError(404, "MCP connection not found");
+  return { ok: true, connectionId: String(result.rows[0].id) };
+});
+
 app.get("/api/v1/demo/:slug/integrations/:integrationId/syncs", async (request) => {
   const params = request.params as { slug?: string; integrationId?: string };
   const business = await getBusiness(params.slug);
@@ -4544,6 +6727,338 @@ app.get("/api/v1/demo/:slug/integrations/:integrationId/syncs", async (request) 
   };
 });
 
+app.get("/api/v1/demo/:slug/team", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "admin");
+  if (!pool) return { members: [], businesses: [{ id: business.id, name: business.name, slug: business.slug }] };
+  const organizationId = await businessOrganizationId(business);
+  const members = await pool.query<Record<string, unknown>>(
+    `select u.id, u.email, u.name, u.status, u.created_at, u.updated_at,
+            coalesce(om.role, 'member') as organization_role,
+            bm.role as business_role,
+            bm.created_at as business_joined_at,
+            (select max(created_at) from conversation_events ce where ce.actor_user_id = u.id and ce.business_id = $2) as last_active_at
+     from app_users u
+     left join organization_members om on om.organization_id = $1 and om.user_id = u.id
+     left join business_members bm on bm.business_id = $2 and bm.user_id = u.id
+     where om.user_id is not null or bm.user_id is not null
+     order by case when om.role = 'owner' then 0 when om.role = 'admin' then 1 else 2 end, u.email`,
+    [organizationId, business.id],
+  );
+  const businessesResult = await pool.query<{ id: string; name: string; slug: string }>(
+    "select id, name, slug from businesses where organization_id = $1 order by created_at",
+    [organizationId],
+  );
+  return {
+    members: members.rows.map((row) => ({
+      id: String(row.id),
+      email: String(row.email),
+      name: String(row.name ?? ""),
+      status: String(row.status),
+      role: row.organization_role === "owner" ? "owner" : row.organization_role === "admin" || row.business_role === "admin" ? "admin" : row.business_role === "viewer" || row.organization_role === "viewer" ? "viewer" : "staff",
+      businessIds: row.organization_role === "owner" || row.organization_role === "admin" ? businessesResult.rows.map((item) => String(item.id)) : [business.id],
+      createdAt: nullableIso(row.created_at),
+      updatedAt: nullableIso(row.updated_at),
+      lastActiveAt: nullableIso(row.last_active_at),
+    })),
+    businesses: businessesResult.rows.map((item) => ({ id: String(item.id), name: String(item.name), slug: String(item.slug) })),
+  };
+});
+
+app.post("/api/v1/demo/:slug/team/invite", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  if (!pool) throw httpError(503, "Team invitations require PostgreSQL storage");
+  const body = asRecord(request.body);
+  const email = optionalString(body.email, 240)?.toLowerCase();
+  if (!email || !email.includes("@")) throw httpError(400, "A valid team member email is required");
+  const name = optionalString(body.name, 160) ?? email.split("@", 1)[0];
+  const role = body.role === "admin" || body.role === "staff" || body.role === "viewer" ? body.role : "staff";
+  const organizationId = await businessOrganizationId(business);
+  const requestedBusinessIds = Array.isArray(body.businessIds) ? body.businessIds.filter((item): item is string => typeof item === "string") : [business.id];
+  const client = await pool.connect();
+  let userId = "";
+  try {
+    await client.query("begin");
+    const userResult = await client.query<{ id: string }>(
+      `insert into app_users (email, email_normalized, name, status)
+       values ($1, $1, $2, 'invited')
+       on conflict (email_normalized) do update set name = excluded.name, status = case when app_users.status = 'disabled' then 'invited' else app_users.status end, updated_at = now()
+       returning id`,
+      [email, name],
+    );
+    userId = userResult.rows[0].id;
+    const validBusinesses = await client.query<{ id: string }>(
+      "select id from businesses where organization_id = $1 and id = any($2::uuid[])",
+      [organizationId, requestedBusinessIds.length ? requestedBusinessIds : [business.id]],
+    );
+    if (!validBusinesses.rowCount) throw httpError(400, "Select at least one business for this team member");
+    const organizationRole = role === "admin" ? "admin" : role === "viewer" ? "viewer" : "member";
+    await client.query(
+      `insert into organization_members (organization_id, user_id, role)
+       values ($1, $2, $3)
+       on conflict (organization_id, user_id) do update set role = excluded.role, updated_at = now()`,
+      [organizationId, userId, organizationRole],
+    );
+    for (const item of validBusinesses.rows) {
+      await client.query(
+        `insert into business_members (business_id, user_id, role)
+         values ($1, $2, $3)
+         on conflict (business_id, user_id) do update set role = excluded.role, updated_at = now()`,
+        [item.id, userId, role === "admin" ? "admin" : role],
+      );
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+  if (sesConfigured()) {
+    try {
+      await sendTransactionalEmail({
+        to: [email],
+        subject: `You’ve been invited to ${business.name} on FrontDeskWise`,
+        text: `${actor.name} invited you to help manage ${business.name}. Sign in to FrontDeskWise with this email to accept the invitation.`,
+        replyTo: process.env.FRONTDESKWISE_SES_REPLY_TO,
+      });
+    } catch (error) {
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown email error" }, "Team invitation email failed");
+    }
+  }
+  return reply.code(201).send({ member: { id: userId, email, name, role, status: "invited", businessIds: requestedBusinessIds }, emailSent: sesConfigured() });
+});
+
+app.patch("/api/v1/demo/:slug/team/:userId", async (request) => {
+  const params = request.params as { slug?: string; userId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  if (!pool) throw httpError(503, "Team management requires PostgreSQL storage");
+  const userId = requiredString(params.userId, "userId", 80);
+  const body = asRecord(request.body);
+  const role = body.role === "admin" || body.role === "staff" || body.role === "viewer" ? body.role : null;
+  if (!role) throw httpError(400, "role must be admin, staff, or viewer");
+  const organizationId = await businessOrganizationId(business);
+  const target = await pool.query<{ role: string }>(
+    "select role from organization_members where organization_id = $1 and user_id = $2",
+    [organizationId, userId],
+  );
+  if (target.rows[0]?.role === "owner") throw httpError(403, "The organization owner cannot be changed here");
+  const businessIds = Array.isArray(body.businessIds) ? body.businessIds.filter((item): item is string => typeof item === "string") : [business.id];
+  if (actor.role !== "owner" && actor.role !== "admin") throw httpError(403, "Only organization admins can update team access");
+  await pool.query("update organization_members set role = $3, updated_at = now() where organization_id = $1 and user_id = $2", [organizationId, userId, role === "admin" ? "admin" : role === "viewer" ? "viewer" : "member"]);
+  await pool.query("delete from business_members where user_id = $1 and business_id in (select id from businesses where organization_id = $2)", [userId, organizationId]);
+  for (const businessId of businessIds) {
+    await pool.query(
+      `insert into business_members (business_id, user_id, role)
+       select id, $2, $3 from businesses where id = $1 and organization_id = $4
+       on conflict (business_id, user_id) do update set role = excluded.role, updated_at = now()`,
+      [businessId, userId, role === "admin" ? "admin" : role, organizationId],
+    );
+  }
+  return { ok: true, userId, role, businessIds };
+});
+
+app.get("/api/v1/demo/:slug/inbox", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const status = optionalString(query.status, 40) as ConversationStatus | null;
+  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED"]);
+  if (status && !allowedStatuses.has(status)) throw httpError(400, "Unsupported conversation status filter");
+  const assignedTo = optionalString(query.assignedTo, 80);
+  const search = optionalString(query.q, 160)?.toLowerCase();
+  const conversations = [...business.conversations.values()]
+    .filter((conversation) => !status || conversation.status === status)
+    .filter((conversation) => !assignedTo || conversation.assignedUserId === assignedTo)
+    .filter((conversation) => !search || conversation.messages.some((message) => message.content.toLowerCase().includes(search)) || business.leads.some((lead) => lead.conversationId === conversation.id && [lead.name, lead.email, lead.intent].some((value) => value?.toLowerCase().includes(search))))
+    .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))
+    .slice(0, 200);
+  return { actor: { id: actor.id, name: actor.name, role: actor.role }, conversations: conversations.map((conversation) => inboxConversationPayload(business, conversation)) };
+});
+
+app.get("/api/v1/demo/:slug/conversations/:conversationId", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "viewer");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  let events = business.conversationEvents.filter((event) => event.conversationId === conversation.id);
+  let notes = business.internalNotes.filter((note) => note.conversationId === conversation.id);
+  if (pool) {
+    const [eventResult, noteResult] = await Promise.all([
+      pool.query<Record<string, unknown>>("select * from conversation_events where business_id = $1 and conversation_id = $2 order by created_at desc", [business.id, conversation.id]).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+      pool.query<Record<string, unknown>>("select n.*, u.name as author_name from internal_notes n join app_users u on u.id = n.author_user_id where n.business_id = $1 and n.conversation_id = $2 order by n.created_at desc", [business.id, conversation.id]).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+    ]);
+    if (eventResult.rows.length) events = eventResult.rows.map((row) => ({ id: String(row.id), businessId: business.id, conversationId: conversation.id, eventType: String(row.event_type) as ConversationEventType, actorUserId: typeof row.actor_user_id === "string" ? row.actor_user_id : null, actorType: String(row.actor_type) as ConversationEvent["actorType"], metadata: asRecord(row.metadata), createdAt: toIso(row.created_at) }));
+    if (noteResult.rows.length) notes = noteResult.rows.map((row) => ({ id: String(row.id), businessId: business.id, conversationId: conversation.id, authorUserId: String(row.author_user_id), authorName: String(row.author_name ?? ""), content: String(row.content), createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) }));
+  }
+  return { conversation: { ...inboxConversationPayload(business, conversation), messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload) }, events, notes };
+});
+
+app.get("/api/v1/demo/:slug/notifications", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  const limit = Math.max(1, Math.min(100, Number((request.query as Record<string, unknown> | undefined)?.limit ?? 50)));
+  if (pool && !actor.legacyDemo) {
+    const result = await pool.query<Record<string, unknown>>("select * from notifications where business_id = $1 and user_id = $2 order by created_at desc limit $3", [business.id, actor.id, limit]);
+    const unread = await pool.query<{ count: string }>("select count(*)::text as count from notifications where business_id = $1 and user_id = $2 and read_at is null", [business.id, actor.id]);
+    return { unreadCount: Number(unread.rows[0]?.count ?? 0), notifications: result.rows.map((row) => ({ id: String(row.id), type: String(row.type), conversationId: typeof row.conversation_id === "string" ? row.conversation_id : null, title: String(row.title), body: String(row.body), readAt: nullableIso(row.read_at), createdAt: toIso(row.created_at) })) };
+  }
+  const notifications = business.notifications.filter((item) => !item.userId || item.userId === actor.id).slice(0, limit);
+  return { unreadCount: notifications.filter((item) => !item.readAt).length, notifications };
+});
+
+app.post("/api/v1/demo/:slug/notifications/:notificationId/read", async (request) => {
+  const params = request.params as { slug?: string; notificationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  const notificationId = requiredString(params.notificationId, "notificationId", 120);
+  if (pool && !actor.legacyDemo) await pool.query("update notifications set read_at = coalesce(read_at, now()) where id = $1 and business_id = $2 and user_id = $3", [notificationId, business.id, actor.id]);
+  const notification = business.notifications.find((item) => item.id === notificationId);
+  if (notification) notification.readAt = notification.readAt ?? new Date().toISOString();
+  return { ok: true };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "staff");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(409, "This conversation is already assigned to another team member");
+  const now = new Date().toISOString();
+  const persistedActorId = actor.legacyDemo ? null : actor.id;
+  conversation.status = "HUMAN_ACTIVE";
+  conversation.assignedUserId = persistedActorId;
+  conversation.assignedAt = now;
+  conversation.humanJoinedAt = now;
+  conversation.unreadCount = 0;
+  conversation.lastActivityAt = now;
+  if (pool && persistedActorId) {
+    const update = await pool.query(
+      `update conversations set status = 'HUMAN_ACTIVE', assigned_user_id = $3, assigned_at = $4, human_joined_at = $4, unread_count = 0, last_activity_at = $4, updated_at = $4
+       where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'WAITING_FOR_STAFF', 'AI_ASSISTED')
+         and (assigned_user_id is null or assigned_user_id = $3 or $5 = true)
+       returning id`,
+      [conversation.id, business.id, persistedActorId, now, actor.role === "admin" || actor.role === "owner"],
+    );
+    if (!update.rowCount) throw httpError(409, "The conversation changed before takeover could be completed");
+    await pool.query("insert into conversation_assignments (business_id, conversation_id, user_id, assigned_by_user_id) values ($1, $2, $3, $3) on conflict (conversation_id) where status = 'active' do update set user_id = excluded.user_id, assigned_by_user_id = excluded.assigned_by_user_id, assigned_at = now()", [business.id, conversation.id, persistedActorId]);
+  }
+  await recordConversationEvent(business, conversation, "HUMAN_JOINED", "staff", persistedActorId, { name: actor.name });
+  await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", persistedActorId, { name: actor.name });
+  await persistConversation(business, conversation);
+  return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/assign", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  if (!pool || actor.legacyDemo) throw httpError(503, "Assignment requires a signed-in team account");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  const body = asRecord(request.body);
+  const assigneeId = requiredString(body.userId, "userId", 80);
+  const member = await pool.query("select 1 from business_members where business_id = $1 and user_id = $2 and role in ('admin', 'staff')", [business.id, assigneeId]);
+  if (!member.rowCount) throw httpError(400, "That user is not an active staff member for this business");
+  const now = new Date().toISOString();
+  await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
+  await pool.query("insert into conversation_assignments (business_id, conversation_id, user_id, assigned_by_user_id) values ($1, $2, $3, $4)", [business.id, conversation.id, assigneeId, actor.id]);
+  conversation.assignedUserId = assigneeId;
+  conversation.assignedAt = now;
+  conversation.lastActivityAt = now;
+  await persistConversation(business, conversation);
+  await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", actor.id, { assigneeId });
+  return { conversation: conversationStatusPayload(conversation) };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/return-to-ai", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "staff");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can return this conversation to AI");
+  conversation.status = "AI_ASSISTED";
+  conversation.assignedUserId = null;
+  conversation.assignedAt = null;
+  conversation.lastActivityAt = new Date().toISOString();
+  if (pool && !actor.legacyDemo) {
+    await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
+  }
+  await recordConversationEvent(business, conversation, "RETURNED_TO_AI", "staff", actor.legacyDemo ? null : actor.id);
+  await persistConversation(business, conversation);
+  return { conversation: conversationStatusPayload(conversation) };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/resolve", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "staff");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  conversation.status = "RESOLVED";
+  conversation.resolvedAt = new Date().toISOString();
+  conversation.unreadCount = 0;
+  conversation.lastActivityAt = conversation.resolvedAt;
+  if (pool && !actor.legacyDemo) await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
+  await recordConversationEvent(business, conversation, "CONVERSATION_RESOLVED", "staff", actor.legacyDemo ? null : actor.id);
+  await persistConversation(business, conversation);
+  return { conversation: conversationStatusPayload(conversation) };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "staff");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can reply here");
+  const content = requiredString(asRecord(request.body).content, "content", 4_000);
+  const now = new Date().toISOString();
+  const message: Message = { role: "human", kind: "message", authorUserId: actor.legacyDemo ? undefined : actor.id, authorName: actor.name, content, createdAt: now };
+  conversation.messages.push(message);
+  conversation.status = "HUMAN_ACTIVE";
+  conversation.unreadCount = 0;
+  conversation.lastActivityAt = now;
+  await persistMessage(conversation, message);
+  await persistConversation(business, conversation);
+  await recordConversationEvent(business, conversation, "MESSAGE_SENT_BY_HUMAN", "staff", actor.legacyDemo ? null : actor.id, { contentLength: content.length });
+  return { message: inboxMessagePayload(message), conversation: conversationStatusPayload(conversation) };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/ai-assist", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "staff");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can request an AI suggestion");
+  const latestVisitorMessage = [...conversation.messages].reverse().find((message) => message.role === "user");
+  if (!latestVisitorMessage) throw httpError(400, "There is no visitor question to assist with yet");
+  const result = await answerQuestion(business, latestVisitorMessage.content, { recordGap: false });
+  conversation.status = "AI_ASSISTED";
+  conversation.lastActivityAt = new Date().toISOString();
+  await persistConversation(business, conversation);
+  return { suggestion: result.answer, grounded: result.grounded, citations: result.citations, conversation: conversationStatusPayload(conversation) };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/notes", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "staff");
+  if (actor.legacyDemo) throw httpError(503, "Internal notes require a signed-in team account");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  const content = requiredString(asRecord(request.body).content, "content", 4_000);
+  const note: InternalNote = { id: randomUUID(), businessId: business.id, conversationId: conversation.id, authorUserId: actor.id, authorName: actor.name, content, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  business.internalNotes.unshift(note);
+  if (pool) {
+    await pool.query("insert into internal_notes (id, business_id, conversation_id, author_user_id, content, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7)", [note.id, business.id, conversation.id, actor.id, content, note.createdAt, note.updatedAt]);
+  }
+  await recordConversationEvent(business, conversation, "INTERNAL_NOTE_ADDED", "staff", actor.id);
+  return { note };
+});
+
 app.get("/api/v1/widget/:siteKey/config", async (request) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
@@ -4559,6 +7074,39 @@ app.get("/api/v1/widget/:siteKey/config", async (request) => {
   };
 });
 
+app.post("/api/v1/widget/:siteKey/telemetry", async (request) => {
+  const params = request.params as { siteKey?: string };
+  const business = await getBusinessBySiteKey(params.siteKey);
+  if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  const body = asRecord(request.body);
+  const event = body.event;
+  if (typeof event !== "string" || !conversionEventTypes.has(event as ConversionEventType)) {
+    throw httpError(400, "Unsupported conversion event");
+  }
+  const conversationId = optionalString(body.conversationId, 120);
+  if (conversationId) maybeConversation(business, conversationId);
+  const flowId = optionalString(body.flowId, 120);
+  if (flowId && !business.actions.some((action) => action.id === flowId)) throw httpError(400, "flowId does not belong to this business");
+  const metadata = asRecord(body.metadata);
+  const boundedMetadata: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata).slice(0, 20)) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") boundedMetadata[key.slice(0, 80)] = typeof value === "string" ? value.slice(0, 240) : value;
+  }
+  await recordConversionEvent(business, {
+    event: event as ConversionEventType,
+    conversationId,
+    flowId,
+    fieldId: optionalString(body.fieldId, 120),
+    sourcePage: optionalString(body.sourcePage, 2_000),
+    device: optionalString(body.device, 40),
+    metadata: boundedMetadata,
+    timestamp: optionalString(body.timestamp, 80),
+  });
+  return { accepted: true };
+});
+
 app.post("/api/v1/widget/:siteKey/conversations", async (request, reply) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
@@ -4567,7 +7115,7 @@ app.post("/api/v1/widget/:siteKey/conversations", async (request, reply) => {
   requireVerifiedBusiness(business);
   const body = asRecord(request.body);
   const conversation = await startConversation(business, typeof body.sessionId === "string" ? body.sessionId : null);
-  return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId });
+  return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId, resumed: conversation.messages.length > 0 });
 });
 
 app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async (request) => {
@@ -4579,7 +7127,38 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   const result = await recordConversationQuestion(business, conversation, question);
-  return { conversationId: conversation.id, ...result };
+  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
+});
+
+app.get("/api/v1/widget/:siteKey/conversations/:conversationId", async (request) => {
+  const params = request.params as { siteKey?: string; conversationId?: string };
+  const business = await getBusinessBySiteKey(params.siteKey);
+  if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  return {
+    conversation: conversationStatusPayload(conversation),
+    messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload),
+  };
+});
+
+app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionId/submit", async (request) => {
+  const params = request.params as { siteKey?: string; conversationId?: string; actionId?: string };
+  const business = await getBusinessBySiteKey(params.siteKey);
+  if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  const body = asRecord(request.body);
+  if (business.agentConfig.requireLeadConsent && body.consent !== true) {
+    throw httpError(400, "Consent is required before sending your details.");
+  }
+  const result = await recordActionFormSubmission(
+    business,
+    conversation,
+    requiredString(params.actionId, "actionId", 120),
+    asRecord(body.values),
+  );
+  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
 });
 
 app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
@@ -4589,6 +7168,9 @@ app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const body = asRecord(request.body);
+  if (business.agentConfig.requireLeadConsent && body.consent !== true) {
+    throw httpError(400, "Consent is required before sending your details.");
+  }
   const leadInputValue = leadInput(body, "widget", request);
   const conversation = leadInputValue.conversationId ? maybeConversation(business, leadInputValue.conversationId) : null;
   const lead = await persistLead(business, leadInputValue);
@@ -4601,6 +7183,11 @@ app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
     conversation.actionTaken = "lead_capture";
     conversation.updatedAt = lead.createdAt;
     await persistConversation(business, conversation);
+    await recordConversionEvent(business, {
+      event: "LEAD_CAPTURED",
+      conversationId: conversation.id,
+      metadata: { leadId: lead.id, source: lead.source },
+    });
   }
   return reply.code(created ? 201 : 200).send({ lead, deduplicated: !created });
 });
@@ -4650,7 +7237,161 @@ app.get("/api/v1/demo/:slug/leads", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
-  return { leads: business.leads };
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const status = optionalString(query.status, 40)?.toLowerCase();
+  if (status && !["new", "qualified", "booked"].includes(status)) throw httpError(400, "Unsupported lead status filter");
+  const search = optionalString(query.q, 160)?.toLowerCase();
+  const limitValue = Number(query.limit ?? 100);
+  const limit = Math.max(1, Math.min(500, Number.isFinite(limitValue) ? limitValue : 100));
+  const leads = business.leads
+    .filter((lead) => !status || lead.status === status)
+    .filter((lead) => !search || [lead.name, lead.email, lead.phone, lead.intent, lead.source].some((value) => value?.toLowerCase().includes(search)))
+    .slice(0, limit);
+  return { leads };
+});
+
+app.patch("/api/v1/demo/:slug/leads/:leadId", async (request) => {
+  const params = request.params as { slug?: string; leadId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const leadId = requiredString(params.leadId, "leadId", 120);
+  const lead = business.leads.find((item) => item.id === leadId);
+  if (!lead) throw httpError(404, "Lead not found");
+  const body = asRecord(request.body);
+  const statusValue = optionalString(body.status, 40)?.toLowerCase();
+  if (statusValue && !["new", "qualified", "booked"].includes(statusValue)) throw httpError(400, "Unsupported lead status");
+  const notes = body.notes === null ? "" : optionalString(body.notes, 4_000);
+  if (statusValue) lead.status = statusValue as Lead["status"];
+  if (body.notes !== undefined) {
+    lead.notes = notes ?? "";
+    lead.metadata = { ...lead.metadata, notes: lead.notes };
+  }
+  if (pool) {
+    await pool.query(
+      `update leads
+       set status = $3, metadata = $4::jsonb
+       where business_id = $1 and id = $2`,
+      [business.id, leadId, lead.status, JSON.stringify(lead.metadata)],
+    );
+    await pool.query(
+      `insert into lead_events (business_id, lead_id, event_type, payload)
+       values ($1, $2, 'lead.updated', $3)`,
+      [business.id, leadId, JSON.stringify({ status: lead.status, notes: lead.metadata.notes ?? null })],
+    );
+  }
+  return { lead };
+});
+
+app.delete("/api/v1/demo/:slug/leads/:leadId", async (request) => {
+  const params = request.params as { slug?: string; leadId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const leadId = requiredString(params.leadId, "leadId", 120);
+  const index = business.leads.findIndex((item) => item.id === leadId);
+  if (index < 0) throw httpError(404, "Lead not found");
+  const [lead] = business.leads.splice(index, 1);
+  if (pool) await pool.query("delete from leads where id = $1 and business_id = $2", [lead.id, business.id]);
+  return { ok: true, leadId: lead.id };
+});
+
+app.get("/api/v1/demo/:slug/actions", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  if (!pool) return { actions: business.actions, templates: ACTION_TEMPLATES, deliveries: [] };
+  let deliveries: Array<Record<string, unknown>> = [];
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      `select ao.id, ao.action_id, ao.connector_provider, ao.status, ao.attempts, ao.last_error, ao.updated_at,
+              a.name as action_name
+       from action_outbox ao
+       join business_actions a on a.id = ao.action_id
+       where ao.business_id = $1
+       order by ao.updated_at desc limit 100`,
+      [business.id],
+    );
+    deliveries = result.rows;
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+  }
+  return {
+    actions: business.actions,
+    templates: ACTION_TEMPLATES,
+    deliveries: deliveries.map((row) => ({
+      id: String(row.id),
+      actionId: String(row.action_id),
+      actionName: String(row.action_name),
+      provider: String(row.connector_provider),
+      status: String(row.status),
+      attempts: Number(row.attempts ?? 0),
+      lastError: typeof row.last_error === "string" ? row.last_error : null,
+      updatedAt: toIso(row.updated_at),
+    })),
+  };
+});
+
+app.post("/api/v1/demo/:slug/action-deliveries/:deliveryId/retry", async (request) => {
+  const params = request.params as { slug?: string; deliveryId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  if (!pool) throw httpError(503, "Action delivery retries require PostgreSQL storage");
+  const result = await pool.query(
+    `update action_outbox
+     set status = 'retrying', attempts = 0, next_attempt_at = now(), last_error = null, updated_at = now()
+     where id = $1 and business_id = $2 and status in ('failed', 'retrying')
+     returning id`,
+    [requiredString(params.deliveryId, "deliveryId", 120), business.id],
+  );
+  if (!result.rowCount) throw httpError(404, "Action delivery not found or already completed");
+  void processActionOutbox();
+  return { ok: true, deliveryId: String(result.rows[0].id) };
+});
+
+app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const action = normalizedAction(request.body);
+  if (business.actions.some((item) => item.key === action.key)) throw httpError(409, "An action with this key already exists");
+  business.actions.push(action);
+  await persistAction(business, action);
+  return reply.code(201).send({ action });
+});
+
+app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
+  const params = request.params as { slug?: string; actionId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const actionIndex = business.actions.findIndex((item) => item.id === requiredString(params.actionId, "actionId", 120));
+  if (actionIndex < 0) throw httpError(404, "Action not found");
+  const previousAction = business.actions[actionIndex];
+  const action = normalizedAction(request.body, previousAction);
+  const duplicate = business.actions.find((item, index) => index !== actionIndex && item.key === action.key);
+  if (duplicate) throw httpError(409, "An action with this key already exists");
+  business.actions[actionIndex] = action;
+  await persistAction(business, action);
+  if (pool && previousAction.key !== action.key) {
+    await pool.query("delete from business_actions where business_id = $1 and action_key = $2", [business.id, previousAction.key]);
+  }
+  return { action };
+});
+
+app.delete("/api/v1/demo/:slug/actions/:actionId", async (request) => {
+  const params = request.params as { slug?: string; actionId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const actionId = requiredString(params.actionId, "actionId", 120);
+  const actionIndex = business.actions.findIndex((item) => item.id === actionId);
+  if (actionIndex < 0) throw httpError(404, "Action not found");
+  const [action] = business.actions.splice(actionIndex, 1);
+  if (pool) await pool.query("delete from business_actions where business_id = $1 and id = $2", [business.id, action.id]);
+  return { ok: true, actionId };
 });
 
 app.post("/api/v1/demo/:slug/agent-config", async (request) => {
@@ -4664,6 +7405,26 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   if (typeof body.widgetColor === "string" && /^#[\da-f]{6}$/i.test(body.widgetColor)) business.agentConfig.widgetColor = body.widgetColor;
   if (typeof body.collectLeads === "boolean") business.agentConfig.collectLeads = body.collectLeads;
   if (typeof body.showBookingAction === "boolean") business.agentConfig.showBookingAction = body.showBookingAction;
+  if (typeof body.widgetDefaultMode === "string") business.agentConfig.widgetDefaultMode = normalizedWidgetMode(body.widgetDefaultMode);
+  if (typeof body.widgetAllowExpand === "boolean") business.agentConfig.widgetAllowExpand = body.widgetAllowExpand;
+  if (Array.isArray(body.widgetQuickActions)) business.agentConfig.widgetQuickActions = normalizedWidgetQuickActions(body.widgetQuickActions, business.name);
+  if (body.widgetLogoUrl === null) business.agentConfig.widgetLogoUrl = null;
+  if (typeof body.widgetLogoUrl === "string") {
+    const logoUrl = body.widgetLogoUrl.trim();
+    if (!logoUrl || /^https:\/\//i.test(logoUrl)) business.agentConfig.widgetLogoUrl = logoUrl || null;
+  }
+  if (typeof body.proactiveEnabled === "boolean") business.agentConfig.proactiveEnabled = body.proactiveEnabled;
+  if (body.proactiveDelaySeconds !== undefined) business.agentConfig.proactiveDelaySeconds = normalizedProactiveDelay(body.proactiveDelaySeconds);
+  if (typeof body.proactiveMessage === "string" && body.proactiveMessage.trim()) business.agentConfig.proactiveMessage = body.proactiveMessage.trim().slice(0, 240);
+  if (Array.isArray(body.proactiveTriggers)) business.agentConfig.proactiveTriggers = normalizedProactiveTriggers(body.proactiveTriggers);
+  if (typeof body.requireLeadConsent === "boolean") business.agentConfig.requireLeadConsent = body.requireLeadConsent;
+  if (body.privacyNoticeUrl === null) business.agentConfig.privacyNoticeUrl = null;
+  if (typeof body.privacyNoticeUrl === "string") {
+    const privacyUrl = body.privacyNoticeUrl.trim();
+    if (!privacyUrl || /^https:\/\//i.test(privacyUrl)) business.agentConfig.privacyNoticeUrl = privacyUrl || null;
+  }
+  if (body.retentionDays !== undefined) business.agentConfig.retentionDays = normalizedRetentionDays(body.retentionDays);
+  if (typeof body.showAiDisclosure === "boolean") business.agentConfig.showAiDisclosure = body.showAiDisclosure;
   await persistAgentConfig(business);
   return { agent: business.agentConfig };
 });
@@ -4686,7 +7447,23 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages", async (req
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   const result = await recordConversationQuestion(business, conversation, question);
-  return { conversationId: conversation.id, ...result };
+  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...result };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/actions/:actionId/submit", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string; actionId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  const body = asRecord(request.body);
+  const result = await recordActionFormSubmission(
+    business,
+    conversation,
+    requiredString(params.actionId, "actionId", 120),
+    asRecord(body.values),
+  );
+  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...result };
 });
 
 app.post("/api/v1/demo/:slug/leads", async (request, reply) => {
@@ -4708,6 +7485,11 @@ app.post("/api/v1/demo/:slug/leads", async (request, reply) => {
     conversation.actionTaken = "lead_capture";
     conversation.updatedAt = lead.createdAt;
     await persistConversation(business, conversation);
+    await recordConversionEvent(business, {
+      event: "LEAD_CAPTURED",
+      conversationId: conversation.id,
+      metadata: { leadId: lead.id, source: lead.source },
+    });
   }
   return reply.code(created ? 201 : 200).send({ lead, deduplicated: !created });
 });
@@ -4723,6 +7505,11 @@ app.post("/api/v1/demo/:slug/actions/booking", async (request) => {
   conversation.actionTaken = "booking";
   conversation.updatedAt = new Date().toISOString();
   await persistConversation(business, conversation);
+  await recordConversionEvent(business, {
+    event: "BOOKING_LINK_OPENED",
+    conversationId: conversation.id,
+    metadata: { action: "booking" },
+  });
   await recordOrganizationUsage(business, "bookings");
   return { ok: true, action: "booking", conversationId };
 });
@@ -4738,6 +7525,7 @@ app.setErrorHandler((error, request: FastifyRequest, reply: FastifyReply) => {
 });
 
 app.addHook("onClose", async () => {
+  clearInterval(retentionCleanupTimer);
   await pool?.end();
 });
 

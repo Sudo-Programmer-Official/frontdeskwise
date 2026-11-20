@@ -51,7 +51,7 @@ export type AuthOrganization = {
 };
 
 export type AuthSnapshot = {
-  user: { id: string; email: string; name: string };
+  user: { id: string; email: string; name: string; isSuperAdmin: boolean };
   organizations: AuthOrganization[];
   activeOrganizationId: string | null;
 };

@@ -15,6 +15,8 @@ Every record is tenant-scoped through `business_id`.
 | Quality | `knowledge_gaps`, `agent_configs` | Unanswered questions, approved answers, and agent/widget configuration |
 | Revenue state | `billing_events`, `billing_plan_entitlements` | Provider-neutral subscription and entitlement state |
 | CRM delivery | `crm_integrations`, `integration_outbox`, `crm_sync_records` | Encrypted connection material, queued events, attempts, remote IDs, and delivery status |
+| Action delivery and telemetry | `action_outbox`, `conversion_events` | Completion connector jobs, retries, funnel events, field drop-offs, and device/source context |
+| MCP assistant connections | `mcp_connections` | Encrypted server credentials, discovered tools, read-only defaults, explicit allowlists, and connection health |
 
 ## Lead record
 
@@ -75,3 +77,17 @@ The JSON payload includes the tenant, conversation ID, lead fields, attribution 
 - Credentials are encrypted with AES-256-GCM using `FRONTDESKWISE_CREDENTIAL_KEY`; only the API decrypts them.
 
 This foundation is intentionally narrower than a full CRM marketplace. OAuth, richer field mapping, webhook verification, contact update events, and provider-specific rate limits belong in additional native adapters after the lead loop is validated with real customers.
+
+## Completion action connectors
+
+Action flows can set `completion.connector` to `generic_webhook`, `email`, or `hubspot`, with vendor HTTP connector classes reserved for Jackrabbit, Square, Mindbody, and Calendly. `action_outbox` stores the serialized action input, provider, integration reference, attempts, retry time, remote identifiers, and last error. This queue is intentionally independent from `leads`: the lead is committed before the connector is queued, and connector failure cannot erase the customer record or change the customer-facing confirmation.
+
+## Conversion telemetry
+
+`conversion_events` is the tenant-scoped event stream for funnel reporting. Each event carries `organization_id`, `business_id`, optional `conversation_id`, optional `flow_id`, optional `field_id`, `event`, `occurred_at`, `source_page`, `device`, and bounded metadata. The public widget sends client-observed events through the site-key telemetry endpoint; server-side flow processing emits authoritative field, lead, form, completion, handoff, and connector events.
+
+## MCP assistant connections
+
+MCP is an additional agent-tool channel, not a replacement for deterministic completion connectors. Owners use the dedicated Connections screen to choose a provider, paste the provider-issued server URL and bearer token, test the connection, and review the discovered tools. Tokens are encrypted with the same `FRONTDESKWISE_CREDENTIAL_KEY` boundary and are never returned to the browser.
+
+The API classifies discovered tools using MCP annotations and conservative name-based fallbacks. Read-only tools such as search, lookup, list, and get are enabled by default. Write and destructive tools remain disabled until an owner explicitly enables them. The current policy layer does not allow the model to execute every discovered tool automatically; completion actions continue through `ActionConnector` and `action_outbox` for deterministic idempotency and retry behavior.

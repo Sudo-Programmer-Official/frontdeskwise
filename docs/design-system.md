@@ -9,11 +9,11 @@ FrontDeskWise has two product surfaces with one shared visual language:
 
 The implementation lives in `apps/web/src/styles.css`. The `--ds-*` variables are the source of truth for new UI work:
 
-- Typography: Inter/system sans; display text uses a tight tracking scale and body text uses readable 1.5–1.65 line height.
+- Typography: Inter is the primary product font, loaded with a system-sans fallback; display text uses a tight tracking scale and body text uses readable 1.5 line height.
 - Color: navy/blue for navigation and primary actions; slate for text; green for healthy/success; amber for attention; red for destructive or failed states; purple for intelligence/readiness.
 - Spacing: 4px base rhythm with named steps from `--ds-space-1` through `--ds-space-8`.
-- Shape: 8px controls, 12px grouped surfaces, 16px cards, pill status tags.
-- Elevation: restrained card shadow; borders carry most of the hierarchy.
+- Shape: 8px controls, 10–14px grouped surfaces, and pill status tags. Keep control heights compact and consistent across the owner and operations shells.
+- Elevation: restrained two-layer card shadow; borders carry most of the hierarchy and surfaces should not look inflated.
 - Focus: use the shared blue focus ring and preserve visible keyboard focus.
 
 ## Component rules
@@ -36,12 +36,18 @@ The first control-plane slice is intentionally small and operational:
 - **Demo operations** — requests, temporary test users, access links, validation, extension, reset, and revoke.
 - **System health** — API/database, object storage, email readiness, and controlled SES test.
 
-The next slices should add business-level inspection and billing overrides as dedicated detail views, using the existing admin API routes rather than duplicating owner-dashboard controls.
+The organization detail surface now adds business-level inspection and controlled billing interventions without duplicating owner-dashboard controls. It includes business ownership/billing status, source and outcome counts, organization members, trial/suspension actions, ownership approval, and reason-required plan overrides.
+
+Owner workspace alignment now uses the same tokens for dashboard cards, panels, form controls, focus states, and the Agent & Widget preview. The widget keeps its customer-facing visual treatment while sharing the same border, surface, typography, spacing, and focus rules. The owner workflow also uses the same interaction language for source lifecycle, lead operations, CRM disconnects, and explicit widget verification.
+
+The shared product pass also standardizes sidebar density, business-switcher contrast, native select rendering, form control height, button hierarchy, status pills, and heading weights. Business names stay white and legible in the dark navigation; dropdown options use a light surface with dark text so the native menu remains readable.
 
 ## Delivery sequence
 
-1. Stabilize shell and tokens (current slice).
-2. Add organization and business detail drawers with consistent tables and status language.
-3. Standardize workspace surfaces: overview, knowledge, conversations, leads, agent/widget, analytics, billing.
-4. Standardize the embeddable widget preview and install states against the same token set.
-5. Add visual regression checks for desktop, mobile, empty, loading, error, and read-only states.
+1. Stabilize shell and tokens (complete).
+2. Add organization and business detail views with consistent tables and status language (complete).
+3. Add controlled billing interventions and keep business billing projections synchronized (complete).
+4. Standardize workspace surfaces: overview, knowledge, conversations, leads, analytics, billing, and actions (complete).
+5. Finish the embeddable widget preview and install states against the same token set (complete; desktop/mobile preview and verification are live).
+6. Add visual regression checks for desktop, mobile, empty, loading, error, and read-only states (the production smoke gate is in place; screenshot coverage remains a release-operations task).
+7. Keep trust and conversion controls in the same system: proactive engagement, visitor continuity, consent/privacy settings, retention, lead deletion, and owner-visible evaluation states use the same compact labels, status language, focus treatment, and responsive layout rules.
