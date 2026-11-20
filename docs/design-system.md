@@ -16,6 +16,20 @@ The implementation lives in `apps/web/src/styles.css`. The `--ds-*` variables ar
 - Elevation: restrained two-layer card shadow; borders carry most of the hierarchy and surfaces should not look inflated.
 - Focus: use the shared blue focus ring and preserve visible keyboard focus.
 
+## Shared UI primitives
+
+The reusable primitives live in `apps/web/src/components/ui/` and are the default building blocks for Agent and workspace forms:
+
+- Controls: `TextInput`, `Textarea`, `Select`, `Checkbox`, `Switch`, `SegmentedControl`, `ColorPicker`, and `FileUpload`.
+- Composition: `FormField`, `FormSection`, `Card`, `Tabs`, and `ModalDrawer`.
+- Feedback: `Button` and `StatusBadge`.
+
+Use `FormField` for every label/control pair. Required state belongs in the field label with a single `*`; optional state is secondary text. `ColorPicker` owns the synchronized hex input, native picker, presets, validation, and accessible text-color calculation. `FileUpload` is the primary logo path; persistent URL entry stays behind the Advanced disclosure.
+
+The Agent customer preview is `apps/web/src/components/WidgetPreview.vue`. It is shared by Behavior, Appearance, and Actions so the preview does not grow a second form language. The published widget in `apps/web/public/widget.js` mirrors the same control dimensions, required/optional treatment, surfaces, focus ring, and accessible brand-color behavior.
+
+Agent deep links accept both the workspace form (`/app/:business/agent/:tab`) and the short form (`/agent/:tab`). The supported tab names are `behavior`, `appearance`, `actions`, `test`, and `install`; `quick-actions` remains a backwards-compatible alias. A valid Agent path must resolve to the Agent shell, never the unavailable state.
+
 ## Component rules
 
 1. Use one page title, one supporting sentence, and one primary action per surface.

@@ -16,7 +16,7 @@ export type WorkspaceView =
   | "billing";
 
 export type SettingsRouteTab = "general" | "team" | "integrations" | "verification" | "notifications" | "billing";
-export type AgentRouteTab = "behavior" | "appearance" | "quick-actions" | "test" | "install";
+export type AgentRouteTab = "behavior" | "appearance" | "quick-actions" | "actions" | "test" | "install";
 export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "users" | "demos" | "messaging" | "installation-support" | "operations";
 export type OnboardingRouteStep = "index" | "business" | "knowledge" | "agent" | "install";
 
@@ -26,10 +26,11 @@ export type AppRoute =
   | { kind: "legal"; page: "privacy" | "terms" }
   | { kind: "auth"; mode: "signin" | "signup" | "forgot" }
   | { kind: "auth-callback" }
-  | { kind: "demo"; demoId: string; view: WorkspaceView; agentTab?: AgentRouteTab }
+  | { kind: "agent-shortcut"; agentTab: AgentRouteTab; testQuestion?: string }
+  | { kind: "demo"; demoId: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
   | { kind: "demo-access"; token: string }
   | { kind: "onboarding"; step: OnboardingRouteStep }
-  | { kind: "workspace"; businessSlug: string; view: WorkspaceView; agentTab?: AgentRouteTab }
+  | { kind: "workspace"; businessSlug: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
   | { kind: "workspace-settings"; view: "settings" | "team" | "connections" | "billing"; tab: SettingsRouteTab }
   | { kind: "platform"; section: PlatformRouteSection; organizationId?: string; businessId?: string }
   | { kind: "not-found"; path: string };
@@ -38,7 +39,7 @@ const workspaceViews = new Set<WorkspaceView>([
   "overview", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set<SettingsRouteTab>(["general", "team", "integrations", "verification", "notifications", "billing"]);
-const agentTabs = new Set<AgentRouteTab>(["behavior", "appearance", "quick-actions", "test", "install"]);
+const agentTabs = new Set<AgentRouteTab>(["behavior", "appearance", "quick-actions", "actions", "test", "install"]);
 
 function cleanPath(pathname: string): string {
   const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
@@ -47,6 +48,17 @@ function cleanPath(pathname: string): string {
 
 function decodeSegment(value: string | undefined): string {
   return value ? decodeURIComponent(value) : "";
+}
+
+function testQuestionFromQuery(query: URLSearchParams, agentTab: AgentRouteTab): string | undefined {
+  if (agentTab !== "test") return undefined;
+  const question = query.get("q")?.trim();
+  return question || undefined;
+}
+
+function appendTestQuestion(path: string, question: string | undefined): string {
+  const normalized = question?.trim();
+  return normalized ? `${path}?q=${encodeURIComponent(normalized)}` : path;
 }
 
 export function parseRoute(location: Pick<Location, "pathname" | "search"> = window.location): AppRoute {
@@ -67,6 +79,11 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     if (segments[1] === "forgot-password") return { kind: "auth", mode: "forgot" };
     return { kind: "auth", mode: "signin" };
   }
+  if (segments[0] === "agent") {
+    const agentTab = segments[1] && agentTabs.has(segments[1] as AgentRouteTab) ? segments[1] as AgentRouteTab : "behavior";
+    const testQuestion = testQuestionFromQuery(query, agentTab);
+    return { kind: "agent-shortcut", agentTab, ...(testQuestion ? { testQuestion } : {}) };
+  }
   if (segments[0] === "demo") {
     if (segments[1] === "access") {
       const token = query.get("token") ?? query.get("demo");
@@ -75,7 +92,8 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     if (!segments[1]) return { kind: "not-found", path };
     if (segments[2] === "agent") {
       const agentTab = segments[3] && agentTabs.has(segments[3] as AgentRouteTab) ? segments[3] as AgentRouteTab : "behavior";
-      return { kind: "demo", demoId: segments[1], view: agentTab === "test" ? "conversations" : "agent", agentTab };
+      const testQuestion = testQuestionFromQuery(query, agentTab);
+      return { kind: "demo", demoId: segments[1], view: agentTab === "test" ? "conversations" : "agent", agentTab, ...(testQuestion ? { testQuestion } : {}) };
     }
     const candidate = segments[2] as WorkspaceView | undefined;
     return { kind: "demo", demoId: segments[1], view: candidate && workspaceViews.has(candidate) ? candidate : "overview" };
@@ -105,7 +123,8 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     if (!businessSlug) return { kind: "not-found", path };
     if (segments[2] === "agent") {
       const agentTab = segments[3] && agentTabs.has(segments[3] as AgentRouteTab) ? segments[3] as AgentRouteTab : "behavior";
-      return { kind: "workspace", businessSlug, view: agentTab === "test" ? "conversations" : "agent", agentTab };
+      const testQuestion = testQuestionFromQuery(query, agentTab);
+      return { kind: "workspace", businessSlug, view: agentTab === "test" ? "conversations" : "agent", agentTab, ...(testQuestion ? { testQuestion } : {}) };
     }
     const candidate = segments[2] as WorkspaceView | undefined;
     return { kind: "workspace", businessSlug, view: candidate && workspaceViews.has(candidate) ? candidate : "overview" };
@@ -116,6 +135,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
 export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
   if (route.kind === "marketing") return "marketing";
   if (route.kind === "legal") return route.page;
+  if (route.kind === "agent-shortcut") return "agent";
   if (route.kind === "demo") return route.view === "agent" || route.view === "conversations" ? "agent" : route.view;
   if (route.kind === "workspace") return route.view === "agent" || route.view === "conversations" ? "agent" : route.view;
   if (route.kind === "workspace-settings") return route.view;
@@ -130,9 +150,13 @@ export function routePath(route: AppRoute): string {
   if (route.kind === "legal") return `/${route.page}`;
   if (route.kind === "auth") return `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
   if (route.kind === "auth-callback") return "/auth/callback";
+  if (route.kind === "agent-shortcut") return appendTestQuestion(`/agent/${route.agentTab}`, route.agentTab === "test" ? route.testQuestion : undefined);
   if (route.kind === "demo") {
     const base = `/demo/${encodeURIComponent(route.demoId)}`;
-    if (route.view === "agent" || route.view === "conversations") return `${base}/agent/${route.agentTab ?? (route.view === "conversations" ? "test" : "behavior")}`;
+    if (route.view === "agent" || route.view === "conversations") {
+      const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "behavior");
+      return appendTestQuestion(`${base}/agent/${agentTab}`, agentTab === "test" ? route.testQuestion : undefined);
+    }
     return route.view === "overview" ? base : `${base}/${route.view}`;
   }
   if (route.kind === "demo-access") return `/demo/access?token=${encodeURIComponent(route.token)}`;
@@ -146,18 +170,21 @@ export function routePath(route: AppRoute): string {
   }
   if (route.kind === "workspace") {
     const base = `/app/${encodeURIComponent(route.businessSlug)}`;
-    if (route.view === "agent" || route.view === "conversations") return `${base}/agent/${route.agentTab ?? (route.view === "conversations" ? "test" : "behavior")}`;
+    if (route.view === "agent" || route.view === "conversations") {
+      const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "behavior");
+      return appendTestQuestion(`${base}/agent/${agentTab}`, agentTab === "test" ? route.testQuestion : undefined);
+    }
     return route.view === "overview" ? base : `${base}/${route.view}`;
   }
   return route.kind === "not-found" ? route.path : "/";
 }
 
-export function workspaceRoute(businessSlug: string, view: WorkspaceView, options: { agentTab?: AgentRouteTab } = {}): AppRoute {
-  return { kind: "workspace", businessSlug, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}) };
+export function workspaceRoute(businessSlug: string, view: WorkspaceView, options: { agentTab?: AgentRouteTab; testQuestion?: string } = {}): AppRoute {
+  return { kind: "workspace", businessSlug, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}) };
 }
 
-export function demoRoute(demoId: string, view: WorkspaceView = "overview", options: { agentTab?: AgentRouteTab } = {}): AppRoute {
-  return { kind: "demo", demoId, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}) };
+export function demoRoute(demoId: string, view: WorkspaceView = "overview", options: { agentTab?: AgentRouteTab; testQuestion?: string } = {}): AppRoute {
+  return { kind: "demo", demoId, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}) };
 }
 
 export function settingsRoute(tab: SettingsRouteTab): AppRoute {

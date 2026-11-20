@@ -156,6 +156,11 @@ test("all Agent tabs keep the Agent shell on direct URLs and refresh", () => {
   const legacyTestRoute = parseRoute({ pathname: "/app/british-swim-school-tampa-bay/conversations", search: "" });
   assert.equal(routeView(legacyTestRoute), "agent");
   assert.equal(routePath(legacyTestRoute), "/app/british-swim-school-tampa-bay/agent/test");
+
+  const questionRoute = parseRoute({ pathname: "/app/plancraftai-ajg8l/agent/test", search: "?q=What%20are%20your%20business%20hours" });
+  assert.equal(questionRoute.kind, "workspace");
+  assert.equal(questionRoute.testQuestion, "What are your business hours");
+  assert.equal(routePath(questionRoute), "/app/plancraftai-ajg8l/agent/test?q=What%20are%20your%20business%20hours");
 });
 
 test("Agent experience exposes one stable tab strip and customer-facing test flow", () => {

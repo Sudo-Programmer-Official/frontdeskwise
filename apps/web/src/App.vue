@@ -16,6 +16,7 @@ import LegalPage from "./LegalPage.vue";
 import AgentExperience from "./AgentExperience.vue";
 import AppFeedback, { type AppToast, type AppToastKind } from "./AppFeedback.vue";
 import MarketingPage from "./MarketingPage.vue";
+import LandingVideo from "./components/LandingVideo.vue";
 import { getMarketingPageByPath } from "./marketing";
 import {
   demoRoute,
@@ -680,6 +681,10 @@ const demoRequesterName = ref("");
 const demoRequesterEmail = ref("");
 const isGenerating = ref(false);
 const generationError = ref("");
+type GenerationStage = "checking" | "learning" | "organizing";
+const generationStage = ref<GenerationStage>("checking");
+const generationDialogOpen = ref(false);
+let generationProgressTimer: ReturnType<typeof setInterval> | null = null;
 const demoSlug = ref("british-swim-school-tampa-bay");
 const demoAccessToken = ref(typeof window !== "undefined" ? window.localStorage.getItem("frontdeskwiseDemoAccessToken") ?? "" : "");
 const publicDemoMode = ref(false);
@@ -725,6 +730,7 @@ const showAiDisclosure = ref(true);
 const savedMessage = ref("");
 const conversationId = ref("");
 const testQuestion = ref("");
+const routedTestQuestion = ref("");
 const testAnswer = ref("");
 const answerSource = ref("");
 const answerGrounded = ref(false);
@@ -778,6 +784,8 @@ const organizationDocuments = ref<OrganizationDocument[]>([]);
 const documentsLoading = ref(false);
 const documentsError = ref("");
 const documentsMessage = ref("");
+const knowledgeTestContext = ref<"updated" | "answer" | null>(null);
+const resolvedKnowledgeQuestion = ref("");
 const integrations = ref<Integration[]>([]);
 const mcpConnections = ref<McpConnection[]>([]);
 const integrationProvider = ref<"webhook" | "hubspot">("webhook");
@@ -959,7 +967,7 @@ const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
 const agentTabs: Array<{ id: AgentTab; label: string }> = [
   { id: "behavior", label: "Behavior" },
   { id: "appearance", label: "Appearance" },
-  { id: "quick-actions", label: "Quick actions" },
+  { id: "actions", label: "Quick actions" },
   { id: "test", label: "Test" },
   { id: "install", label: "Install" },
 ];
@@ -1014,6 +1022,13 @@ const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "
 const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
 const inboxUnreadCount = computed(() => inboxConversations.value.reduce((total, conversation) => total + (conversation.unreadCount ?? 0), 0));
 const readinessScore = computed(() => workspaceReadiness.value);
+const knowledgeSourcesNeedAttention = computed(() => Boolean((workspaceKnowledge.value?.pendingSources ?? 0) + (workspaceKnowledge.value?.failedSources ?? 0)));
+const knowledgeTestAction = computed(() => {
+  if (knowledgeSourcesNeedAttention.value) return { label: "Fix sources first", disabled: true };
+  if (knowledgeTestContext.value === "answer") return { label: "Test this answer", disabled: false };
+  if (knowledgeTestContext.value === "updated" || workspaceKnowledge.value?.status === "indexing") return { label: "Test updated knowledge", disabled: false };
+  return { label: "Test agent", disabled: false };
+});
 const chartMax = computed(() => Math.max(1, ...(workspaceStats.value?.trend ?? []).flatMap((point) => [point.conversations, point.leads])));
 const trialDaysRemaining = computed(() => {
   const end = billingSnapshot.value?.billing.trialEndAt;
@@ -1211,6 +1226,19 @@ async function applyRouteState(nextRoute: AppRoute) {
     settingsTab.value = nextRoute.tab;
     return;
   }
+  if (nextRoute.kind === "agent-shortcut") {
+    agentTab.value = nextRoute.agentTab;
+    if (!authSnapshot.value && !demoAccessToken.value) {
+      openAuth("signin", false);
+      return;
+    }
+    publicDemoMode.value = false;
+    const nextSlug = workspaceSlugForRoute();
+    demoSlug.value = nextSlug;
+    if (!workspaceStats.value) await loadBusinessWorkspace(nextSlug);
+    if (nextRoute.agentTab === "test" && nextRoute.testQuestion) void runRoutedTestQuestion(nextRoute.testQuestion);
+    return;
+  }
   if (nextRoute.kind === "demo" || nextRoute.kind === "workspace") {
     const isPublic = nextRoute.kind === "demo";
     const nextSlug = nextRoute.kind === "demo" ? nextRoute.demoId : nextRoute.businessSlug;
@@ -1226,6 +1254,8 @@ async function applyRouteState(nextRoute: AppRoute) {
     if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
     if (needsReload) await loadBusinessWorkspace(nextSlug, isPublic);
     if (nextRoute.agentTab) void loadWidgetInstall();
+    if (nextRoute.agentTab === "test" && nextRoute.testQuestion) void runRoutedTestQuestion(nextRoute.testQuestion);
+    else if (nextRoute.agentTab !== "test") routedTestQuestion.value = "";
   }
 }
 
@@ -1258,6 +1288,40 @@ function selectAgentTab(tab: AgentTab) {
   agentTab.value = tab;
   commitRoute(routeForView("agent"));
   if (tab === "install") void loadWidgetInstall();
+}
+
+function openAgentTest(question?: string) {
+  const normalizedQuestion = question?.trim() || undefined;
+  knowledgeTestContext.value = null;
+  resolvedKnowledgeQuestion.value = "";
+  routedTestQuestion.value = "";
+  const options = { agentTab: "test" as const, ...(normalizedQuestion ? { testQuestion: normalizedQuestion } : {}) };
+  const nextRoute = route.value.kind === "demo"
+    ? demoRoute(workspaceSlugForRoute(), "agent", options)
+    : workspaceRoute(workspaceSlugForRoute(), "agent", options);
+  commitRoute(nextRoute);
+}
+
+function clearTestResponse() {
+  testAnswer.value = "";
+  answerSource.value = "";
+  answerGrounded.value = false;
+  answerConfidence.value = 0;
+  answerConfidenceBand.value = "low";
+  answerRetrievalMode.value = "";
+  answerCitations.value = [];
+  answerAction.value = null;
+  answerFormValues.value = {};
+}
+
+function runRoutedTestQuestion(question: string) {
+  const normalizedQuestion = question.trim();
+  if (!normalizedQuestion || routedTestQuestion.value === normalizedQuestion && testAnswer.value) return;
+  routedTestQuestion.value = normalizedQuestion;
+  testQuestion.value = normalizedQuestion;
+  clearTestResponse();
+  testQuestion.value = normalizedQuestion;
+  void askQuestion();
 }
 
 function openHelpAndSupport() {
@@ -1342,6 +1406,7 @@ async function submitAuth() {
     authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => mode === "signup"
       ? signUpAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value)
       : signInAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value));
+    firebaseToken.value = await currentFirebaseToken();
     await settleAuthenticatedSession();
     authModalOpen.value = false;
     authPassword.value = "";
@@ -1364,6 +1429,7 @@ async function submitGoogleAuth() {
   try {
     if (!firebaseAuthConfigured()) throw new Error("Sign-in configuration is unavailable.");
     authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => signInWithGoogleAndBootstrap(demoToken, authOrganizationName.value));
+    firebaseToken.value = await currentFirebaseToken();
     await settleAuthenticatedSession();
     authModalOpen.value = false;
     notifySuccess("You're signed in with Google.", "Welcome back");
@@ -1557,7 +1623,7 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
   clearWorkspaceState();
   try {
     const endpoint = publicOnly ? `/api/v1/demo/${slug}/public` : `/api/v1/demo/${slug}`;
-    const response = await trackedFetch(apiUrl(endpoint), { headers: publicOnly ? {} : ownerHeaders() });
+    const response = await trackedFetch(apiUrl(endpoint), { headers: ownerHeaders() });
     const payload = await response.json() as WorkspacePayload & { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load this workspace.");
     applyWorkspacePayload(payload);
@@ -1609,10 +1675,20 @@ async function selectBusiness(slug: string) {
       : nextView === "admin" || nextView === "home" || nextView === "privacy" || nextView === "terms"
         ? "overview"
         : nextView as WorkspaceView;
-    const options = nextWorkspaceView === "agent" ? { agentTab: agentTab.value } : {};
+    const options = nextWorkspaceView === "agent"
+      ? {
+        agentTab: agentTab.value,
+        ...(agentTab.value === "test" && route.value.kind === "workspace" && route.value.testQuestion
+          ? { testQuestion: route.value.testQuestion }
+          : {}),
+      }
+      : {};
     commitRoute(workspaceRoute(slug, nextWorkspaceView, options), false, false);
   }
   await loadBusinessWorkspace(slug);
+  if (route.value.kind === "workspace" && route.value.agentTab === "test" && route.value.testQuestion) {
+    void runRoutedTestQuestion(route.value.testQuestion);
+  }
 }
 
 async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolean> {
@@ -1674,21 +1750,22 @@ async function createBusiness() {
   addBusinessError.value = "";
   addBusinessMessage.value = "";
   try {
+    const normalizedWebsiteUrl = normalizeWebsiteUrl(addBusinessUrl.value);
     const response = await trackedFetch(apiUrl("/api/v1/auth/businesses"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
-      body: JSON.stringify({ websiteUrl: addBusinessUrl.value.trim(), organizationId: authSnapshot.value.activeOrganizationId }),
+      body: JSON.stringify({ websiteUrl: normalizedWebsiteUrl, organizationId: authSnapshot.value.activeOrganizationId }),
     });
-    const payload = await response.json() as { error?: string; auth?: AuthSnapshot; business?: { slug?: string } };
+    const payload = await response.json() as { error?: string; auth?: AuthSnapshot; business?: WorkspacePayload };
     if (!response.ok || !payload.auth) throw new Error(payload.error ?? "Could not add this business.");
     authSnapshot.value = payload.auth;
-    addBusinessMessage.value = "Business added · crawling its knowledge now";
     addBusinessOpen.value = false;
-    const createdSlug = payload.business?.slug;
+    const createdSlug = payload.business?.slug ?? "";
     const nextBusiness = createdSlug
       ? payload.auth.organizations.flatMap((organization) => organization.businesses).find((business) => business.slug === createdSlug)
       : undefined;
     if (nextBusiness) await selectBusiness(nextBusiness.slug);
+    notifySuccess(`${payload.business?.business?.name ?? "Your business"} was added and is ready to review.`, "Business added");
   } catch (error) {
     addBusinessError.value = error instanceof Error ? error.message : "Could not add this business.";
   } finally {
@@ -1767,12 +1844,39 @@ function normalizeWebsiteUrl(value: string): string {
   return `https://${trimmed}`;
 }
 
+function stopGenerationProgress() {
+  if (generationProgressTimer !== null) {
+    window.clearInterval(generationProgressTimer);
+    generationProgressTimer = null;
+  }
+}
+
+function startGenerationProgress() {
+  stopGenerationProgress();
+  generationStage.value = "checking";
+  generationProgressTimer = window.setInterval(() => {
+    generationStage.value = generationStage.value === "checking"
+      ? "learning"
+      : generationStage.value === "learning"
+        ? "organizing"
+        : "organizing";
+  }, 1_800);
+}
+
+function closeGenerationDialog() {
+  if (isGenerating.value) return;
+  generationDialogOpen.value = false;
+  generationError.value = "";
+}
+
 async function generateDemo() {
   const normalizedWebsiteUrl = normalizeWebsiteUrl(websiteUrl.value);
   if (!normalizedWebsiteUrl) return;
   websiteUrl.value = normalizedWebsiteUrl;
   isGenerating.value = true;
   generationError.value = "";
+  generationDialogOpen.value = true;
+  startGenerationProgress();
   try {
     const response = await trackedFetch(apiUrl("/api/v1/demos"), {
       method: "POST",
@@ -1789,14 +1893,20 @@ async function generateDemo() {
       demoAccessToken.value = payload.access.accessToken;
       window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.access.accessToken);
     }
+    generationStage.value = "organizing";
     demoSlug.value = payload.slug ?? demoSlug.value;
     const generatedSlug = demoSlug.value;
-    commitRoute(demoRoute(generatedSlug), false, false);
     await loadBusinessWorkspace(generatedSlug, true);
+    if (workspaceError.value) throw new Error(workspaceError.value);
+    commitRoute(demoRoute(generatedSlug), false, false);
+    generationDialogOpen.value = false;
   } catch (error) {
+    publicDemoMode.value = false;
+    websiteUrl.value = normalizedWebsiteUrl;
     generationError.value = error instanceof Error ? error.message : "We could not create that demo yet.";
   } finally {
     isGenerating.value = false;
+    stopGenerationProgress();
   }
 }
 
@@ -1893,6 +2003,7 @@ async function watchDocumentProcessing(documentId: string): Promise<void> {
     const current = organizationDocuments.value.find((item) => item.id === documentId);
     if (current?.status === "ready") {
       documentsMessage.value = `${current.fileName} is searchable in the private knowledge base.`;
+      knowledgeTestContext.value = "updated";
       await refreshWorkspaceSummary();
       await loadKnowledge();
       return;
@@ -1941,6 +2052,7 @@ async function uploadDocument(event: Event) {
     const completePayload = await completeResponse.json() as { error?: string; document?: OrganizationDocument };
     if (!completeResponse.ok) throw new Error(completePayload.error ?? "The upload could not be finalized.");
     documentsMessage.value = `${file.name} uploaded securely.`;
+    knowledgeTestContext.value = "updated";
     documentsLoading.value = false;
     await loadDocuments();
     if (completePayload.document?.id) void watchDocumentProcessing(completePayload.document.id);
@@ -1994,6 +2106,9 @@ async function resolveKnowledgeGap(gap: KnowledgeGap) {
   }
   gap.status = "resolved";
   gap.approvedAnswer = approvedAnswer;
+  resolvedKnowledgeQuestion.value = gap.question;
+  knowledgeTestContext.value = "answer";
+  await refreshWorkspaceSummary();
 }
 
 async function loadWidgetInstall() {
@@ -2510,6 +2625,7 @@ async function reindexKnowledge() {
     const payload = await response.json() as { status?: string; message?: string; error?: string };
     if (!response.ok) throw new Error(response.status === 503 ? "Knowledge re-indexing is not available yet." : payload.error ?? "Could not re-index knowledge.");
     embeddingMessage.value = payload.status === "queued" ? "Knowledge re-indexing started." : payload.message ?? "Knowledge is already up to date.";
+    knowledgeTestContext.value = "updated";
     await refreshWorkspaceSummary();
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : "Could not re-index knowledge.";
@@ -3771,7 +3887,6 @@ async function askQuestion() {
     answerAction.value = payload.action ?? null;
     answerFormValues.value = Object.fromEntries((payload.action?.form?.fields ?? []).map((field) => [field.key, field.value ?? ""]));
     answerSource.value = payload.citations?.[0]?.url ?? "";
-    testQuestion.value = "";
     if (!publicDemoMode.value) await Promise.all([refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
   } catch (error) {
     testAnswer.value = error instanceof Error ? error.message : "Could not answer that question.";
@@ -4005,6 +4120,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopFirebaseObserver?.();
+  stopGenerationProgress();
   if (landingHeroTimer !== null) window.clearInterval(landingHeroTimer);
   if (typeof window !== "undefined") window.removeEventListener("popstate", handleRouteChange);
 });
@@ -4060,36 +4176,31 @@ function startMarketingDemo() {
             <input v-model="demoRequesterEmail" type="email" placeholder="Work email (optional)" aria-label="Work email" />
             <span>We’ll log the request and can send a fresh demo link later.</span>
           </div>
-          <p v-if="generationError" class="form-error">{{ generationError }}</p>
+          <p v-if="generationError && !generationDialogOpen" class="form-error">{{ generationError }}</p>
           <div class="trust-row landing-trust-row"><span>✓ No credit card</span><span>✓ Built from your website</span><span>✓ Ready in minutes</span></div>
         </div>
 
-        <div class="landing-hero-visual" aria-label="Illustrative FrontDeskWise conversation flow">
+        <div class="landing-hero-visual" aria-label="FrontDeskWise customer conversation flow">
           <div class="landing-hero-signal landing-hero-signal-top"><span class="landing-signal-dot"></span><strong>Agent is working</strong><small>Answering, qualifying, and routing</small></div>
           <div class="landing-hero-signal landing-hero-signal-bottom"><strong>61</strong><span>illustrative leads captured</span></div>
           <div class="landing-browser">
             <div class="landing-browser-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span class="landing-browser-url">yourbusiness.com · sample workspace</span></div>
-            <div class="landing-site-preview">
-              <div class="landing-site-nav"><strong>Harbor &amp; Home</strong><span>Services &nbsp; About &nbsp; Contact</span></div>
-              <div class="landing-site-content"><span class="landing-site-kicker">YOUR BUSINESS, ALWAYS OPEN</span><h2>Useful answers.<br />Clear next steps.</h2><span>A calmer way for customers to get help and take action.</span><div class="landing-site-proof"><span>Knowledge synced</span><span>Human handoff ready</span></div></div>
-              <div class="landing-widget">
-                <div class="landing-widget-head"><span class="mini-orb">✦</span><div><strong>Harbor assistant</strong><small><span class="online-dot"></span> Online now</small></div><span class="landing-widget-close">×</span></div>
-                <div class="landing-widget-body">
-                  <div class="landing-widget-tabs"><button v-for="(step, index) in landingDemoSteps" :key="step.label" type="button" :class="{ active: heroDemoStep === index }" @click="heroDemoStep = index">{{ index + 1 }}</button></div>
-                  <p class="landing-step-label">{{ landingDemoSteps[heroDemoStep].label }}</p>
-                  <div v-if="heroDemoStep === 0" class="landing-chat-stack"><div class="landing-chat-question">Do you have a Saturday appointment?</div><div class="landing-chat-answer">Yes — I can help with that. What service would you like to book?</div><div class="landing-choice-row"><span>Book a service</span><span>See availability</span></div></div>
-                  <div v-else-if="heroDemoStep === 1" class="landing-chat-stack"><div class="landing-chat-question">A repair visit. How soon can someone come out?</div><div class="landing-chat-answer">I can check your service area and send the team the right details.</div><div class="landing-choice-row"><span>Service area</span><span>Urgent request</span></div></div>
-                  <div v-else class="landing-lead-captured"><div class="landing-check">✓</div><div><strong>Next step completed</strong><span>Lead, intent, and context sent to the team.</span></div></div>
-                  <div class="landing-source-chip"><span>✓</span> Answer grounded in approved knowledge</div>
-                  <div class="landing-widget-caption">{{ landingDemoSteps[heroDemoStep].body }}</div>
-                </div>
-              </div>
-            </div>
+            <LandingVideo
+              src="/video/frameflow-1795188921494.mp4"
+              poster="/video/hero-poster.jpg"
+              ariaLabel="FrontDeskWise answers a website visitor, qualifies the request, and captures the next step"
+              description="A product demonstration showing a visitor question becoming an AI answer, qualification, and captured lead."
+            />
           </div>
         </div>
       </div>
 
-      <div class="landing-hero-note"><span>Illustrative sample flow</span><span>Use your own website to build a real workspace</span><button class="landing-text-link" type="button" @click="scrollLandingTo('how-it-works')">See the flow</button></div>
+      <div class="landing-hero-note"><span>Illustrative sample flow</span><span>Answer grounded in approved knowledge</span><span>Use your own website to build a real workspace</span><button class="landing-text-link" type="button" @click="scrollLandingTo('how-it-works')">See the flow</button></div>
+
+      <section class="landing-section landing-capabilities-section">
+        <div class="landing-section-heading"><p class="eyebrow">What FrontDeskWise does</p><h2>Built for answers, actions, and human judgment.</h2><p>One AI front desk helps visitors get useful answers, take the next step, and reach your team when the moment calls for it.</p></div>
+        <div class="landing-capability-grid"><article v-for="capability in landingCapabilities" :key="capability.title" class="landing-capability-card"><span :class="['landing-capability-icon', capability.tone]">{{ capability.icon }}</span><h3>{{ capability.title }}</h3><p>{{ capability.body }}</p></article></div>
+      </section>
 
       <section id="how-it-works" class="landing-section landing-conversion-section">
         <div class="landing-section-heading landing-section-heading-centered"><p class="eyebrow">The commercial story</p><h2>See the conversation turn into a next step.</h2><p>FrontDeskWise connects the moment a visitor asks a question to the outcome your business needs.</p></div>
@@ -4111,10 +4222,14 @@ function startMarketingDemo() {
         </div>
       </section>
 
-      <section class="landing-section landing-capabilities-section">
-        <div class="landing-section-heading"><p class="eyebrow">One front desk. More useful conversations.</p><h2>Built for answers, actions, and human judgment.</h2></div>
-        <div class="landing-capability-grid"><article v-for="capability in landingCapabilities" :key="capability.title" class="landing-capability-card"><span :class="['landing-capability-icon', capability.tone]">{{ capability.icon }}</span><h3>{{ capability.title }}</h3><p>{{ capability.body }}</p></article></div>
+      <section class="landing-section landing-setup-section">
+        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">From website to working agent</p><h2>Built from your website. Ready for your review.</h2></div><p>One URL gives you a starting point. You decide what the AI can say, do, and hand off.</p></div>
+        <div class="landing-setup-grid"><div class="landing-setup-steps"><article><span>01</span><div><h3>Paste your URL</h3><p><code>yourbusiness.com</code></p></div></article><article><span>02</span><div><h3>FrontDeskWise learns your business</h3><p>Services, pricing, locations, and policies are organized for review.</p></div></article><article><span>03</span><div><h3>Review and test</h3><p>Ask real questions before anything goes live.</p></div></article><article><span>04</span><div><h3>Add it to your website</h3><p>Install the widget and start capturing the next opportunity.</p></div></article></div><LandingVideo src="/video/frameflow-1795189292121.mp4" poster="/video/onboarding-poster.jpg" lazy ariaLabel="FrontDeskWise turns a website URL into a reviewed, ready-to-install AI front desk" description="A product demonstration showing website learning, business knowledge readiness, testing, and installation." /></div>
       </section>
+
+      <section class="landing-section landing-handoff-section"><div class="landing-handoff-card"><LandingVideo src="/video/frameflow-1795189415791.mp4" poster="/video/handoff-poster.jpg" lazy ariaLabel="FrontDeskWise hands a customer conversation to a staff member with context preserved" description="A product demonstration showing AI recognizing a human need, bringing in staff, and preserving the conversation context." /><div class="landing-handoff-copy"><p class="eyebrow">AI + your team</p><h2>AI when it can help. Your team when it matters.</h2><p>FrontDeskWise handles routine questions automatically and brings your team into the conversation when a human touch is needed — with the full context already attached.</p><button class="landing-text-link" type="button" @click="openAuth('signup')">Start with a safer front desk</button></div></div></section>
+
+      <section class="landing-section landing-integrations-section"><div class="landing-section-heading"><p class="eyebrow">Fits your existing workflow</p><h2>Works with the tools your business already uses.</h2><p>Capture the lead first, then send it into the systems your team already trusts.</p></div><div class="landing-integration-row"><span>CRM</span><span>Booking</span><span>Calendar</span><span>Email</span><span>Zapier</span><span>Make</span><span>HubSpot</span><span>Custom API / MCP</span></div></section>
 
       <section class="landing-section landing-dashboard-section">
         <div class="landing-dashboard-copy"><p class="eyebrow">A clearer owner view</p><h2>Know what your AI front desk is doing for the business.</h2><p>See conversations, leads, booking actions, handoffs, and the questions worth adding to your knowledge base.</p><span class="landing-illustrative-note">Illustrative sample workspace · not customer data</span><button class="outline-button" type="button" @click="openAuth('signup')">Create your workspace</button></div>
@@ -4124,15 +4239,6 @@ function startMarketingDemo() {
           <div class="landing-dashboard-bottom"><div class="landing-mini-chart"><div class="landing-mini-chart-head"><strong>Conversation activity</strong><span>Illustrative last 7 days</span></div><div class="landing-bars"><i v-for="(height, index) in [32, 48, 41, 67, 54, 79, 88]" :key="index" :style="{ height: `${height}%` }"></i></div><div class="landing-chart-labels"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div></div><div class="landing-opportunity"><span class="landing-opportunity-label">TOP OPPORTUNITY</span><strong>17 visitors asked about weekend availability.</strong><p>Add weekend hours to your knowledge and turn a repeated question into a better answer.</p><span class="landing-opportunity-action">Knowledge gap</span></div></div>
         </div>
       </section>
-
-      <section class="landing-section landing-setup-section">
-        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">From website to working agent</p><h2>Built from your website. Ready for your review.</h2></div><p>One URL gives you a starting point. You decide what the AI can say, do, and hand off.</p></div>
-        <div class="landing-setup-grid"><div class="landing-setup-steps"><article><span>01</span><div><h3>Paste your URL</h3><p><code>yourbusiness.com</code></p></div></article><article><span>02</span><div><h3>FrontDeskWise learns your business</h3><p>Services, pricing, locations, and policies are organized for review.</p></div></article><article><span>03</span><div><h3>Review and test</h3><p>Ask real questions before anything goes live.</p></div></article><article><span>04</span><div><h3>Add it to your website</h3><p>Install the widget and start capturing the next opportunity.</p></div></article></div><div class="landing-knowledge-card"><div class="landing-knowledge-url">https://yourbusiness.com <span>✓</span></div><div class="landing-knowledge-summary"><strong>Business knowledge ready</strong><span>Illustrative review</span></div><div class="landing-knowledge-list"><span>✓ Services found</span><span>✓ Pricing found</span><span>✓ Locations found</span><span>✓ Policies found</span></div><div class="landing-knowledge-footer"><span>Readiness <strong>91%</strong></span><span class="landing-readiness-bar"><i style="width: 91%"></i></span></div><span class="landing-illustrative-note">Example workspace preview · your score comes from your sources</span></div></div>
-      </section>
-
-      <section class="landing-section landing-handoff-section"><div class="landing-handoff-card"><div class="landing-handoff-conversation"><span class="landing-dashboard-kicker">SAFE HUMAN HANDOFF</span><div class="landing-handoff-message customer"><strong>Customer</strong><p>Can I talk to someone about a custom request?</p></div><div class="landing-handoff-message ai"><strong>AI front desk</strong><p>Absolutely. I’ve notified the team and kept your details with the conversation.</p></div><div class="landing-human-joined"><span>●</span><strong>Sarah joined the conversation</strong><small>Team notified · AI can assist</small></div></div><div class="landing-handoff-copy"><p class="eyebrow">AI + your team</p><h2>Automation should feel helpful, not risky.</h2><p>Let AI handle the routine work while your team keeps the context, the customer, and the final say.</p><button class="landing-text-link" type="button" @click="openAuth('signup')">Start with a safer front desk</button></div></div></section>
-
-      <section class="landing-section landing-integrations-section"><div class="landing-section-heading"><p class="eyebrow">Fits your existing workflow</p><h2>Works with the tools your business already uses.</h2><p>Capture the lead first, then send it into the systems your team already trusts.</p></div><div class="landing-integration-row"><span>CRM</span><span>Booking</span><span>Calendar</span><span>Email</span><span>Zapier</span><span>Make</span><span>HubSpot</span><span>Custom API / MCP</span></div></section>
 
       <section class="landing-multi-business"><div><p class="eyebrow">One login. Multiple businesses.</p><h2>Grow your portfolio without adding another tool to manage.</h2><p>Keep businesses, teams, actions, and analytics organized in one shared operating layer.</p></div><div class="landing-portfolio-card"><div><span class="landing-portfolio-avatar blue">H</span><strong>Harbor &amp; Home</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar orange">N</span><strong>Northstar Studio</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar green">C</span><strong>ClearAir Services</strong><small>Connected workspace · shared team</small></div></div></section>
 
@@ -4279,7 +4385,7 @@ function startMarketingDemo() {
 
 
         <div v-else-if="view === 'knowledge'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><div class="toolbar-actions"><span v-if="embeddingMessage" class="saved-message">✓ {{ embeddingMessage }}</span><button v-if="authSnapshot && availableBusinesses.length" class="outline-button small" type="button" :disabled="embeddingLoading" @click="reindexKnowledge">{{ embeddingLoading ? 'Re-indexing…' : 'Re-index knowledge' }}</button><button class="outline-button small" type="button" @click="loadKnowledge">{{ knowledgeLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><div class="toolbar-actions knowledge-toolbar-actions"><span v-if="embeddingMessage" class="saved-message">✓ {{ embeddingMessage }}</span><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" :title="knowledgeTestAction.disabled ? 'Review sources that need attention before testing.' : undefined" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">{{ knowledgeTestAction.label }}<span v-if="!knowledgeTestAction.disabled"> →</span></button><button v-if="authSnapshot && availableBusinesses.length" class="outline-button small" type="button" :disabled="embeddingLoading" @click="reindexKnowledge">{{ embeddingLoading ? 'Re-indexing…' : 'Re-index' }}</button><button class="outline-button small knowledge-toolbar-more" type="button" aria-label="Refresh knowledge" title="Refresh knowledge" @click="loadKnowledge">⋯</button></div></div>
           <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
           <article v-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message knowledge-start-panel"><strong>Start your knowledge base</strong><p>Sign-in is complete. Add your first business website and FrontDeskWise will crawl it, index the readable content, and make it available for questions.</p><button class="primary-button small" type="button" @click="openAddBusiness">Add website / domain →</button></article>
           <article v-if="!authSnapshot || availableBusinesses.length" class="panel document-library">
@@ -4292,8 +4398,8 @@ function startMarketingDemo() {
           </article>
           <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
           <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
-          <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon">✓</div><h2>No open knowledge gaps</h2><p>New low-confidence questions will appear here for review.</p></article>
-          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || gap.status === 'resolved'" @click="resolveKnowledgeGap(gap)">{{ gap.status === 'resolved' ? 'Approved' : 'Approve answer' }}</button></div></article></div>
+          <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon">✓</div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Your knowledge looks healthy.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button v-if="!knowledgeSourcesNeedAttention" class="primary-button small" type="button" @click="openAgentTest()">Test agent →</button></article>
+          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" :disabled="gap.status === 'resolved'" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><template v-if="gap.status === 'resolved'"><span class="gap-answer-saved">✓ Answer saved</span><button class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button></template><button v-else class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim()" @click="resolveKnowledgeGap(gap)">Approve answer</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Answer quality</p><h2>Recent answer checks</h2><p>Review confidence and whether each answer was grounded in your knowledge.</p></div></div>
           <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Outcome</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Needs review' }}<small>{{ diagnostic.retrieval?.candidateCount ?? 0 }} knowledge matches</small></span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No answer checks yet.</div></article>
         </div>
@@ -4527,11 +4633,27 @@ function startMarketingDemo() {
         <p class="eyebrow">{{ activeOrganization?.name ?? 'Your organization' }}</p>
         <h2 id="add-business-title">Add another business</h2>
         <p class="auth-copy">Paste a public website URL. FrontDeskWise will crawl it and add the new business to this organization, subject to your plan capacity.</p>
-        <label>Business website<input v-model="addBusinessUrl" type="url" required placeholder="https://company.com" /></label>
+        <label>Business website<input v-model="addBusinessUrl" type="text" inputmode="url" required placeholder="yourbusiness.com" /></label>
         <p v-if="addBusinessError" class="form-error">{{ addBusinessError }}</p>
         <p v-if="addBusinessMessage" class="saved-message">✓ {{ addBusinessMessage }}</p>
         <button class="primary-button auth-submit" type="submit" :disabled="addBusinessLoading">{{ addBusinessLoading ? 'Crawling website…' : 'Add business →' }}</button>
       </form>
+    </div>
+
+    <div v-if="generationDialogOpen" class="generation-overlay" role="dialog" aria-modal="true" aria-labelledby="generation-title">
+      <section class="generation-dialog">
+        <div class="generation-orbit" aria-hidden="true"><span></span><i></i></div>
+        <p class="eyebrow">Your workspace is taking shape</p>
+        <h2 id="generation-title">Building your AI front desk</h2>
+        <p class="generation-copy">We’re checking the public website, learning the important business details, and organizing them into a workspace you can review.</p>
+        <div class="generation-steps" aria-live="polite">
+          <div :class="['generation-step', { active: generationStage === 'checking', complete: generationStage !== 'checking' }]"><span>{{ generationStage === 'checking' ? '·' : '✓' }}</span><div><strong>Checking your website</strong><small>Making sure the URL is reachable</small></div></div>
+          <div :class="['generation-step', { active: generationStage === 'learning', complete: generationStage === 'organizing' }]"><span>{{ generationStage === 'organizing' ? '✓' : generationStage === 'learning' ? '·' : '2' }}</span><div><strong>Learning your business</strong><small>Finding services, locations, and helpful answers</small></div></div>
+          <div :class="['generation-step', { active: generationStage === 'organizing' }]"><span>{{ generationStage === 'organizing' ? '·' : '3' }}</span><div><strong>Preparing your workspace</strong><small>Turning the crawl into a reviewable front desk</small></div></div>
+        </div>
+        <div v-if="generationError" class="generation-error"><strong>We couldn’t finish that website yet.</strong><p>{{ generationError }}</p><small>Try the URL again, or use a public homepage that does not require a login.</small></div>
+        <div v-if="generationError" class="generation-actions"><button class="outline-button small" type="button" @click="closeGenerationDialog">Back to landing page</button><button class="primary-button small" type="button" @click="generateDemo">Try again →</button></div>
+      </section>
     </div>
 
     <div v-if="leadDetailOpen && selectedLead" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="lead-detail-title" @click.self="leadDetailOpen = false">

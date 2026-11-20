@@ -3,13 +3,23 @@ const workspaceViews = new Set([
     "overview", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set(["general", "team", "integrations", "verification", "notifications", "billing"]);
-const agentTabs = new Set(["behavior", "appearance", "quick-actions", "test", "install"]);
+const agentTabs = new Set(["behavior", "appearance", "quick-actions", "actions", "test", "install"]);
 function cleanPath(pathname) {
     const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
     return path || "/";
 }
 function decodeSegment(value) {
     return value ? decodeURIComponent(value) : "";
+}
+function testQuestionFromQuery(query, agentTab) {
+    if (agentTab !== "test")
+        return undefined;
+    const question = query.get("q")?.trim();
+    return question || undefined;
+}
+function appendTestQuestion(path, question) {
+    const normalized = question?.trim();
+    return normalized ? `${path}?q=${encodeURIComponent(normalized)}` : path;
 }
 export function parseRoute(location = window.location) {
     const path = cleanPath(location.pathname);
@@ -34,6 +44,11 @@ export function parseRoute(location = window.location) {
             return { kind: "auth", mode: "forgot" };
         return { kind: "auth", mode: "signin" };
     }
+    if (segments[0] === "agent") {
+        const agentTab = segments[1] && agentTabs.has(segments[1]) ? segments[1] : "behavior";
+        const testQuestion = testQuestionFromQuery(query, agentTab);
+        return { kind: "agent-shortcut", agentTab, ...(testQuestion ? { testQuestion } : {}) };
+    }
     if (segments[0] === "demo") {
         if (segments[1] === "access") {
             const token = query.get("token") ?? query.get("demo");
@@ -43,7 +58,8 @@ export function parseRoute(location = window.location) {
             return { kind: "not-found", path };
         if (segments[2] === "agent") {
             const agentTab = segments[3] && agentTabs.has(segments[3]) ? segments[3] : "behavior";
-            return { kind: "demo", demoId: segments[1], view: agentTab === "test" ? "conversations" : "agent", agentTab };
+            const testQuestion = testQuestionFromQuery(query, agentTab);
+            return { kind: "demo", demoId: segments[1], view: agentTab === "test" ? "conversations" : "agent", agentTab, ...(testQuestion ? { testQuestion } : {}) };
         }
         const candidate = segments[2];
         return { kind: "demo", demoId: segments[1], view: candidate && workspaceViews.has(candidate) ? candidate : "overview" };
@@ -82,7 +98,8 @@ export function parseRoute(location = window.location) {
             return { kind: "not-found", path };
         if (segments[2] === "agent") {
             const agentTab = segments[3] && agentTabs.has(segments[3]) ? segments[3] : "behavior";
-            return { kind: "workspace", businessSlug, view: agentTab === "test" ? "conversations" : "agent", agentTab };
+            const testQuestion = testQuestionFromQuery(query, agentTab);
+            return { kind: "workspace", businessSlug, view: agentTab === "test" ? "conversations" : "agent", agentTab, ...(testQuestion ? { testQuestion } : {}) };
         }
         const candidate = segments[2];
         return { kind: "workspace", businessSlug, view: candidate && workspaceViews.has(candidate) ? candidate : "overview" };
@@ -94,6 +111,8 @@ export function routeView(route) {
         return "marketing";
     if (route.kind === "legal")
         return route.page;
+    if (route.kind === "agent-shortcut")
+        return "agent";
     if (route.kind === "demo")
         return route.view === "agent" || route.view === "conversations" ? "agent" : route.view;
     if (route.kind === "workspace")
@@ -117,10 +136,14 @@ export function routePath(route) {
         return `/auth/${route.mode === "signin" ? "sign-in" : route.mode === "signup" ? "sign-up" : "forgot-password"}`;
     if (route.kind === "auth-callback")
         return "/auth/callback";
+    if (route.kind === "agent-shortcut")
+        return appendTestQuestion(`/agent/${route.agentTab}`, route.agentTab === "test" ? route.testQuestion : undefined);
     if (route.kind === "demo") {
         const base = `/demo/${encodeURIComponent(route.demoId)}`;
-        if (route.view === "agent" || route.view === "conversations")
-            return `${base}/agent/${route.agentTab ?? (route.view === "conversations" ? "test" : "behavior")}`;
+        if (route.view === "agent" || route.view === "conversations") {
+            const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "behavior");
+            return appendTestQuestion(`${base}/agent/${agentTab}`, agentTab === "test" ? route.testQuestion : undefined);
+        }
         return route.view === "overview" ? base : `${base}/${route.view}`;
     }
     if (route.kind === "demo-access")
@@ -140,17 +163,19 @@ export function routePath(route) {
     }
     if (route.kind === "workspace") {
         const base = `/app/${encodeURIComponent(route.businessSlug)}`;
-        if (route.view === "agent" || route.view === "conversations")
-            return `${base}/agent/${route.agentTab ?? (route.view === "conversations" ? "test" : "behavior")}`;
+        if (route.view === "agent" || route.view === "conversations") {
+            const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "behavior");
+            return appendTestQuestion(`${base}/agent/${agentTab}`, agentTab === "test" ? route.testQuestion : undefined);
+        }
         return route.view === "overview" ? base : `${base}/${route.view}`;
     }
     return route.kind === "not-found" ? route.path : "/";
 }
 export function workspaceRoute(businessSlug, view, options = {}) {
-    return { kind: "workspace", businessSlug, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}) };
+    return { kind: "workspace", businessSlug, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}) };
 }
 export function demoRoute(demoId, view = "overview", options = {}) {
-    return { kind: "demo", demoId, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}) };
+    return { kind: "demo", demoId, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}) };
 }
 export function settingsRoute(tab) {
     const view = tab === "team" ? "team" : tab === "integrations" ? "connections" : tab === "billing" ? "billing" : "settings";

@@ -6808,8 +6808,11 @@ app.get("/api/v1/demo-catalog", async () => ({
 app.get("/api/v1/demo/:slug/public", async (request) => {
   const params = request.params as { slug?: string };
   const slug = requiredString(params.slug, "slug", 120);
-  if (!isInternalDemoSlug(slug)) throw httpError(404, "Public demo workspace not found");
   const business = await getBusiness(slug);
+  // Landing-page demos are created on demand and are public only to the
+  // visitor holding the short-lived demo access token. Seeded examples remain
+  // open without a token.
+  if (!isInternalDemoSlug(slug)) await requireDemoOwner(business, request);
   return publicWorkspacePayload(business);
 });
 

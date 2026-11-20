@@ -1,7 +1,20 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref, toRef, watch } from "vue";
+import Button from "./components/ui/Button.vue";
+import Card from "./components/ui/Card.vue";
+import ColorPicker from "./components/ui/ColorPicker.vue";
+import FileUpload from "./components/ui/FileUpload.vue";
+import FormField from "./components/ui/FormField.vue";
+import FormSection from "./components/ui/FormSection.vue";
+import Select from "./components/ui/Select.vue";
+import SegmentedControl from "./components/ui/SegmentedControl.vue";
+import Switch from "./components/ui/Switch.vue";
+import TextInput from "./components/ui/TextInput.vue";
+import Textarea from "./components/ui/Textarea.vue";
+import WidgetPreview from "./components/WidgetPreview.vue";
+import { getAccessibleTextColor, isHexColor } from "./utils/color";
 
-type AgentTab = "behavior" | "appearance" | "quick-actions" | "test" | "install";
+type AgentTab = "behavior" | "appearance" | "quick-actions" | "actions" | "test" | "install";
 type Tone = "friendly" | "professional" | "concise" | "custom";
 type FallbackBehavior = "contact_form" | "human" | "unavailable";
 type WidgetTheme = "light" | "dark" | "auto";
@@ -130,10 +143,13 @@ function cloneModel(model: AgentModel): AgentModel {
 }
 
 const draft = reactive<AgentModel>(cloneModel(props.model));
+const agentDraft = computed(() => draft);
 const previewMode = ref<"desktop" | "mobile">("desktop");
 const quickActionEditorOpen = ref(false);
 const editingActionIndex = ref<number | null>(null);
 const actionDraft = reactive<QuickAction>({ label: "", question: "" });
+const actionLabel = toRef(actionDraft, "label");
+const actionQuestion = toRef(actionDraft, "question");
 const logoPreview = ref(props.model.widgetLogoUrl);
 const logoFileName = ref("");
 const testPrompt = ref(props.test.question);
@@ -148,6 +164,14 @@ const installInstructions = computed(() => ({
   custom: "Paste this snippet before </body> on your website.",
   not_sure: "We can identify the right place to add this snippet with you.",
 }[installPlatform.value]));
+const safeWidgetColor = computed(() => isHexColor(draft.widgetColor) ? draft.widgetColor : "#2563EB");
+const accessibleWidgetText = computed(() => getAccessibleTextColor(safeWidgetColor.value));
+const toneOptions = ["friendly", "professional", "concise", "custom"].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }));
+const themeOptions = ["light", "dark", "auto"].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }));
+const positionOptions = [{ label: "Bottom right", value: "bottom-right" }, { label: "Bottom left", value: "bottom-left" }];
+const openingSizeOptions = [{ label: "Compact", value: "compact" }, { label: "Expanded", value: "expanded" }, { label: "Full screen", value: "fullscreen" }];
+const languageOptions = ["English", "Spanish", "French", "Portuguese"].map((value) => ({ label: value, value }));
+const fallbackOptions = [{ label: "Offer contact form", value: "contact_form" }, { label: "Request human", value: "human" }, { label: "Say information is unavailable", value: "unavailable" }];
 const supportDrawerOpen = ref(false);
 const supportSubmitted = ref(false);
 const supportForm = reactive<InstallationSupportPayload>({
@@ -159,6 +183,13 @@ const supportForm = reactive<InstallationSupportPayload>({
   message: "",
   screenshotUrl: "",
 });
+const supportName = toRef(supportForm, "name");
+const supportPlatform = toRef(supportForm, "platform");
+const supportHelpRequest = toRef(supportForm, "helpRequest");
+const supportPreferredContactMethod = toRef(supportForm, "preferredContactMethod");
+const supportContactValue = toRef(supportForm, "contactValue");
+const supportMessage = toRef(supportForm, "message");
+const supportScreenshotUrl = toRef(supportForm, "screenshotUrl");
 
 function syncModel(model: AgentModel): void {
   Object.assign(draft, cloneModel(model));
@@ -189,6 +220,7 @@ function saveChanges(): void {
     emit("require-auth");
     return;
   }
+  if (!isHexColor(draft.widgetColor)) return;
   localSaved.value = true;
   window.setTimeout(() => (localSaved.value = false), 2600);
   emit("save", cloneModel(draft));
@@ -231,9 +263,7 @@ function moveAction(index: number, direction: -1 | 1): void {
   draft.widgetQuickActions.splice(nextIndex, 0, action);
 }
 
-function previewLogo(event: Event): void {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
+function previewLogo(file: File): void {
   logoFileName.value = file.name;
   logoPreview.value = URL.createObjectURL(file);
 }
@@ -289,6 +319,7 @@ function sendDeveloperInstructions(): void {
 </script>
 
 <template>
+  <!-- WidgetPreview renders the customer surface with aria-label="Widget preview". -->
   <div class="agent-experience">
     <div class="agent-header-row">
       <div>
@@ -298,70 +329,66 @@ function sendDeveloperInstructions(): void {
       </div>
       <div class="agent-header-actions">
         <span v-if="savedMessage || localSaved" class="saved-message">✓ {{ savedMessage || "Saved" }}</span>
-        <button v-if="tab !== 'test' && tab !== 'install'" class="primary-button small" type="button" @click="saveChanges">Save changes</button>
-        <button v-if="tab === 'test'" class="outline-button small" type="button" @click="emit('reset-conversation')">Reset conversation</button>
-        <button v-if="tab === 'install'" class="primary-button small" type="button" @click="saveChanges">Publish AI front desk</button>
+        <Button v-if="tab !== 'test' && tab !== 'install'" variant="primary" size="small" @click="saveChanges">Save changes</Button>
+        <Button v-if="tab === 'test'" variant="secondary" size="small" @click="emit('reset-conversation')">Reset conversation</Button>
+        <Button v-if="tab === 'install'" variant="primary" size="small" @click="saveChanges">Publish AI front desk</Button>
       </div>
     </div>
 
     <div v-if="tab === 'behavior'" class="agent-config-layout">
-      <article class="agent-form-panel panel">
-        <section class="agent-section">
-          <div class="agent-section-heading"><div><p class="section-kicker">Identity</p><h3>Assistant identity</h3></div></div>
-          <label>Assistant name<input v-model="draft.assistantName" type="text" maxlength="120" /></label>
-        </section>
-        <section class="agent-section">
-          <div class="agent-section-heading"><div><p class="section-kicker">Conversation</p><h3>How your assistant speaks</h3></div></div>
-          <label>Welcome message<textarea v-model="draft.welcomeMessage" rows="4" maxlength="1000"></textarea></label>
+      <Card class="agent-form-panel">
+        <FormSection eyebrow="Identity" title="Assistant identity">
+          <FormField label="Assistant name" required><TextInput v-model="draft.assistantName" :maxlength="120" /></FormField>
+        </FormSection>
+        <FormSection eyebrow="Conversation" title="How your assistant speaks">
+          <FormField label="Welcome message" required><Textarea v-model="draft.welcomeMessage" :rows="4" :maxlength="1000" /></FormField>
           <div class="field-grid">
-            <label>Tone<div class="segmented-control"><button v-for="tone in (['friendly', 'professional', 'concise', 'custom'] as Tone[])" :key="tone" type="button" :class="{ active: draft.tone === tone }" @click="draft.tone = tone">{{ tone[0].toUpperCase() + tone.slice(1) }}</button></div></label>
-            <label>Primary language<select v-model="draft.primaryLanguage"><option>English</option><option>Spanish</option><option>French</option><option>Portuguese</option></select></label>
+            <FormField label="Tone"><SegmentedControl v-model="draft.tone" :options="toneOptions" aria-label="Assistant tone" /></FormField>
+            <FormField label="Primary language"><Select v-model="draft.primaryLanguage" :options="languageOptions" placeholder="" /></FormField>
           </div>
-        </section>
-        <section class="agent-section">
-          <div class="agent-section-heading"><div><p class="section-kicker">When AI cannot answer</p><h3>Make the next step clear</h3></div></div>
-          <label>Fallback behavior<select v-model="draft.fallbackBehavior"><option value="contact_form">Offer contact form</option><option value="human">Request human</option><option value="unavailable">Say information is unavailable</option></select></label>
-          <label class="switch-row"><span><strong>Human handoff</strong><small>Let visitors ask for your team when they need help.</small></span><input v-model="draft.humanHandoffEnabled" type="checkbox" /></label>
-        </section>
+        </FormSection>
+        <FormSection eyebrow="When AI cannot answer" title="Make the next step clear">
+          <FormField label="Fallback behavior"><Select v-model="draft.fallbackBehavior" :options="fallbackOptions" placeholder="" /></FormField>
+          <Switch v-model="draft.humanHandoffEnabled" label="Human handoff" description="Let visitors ask for your team when they need help." />
+        </FormSection>
         <section class="agent-section agent-section-footer">
           <div><strong>Conversation behavior is ready to review.</strong><p>Save changes to use this configuration in the live widget.</p></div>
-          <button class="primary-button small" type="button" @click="saveChanges">Save changes</button>
+          <Button variant="primary" size="small" @click="saveChanges">Save changes</Button>
         </section>
-      </article>
-      <aside class="agent-preview-column"><div class="preview-sticky"><div class="preview-label-row"><div><p class="section-kicker">Customer view</p><h3>Live preview</h3></div><div class="preview-mode-toggle"><button type="button" :class="{ active: previewMode === 'desktop' }" @click="previewMode = 'desktop'">Desktop</button><button type="button" :class="{ active: previewMode === 'mobile' }" @click="previewMode = 'mobile'">Mobile</button></div></div><div aria-label="Widget preview" :class="['customer-preview', `preview-${previewMode}`]" :style="{ '--preview-accent': draft.widgetColor }"><div class="preview-site-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ websiteUrl || 'yourbusiness.com' }}</span></div><div class="preview-site-body"><div class="preview-site-nav"><strong>{{ businessName || 'Your business' }}</strong><span>Services　About　Contact</span></div><div class="preview-site-copy"><span class="preview-badge">AI FRONT DESK · ONLINE</span><h4>More answers.<br />More confidence.</h4><p>Grounded answers from {{ businessName || 'your website' }}.</p></div><div class="preview-chat"><div class="preview-chat-header"><span class="preview-orb">✦</span><span>{{ draft.assistantName || 'AI assistant' }}</span><span class="online-dot"></span></div><div class="preview-chat-bubble">{{ draft.welcomeMessage }}</div><div v-for="action in draft.widgetQuickActions.slice(0, 2)" :key="action.label" class="preview-suggested-action">{{ action.label }} <span>›</span></div><div class="preview-chat-input">Ask a question… <span>➤</span></div></div></div></div><p class="preview-note">Updates appear here as you edit. This is what visitors will see.</p></div></aside>
+      </Card>
+      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :quick-actions="agentDraft.widgetQuickActions" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
     <div v-else-if="tab === 'appearance'" class="agent-config-layout">
-      <article class="agent-form-panel panel">
-        <section class="agent-section">
-          <div class="agent-section-heading"><div><p class="section-kicker">Brand</p><h3>Appearance</h3><p>Make the front desk feel like part of your website.</p></div></div>
-          <div class="logo-upload-row"><div class="logo-preview"><img v-if="logoPreview" :src="logoPreview" alt="Current logo" /><span v-else>✦</span></div><div><strong>{{ logoFileName || (draft.widgetLogoUrl ? 'Current logo' : 'Add your logo') }}</strong><small>PNG, JPG, or SVG · upload for preview</small><label class="upload-button outline-button small">Upload logo<input type="file" accept="image/png,image/jpeg,image/svg+xml" @change="previewLogo" /></label></div></div>
-            <details class="advanced-setting"><summary>Advanced · logo URL</summary><label>Logo URL<input v-model="draft.widgetLogoUrl" type="url" placeholder="https://yourbusiness.com/logo.png" /></label><small>Use an HTTPS URL when the logo should persist to the published widget.</small></details>
-          <label>Brand color<div class="color-control"><button v-for="color in ['#1769e8', '#18a999', '#7447d9', '#f27b35', '#112c64']" :key="color" type="button" :class="['color-swatch', { selected: draft.widgetColor === color }]" :style="{ background: color }" @click="draft.widgetColor = color"></button><input v-model="draft.widgetColor" type="color" aria-label="Custom brand color" /></div></label>
-        </section>
-        <section class="agent-section">
-          <div class="agent-section-heading"><div><p class="section-kicker">Widget</p><h3>Visitor controls</h3></div></div>
-          <label>Theme<div class="segmented-control"><button v-for="theme in (['light', 'dark', 'auto'] as WidgetTheme[])" :key="theme" type="button" :class="{ active: draft.widgetTheme === theme }" @click="draft.widgetTheme = theme">{{ theme[0].toUpperCase() + theme.slice(1) }}</button></div></label>
-          <label>Widget position<div class="segmented-control two-up"><button type="button" :class="{ active: draft.widgetPosition === 'bottom-right' }" @click="draft.widgetPosition = 'bottom-right'">Bottom right</button><button type="button" :class="{ active: draft.widgetPosition === 'bottom-left' }" @click="draft.widgetPosition = 'bottom-left'">Bottom left</button></div></label>
-          <label>Opening size<div class="segmented-control"><button v-for="size in (['compact', 'expanded', 'fullscreen'] as AgentModel['widgetDefaultMode'][])" :key="size" type="button" :class="{ active: draft.widgetDefaultMode === size }" @click="draft.widgetDefaultMode = size">{{ size === 'fullscreen' ? 'Full screen' : size[0].toUpperCase() + size.slice(1) }}</button></div></label>
-          <label class="switch-row"><span><strong>Allow expand</strong><small>Visitors can make the assistant larger when they need more room.</small></span><input v-model="draft.widgetAllowExpand" type="checkbox" /></label>
-        </section>
-        <section class="agent-section agent-section-footer"><div><strong>Visual changes are ready to review.</strong><p>Save changes when the preview feels right.</p></div><button class="primary-button small" type="button" @click="saveChanges">Save changes</button></section>
-      </article>
-      <aside class="agent-preview-column"><div class="preview-sticky"><div class="preview-label-row"><div><p class="section-kicker">Customer view</p><h3>Live preview</h3></div><div class="preview-mode-toggle"><button type="button" :class="{ active: previewMode === 'desktop' }" @click="previewMode = 'desktop'">Desktop</button><button type="button" :class="{ active: previewMode === 'mobile' }" @click="previewMode = 'mobile'">Mobile</button></div></div><div aria-label="Widget preview" :class="['customer-preview', `preview-${previewMode}`, `theme-${draft.widgetTheme}`, `position-${draft.widgetPosition}`]" :style="{ '--preview-accent': draft.widgetColor }"><div class="preview-site-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ websiteUrl || 'yourbusiness.com' }}</span></div><div class="preview-site-body"><div class="preview-site-nav"><strong>{{ businessName || 'Your business' }}</strong><span>Services　About　Contact</span></div><div class="preview-site-copy"><span class="preview-badge">AI FRONT DESK · ONLINE</span><h4>More answers.<br />More confidence.</h4><p>Grounded answers from {{ businessName || 'your website' }}.</p></div><div class="preview-chat"><div class="preview-chat-header"><span class="preview-orb">✦</span><span>{{ draft.assistantName || 'AI assistant' }}</span><span class="online-dot"></span></div><div class="preview-chat-bubble">{{ draft.welcomeMessage }}</div><div v-for="action in draft.widgetQuickActions.slice(0, 2)" :key="action.label" class="preview-suggested-action">{{ action.label }} <span>›</span></div><div v-if="draft.showLeadCapture" class="preview-form-simulation"><strong>Let's get your details</strong><label>Name <span>Required ✓</span><input /></label><label>Email <span>Required ✓</span><input /></label><label>Phone <span>Optional</span><input /></label><button>Continue</button></div><div class="preview-chat-input">Ask a question… <span>➤</span></div></div></div></div><p class="preview-note">Updates appear here as you edit. This is what visitors will see.</p></div></aside>
+      <Card class="agent-form-panel">
+        <FormSection eyebrow="Brand" title="Appearance" description="Make the front desk feel like part of your website.">
+          <FileUpload :filename="logoFileName || (draft.widgetLogoUrl ? 'Current logo' : '')" :preview-url="logoPreview" accept="image/png,image/jpeg,image/svg+xml" @change="previewLogo" />
+          <details class="advanced-setting"><summary>Advanced · logo URL</summary><FormField label="Logo URL" hint="Use an HTTPS URL when the logo should persist to the published widget."><TextInput v-model="draft.widgetLogoUrl" type="url" placeholder="https://yourbusiness.com/logo.png" /></FormField></details>
+          <FormField label="Brand color" hint="Used for CTAs, accents, focus rings, and quick actions. Text contrast adjusts automatically."><ColorPicker v-model="draft.widgetColor" /></FormField>
+          <p class="accessible-color-note"><span :style="{ background: safeWidgetColor, color: accessibleWidgetText }">Aa</span> Accessible text preview</p>
+        </FormSection>
+        <FormSection eyebrow="Widget" title="Visitor controls">
+          <FormField label="Theme"><SegmentedControl v-model="draft.widgetTheme" :options="themeOptions" aria-label="Widget theme" /></FormField>
+          <FormField label="Widget position"><SegmentedControl v-model="draft.widgetPosition" :options="positionOptions" aria-label="Widget position" /></FormField>
+          <FormField label="Opening size"><SegmentedControl v-model="draft.widgetDefaultMode" :options="openingSizeOptions" aria-label="Opening size" /></FormField>
+          <Switch v-model="draft.widgetAllowExpand" label="Allow expand" description="Visitors can make the assistant larger when they need more room." />
+        </FormSection>
+        <section class="agent-section agent-section-footer"><div><strong>Visual changes are ready to review.</strong><p>Save changes when the preview feels right.</p></div><Button variant="primary" size="small" @click="saveChanges">Save changes</Button></section>
+      </Card>
+      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
-    <div v-else-if="tab === 'quick-actions'" class="agent-config-layout">
+    <div v-else-if="tab === 'quick-actions' || tab === 'actions'" class="agent-config-layout">
       <article class="agent-form-panel panel">
-        <section class="agent-section quick-actions-section"><div class="agent-section-heading action-heading"><div><p class="section-kicker">Guide visitors</p><h3>Quick actions</h3><p>Keep this list short. The same buttons appear in the visitor preview.</p></div><button class="primary-button small" type="button" :disabled="draft.widgetQuickActions.length >= 5" @click="startAddAction">+ Add quick action</button></div><div v-if="!draft.widgetQuickActions.length" class="empty-actions"><strong>Start with a helpful question.</strong><p>Add one action to give visitors an easy first step.</p><button class="outline-button small" type="button" @click="startAddAction">Add quick action</button></div><div v-else class="compact-action-list"><article v-for="(action, index) in draft.widgetQuickActions" :key="`${action.label}-${index}`" class="compact-action-row"><button class="drag-handle" type="button" aria-label="Move action up" @click="moveAction(index, -1)">≡</button><div class="compact-action-copy"><strong>{{ action.label }}</strong><span>“{{ action.question }}”</span></div><div class="compact-action-controls"><button type="button" @click="editAction(index)">Edit</button><button type="button" @click="removeAction(index)">Delete</button></div></article></div></section>
-        <section v-if="quickActionEditorOpen" class="action-drawer"><div class="agent-section-heading"><div><p class="section-kicker">{{ editingActionIndex === null ? 'New action' : 'Edit action' }}</p><h3>Quick action details</h3></div><button class="icon-button" type="button" aria-label="Close" @click="quickActionEditorOpen = false">×</button></div><label>Label<input v-model="actionDraft.label" maxlength="48" placeholder="Explore services" /></label><label>Customer message<input v-model="actionDraft.question" maxlength="300" placeholder="What services do you offer?" /></label><label>Action type<select><option>Ask AI</option><option>Open lead form</option><option>Request human</option></select></label><div class="drawer-actions"><button class="outline-button small" type="button" @click="quickActionEditorOpen = false">Cancel</button><button class="primary-button small" type="button" :disabled="!actionDraft.label.trim() || !actionDraft.question.trim()" @click="saveAction">Save action</button></div></section>
-        <section class="agent-section agent-section-footer"><div><strong>{{ draft.widgetQuickActions.length }} of 5 recommended actions</strong><p>Use specific questions that help visitors choose what to do next.</p></div><button class="primary-button small" type="button" @click="saveChanges">Save changes</button></section>
+        <section class="agent-section quick-actions-section"><div class="agent-section-heading action-heading"><div><p class="section-kicker">Guide visitors</p><h3>Quick actions</h3><p>Keep this list short. The same buttons appear in the visitor preview.</p></div><Button variant="primary" size="small" :disabled="agentDraft.widgetQuickActions.length >= 5" @click="startAddAction">+ Add quick action</Button></div><div v-if="!agentDraft.widgetQuickActions.length" class="empty-actions"><strong>Start with a helpful question.</strong><p>Add one action to give visitors an easy first step.</p><Button variant="secondary" size="small" @click="startAddAction">Add quick action</Button></div><div v-else class="compact-action-list"><article v-for="(action, index) in agentDraft.widgetQuickActions" :key="`${action.label}-${index}`" class="compact-action-row"><button class="drag-handle" type="button" aria-label="Move action up" @click="moveAction(index, -1)">≡</button><div class="compact-action-copy"><strong>{{ action.label }}</strong><span>“{{ action.question }}”</span></div><div class="compact-action-controls"><button type="button" @click="editAction(index)">Edit</button><button type="button" @click="removeAction(index)">Delete</button></div></article></div></section>
+        <section v-if="quickActionEditorOpen" class="action-drawer"><div class="agent-section-heading"><div><p class="section-kicker">{{ editingActionIndex === null ? 'New action' : 'Edit action' }}</p><h3>Quick action details</h3></div><button class="icon-button" type="button" aria-label="Close" @click="quickActionEditorOpen = false">×</button></div><FormField label="Label" required><TextInput v-model="actionLabel" :maxlength="48" placeholder="Explore services" /></FormField><FormField label="Customer message" required><TextInput v-model="actionQuestion" :maxlength="300" placeholder="What services do you offer?" /></FormField><FormField label="Action type"><Select :options="[{ label: 'Ask AI', value: 'ask' }, { label: 'Open lead form', value: 'lead' }, { label: 'Request human', value: 'human' }]" placeholder="" /></FormField><div class="drawer-actions"><Button variant="secondary" size="small" @click="quickActionEditorOpen = false">Cancel</Button><Button variant="primary" size="small" :disabled="!actionLabel.trim() || !actionQuestion.trim()" @click="saveAction">Save action</Button></div></section>
+        <section class="agent-section agent-section-footer"><div><strong>{{ agentDraft.widgetQuickActions.length }} of 5 recommended actions</strong><p>Use specific questions that help visitors choose what to do next.</p></div><Button variant="primary" size="small" @click="saveChanges">Save changes</Button></section>
       </article>
-      <aside class="agent-preview-column"><div class="preview-sticky"><div class="preview-label-row"><div><p class="section-kicker">Customer view</p><h3>Live preview</h3></div></div><div class="action-preview-card"><div class="preview-chat-header"><span class="preview-orb" :style="{ background: draft.widgetColor }">✦</span><span>{{ draft.assistantName || 'AI assistant' }}</span><span class="online-dot"></span></div><div class="preview-chat-bubble">{{ draft.welcomeMessage }}</div><button v-for="action in draft.widgetQuickActions" :key="action.label" class="preview-action-button" type="button">{{ action.label }} <span>›</span></button><div v-if="draft.showLeadCapture" class="preview-chat-input">Ask a question… <span>➤</span></div></div><p class="preview-note">Every action is immediately reflected in the customer preview.</p></div></aside>
+      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
     <div v-else-if="tab === 'test'" class="agent-test-layout">
-      <article class="test-conversation panel"><div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the real conversation path to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div><div class="test-thread"><div class="test-welcome"><span class="preview-orb" :style="{ background: draft.widgetColor }">✦</span><div><strong>{{ draft.assistantName || 'AI assistant' }}</strong><small>Answers from {{ businessName || 'your business' }} knowledge</small></div></div><div v-if="test.question" class="test-user-message">{{ test.question }}</div><div v-if="test.answer" class="test-answer-message"><div class="answer-meta"><span v-if="test.action" class="answer-badge grounded">✓ {{ test.action.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', test.grounded ? 'grounded' : 'fallback']">{{ test.grounded ? '✓ Grounded answer' : '! Safe fallback' }}</span></div><p>{{ test.answer }}</p><form v-if="test.action?.form" class="test-action-form" @submit.prevent="submitAction"><label v-for="field in test.action.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><select v-if="field.type === 'select'" v-model="test.formValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="test.formValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label><button class="primary-button small" type="submit" :disabled="test.isAsking">{{ test.isAsking ? 'Submitting…' : test.action.form.submitLabel }}</button></form><div v-if="test.citations.length" class="test-citations"><span>Sources ({{ test.citations.length }})</span><a v-for="citation in test.citations" :key="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} ↗</a></div></div><div v-else class="test-empty">Ask a question to see the live answer and its sources.</div></div><div v-if="test.suggestedQuestions.length" class="test-suggestions"><span>Try a common question</span><button v-for="suggestion in test.suggestedQuestions.slice(0, 4)" :key="suggestion" type="button" @click="ask(suggestion)">{{ suggestion }} <b>›</b></button></div><form class="test-composer" @submit.prevent="ask()"><input v-model="testPrompt" type="text" placeholder="e.g. What services do you offer?" aria-label="Test customer question" /><button class="primary-button small" type="submit" :disabled="test.isAsking || !testPrompt.trim()">{{ test.isAsking ? 'Checking…' : 'Send as visitor' }}</button></form></article>
+      <article class="test-conversation panel"><div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the real conversation path to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div><div class="test-thread"><div class="test-welcome"><span class="preview-orb" :style="{ background: agentDraft.widgetColor }">✦</span><div><strong>{{ agentDraft.assistantName || 'AI assistant' }}</strong><small>Answers from {{ businessName || 'your business' }} knowledge</small></div></div><div v-if="test.question" class="test-user-message">{{ test.question }}</div><div v-if="test.answer" class="test-answer-message"><div class="answer-meta"><span v-if="test.action" class="answer-badge grounded">✓ {{ test.action.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', test.grounded ? 'grounded' : 'fallback']">{{ test.grounded ? '✓ Grounded answer' : '! Safe fallback' }}</span></div><p>{{ test.answer }}</p><form v-if="test.action?.form" class="test-action-form" @submit.prevent="submitAction"><label v-for="field in test.action.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><select v-if="field.type === 'select'" v-model="test.formValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="test.formValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label><button class="primary-button small" type="submit" :disabled="test.isAsking">{{ test.isAsking ? 'Submitting…' : test.action.form.submitLabel }}</button></form><div v-if="test.citations.length" class="test-citations"><span>Sources ({{ test.citations.length }})</span><a v-for="citation in test.citations" :key="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} ↗</a></div></div><div v-else class="test-empty">Ask a question to see the live answer and its sources.</div></div><div v-if="test.suggestedQuestions.length" class="test-suggestions"><span>Try a common question</span><button v-for="suggestion in test.suggestedQuestions.slice(0, 4)" :key="suggestion" type="button" @click="ask(suggestion)">{{ suggestion }} <b>›</b></button></div><form class="test-composer" @submit.prevent="ask()"><input v-model="testPrompt" type="text" placeholder="e.g. What services do you offer?" aria-label="Test customer question" /><button class="primary-button small" type="submit" :disabled="test.isAsking || !testPrompt.trim()">{{ test.isAsking ? 'Checking…' : 'Send as visitor' }}</button></form></article>
       <aside class="test-owner-panel panel"><div class="agent-section-heading"><div><p class="section-kicker">Owner checks</p><h3>What to verify</h3></div></div><div class="owner-check-list"><div><span :class="statusClass(Boolean(test.answer && test.grounded))">✓</span><span><strong>Grounded answers</strong><small>{{ test.answer && test.grounded ? 'Grounded in business knowledge' : 'Ask a knowledge question' }}</small></span></div><div><span :class="statusClass(test.citations.length > 0)">✓</span><span><strong>Sources</strong><small>{{ test.citations.length ? `${test.citations.length} source${test.citations.length === 1 ? '' : 's'}` : 'Sources appear with grounded answers' }}</small></span></div><div><span :class="statusClass(Boolean(test.action))">✓</span><span><strong>Action flows</strong><small>{{ test.action ? 'Action flow is running in the conversation' : 'Try a quick action or ask for help' }}</small></span></div><div><span :class="statusClass(Boolean(test.action?.status === 'completed'))">✓</span><span><strong>Completion</strong><small>{{ test.action?.status === 'completed' ? 'Test lead captured' : 'Submit the conversational form to verify' }}</small></span></div></div><div v-if="test.action?.status === 'completed'" class="test-success"><strong>✓ Test lead captured</strong><button class="text-button" type="button" @click="emit('view-leads')">View in Leads →</button></div><p class="test-owner-note">Internal details stay summarized here. Visitors only see the conversation.</p></aside>
     </div>
 
@@ -386,15 +413,15 @@ function sendDeveloperInstructions(): void {
       <p class="support-drawer-copy">Tell us where you’re stuck and our team will reply with the next step.</p>
       <div v-if="supportSubmitted || installationSupportMessage" class="support-success"><strong>Request sent ✓</strong><p>{{ installationSupportMessage || 'We’ll be in touch soon with installation help.' }}</p><button class="primary-button small" type="button" @click="supportDrawerOpen = false">Done</button></div>
       <form v-else class="support-form" @submit.prevent="submitInstallationSupport">
-        <label>Name<input v-model="supportForm.name" type="text" autocomplete="name" required /></label>
+        <label>Name<input v-model="supportName" type="text" autocomplete="name" required /></label>
         <label>Business<input :value="businessName" type="text" readonly /></label>
         <label>Website<input :value="websiteUrl" type="url" readonly /></label>
-        <label>Platform<select v-model="supportForm.platform"><option value="wordpress">WordPress</option><option value="wix">Wix</option><option value="shopify">Shopify</option><option value="squarespace">Squarespace</option><option value="custom">Custom</option><option value="not_sure">Not sure</option></select></label>
-        <label>What do you need help with?<input v-model="supportForm.helpRequest" type="text" maxlength="240" required placeholder="e.g. I’m not sure where to paste the code" /></label>
-        <label>Preferred contact method<select v-model="supportForm.preferredContactMethod"><option value="email">Email</option><option value="phone">Phone</option></select></label>
-        <label>{{ supportForm.preferredContactMethod === 'email' ? 'Email address' : 'Phone number' }}<input v-model="supportForm.contactValue" :type="supportForm.preferredContactMethod === 'email' ? 'email' : 'tel'" required /></label>
-        <label>Message <span class="optional">optional</span><textarea v-model="supportForm.message" rows="4" maxlength="4000" placeholder="Add any details that would help us understand where you’re stuck."></textarea></label>
-        <label>Screenshot link <span class="optional">optional</span><input v-model="supportForm.screenshotUrl" type="url" placeholder="https://…" /></label>
+        <label>Platform<select v-model="supportPlatform"><option value="wordpress">WordPress</option><option value="wix">Wix</option><option value="shopify">Shopify</option><option value="squarespace">Squarespace</option><option value="custom">Custom</option><option value="not_sure">Not sure</option></select></label>
+        <label>What do you need help with?<input v-model="supportHelpRequest" type="text" maxlength="240" required placeholder="e.g. I’m not sure where to paste the code" /></label>
+        <label>Preferred contact method<select v-model="supportPreferredContactMethod"><option value="email">Email</option><option value="phone">Phone</option></select></label>
+        <label>{{ supportPreferredContactMethod === 'email' ? 'Email address' : 'Phone number' }}<input v-model="supportContactValue" :type="supportPreferredContactMethod === 'email' ? 'email' : 'tel'" required /></label>
+        <label>Message <span class="optional">optional</span><textarea v-model="supportMessage" rows="4" maxlength="4000" placeholder="Add any details that would help us understand where you’re stuck."></textarea></label>
+        <label>Screenshot link <span class="optional">optional</span><input v-model="supportScreenshotUrl" type="url" placeholder="https://…" /></label>
         <p v-if="installationSupportError" class="form-error">{{ installationSupportError }}</p>
         <div class="drawer-actions"><button class="outline-button small" type="button" @click="supportDrawerOpen = false">Cancel</button><button class="primary-button small" type="submit" :disabled="installationSupportLoading">{{ installationSupportLoading ? 'Sending…' : 'Request installation help' }}</button></div>
       </form>

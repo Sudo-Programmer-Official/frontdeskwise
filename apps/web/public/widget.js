@@ -14,7 +14,7 @@
     <style>
       :host { all: initial; }
       * { box-sizing: border-box; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
-      .launcher { position: fixed; right: 22px; bottom: 22px; z-index: 2147483000; display: grid; place-items: center; width: 58px; height: 58px; border: 0; border-radius: 18px; color: #fff; background: var(--accent, #0d6efd); box-shadow: 0 14px 30px rgba(13, 75, 160, .28); cursor: pointer; font-size: 24px; transition: transform .18s ease, box-shadow .18s ease; }
+      .launcher { position: fixed; right: 22px; bottom: 22px; z-index: 2147483000; display: grid; place-items: center; width: 58px; height: 58px; border: 0; border-radius: 18px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); box-shadow: 0 14px 30px rgba(13, 75, 160, .28); cursor: pointer; font-size: 24px; transition: transform .18s ease, box-shadow .18s ease; }
       .launcher:hover { transform: translateY(-2px); box-shadow: 0 18px 34px rgba(13, 75, 160, .34); }
       .launcher[hidden] { display: none; }
       .panel { position: fixed; right: 22px; bottom: 92px; z-index: 2147483000; display: none; flex-direction: column; width: min(420px, calc(100vw - 32px)); height: min(680px, calc(100vh - 120px)); overflow: hidden; border: 1px solid #d7e1ee; border-radius: 18px; color: #182b49; background: #fff; box-shadow: 0 24px 70px rgba(13, 44, 91, .24); }
@@ -35,17 +35,17 @@
         .panel.theme-auto .composer { background: #182a43; border-color: #2f4768; }
         .panel.theme-auto .composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
       }
-      .header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: #fff; background: var(--accent, #0d6efd); }
+      .header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); }
       .identity { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
       .logo, .orb { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.2); }
       .logo { object-fit: cover; background: #fff; }
       .title-group { display: grid; gap: 2px; min-width: 0; }
       .title-group strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; letter-spacing: -.01em; }
-      .title-group small { color: rgba(255,255,255,.76); font-size: 10px; }
+      .title-group small { color: currentColor; opacity: .68; font-size: 10px; }
       .handoff-status { display: none; margin: 0 15px 10px; padding: 9px 11px; border: 1px solid #cfe0f7; border-radius: 9px; color: #36577e; background: #f3f8ff; font-size: 11px; line-height: 1.4; }
       .handoff-status.open { display: block; }
       .header-actions { display: flex; gap: 4px; }
-      .header-actions button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: #fff; background: transparent; cursor: pointer; font-size: 17px; }
+      .header-actions button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: currentColor; background: transparent; cursor: pointer; font-size: 17px; }
       .header-actions button:hover, .header-actions button:focus-visible { background: rgba(255,255,255,.16); outline: none; }
       .messages { display: flex; flex: 1; flex-direction: column; align-content: flex-start; gap: 10px; min-height: 0; overflow: auto; padding: 18px 16px 12px; background: #f8fafd; }
       .message { align-self: flex-start; max-width: min(88%, 560px); padding: 11px 12px; border: 1px solid #e1e9f3; border-radius: 6px 14px 14px 14px; color: #445873; background: #fff; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
@@ -56,21 +56,29 @@
       .quick-actions[hidden] { display: none; }
       .quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
       .quick-actions button:hover, .quick-actions button:focus-visible { border-color: var(--accent, #0d6efd); color: var(--accent, #0d6efd); outline: none; }
-      .action-form { display: grid; gap: 8px; margin: 0 15px 13px; padding: 12px; border: 1px solid #dbe7f8; border-radius: 11px; background: #f7faff; }
+      .action-form { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
       .action-form[hidden] { display: none; }
-      .action-form label { display: grid; gap: 4px; color: #5e708a; font-size: 10px; font-weight: 750; }
-      .action-form input, .action-form select { width: 100%; padding: 9px; border: 1px solid #dbe4ef; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 11px; }
+      .action-form label { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
+      .action-form label > span:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
+      .action-form label > span:first-child em { color: #9aa7b7; font-size: 10px; font-style: normal; font-weight: 500; }
+      .action-form label > span:first-child b, .lead-heading b { color: #c34e47; }
+      .action-form input, .action-form select { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cbd7e5; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 12px; }
       .action-form input:focus, .action-form select:focus, .lead input:focus, .composer input:focus { border-color: var(--accent, #0d6efd); box-shadow: 0 0 0 3px rgba(13,110,253,.12); }
-      .action-form button { padding: 10px; border: 0; border-radius: 8px; color: #fff; background: var(--accent, #0d6efd); cursor: pointer; font-size: 11px; font-weight: 800; }
-      .lead { display: none; gap: 7px; padding: 0 15px 13px; }
+      .action-form button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); cursor: pointer; font-size: 12px; font-weight: 800; }
+      .lead { display: none; gap: 10px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
       .lead.open { display: grid; }
-      .lead small { color: #687b94; font-size: 11px; }
-      .lead input { padding: 9px; border: 1px solid #dbe4ef; border-radius: 8px; outline: none; font-size: 11px; }
+      .lead-heading { display: grid; gap: 4px; margin-bottom: 2px; }
+      .lead-heading strong { color: #1f3658; font-size: 13px; letter-spacing: -.01em; }
+      .lead-heading small { color: #687b94; font-size: 10px; line-height: 1.4; }
+      .lead label:not(.consent-row) { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
+      .lead label:not(.consent-row) > span { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
+      .lead label:not(.consent-row) em { color: #9aa7b7; font-size: 10px; font-style: normal; font-weight: 500; }
+      .lead input { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cbd7e5; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 12px; }
       .consent-row { display: flex; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
       .consent-row[hidden] { display: none; }
       .consent-row input { flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--accent, #0d6efd); }
       .consent-row a { color: #1769c2; font-weight: 700; }
-      .lead button { padding: 9px; border: 0; border-radius: 8px; color: #fff; background: var(--accent, #0d6efd); cursor: pointer; font-size: 11px; font-weight: 800; }
+      .lead button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); cursor: pointer; font-size: 12px; font-weight: 800; }
       .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e6edf5; background: #fff; }
       .composer input { min-width: 0; flex: 1; padding: 11px 12px; border: 1px solid #d5e0ed; border-radius: 9px; outline: none; color: #243957; font-size: 12px; }
       .composer button { width: 40px; border: 0; border-radius: 9px; color: #fff; background: var(--accent, #0d6efd); cursor: pointer; font-size: 15px; font-weight: 800; }
@@ -91,7 +99,7 @@
       <div class="handoff-status"></div>
       <div class="quick-actions" hidden></div>
       <form class="action-form" hidden></form>
-      <div class="lead"><small>Want a team member to follow up?</small><input type="email" placeholder="Your email" aria-label="Your email"/><label class="consent-row" hidden><input class="lead-consent" type="checkbox" name="consent"/><span>I agree to share my details with this business. <a class="privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><button type="button">Send details</button></div>
+      <form class="lead"><div class="lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required/></label><label><span>Email <b>*</b></span><input class="lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required/></label><label><span>Phone <em>Optional</em></span><input class="lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"/></label><label class="consent-row" hidden><input class="lead-consent" type="checkbox" name="consent"/><span>I agree to share my details with this business. <a class="privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><button type="submit">Continue</button></form>
       <form class="composer"><input placeholder="Ask a question…" aria-label="Ask a question"/><button aria-label="Send" type="submit">➤</button></form>
     </section>`;
 
@@ -109,7 +117,9 @@
   var input = composer.querySelector("input");
   var actionForm = shadow.querySelector(".action-form");
   var lead = shadow.querySelector(".lead");
-  var leadInput = lead.querySelector("input");
+  var leadNameInput = lead.querySelector(".lead-name");
+  var leadEmailInput = lead.querySelector(".lead-email");
+  var leadPhoneInput = lead.querySelector(".lead-phone");
   var leadConsentRow = shadow.querySelector(".consent-row");
   var leadConsent = shadow.querySelector(".lead-consent");
   var privacyLink = shadow.querySelector(".privacy-link");
@@ -123,6 +133,16 @@
   var mode = "compact";
   var lastViewedField = null;
   var visitorId = getVisitorId();
+
+  function accessibleTextColor(hex) {
+    if (!/^#[0-9a-f]{6}$/i.test(hex || "")) return "#ffffff";
+    var channels = [1, 3, 5].map(function (offset) {
+      var channel = parseInt(hex.slice(offset, offset + 2), 16) / 255;
+      return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+    });
+    var luminance = channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+    return luminance > .48 ? "#14233d" : "#ffffff";
+  }
   var proactiveTimer = null;
   var proactiveShown = false;
 
@@ -274,7 +294,18 @@
     }
     action.form.fields.forEach(function (field) {
       var label = document.createElement("label");
-      label.textContent = field.label + (field.required ? "" : " (optional)");
+      var labelText = document.createElement("span");
+      labelText.textContent = field.label;
+      if (field.required) {
+        var required = document.createElement("b");
+        required.textContent = " *";
+        labelText.appendChild(required);
+      } else {
+        var optional = document.createElement("em");
+        optional.textContent = "Optional";
+        labelText.appendChild(optional);
+      }
+      label.appendChild(labelText);
       var control;
       if (field.type === "select") {
         control = document.createElement("select");
@@ -333,8 +364,11 @@
     var payload = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/config");
     config = payload;
     var agent = payload.agent || {};
-    panel.style.setProperty("--accent", agent.widgetColor || "#0d6efd");
-    launcher.style.setProperty("--accent", agent.widgetColor || "#0d6efd");
+    var accent = /^#[0-9a-f]{6}$/i.test(agent.widgetColor || "") ? agent.widgetColor : "#0d6efd";
+    panel.style.setProperty("--accent", accent);
+    panel.style.setProperty("--accent-text", accessibleTextColor(accent));
+    launcher.style.setProperty("--accent", accent);
+    launcher.style.setProperty("--accent-text", accessibleTextColor(accent));
     panel.classList.remove("theme-light", "theme-dark", "theme-auto", "position-bottom-right", "position-bottom-left");
     launcher.classList.remove("position-bottom-right", "position-bottom-left");
     panel.classList.add("theme-" + (agent.widgetTheme || "auto"), "position-" + (agent.widgetPosition || "bottom-right"));
@@ -475,15 +509,18 @@
       actionSubmitting = false;
     }
   });
-  lead.querySelector("button").addEventListener("click", async function () {
-    var email = leadInput.value.trim();
-    if (!email || !conversationId) return;
+  lead.addEventListener("submit", async function (event) {
+    event.preventDefault();
+    var name = leadNameInput.value.trim();
+    var email = leadEmailInput.value.trim();
+    var phone = leadPhoneInput.value.trim();
+    if (!name || !email || !conversationId) return;
     if (config && config.agent && config.agent.requireLeadConsent && !leadConsent.checked) {
       addMessage("Please confirm that you agree to share your details.", false);
       return;
     }
     try {
-      await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/leads", { method: "POST", body: JSON.stringify({ conversationId: conversationId, email: email, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
+      await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/leads", { method: "POST", body: JSON.stringify({ conversationId: conversationId, name: name, email: email, phone: phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
       lead.classList.remove("open");
       addMessage("Thanks — the team can follow up with you.", false);
     } catch (error) {
