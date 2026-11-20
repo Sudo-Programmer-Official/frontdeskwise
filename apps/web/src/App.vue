@@ -1829,6 +1829,15 @@ const landingCapabilities = [
   { icon: "ϟ", tone: "purple", title: "Works with your existing systems", body: "Connect your CRM, booking tools, calendar, email, webhooks, or MCP-powered tools." },
 ];
 
+const landingIntegrations = [
+  { name: "HubSpot", kind: "CRM", icon: "◈", tone: "orange", outcome: "Qualified lead created" },
+  { name: "Zapier", kind: "Automation", icon: "✱", tone: "orange", outcome: "Workflow triggered" },
+  { name: "Make", kind: "Automation", icon: "M", tone: "purple", outcome: "Data delivered" },
+  { name: "Booking tools", kind: "Appointments", icon: "▣", tone: "blue", outcome: "Request sent" },
+  { name: "Email", kind: "Notifications", icon: "✉", tone: "blue", outcome: "Team notified" },
+  { name: "API / MCP", kind: "Custom workflows", icon: "</>", tone: "blue", outcome: "Tool executed" },
+];
+
 const landingPlans = [
   { key: "starter", name: "Starter", price: "$99", description: "A grounded AI front desk for one business.", businesses: "1 business", featured: false, badge: "", bullets: ["AI answers from your website", "Lead capture", "Basic analytics", "Website widget", "Free setup help included"] },
   { key: "growth", name: "Growth", price: "$199", description: "More volume, routing, and operating visibility.", businesses: "1 business", featured: false, badge: "", bullets: ["Everything in Starter", "Higher conversation volume", "Advanced actions", "Integrations + team handoff", "Guided setup assistance"] },
@@ -4211,7 +4220,7 @@ function startMarketingDemo() {
       </section>
 
       <section id="industries" class="landing-section landing-industries-section">
-        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">Works where you work</p><h2>Show customers what happens next.</h2></div><p>Real conversations. Clear outcomes. A front desk that feels useful from the first question.</p></div>
+        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">Works where you work</p><h2>Show customers what happens next.</h2></div></div>
         <div class="landing-industry-grid">
           <article v-for="industry in landingIndustries" :key="industry.name" class="landing-industry-card">
             <div class="landing-industry-top"><span class="landing-industry-icon">{{ industry.icon }}</span><span class="landing-industry-tag">{{ industry.name }}</span></div>
@@ -4223,13 +4232,37 @@ function startMarketingDemo() {
       </section>
 
       <section class="landing-section landing-setup-section">
-        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">From website to working agent</p><h2>Built from your website. Ready for your review.</h2></div><p>One URL gives you a starting point. You decide what the AI can say, do, and hand off.</p></div>
+        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">From website to working agent</p><h2>Built from your website. Ready for your review.</h2></div></div>
         <div class="landing-setup-grid"><div class="landing-setup-steps"><article><span>01</span><div><h3>Paste your URL</h3><p><code>yourbusiness.com</code></p></div></article><article><span>02</span><div><h3>FrontDeskWise learns your business</h3><p>Services, pricing, locations, and policies are organized for review.</p></div></article><article><span>03</span><div><h3>Review and test</h3><p>Ask real questions before anything goes live.</p></div></article><article><span>04</span><div><h3>Add it to your website</h3><p>Install the widget and start capturing the next opportunity.</p></div></article></div><LandingVideo src="/video/frameflow-1795189292121.mp4" poster="/video/onboarding-poster.jpg" lazy ariaLabel="FrontDeskWise turns a website URL into a reviewed, ready-to-install AI front desk" description="A product demonstration showing website learning, business knowledge readiness, testing, and installation." /></div>
       </section>
 
       <section class="landing-section landing-handoff-section"><div class="landing-handoff-card"><LandingVideo src="/video/frameflow-1795189415791.mp4" poster="/video/handoff-poster.jpg" lazy ariaLabel="FrontDeskWise hands a customer conversation to a staff member with context preserved" description="A product demonstration showing AI recognizing a human need, bringing in staff, and preserving the conversation context." /><div class="landing-handoff-copy"><p class="eyebrow">AI + your team</p><h2>AI when it can help. Your team when it matters.</h2><p>FrontDeskWise handles routine questions automatically and brings your team into the conversation when a human touch is needed — with the full context already attached.</p><button class="landing-text-link" type="button" @click="openAuth('signup')">Start with a safer front desk</button></div></div></section>
 
-      <section class="landing-section landing-integrations-section"><div class="landing-section-heading"><p class="eyebrow">Fits your existing workflow</p><h2>Works with the tools your business already uses.</h2><p>Capture the lead first, then send it into the systems your team already trusts.</p></div><div class="landing-integration-row"><span>CRM</span><span>Booking</span><span>Calendar</span><span>Email</span><span>Zapier</span><span>Make</span><span>HubSpot</span><span>Custom API / MCP</span></div></section>
+      <section class="landing-section landing-integrations-section">
+        <div class="landing-integrations-layout">
+          <div class="landing-integrations-copy">
+            <p class="eyebrow">Fits your existing workflow</p>
+            <h2>Your AI front desk connects the conversation to the tools that run your business.</h2>
+            <p>FrontDeskWise captures the customer context first, then sends the right information to your CRM, booking tools, automations, email, or custom systems.</p>
+            <a class="primary-button landing-integrations-cta" href="/integrations">Explore integrations</a>
+          </div>
+          <div class="landing-integration-map" aria-label="FrontDeskWise routes customer context into business tools">
+            <div class="landing-integration-visitor"><span class="landing-integration-visitor-icon" aria-hidden="true">○</span><span><strong>Website visitor</strong><b>“I’d like to book a consultation.”</b></span></div>
+            <span class="landing-integration-arrow" aria-hidden="true">↓</span>
+            <div class="landing-integration-core"><div class="landing-integration-brand"><span aria-hidden="true">✦</span> FrontDesk<span>Wise</span></div><strong>Answer <i>→</i> Qualify <i>→</i> Act</strong><span class="landing-integration-context">✓ Customer context ready</span></div>
+            <div class="landing-integration-branch" aria-hidden="true"></div>
+            <div class="landing-integration-card-grid">
+              <article v-for="integration in landingIntegrations" :key="integration.name" class="landing-integration-card">
+                <span :class="['landing-integration-icon', integration.tone]" aria-hidden="true">{{ integration.icon }}</span>
+                <strong>{{ integration.name }}</strong>
+                <small>{{ integration.kind }}</small>
+                <span class="landing-integration-outcome">✓ {{ integration.outcome }}</span>
+              </article>
+            </div>
+            <div class="landing-integration-trust"><span>◉ <b>Lead saved first</b></span><span>↻ <b>Retries on delivery failure</b></span><span>♢ <b>Your systems stay in control</b></span></div>
+          </div>
+        </div>
+      </section>
 
       <section class="landing-section landing-dashboard-section">
         <div class="landing-dashboard-copy"><p class="eyebrow">A clearer owner view</p><h2>Know what your AI front desk is doing for the business.</h2><p>See conversations, leads, booking actions, handoffs, and the questions worth adding to your knowledge base.</p><span class="landing-illustrative-note">Illustrative sample workspace · not customer data</span><button class="outline-button" type="button" @click="openAuth('signup')">Create your workspace</button></div>
