@@ -14,6 +14,8 @@ The code now adds intent-aware source filtering, semantic source types, coverage
 
 Continuation audit result: a sanitized direct provider probe confirmed `HTTP 401`, error code `invalid_api_key`, for the configured OpenAI embedding request. The key is present in the local API environment and uses the project-key prefix, but OpenAI rejects it. The configured model is `text-embedding-3-small`; the request and vector schema both use 1,536 dimensions. No secret value is recorded here.
 
+Post-key verification found an important tenant distinction. The dashboard URL in the current browser is `plancraftai-ajg8l`, a separate tenant from the primary audit tenant `plancraftai`. The visible tenant now has 157/157 embedded chunks and a succeeded `text-embedding-3-small` job. Recent post-job services and contact answers record `retrieval_mode = hybrid_rrf`. The primary audit tenant remains at 0/157 with its latest job failed on HTTP 401. The original audit verdict therefore remains `NOT READY` for the primary tenant; the visible tenant has a healthy embedding job but still needs fresh post-reindex relevance evaluation and the improved ingestion crawl.
+
 ## Current pipeline
 
 ```text
@@ -231,6 +233,10 @@ The code now records the required operational counters and emits the provider/co
 - Pricing, reminders, calendar integration, voice task capture, daily planning, teams/workspaces, and core product capabilities are covered by current sources.
 
 The assistant should continue to abstain for unsupported gaps instead of treating adjacent product or reminder content as evidence.
+
+## Fallback policy
+
+The conversation path now separates three outcomes: answerable questions receive grounded answers; knowledge gaps stay in AI mode, return a verified-information fallback, optionally expose a contact quick action, and record an open answer gap with intent/reason/occurrences; explicit requests for a human trigger handoff immediately. A permissions question therefore no longer notifies staff unless the visitor chooses the contact action or explicitly asks for a person.
 
 ## Recommended operational sequence
 

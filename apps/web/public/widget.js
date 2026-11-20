@@ -216,7 +216,7 @@
       return;
     }
     if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED") {
-      handoffStatus.textContent = "You’re connected with the team. You can keep sending messages here.";
+      handoffStatus.textContent = "A team member is now helping you. You can keep sending messages here.";
       handoffStatus.classList.add("open");
       subtitle.textContent = "Connected to the team";
       return;
@@ -239,7 +239,7 @@
       (payload.messages || []).forEach(function (message) {
         if (message.role !== "human" && message.role !== "system") return;
         var key = String(message.createdAt || "") + ":" + String(message.role || "") + ":" + String(message.content || "");
-        addMessage(message.content || "", false, null, key);
+        addMessage((message.authorName ? message.authorName + ": " : "") + (message.content || ""), false, null, key);
       });
     } catch (_) {
       // Polling is best-effort; the visitor can continue using the assistant.
@@ -452,7 +452,7 @@
         conversationId = started.conversationId;
         if (started.resumed) {
           var history = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/conversations/" + encodeURIComponent(conversationId));
-          (history.messages || []).forEach(function (message) { addMessage(message.content || "", message.role === "user", message.citations && message.citations[0], String(message.createdAt || "") + ":history"); });
+          (history.messages || []).forEach(function (message) { addMessage((message.role === "human" && message.authorName ? message.authorName + ": " : "") + (message.content || ""), message.role === "user", message.citations && message.citations[0], String(message.createdAt || "") + ":history"); });
           renderConversationStatus(history.conversation && history.conversation.status);
         }
       }
@@ -461,9 +461,10 @@
       addMessage(answer.answer, false, answer.citations && answer.citations[0]);
       renderConversationStatus(answer.conversation && answer.conversation.status);
       if (answer.conversation && answer.conversation.status !== "AI_ACTIVE") startPolling();
+      renderQuickActions(answer.quickActions);
       renderActionForm(answer.action);
       if (answer.action) lead.classList.remove("open");
-      if (!answer.grounded && !answer.action) lead.classList.add("open");
+      if (!answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length)) lead.classList.add("open");
     } catch (error) {
       addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", false);
     }

@@ -1,7 +1,7 @@
 export type HandoffStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED";
 
 export function isExplicitHumanRequest(question: string): boolean {
-  return /\b(talk|speak|connect|chat|reach)\b.{0,24}\b(person|human|staff|team|representative|agent)\b|\b(human|staff|team member|representative|real person)\b/i.test(question)
+  return /\b(talk|speak|connect|chat|reach)\b.{0,24}\b(someone|person|human|staff|team|representative|agent)\b|\b(get|put|connect|transfer)\b.{0,16}\b(me|us)\b.{0,12}\b(someone|person|human|staff|team|representative|agent)\b|\b(human|staff|team member|representative|real person)\b/i.test(question)
     || /\b(someone|a person)\s+(call|contact|help|reach)\s+me\b/i.test(question);
 }
 

@@ -14,6 +14,7 @@ export type LifecycleEventType =
   | "SUBSCRIPTION_CANCELED"
   | "TEAM_INVITED"
   | "HUMAN_HANDOFF"
+  | "KNOWLEDGE_GAP"
   | "QUALIFIED_LEAD"
   | "INTEGRATION_FAILURE";
 
@@ -25,6 +26,8 @@ export type LifecycleEvent = {
   recipientUserId?: string | null;
   recipientUserIds?: string[];
   recipientEmail?: string | null;
+  recipientEmails?: string[];
+  delaySeconds?: number;
   payload?: Record<string, unknown>;
 };
 
@@ -61,6 +64,16 @@ type MessageAutomation = {
 
 type DeliveryRecipient = { id: string | null; email: string };
 
+function uniqueRecipients(recipients: DeliveryRecipient[]): DeliveryRecipient[] {
+  const seen = new Set<string>();
+  return recipients.filter((recipient) => {
+    const key = recipient.email.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
@@ -73,6 +86,7 @@ function normalizedEmail(value: unknown): string | null {
 
 function preferenceKey(eventType: LifecycleEventType): string | null {
   if (eventType === "HUMAN_HANDOFF") return "human_handoff";
+  if (eventType === "KNOWLEDGE_GAP") return "knowledge_gap";
   if (eventType === "QUALIFIED_LEAD") return "new_lead";
   if (eventType === "INTEGRATION_FAILURE") return "integration_failure";
   return null;
@@ -159,25 +173,37 @@ export function lifecycleTemplatePayload(row: Record<string, unknown>): Lifecycl
 
 async function recipientsForAutomation(pool: Pool, automation: MessageAutomation, event: LifecycleEvent): Promise<DeliveryRecipient[]> {
   if (automation.recipient_scope === "event_recipient") {
+    const recipients: DeliveryRecipient[] = [];
     if (event.recipientUserId) {
       const result = await pool.query<{ id: string; email: string }>(
         "select id, email from app_users where id = $1 and status <> 'disabled'",
         [event.recipientUserId],
       );
-      return result.rows.map((row) => ({ id: row.id, email: row.email.toLowerCase() }));
+      recipients.push(...result.rows.map((row) => ({ id: row.id, email: row.email.toLowerCase() })));
     }
     const email = normalizedEmail(event.recipientEmail);
-    return email ? [{ id: null, email }] : [];
+    if (email) recipients.push({ id: null, email });
+    for (const candidate of event.recipientEmails ?? []) {
+      const normalized = normalizedEmail(candidate);
+      if (normalized) recipients.push({ id: null, email: normalized });
+    }
+    return uniqueRecipients(recipients);
   }
 
   if (!event.businessId) return [];
+  const explicitRecipients: DeliveryRecipient[] = [];
   if (event.recipientUserIds?.length) {
     const explicit = await pool.query<{ id: string; email: string }>(
       "select id, email from app_users where id = any($1::uuid[]) and status = 'active' order by email",
       [event.recipientUserIds],
     );
-    return explicit.rows.map((row) => ({ id: row.id, email: row.email.toLowerCase() }));
+    explicitRecipients.push(...explicit.rows.map((row) => ({ id: row.id, email: row.email.toLowerCase() })));
   }
+  for (const candidate of event.recipientEmails ?? []) {
+    const normalized = normalizedEmail(candidate);
+    if (normalized) explicitRecipients.push({ id: null, email: normalized });
+  }
+  if (explicitRecipients.length) return uniqueRecipients(explicitRecipients);
   const roles = automation.recipient_scope === "business_owners"
     ? ["owner", "admin"]
     : ["owner", "admin", "staff"];
@@ -192,7 +218,7 @@ async function recipientsForAutomation(pool: Pool, automation: MessageAutomation
      order by u.email`,
     [event.businessId, roles, roles.filter((role) => role !== "owner")],
   );
-  return result.rows.map((row) => ({ id: row.id, email: row.email.toLowerCase() }));
+  return uniqueRecipients(result.rows.map((row) => ({ id: row.id, email: row.email.toLowerCase() })));
 }
 
 async function recipientEnabled(pool: Pool, recipient: DeliveryRecipient, event: LifecycleEvent, automation: MessageAutomation): Promise<boolean> {
@@ -251,7 +277,7 @@ export async function emitLifecycleEvent(pool: Pool | null, event: LifecycleEven
           recipient.id,
           recipient.email,
           JSON.stringify(payload),
-          automation.delay_seconds,
+          event.delaySeconds ?? automation.delay_seconds,
         ],
       );
       queued += result.rowCount ?? 0;
@@ -310,6 +336,17 @@ export async function processLifecycleMessagingOutbox(pool: Pool | null = null):
       );
       if (!claim.rowCount) break;
       const delivery = claim.rows[0];
+      const deliveryPayload = record(delivery.payload);
+      if (delivery.event_type === "HUMAN_HANDOFF" && deliveryPayload.handoff_reminder === true && deliveryPayload.conversation_id && delivery.business_id) {
+        const conversation = await pool.query<{ status: string }>(
+          "select status from conversations where id = $1 and business_id = $2",
+          [String(deliveryPayload.conversation_id), String(delivery.business_id)],
+        );
+        if (!conversation.rows[0] || !["HANDOFF_REQUESTED", "WAITING_FOR_STAFF"].includes(conversation.rows[0].status)) {
+          await pool.query("update message_deliveries set status = 'canceled', updated_at = now() where id = $1", [delivery.id]);
+          continue;
+        }
+      }
       try {
         if (delivery.template_status !== "active") throw new Error("Message template is not active");
         if (!sesConfigured()) throw new Error("Email delivery is not configured");

@@ -35,6 +35,12 @@ import {
   type RetrievalIntent,
 } from "./retrieval.js";
 import {
+  knowledgeGapContactAction,
+  knowledgeGapMessage,
+  knowledgeGapReason,
+  type KnowledgeGapReason,
+} from "./knowledge-gap-policy.js";
+import {
   embeddingReadiness,
   ragMetricsSnapshot,
   recordAnswer,
@@ -309,6 +315,32 @@ type Conversation = {
   updatedAt: string;
 };
 
+type HandoffNotificationSettings = {
+  enabled: boolean;
+  defaultRecipientEmail: string | null;
+  additionalRecipientEmails: string[];
+  handoffDelaySeconds: 0 | 120 | 300;
+  repeatEnabled: boolean;
+  repeatAfterSeconds: number;
+  notifyExplicitHumanRequest: boolean;
+  notifyKnowledgeGap: boolean;
+  notifyHighValueLead: boolean;
+  notifyEveryLead: boolean;
+};
+
+const defaultHandoffNotificationSettings: HandoffNotificationSettings = {
+  enabled: true,
+  defaultRecipientEmail: null,
+  additionalRecipientEmails: [],
+  handoffDelaySeconds: 0,
+  repeatEnabled: false,
+  repeatAfterSeconds: 600,
+  notifyExplicitHumanRequest: true,
+  notifyKnowledgeGap: false,
+  notifyHighValueLead: true,
+  notifyEveryLead: false,
+};
+
 type ConversationEvent = {
   id: string;
   businessId: string;
@@ -407,6 +439,8 @@ type KnowledgeGap = {
   status: "open" | "resolved";
   approvedAnswer: string | null;
   lastSeenAt: string;
+  intent: RetrievalIntent | null;
+  reason: KnowledgeGapReason | "legacy_unknown";
 };
 
 type EvaluationExpectation = "grounded" | "fallback";
@@ -620,6 +654,48 @@ function lifecycleAppUrl(path: string): string {
   return `${origin.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+function normalizedNotificationEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const email = value.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email.slice(0, 320) : null;
+}
+
+function normalizedNotificationEmails(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\n,]+/) : [];
+  return [...new Set(values.map(normalizedNotificationEmail).filter((email): email is string => Boolean(email)))].slice(0, 20);
+}
+
+function handoffNotificationSettingsPayload(row?: Record<string, unknown>): HandoffNotificationSettings {
+  const delay = Number(row?.handoff_delay_seconds ?? defaultHandoffNotificationSettings.handoffDelaySeconds);
+  const handoffDelaySeconds: 0 | 120 | 300 = delay === 120 || delay === 300 ? delay : 0;
+  return {
+    enabled: row?.handoff_enabled !== false,
+    defaultRecipientEmail: normalizedNotificationEmail(row?.default_recipient_email),
+    additionalRecipientEmails: normalizedNotificationEmails(row?.additional_recipient_emails),
+    handoffDelaySeconds,
+    repeatEnabled: row?.repeat_enabled === true,
+    repeatAfterSeconds: Math.max(60, Math.min(86_400, Number(row?.repeat_after_seconds ?? 600))),
+    notifyExplicitHumanRequest: row?.notify_explicit_human_request !== false,
+    notifyKnowledgeGap: row?.notify_knowledge_gap === true,
+    notifyHighValueLead: row?.notify_high_value_lead !== false,
+    notifyEveryLead: row?.notify_every_lead === true,
+  };
+}
+
+async function loadHandoffNotificationSettings(business: Business): Promise<HandoffNotificationSettings> {
+  if (!pool) return { ...defaultHandoffNotificationSettings };
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      "select * from business_notification_settings where business_id = $1",
+      [business.id],
+    );
+    return handoffNotificationSettingsPayload(result.rows[0]);
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    return { ...defaultHandoffNotificationSettings };
+  }
+}
+
 async function queueLifecycleEvent(input: {
   eventType: LifecycleEventType;
   eventKey: string;
@@ -628,6 +704,8 @@ async function queueLifecycleEvent(input: {
   recipientUserId?: string | null;
   recipientUserIds?: string[];
   recipientEmail?: string | null;
+  recipientEmails?: string[];
+  delaySeconds?: number;
   payload?: Record<string, unknown>;
 }): Promise<void> {
   try {
@@ -2045,6 +2123,12 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         status: gap.status === "resolved" ? "resolved" : "open",
         approvedAnswer: typeof gap.approved_answer === "string" ? gap.approved_answer : null,
         lastSeenAt: toIso(gap.last_seen_at),
+        intent: ["services", "hours", "contact", "pricing", "location", "booking", "reminders", "calendar", "voice", "teams", "permissions", "privacy", "policy", "support", "general", "unsupported"].includes(String(gap.intent))
+          ? String(gap.intent) as RetrievalIntent
+          : null,
+        reason: ["no_authoritative_source", "low_confidence_evidence", "answer_generation_failed", "grounding_check_failed"].includes(String(gap.reason))
+          ? String(gap.reason) as KnowledgeGapReason
+          : "legacy_unknown",
       } satisfies KnowledgeGap,
     ])),
     agentConfig: config ? {
@@ -2368,13 +2452,15 @@ async function persistLead(business: Business, lead: Lead): Promise<Lead> {
 async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> {
   if (!pool) return;
   const result = await pool.query<{ occurrence_count: number }>(
-    `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, last_seen_at)
-     values ($1, $2, 1, $3, $4, $5)
+    `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, last_seen_at, intent, reason)
+     values ($1, $2, 1, $3, $4, $5, $6, $7)
      on conflict (business_id, question) do update set
        occurrence_count = knowledge_gaps.occurrence_count + 1,
-       last_seen_at = excluded.last_seen_at
+       last_seen_at = excluded.last_seen_at,
+       intent = excluded.intent,
+       reason = excluded.reason
      returning occurrence_count`,
-    [business.id, gap.question, gap.status, gap.approvedAnswer, gap.lastSeenAt],
+    [business.id, gap.question, gap.status, gap.approvedAnswer, gap.lastSeenAt, gap.intent, gap.reason],
   );
   gap.occurrenceCount = Number(result.rows[0].occurrence_count);
 }
@@ -4009,6 +4095,9 @@ function inboxMessagePayload(message: Message) {
 
 function inboxConversationPayload(business: Business, conversation: Conversation) {
   const lead = business.leads.find((item) => item.conversationId === conversation.id) ?? null;
+  const visibleMessages = conversation.messages.filter((message) => message.kind !== "internal_note");
+  const latestVisitorMessage = [...visibleMessages].reverse().find((message) => message.role === "user");
+  const latestMessage = latestVisitorMessage ?? visibleMessages.at(-1);
   return {
     ...conversationStatusPayload(conversation),
     sessionId: conversation.sessionId,
@@ -4017,9 +4106,7 @@ function inboxConversationPayload(business: Business, conversation: Conversation
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     lead,
-    lastMessage: conversation.messages.filter((message) => message.kind !== "internal_note").at(-1)
-      ? inboxMessagePayload(conversation.messages.filter((message) => message.kind !== "internal_note").at(-1) as Message)
-      : null,
+    lastMessage: latestMessage ? inboxMessagePayload(latestMessage) : null,
   };
 }
 
@@ -4031,16 +4118,18 @@ function tokenise(value: string): string[] {
   return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((token) => token.length > 2 && !stopWords.has(token));
 }
 
-function rememberGap(business: Business, question: string): KnowledgeGap {
+function rememberGap(business: Business, question: string, intent: RetrievalIntent, reason: KnowledgeGapReason): KnowledgeGap {
   const key = question.toLowerCase().replace(/\s+/g, " ").trim();
   const existing = business.knowledgeGaps.get(key);
   const now = new Date().toISOString();
   if (existing) {
     existing.occurrenceCount += 1;
     existing.lastSeenAt = now;
+    existing.intent = intent;
+    existing.reason = reason;
     return existing;
   }
-  const gap: KnowledgeGap = { question, occurrenceCount: 1, status: "open", approvedAnswer: null, lastSeenAt: now };
+  const gap: KnowledgeGap = { question, occurrenceCount: 1, status: "open", approvedAnswer: null, lastSeenAt: now, intent, reason };
   business.knowledgeGaps.set(key, gap);
   return gap;
 }
@@ -4347,12 +4436,19 @@ async function answerQuestion(business: Business, question: string, options: { r
   const modelGenerationFailed = Boolean(decision.model && (!generated || groundingCheckStatus !== "passed"));
 
   if (!materiallyRelevant || !match || confidenceBand === "low" || modelGenerationFailed) {
-    const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question);
+    const gapReason = knowledgeGapReason({
+      answerable: materiallyRelevant,
+      hasMatch: Boolean(match),
+      modelGenerationFailed,
+      groundingCheckStatus,
+    });
+    const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question, intent, gapReason);
     return {
-      answer: business.agentConfig.fallbackMessage,
+      answer: knowledgeGapMessage(business.name, intent),
       grounded: false,
       citations: [],
       knowledgeGap: gap,
+      quickActions: [knowledgeGapContactAction],
       confidenceScore,
       confidenceBand,
       retrieval: enrichedRetrieval,
@@ -4403,6 +4499,7 @@ type ActionFormSchema = {
 };
 
 type ConversationAnswerResult = AnswerResult & {
+  quickActions?: Array<{ label: string; question: string }>;
   handoff?: {
     status: ConversationStatus;
     reason: string;
@@ -4755,6 +4852,7 @@ function customerAnswerPayload(result: ConversationAnswerResult) {
     answer: result.answer,
     grounded: result.grounded,
     citations: result.citations,
+    ...(result.quickActions?.length ? { quickActions: result.quickActions } : {}),
     ...(result.handoff ? { handoff: result.handoff } : {}),
     ...(result.action ? { action: result.action } : {}),
   };
@@ -5083,6 +5181,21 @@ async function recordConversationEvent(
   }
 }
 
+async function cancelPendingHandoffReminders(conversationId: string): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    `update message_deliveries
+     set status = 'canceled', updated_at = now()
+     where event_type = 'HUMAN_HANDOFF'
+       and event_key like '%:reminder'
+       and status in ('queued', 'deferred')
+       and payload->>'conversation_id' = $1`,
+    [conversationId],
+  ).catch((error) => {
+    if (!isMissingDatabaseTable(error)) throw error;
+  });
+}
+
 function normalizeTelemetryDevice(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
@@ -5157,7 +5270,7 @@ async function staffRecipients(business: Business): Promise<Array<{ id: string; 
 async function notifyStaff(
   business: Business,
   conversation: Conversation,
-  input: { type: string; title: string; body: string; leadId?: string | null; channels?: Array<"in_app" | "email">; targets?: Array<"owner" | "business_team" | "assigned_staff"> },
+  input: { type: string; title: string; body: string; leadId?: string | null; intent?: string | null; channels?: Array<"in_app" | "email">; targets?: Array<"owner" | "business_team" | "assigned_staff">; handoffTrigger?: "explicit_human_request" | "knowledge_gap" | "high_value_lead"; lastMessage?: string },
 ): Promise<void> {
   const recipients = await staffRecipients(business);
   const channels = input.channels?.length ? input.channels : ["in_app", "email"];
@@ -5199,34 +5312,65 @@ async function notifyStaff(
       }
     }
   }
-  if (channels.includes("email") && filteredRecipients.length) {
+  if (channels.includes("email")) {
     const eventType: LifecycleEventType | null = input.type === "handoff_requested"
       ? "HUMAN_HANDOFF"
+      : input.type === "knowledge_gap"
+        ? "KNOWLEDGE_GAP"
       : input.type === "lead_created"
         ? "QUALIFIED_LEAD"
         : input.type === "action_staff_required" ? "HUMAN_HANDOFF" : null;
-    if (eventType) {
+    const handoffSettings = eventType === "HUMAN_HANDOFF" || eventType === "KNOWLEDGE_GAP" ? await loadHandoffNotificationSettings(business) : null;
+    const trigger = input.handoffTrigger ?? (input.type === "action_staff_required" ? "high_value_lead" : "explicit_human_request");
+    const handoffTriggerEnabled = !handoffSettings
+      || (handoffSettings.enabled && (trigger === "explicit_human_request"
+        ? handoffSettings.notifyExplicitHumanRequest
+        : trigger === "knowledge_gap" ? handoffSettings.notifyKnowledgeGap : handoffSettings.notifyHighValueLead));
+    const configuredEmails = handoffSettings && handoffTriggerEnabled
+      ? [handoffSettings.defaultRecipientEmail, ...handoffSettings.additionalRecipientEmails].filter((email): email is string => Boolean(email))
+      : [];
+    const hasRecipients = filteredRecipients.length > 0 || configuredEmails.length > 0;
+    if (eventType && handoffTriggerEnabled && hasRecipients) {
       const lead = input.leadId ? business.leads.find((item) => item.id === input.leadId) : null;
-      await queueLifecycleEvent({
+      const latestVisitorMessage = [...conversation.messages].reverse().find((message) => message.role === "user");
+      const notificationPayload = eventType === "QUALIFIED_LEAD"
+        ? {
+          business_name: business.name,
+          lead_name: lead?.name || "A visitor",
+          lead_intent: lead?.intent || "customer inquiry",
+          lead_contact: lead?.email || lead?.phone || "No direct contact provided",
+          leads_url: lifecycleAppUrl(`/app/${business.slug}/leads`),
+        }
+        : {
+          business_name: business.name,
+          visitor_name: lead?.name || "Unknown visitor",
+          visitor_intent: lead?.intent || input.intent || latestVisitorMessage?.retrieval?.intent || "General inquiry",
+          waiting_since: conversation.handoffRequestedAt || conversation.lastActivityAt,
+          last_message: input.lastMessage || latestVisitorMessage?.content || input.body,
+          handoff_status: conversation.status === "HANDOFF_REQUESTED" ? "WAITING_FOR_STAFF" : conversation.status,
+          handoff_reason: conversation.handoffReason || input.body,
+          conversation_id: conversation.id,
+          inbox_url: lifecycleAppUrl(`/app/${business.slug}/inbox?conversation=${encodeURIComponent(conversation.id)}`),
+        };
+      const lifecycleEvent = {
         eventType,
         eventKey: `business.notification:${business.id}:${conversation.id}:${input.type}:${input.leadId ?? "none"}`,
         organizationId,
         businessId: business.id,
-        recipientUserIds: filteredRecipients.map((recipient) => recipient.id),
-        payload: eventType === "QUALIFIED_LEAD"
-          ? {
-            business_name: business.name,
-            lead_name: lead?.name || "A visitor",
-            lead_intent: lead?.intent || "customer inquiry",
-            lead_contact: lead?.email || lead?.phone || "No direct contact provided",
-            leads_url: lifecycleAppUrl(`/app/${business.slug}/leads`),
-          }
-          : {
-            business_name: business.name,
-            handoff_reason: conversation.handoffReason || input.body,
-            inbox_url: lifecycleAppUrl(`/app/${business.slug}/inbox`),
-          },
-      });
+        recipientUserIds: configuredEmails.length ? undefined : filteredRecipients.map((recipient) => recipient.id),
+        recipientEmails: configuredEmails.length ? configuredEmails : undefined,
+        delaySeconds: handoffSettings?.handoffDelaySeconds,
+        payload: notificationPayload,
+      } satisfies Parameters<typeof queueLifecycleEvent>[0];
+      await queueLifecycleEvent(lifecycleEvent);
+      if (eventType === "HUMAN_HANDOFF" && handoffSettings?.repeatEnabled) {
+        await queueLifecycleEvent({
+          ...lifecycleEvent,
+          eventKey: `${lifecycleEvent.eventKey}:reminder`,
+          delaySeconds: handoffSettings.repeatAfterSeconds,
+          payload: { ...notificationPayload, handoff_reminder: true },
+        });
+      }
     }
   }
 }
@@ -5254,7 +5398,7 @@ function handoffAnswer(business: Business, reason: string): ConversationAnswerRe
   };
 }
 
-async function requestHandoff(business: Business, conversation: Conversation, reason: string): Promise<ConversationAnswerResult> {
+async function requestHandoff(business: Business, conversation: Conversation, reason: string, lastMessage?: string): Promise<ConversationAnswerResult> {
   const now = new Date().toISOString();
   conversation.status = "HANDOFF_REQUESTED";
   conversation.handoffReason = reason;
@@ -5271,6 +5415,8 @@ async function requestHandoff(business: Business, conversation: Conversation, re
     type: "handoff_requested",
     title: "Human help requested",
     body: `${business.name} has a visitor waiting for a team member. Reason: ${reason}`,
+    handoffTrigger: "explicit_human_request",
+    lastMessage,
   });
   await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { reason });
   conversation.status = "WAITING_FOR_STAFF";
@@ -5374,7 +5520,20 @@ async function persistConversationExchange(
   }
   await recordOrganizationUsage(business, "llm_requests");
   await recordModelUsage(business, result.modelUsage);
-  if (result.knowledgeGap) await persistGap(business, result.knowledgeGap);
+  if (result.knowledgeGap) {
+    await persistGap(business, result.knowledgeGap);
+    const handoffSettings = await loadHandoffNotificationSettings(business);
+    if (handoffSettings.notifyKnowledgeGap) {
+      await notifyStaff(business, conversation, {
+        type: "knowledge_gap",
+        title: "Answer gap needs review",
+        body: `${business.name} received a question without enough verified information.`,
+        handoffTrigger: "knowledge_gap",
+        intent: result.knowledgeGap.intent,
+        lastMessage: userContent,
+      });
+    }
+  }
   return result;
 }
 
@@ -5383,8 +5542,8 @@ async function recordConversationQuestion(business: Business, conversation: Conv
     conversation.status = "AI_ACTIVE";
     conversation.resolvedAt = null;
   }
-  if (isExplicitHumanRequest(question) && conversation.status !== "HUMAN_ACTIVE") {
-    const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member");
+  if (isExplicitHumanRequest(question) && !["HUMAN_ACTIVE", "WAITING_FOR_STAFF", "HANDOFF_REQUESTED"].includes(conversation.status)) {
+    const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member", question);
     return persistConversationExchange(business, conversation, question, result);
   }
   if (conversation.status === "HUMAN_ACTIVE") {
@@ -5395,11 +5554,14 @@ async function recordConversationQuestion(business: Business, conversation: Conv
     };
     return persistConversationExchange(business, conversation, question, result);
   }
-  const result: ConversationAnswerResult = await continueActionConversation(business, conversation, question) ?? await answerQuestion(business, question);
-  if (!result.handoff && result.confidenceBand === "low" && question.trim().length > 12) {
-    const fallback = await requestHandoff(business, conversation, "The assistant could not answer confidently");
-    return persistConversationExchange(business, conversation, question, fallback);
+  if (conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED") {
+    const result = {
+      ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
+      answer: "Your message has been sent to the team. A team member will reply here shortly.",
+    };
+    return persistConversationExchange(business, conversation, question, result);
   }
+  const result: ConversationAnswerResult = await continueActionConversation(business, conversation, question) ?? await answerQuestion(business, question);
   return persistConversationExchange(business, conversation, question, result);
 }
 
@@ -6206,6 +6368,7 @@ app.get("/api/v1/admin/messaging/deliveries", async (request) => {
   return { deliveries: result.rows.map((row) => ({
     id: String(row.id), templateKey: String(row.template_key), templateName: String(row.template_name), eventType: String(row.event_type),
     businessName: row.business_name ? String(row.business_name) : null, recipientEmail: String(row.recipient_email), status: String(row.status),
+    conversationId: typeof asRecord(row.payload).conversation_id === "string" ? String(asRecord(row.payload).conversation_id) : null,
     attempts: Number(row.attempts ?? 0), scheduledAt: nullableIso(row.scheduled_at), sentAt: nullableIso(row.sent_at), deliveredAt: nullableIso(row.delivered_at),
     failedAt: nullableIso(row.failed_at), failureReason: typeof row.failure_reason === "string" ? row.failure_reason : null, providerMessageId: row.provider_message_id ? String(row.provider_message_id) : null,
   })) };
@@ -6266,6 +6429,64 @@ app.patch("/api/v1/messaging/preferences", async (request) => {
     );
   }
   return { ok: true, preferences: { newLead: body.newLead !== false, humanHandoff: body.humanHandoff !== false, integrationFailure: body.integrationFailure !== false } };
+});
+
+app.get("/api/v1/demo/:slug/notification-settings", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "admin");
+  return { settings: await loadHandoffNotificationSettings(business) };
+});
+
+app.patch("/api/v1/demo/:slug/notification-settings", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "admin");
+  if (!pool) throw httpError(503, "Handoff notification settings require PostgreSQL storage");
+  const body = asRecord(request.body);
+  const defaultRecipientEmail = body.defaultRecipientEmail === null || body.defaultRecipientEmail === ""
+    ? null
+    : normalizedNotificationEmail(body.defaultRecipientEmail);
+  if (body.defaultRecipientEmail !== undefined && body.defaultRecipientEmail !== null && body.defaultRecipientEmail !== "" && !defaultRecipientEmail) {
+    throw httpError(400, "Enter a valid default recipient email");
+  }
+  const rawDelay = body.handoffDelaySeconds === undefined ? 0 : Number(body.handoffDelaySeconds);
+  if (![0, 120, 300].includes(rawDelay)) throw httpError(400, "handoffDelaySeconds must be 0, 120, or 300");
+  const rawRepeatAfter = body.repeatAfterSeconds === undefined ? 600 : Number(body.repeatAfterSeconds);
+  if (!Number.isInteger(rawRepeatAfter) || rawRepeatAfter < 60 || rawRepeatAfter > 86_400) throw httpError(400, "repeatAfterSeconds must be between 60 and 86400");
+  const settings = {
+    enabled: body.enabled !== false,
+    defaultRecipientEmail,
+    additionalRecipientEmails: normalizedNotificationEmails(body.additionalRecipientEmails),
+    handoffDelaySeconds: rawDelay as 0 | 120 | 300,
+    repeatEnabled: body.repeatEnabled === true,
+    repeatAfterSeconds: rawRepeatAfter,
+    notifyExplicitHumanRequest: body.notifyExplicitHumanRequest !== false,
+    notifyKnowledgeGap: body.notifyKnowledgeGap === true,
+    notifyHighValueLead: body.notifyHighValueLead !== false,
+    notifyEveryLead: body.notifyEveryLead === true,
+  } satisfies HandoffNotificationSettings;
+  await pool.query(
+    `insert into business_notification_settings
+       (business_id, handoff_enabled, default_recipient_email, additional_recipient_emails,
+        handoff_delay_seconds, repeat_enabled, repeat_after_seconds,
+        notify_explicit_human_request, notify_knowledge_gap, notify_high_value_lead, notify_every_lead, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+     on conflict (business_id) do update set
+       handoff_enabled = excluded.handoff_enabled,
+       default_recipient_email = excluded.default_recipient_email,
+       additional_recipient_emails = excluded.additional_recipient_emails,
+       handoff_delay_seconds = excluded.handoff_delay_seconds,
+       repeat_enabled = excluded.repeat_enabled,
+       repeat_after_seconds = excluded.repeat_after_seconds,
+       notify_explicit_human_request = excluded.notify_explicit_human_request,
+       notify_knowledge_gap = excluded.notify_knowledge_gap,
+       notify_high_value_lead = excluded.notify_high_value_lead,
+       notify_every_lead = excluded.notify_every_lead,
+       updated_at = now()`,
+    [business.id, settings.enabled, settings.defaultRecipientEmail, JSON.stringify(settings.additionalRecipientEmails), settings.handoffDelaySeconds, settings.repeatEnabled, settings.repeatAfterSeconds, settings.notifyExplicitHumanRequest, settings.notifyKnowledgeGap, settings.notifyHighValueLead, settings.notifyEveryLead],
+  );
+  return { ok: true, settings };
 });
 
 app.get("/api/v1/admin/organizations", async (request) => {
@@ -8000,7 +8221,7 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   const search = optionalString(query.q, 160)?.toLowerCase();
   const conversations = [...business.conversations.values()]
     .filter((conversation) => !status || conversation.status === status)
-    .filter((conversation) => !assignedTo || conversation.assignedUserId === assignedTo)
+    .filter((conversation) => !assignedTo || (assignedTo === "unassigned" ? !conversation.assignedUserId : conversation.assignedUserId === assignedTo))
     .filter((conversation) => !search || conversation.messages.some((message) => message.content.toLowerCase().includes(search)) || business.leads.some((lead) => lead.conversationId === conversation.id && [lead.name, lead.email, lead.intent].some((value) => value?.toLowerCase().includes(search))))
     .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))
     .slice(0, 200);
@@ -8023,6 +8244,22 @@ app.get("/api/v1/demo/:slug/conversations/:conversationId", async (request) => {
     if (noteResult.rows.length) notes = noteResult.rows.map((row) => ({ id: String(row.id), businessId: business.id, conversationId: conversation.id, authorUserId: String(row.author_user_id), authorName: String(row.author_name ?? ""), content: String(row.content), createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) }));
   }
   return { conversation: { ...inboxConversationPayload(business, conversation), messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload) }, events, notes };
+});
+
+app.post("/api/v1/demo/:slug/conversations/:conversationId/read", async (request) => {
+  const params = request.params as { slug?: string; conversationId?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "viewer");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  conversation.unreadCount = 0;
+  conversation.updatedAt = new Date().toISOString();
+  if (pool) {
+    await pool.query(
+      "update conversations set unread_count = 0, updated_at = $3 where id = $1 and business_id = $2",
+      [conversation.id, business.id, conversation.updatedAt],
+    );
+  }
+  return { ok: true, conversation: conversationStatusPayload(conversation) };
 });
 
 app.get("/api/v1/demo/:slug/notifications", async (request) => {
@@ -8055,29 +8292,70 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
-  if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(409, "This conversation is already assigned to another team member");
   const now = new Date().toISOString();
   const persistedActorId = actor.legacyDemo ? null : actor.id;
+  if ((!pool || actor.legacyDemo)
+    && conversation.assignedUserId
+    && conversation.assignedUserId !== actor.id
+    && actor.role !== "admin"
+    && actor.role !== "owner") {
+    throw httpError(409, "This conversation is already assigned to another team member");
+  }
+  if (conversation.status === "HUMAN_ACTIVE" && conversation.assignedUserId === persistedActorId) {
+    return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
+  }
+  if (pool && persistedActorId) {
+    const client = await pool.connect();
+    let alreadyActive = false;
+    try {
+      await client.query("begin");
+      const update = await client.query(
+        `update conversations set status = 'HUMAN_ACTIVE', assigned_user_id = $3, assigned_at = $4, human_joined_at = $4, unread_count = 0, last_activity_at = $4, updated_at = $4
+         where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'WAITING_FOR_STAFF', 'AI_ASSISTED')
+           and (assigned_user_id is null or assigned_user_id = $3 or $5 = true)
+         returning id`,
+        [conversation.id, business.id, persistedActorId, now, actor.role === "admin" || actor.role === "owner"],
+      );
+      if (!update.rowCount) {
+        const current = await client.query<{ status: string; assigned_user_id: string | null }>(
+          "select status, assigned_user_id from conversations where id = $1 and business_id = $2 for update",
+          [conversation.id, business.id],
+        );
+        if (current.rows[0]?.status === "HUMAN_ACTIVE" && current.rows[0].assigned_user_id === persistedActorId) alreadyActive = true;
+        else throw httpError(409, "The conversation changed before takeover could be completed");
+      }
+      if (!alreadyActive) {
+        await client.query("insert into conversation_assignments (business_id, conversation_id, user_id, assigned_by_user_id) values ($1, $2, $3, $3) on conflict (conversation_id) where status = 'active' do update set user_id = excluded.user_id, assigned_by_user_id = excluded.assigned_by_user_id, assigned_at = now()", [business.id, conversation.id, persistedActorId]);
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (alreadyActive) {
+      conversation.status = "HUMAN_ACTIVE";
+      conversation.assignedUserId = persistedActorId;
+      conversation.assignedAt = conversation.assignedAt ?? now;
+      conversation.humanJoinedAt = conversation.humanJoinedAt ?? now;
+      conversation.unreadCount = 0;
+      conversation.updatedAt = now;
+      await cancelPendingHandoffReminders(conversation.id);
+      return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
+    }
+  }
   conversation.status = "HUMAN_ACTIVE";
   conversation.assignedUserId = persistedActorId;
   conversation.assignedAt = now;
   conversation.humanJoinedAt = now;
   conversation.unreadCount = 0;
   conversation.lastActivityAt = now;
-  if (pool && persistedActorId) {
-    const update = await pool.query(
-      `update conversations set status = 'HUMAN_ACTIVE', assigned_user_id = $3, assigned_at = $4, human_joined_at = $4, unread_count = 0, last_activity_at = $4, updated_at = $4
-       where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'WAITING_FOR_STAFF', 'AI_ASSISTED')
-         and (assigned_user_id is null or assigned_user_id = $3 or $5 = true)
-       returning id`,
-      [conversation.id, business.id, persistedActorId, now, actor.role === "admin" || actor.role === "owner"],
-    );
-    if (!update.rowCount) throw httpError(409, "The conversation changed before takeover could be completed");
-    await pool.query("insert into conversation_assignments (business_id, conversation_id, user_id, assigned_by_user_id) values ($1, $2, $3, $3) on conflict (conversation_id) where status = 'active' do update set user_id = excluded.user_id, assigned_by_user_id = excluded.assigned_by_user_id, assigned_at = now()", [business.id, conversation.id, persistedActorId]);
-  }
+  conversation.updatedAt = now;
+  await cancelPendingHandoffReminders(conversation.id);
   await recordConversationEvent(business, conversation, "HUMAN_JOINED", "staff", persistedActorId, { name: actor.name });
   await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", persistedActorId, { name: actor.name });
-  await persistConversation(business, conversation);
+  if (!pool || actor.legacyDemo) await persistConversation(business, conversation);
   return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
 });
 
@@ -8112,6 +8390,8 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/return-to-ai", async 
   conversation.assignedUserId = null;
   conversation.assignedAt = null;
   conversation.lastActivityAt = new Date().toISOString();
+  conversation.updatedAt = conversation.lastActivityAt;
+  await cancelPendingHandoffReminders(conversation.id);
   if (pool && !actor.legacyDemo) {
     await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
   }
@@ -8126,9 +8406,13 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/resolve", async (requ
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   conversation.status = "RESOLVED";
+  conversation.assignedUserId = null;
+  conversation.assignedAt = null;
   conversation.resolvedAt = new Date().toISOString();
   conversation.unreadCount = 0;
   conversation.lastActivityAt = conversation.resolvedAt;
+  conversation.updatedAt = conversation.resolvedAt;
+  await cancelPendingHandoffReminders(conversation.id);
   if (pool && !actor.legacyDemo) await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
   await recordConversationEvent(business, conversation, "CONVERSATION_RESOLVED", "staff", actor.legacyDemo ? null : actor.id);
   await persistConversation(business, conversation);
@@ -8140,6 +8424,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", asyn
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversation.status !== "HUMAN_ACTIVE") throw httpError(409, "Take over this conversation before replying");
   if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can reply here");
   const content = requiredString(asRecord(request.body).content, "content", 4_000);
   const now = new Date().toISOString();
@@ -8148,6 +8433,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", asyn
   conversation.status = "HUMAN_ACTIVE";
   conversation.unreadCount = 0;
   conversation.lastActivityAt = now;
+  conversation.updatedAt = now;
   await persistMessage(conversation, message);
   await persistConversation(business, conversation);
   await recordConversationEvent(business, conversation, "MESSAGE_SENT_BY_HUMAN", "staff", actor.legacyDemo ? null : actor.id, { contentLength: content.length });

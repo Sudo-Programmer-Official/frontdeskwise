@@ -87,6 +87,7 @@ interface TestMessage {
   content: string;
   grounded: boolean;
   citations: Array<{ title?: string; url?: string; pageType?: string }>;
+  quickActions: Array<{ label: string; question: string }>;
   action: TestAction | null;
   formValues: Record<string, string>;
 }
@@ -419,6 +420,7 @@ function sendDeveloperInstructions(): void {
               <article v-else class="test-answer-message">
                 <div class="answer-meta"><span v-if="message.action" class="answer-badge grounded"><Check :size="13" :stroke-width="2" aria-hidden="true" /> {{ message.action.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', message.grounded ? 'grounded' : 'fallback']"><component :is="message.grounded ? CircleCheck : CircleAlert" :size="13" :stroke-width="2" aria-hidden="true" /> {{ message.grounded ? 'Grounded answer' : 'Safe fallback' }}</span></div>
                 <p>{{ message.content }}</p>
+                <div v-if="message.quickActions.length" class="test-quick-actions"><button v-for="quickAction in message.quickActions" :key="quickAction.label" class="text-button" type="button" @click="ask(quickAction.question)">{{ quickAction.label }} <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></button></div>
                 <form v-if="message.action?.form" class="test-action-form" @submit.prevent="submitAction(message)">
                   <label v-for="field in message.action.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><select v-if="field.type === 'select'" v-model="message.formValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="message.formValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label>
                   <button class="primary-button small" type="submit" :disabled="test.isAsking">{{ test.isAsking ? 'Submitting…' : message.action.form.submitLabel }}</button>

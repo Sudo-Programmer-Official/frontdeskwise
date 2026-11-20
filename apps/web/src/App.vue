@@ -154,6 +154,29 @@ interface InboxConversation {
   lead: { name?: string | null; email?: string | null; phone?: string | null; intent?: string | null } | null;
   lastMessage: InboxMessage | null;
   messages?: InboxMessage[];
+  notes?: InboxNote[];
+}
+
+interface InboxNote {
+  id: string;
+  authorUserId: string;
+  authorName?: string | null;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface HandoffNotificationSettings {
+  enabled: boolean;
+  defaultRecipientEmail: string | null;
+  additionalRecipientEmails: string[];
+  handoffDelaySeconds: 0 | 120 | 300;
+  repeatEnabled: boolean;
+  repeatAfterSeconds: number;
+  notifyExplicitHumanRequest: boolean;
+  notifyKnowledgeGap: boolean;
+  notifyHighValueLead: boolean;
+  notifyEveryLead: boolean;
 }
 
 interface TeamMember {
@@ -213,6 +236,7 @@ interface TestConversationMessage {
   content: string;
   grounded: boolean;
   citations: Array<{ title?: string; url?: string; pageType?: string }>;
+  quickActions: Array<{ label: string; question: string }>;
   action: TestConversationAction | null;
   formValues: Record<string, string>;
 }
@@ -225,6 +249,7 @@ type TestAnswerPayload = {
   confidenceBand?: "high" | "medium" | "low";
   retrieval?: { mode?: string };
   citations?: Array<{ title?: string; url?: string; pageType?: string }>;
+  quickActions?: Array<{ label: string; question: string }>;
   action?: TestConversationAction;
 };
 
@@ -278,6 +303,8 @@ interface KnowledgeGap {
   status: "open" | "resolved";
   approvedAnswer: string | null;
   lastSeenAt: string;
+  intent?: string | null;
+  reason?: string | null;
 }
 
 interface OrganizationDocument {
@@ -657,6 +684,7 @@ interface MessagingDelivery {
   templateName: string;
   eventType: string;
   businessName: string | null;
+  conversationId?: string | null;
   recipientEmail: string;
   status: string;
   attempts: number;
@@ -1045,7 +1073,7 @@ const inboxConversations = ref<InboxConversation[]>([]);
 const inboxLoading = ref(false);
 const inboxError = ref("");
 const inboxStatusFilter = ref<"all" | InboxConversation["status"]>("all");
-const inboxAssignmentFilter = ref<"all" | "mine">("all");
+const inboxAssignmentFilter = ref<"all" | "unassigned" | "mine" | string>("all");
 const selectedInboxConversation = ref<InboxConversation | null>(null);
 const inboxReply = ref("");
 const inboxNote = ref("");
@@ -1067,6 +1095,22 @@ const notificationPreferences = ref({ newLead: true, humanHandoff: true, integra
 const notificationPreferencesLoading = ref(false);
 const notificationPreferencesMessage = ref("");
 const notificationPreferencesError = ref("");
+const handoffNotificationSettings = ref<HandoffNotificationSettings>({
+  enabled: true,
+  defaultRecipientEmail: "",
+  additionalRecipientEmails: [],
+  handoffDelaySeconds: 0,
+  repeatEnabled: false,
+  repeatAfterSeconds: 10,
+  notifyExplicitHumanRequest: true,
+  notifyKnowledgeGap: false,
+  notifyHighValueLead: true,
+  notifyEveryLead: false,
+});
+const handoffAdditionalRecipients = ref("");
+const handoffSettingsLoading = ref(false);
+const handoffSettingsMessage = ref("");
+const handoffSettingsError = ref("");
 const embeddingLoading = ref(false);
 const embeddingMessage = ref("");
 
@@ -2467,6 +2511,8 @@ async function loadInbox() {
     const params = new URLSearchParams();
     if (inboxStatusFilter.value !== "all") params.set("status", inboxStatusFilter.value);
     if (inboxAssignmentFilter.value === "mine" && authSnapshot.value?.user.id) params.set("assignedTo", authSnapshot.value.user.id);
+    else if (inboxAssignmentFilter.value === "unassigned") params.set("assignedTo", "unassigned");
+    else if (inboxAssignmentFilter.value !== "all") params.set("assignedTo", inboxAssignmentFilter.value);
     const query = params.toString() ? `?${params.toString()}` : "";
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/inbox${query}`), { headers: ownerHeaders() });
     const payload = await response.json() as { error?: string; conversations?: InboxConversation[] };
@@ -2475,6 +2521,10 @@ async function loadInbox() {
     if (selectedInboxConversation.value) {
       const current = inboxConversations.value.find((conversation) => conversation.id === selectedInboxConversation.value?.id);
       if (current) await openInboxConversation(current);
+    } else {
+      const requestedConversationId = new URLSearchParams(window.location.search).get("conversation");
+      const requested = requestedConversationId ? inboxConversations.value.find((conversation) => conversation.id === requestedConversationId) : null;
+      if (requested) await openInboxConversation(requested);
     }
   } catch (error) {
     inboxError.value = error instanceof Error ? error.message : "Could not load the inbox.";
@@ -2540,6 +2590,45 @@ async function saveNotificationPreferences() {
   }
 }
 
+async function loadHandoffNotificationSettings() {
+  if (!authSnapshot.value) return;
+  handoffSettingsError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/notification-settings`), { headers: ownerHeaders() }, { globalLoading: false });
+    const payload = await response.json() as { settings?: HandoffNotificationSettings; error?: string };
+    if (!response.ok || !payload.settings) throw new Error(payload.error ?? "Could not load handoff notification settings.");
+    handoffNotificationSettings.value = { ...payload.settings, defaultRecipientEmail: payload.settings.defaultRecipientEmail ?? "", repeatAfterSeconds: Math.round(payload.settings.repeatAfterSeconds / 60) };
+    handoffAdditionalRecipients.value = payload.settings.additionalRecipientEmails.join("\n");
+  } catch (error) {
+    handoffSettingsError.value = error instanceof Error ? error.message : "Could not load handoff notification settings.";
+  }
+}
+
+async function saveHandoffNotificationSettings() {
+  if (!authSnapshot.value || handoffSettingsLoading.value) return;
+  handoffSettingsLoading.value = true;
+  handoffSettingsMessage.value = "";
+  handoffSettingsError.value = "";
+  const additionalRecipientEmails = handoffAdditionalRecipients.value.split(/[\n,]+/).map((email) => email.trim()).filter(Boolean);
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/notification-settings`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ ...handoffNotificationSettings.value, defaultRecipientEmail: handoffNotificationSettings.value.defaultRecipientEmail || null, additionalRecipientEmails, repeatAfterSeconds: handoffNotificationSettings.value.repeatAfterSeconds * 60 }),
+    }, { globalLoading: false });
+    const payload = await response.json() as { settings?: HandoffNotificationSettings; error?: string };
+    if (!response.ok || !payload.settings) throw new Error(payload.error ?? "Could not save handoff notification settings.");
+    handoffNotificationSettings.value = { ...payload.settings, defaultRecipientEmail: payload.settings.defaultRecipientEmail ?? "", repeatAfterSeconds: Math.round(payload.settings.repeatAfterSeconds / 60) };
+    handoffAdditionalRecipients.value = payload.settings.additionalRecipientEmails.join("\n");
+    handoffSettingsMessage.value = "Handoff alerts saved.";
+    window.setTimeout(() => (handoffSettingsMessage.value = ""), 2400);
+  } catch (error) {
+    handoffSettingsError.value = error instanceof Error ? error.message : "Could not save handoff notification settings.";
+  } finally {
+    handoffSettingsLoading.value = false;
+  }
+}
+
 function toggleNotifications() {
   if (!authSnapshot.value) return;
   notificationMenuOpen.value = !notificationMenuOpen.value;
@@ -2557,34 +2646,43 @@ async function markNotificationRead(notification: StaffNotification) {
 async function openInboxConversation(conversation: InboxConversation) {
   try {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}`), { headers: ownerHeaders() });
-    const payload = await response.json() as { error?: string; conversation?: InboxConversation };
+    const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[] };
     if (!response.ok || !payload.conversation) throw new Error(payload.error ?? "Could not open this conversation.");
-    selectedInboxConversation.value = payload.conversation;
+    selectedInboxConversation.value = { ...payload.conversation, notes: payload.notes ?? [] };
+    await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}/read`), {
+      method: "POST",
+      headers: ownerHeaders(),
+    }, { globalLoading: false });
+    selectedInboxConversation.value.unreadCount = 0;
     const index = inboxConversations.value.findIndex((item) => item.id === conversation.id);
-    if (index >= 0) inboxConversations.value[index] = { ...inboxConversations.value[index], ...payload.conversation };
+    if (index >= 0) inboxConversations.value[index] = { ...inboxConversations.value[index], ...selectedInboxConversation.value, unreadCount: 0 };
   } catch (error) {
     inboxError.value = error instanceof Error ? error.message : "Could not open this conversation.";
   }
 }
 
-async function inboxMutation(path: string, body?: Record<string, unknown>) {
+type InboxMutationRequest = { content: string } | undefined;
+type InboxMutationResponse = { error?: string; conversation?: InboxConversation; message?: InboxMessage; note?: InboxNote };
+
+async function inboxMutation(path: string, body?: InboxMutationRequest): Promise<void> {
   if (inboxActionLoading.value) return;
   inboxActionLoading.value = true;
   inboxError.value = "";
   try {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}${path}`), {
       method: "POST",
-      headers: { "content-type": "application/json", ...ownerHeaders() },
+      headers: { ...(body ? { "content-type": "application/json" } : {}), ...ownerHeaders() },
       ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    const payload = await response.json() as { error?: string };
+    }, { globalLoading: false });
+    const payload = await response.json() as InboxMutationResponse;
     if (!response.ok) throw new Error(payload.error ?? "Could not update this conversation.");
     inboxMessage.value = "Inbox updated";
     await loadInbox();
     if (selectedInboxConversation.value) await openInboxConversation(selectedInboxConversation.value);
     window.setTimeout(() => (inboxMessage.value = ""), 2400);
   } catch (error) {
-    inboxError.value = error instanceof Error ? error.message : "Could not update this conversation.";
+    inboxError.value = "We couldn't update this conversation. Try again.";
+    notifyError(error, inboxError.value);
   } finally {
     inboxActionLoading.value = false;
   }
@@ -2608,14 +2706,12 @@ async function resolveConversation() {
 async function sendInboxReply() {
   if (!selectedInboxConversation.value || !inboxReply.value.trim()) return;
   const content = inboxReply.value.trim();
-  inboxReply.value = "";
   await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/messages/human`, { content });
 }
 
 async function addInboxNote() {
   if (!selectedInboxConversation.value || !inboxNote.value.trim()) return;
   const content = inboxNote.value.trim();
-  inboxNote.value = "";
   await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/notes`, { content });
 }
 
@@ -4104,6 +4200,7 @@ function appendTestAssistantMessage(payload: TestAnswerPayload): TestConversatio
     content: payload.answer ?? "",
     grounded: Boolean(payload.grounded),
     citations: payload.citations ?? [],
+    quickActions: payload.quickActions ?? [],
     action: payload.action ?? null,
     formValues: actionFormValues(payload.action),
   };
@@ -4130,6 +4227,7 @@ async function askQuestion() {
     content: question,
     grounded: false,
     citations: [],
+    quickActions: [],
     action: null,
     formValues: {},
   });
@@ -4339,7 +4437,7 @@ watch(view, (nextView, previousView) => {
     void loadMcpConnections();
   }
   if (nextView === "billing") { settingsTab.value = "billing"; void loadBilling(); }
-  if (nextView === "settings" && settingsTab.value === "notifications") { void loadNotifications(); void loadNotificationPreferences(); }
+  if (nextView === "settings" && settingsTab.value === "notifications") { void loadNotifications(); void loadNotificationPreferences(); void loadHandoffNotificationSettings(); }
   if (nextView === "settings" && !["general", "verification", "notifications"].includes(settingsTab.value)) settingsTab.value = "general";
   if (nextView === "admin") {
     void loadAdminOrganizations();
@@ -4355,6 +4453,7 @@ watch(settingsTab, (nextTab) => {
   if (nextTab === "notifications") {
     void loadNotifications();
     void loadNotificationPreferences();
+    void loadHandoffNotificationSettings();
   }
 });
 
@@ -4707,6 +4806,8 @@ function startMarketingDemo() {
         <div v-else-if="view === 'inbox'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Customer conversations</p><h2>Inbox</h2><p>Review conversations that need your team and keep the AI in the loop.</p></div><div class="toolbar-actions"><span v-if="inboxMessage" class="saved-message">✓ {{ inboxMessage }}</span><button class="outline-button small" type="button" :disabled="inboxLoading" @click="loadInbox">{{ inboxLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
           <p v-if="inboxError" class="form-error">{{ inboxError }}</p>
+          <div class="inbox-assignment-shortcuts" aria-label="Inbox assignment shortcuts"><span>Quick view</span><button type="button" :class="{ active: inboxAssignmentFilter === 'all' }" @click="inboxAssignmentFilter = 'all'; loadInbox()">All</button><button type="button" :class="{ active: inboxAssignmentFilter === 'unassigned' }" @click="inboxAssignmentFilter = 'unassigned'; loadInbox()">Unassigned</button><button v-if="authSnapshot?.user.id" type="button" :class="{ active: inboxAssignmentFilter === 'mine' }" @click="inboxAssignmentFilter = 'mine'; loadInbox()">Mine</button></div>
+          <article v-if="selectedInboxConversation?.notes?.length" class="panel inbox-notes-panel"><div class="panel-heading"><div><p class="eyebrow">Staff only</p><h3>Internal notes</h3><p>These notes stay in the Inbox and are never sent to the visitor.</p></div></div><div class="internal-note-list"><div v-for="note in selectedInboxConversation.notes" :key="note.id" class="internal-note"><strong>{{ note.authorName || 'Team member' }}</strong><small>{{ new Date(note.createdAt).toLocaleString() }}</small><p>{{ note.content }}</p></div></div></article>
           <div class="panel lead-filters"><label>Status<select v-model="inboxStatusFilter" @change="loadInbox"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option></select></label><label>Assignment<select v-model="inboxAssignmentFilter" @change="loadInbox"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span>{{ inboxConversations.length }} conversation{{ inboxConversations.length === 1 ? '' : 's' }} · {{ inboxUnreadCount }} unread visitor message{{ inboxUnreadCount === 1 ? '' : 's' }}</span></div>
           <div class="dashboard-grid conversation-inbox-grid"><article class="panel table-panel"><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div v-if="!inboxConversations.length" class="diagnostics-empty">No conversations match this view.</div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'AI_ACTIVE' ? 'new' : 'qualified']">{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount"> · {{ conversation.unreadCount }}</b></span><small>{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading"><div><p class="eyebrow">Conversation detail</p><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} · {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div class="inbox-message-thread"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="`${message.createdAt}-${index}`" :class="['message-thread-item', message.role]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}</small><p>{{ message.content }}</p></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><form class="question-form" @submit.prevent="sendInboxReply"><input v-model="inboxReply" type="text" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" /><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || inboxActionLoading">Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message"><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></article></div>
         </div>
@@ -4737,7 +4838,7 @@ function startMarketingDemo() {
           <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
           <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
           <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon"><CircleCheck :size="24" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Your knowledge looks healthy.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button v-if="!knowledgeSourcesNeedAttention" class="primary-button small" type="button" @click="openAgentTest()">Test agent <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article>
-          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" :disabled="gap.status === 'resolved'" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><template v-if="gap.status === 'resolved'"><span class="gap-answer-saved">✓ Answer saved</span><button class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button></template><button v-else class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim()" @click="resolveKnowledgeGap(gap)">Approve answer</button></div></article></div>
+          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3><small v-if="gap.intent || gap.reason" class="gap-diagnostics">Intent: {{ gap.intent ?? 'general' }} · Reason: {{ (gap.reason ?? 'legacy_unknown').replaceAll('_', ' ') }}</small></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" :disabled="gap.status === 'resolved'" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><template v-if="gap.status === 'resolved'"><span class="gap-answer-saved">✓ Answer saved</span><button class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button></template><button v-else class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim()" @click="resolveKnowledgeGap(gap)">Approve answer</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Answer quality</p><h2>Recent answer checks</h2><p>Review confidence and whether each answer was grounded in your knowledge.</p></div></div>
           <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Outcome</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Needs review' }}<small>{{ diagnostic.retrieval?.candidateCount ?? 0 }} knowledge matches</small></span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No answer checks yet.</div></article>
         </div>
@@ -4898,6 +4999,7 @@ function startMarketingDemo() {
           </template>
           <template v-else-if="currentSettingsTab === 'notifications'">
             <div class="section-toolbar"><div><p class="eyebrow">Workspace updates</p><h2>Notifications</h2><p>Review operational updates for conversations, delivery, and account activity.</p></div><button class="outline-button small" type="button" @click="loadNotifications">Refresh</button></div>
+            <article v-if="authSnapshot" class="panel handoff-notification-card"><div class="panel-heading"><div><p class="eyebrow">Human handoff alerts</p><h3>Tell the team when a visitor is waiting</h3><p>Explicit requests notify staff immediately by default. Knowledge gaps stay in the Inbox unless you opt them into email alerts.</p></div><button class="primary-button small" type="button" :disabled="handoffSettingsLoading" @click="saveHandoffNotificationSettings">{{ handoffSettingsLoading ? 'Saving…' : 'Save handoff alerts' }}</button></div><div class="handoff-settings-grid"><label class="handoff-toggle"><span><strong>Email handoff alerts</strong><small>Send an actionable email with a direct link to the exact conversation.</small></span><input v-model="handoffNotificationSettings.enabled" type="checkbox" /></label><label><span class="field-label">Default recipient</span><input v-model="handoffNotificationSettings.defaultRecipientEmail" type="email" placeholder="support@business.com" /></label><label><span class="field-label">Additional recipients <span class="optional">One per line or comma-separated</span></span><textarea v-model="handoffAdditionalRecipients" rows="3" placeholder="manager@business.com&#10;frontdesk@business.com"></textarea></label><fieldset><legend>Send alert</legend><label><input v-model="handoffNotificationSettings.handoffDelaySeconds" type="radio" :value="0" /> Immediately</label><label><input v-model="handoffNotificationSettings.handoffDelaySeconds" type="radio" :value="120" /> After 2 minutes</label><label><input v-model="handoffNotificationSettings.handoffDelaySeconds" type="radio" :value="300" /> After 5 minutes</label></fieldset><label class="handoff-toggle"><span><strong>Remind if unanswered</strong><small>Keep the repeat policy ready for the async delivery worker.</small></span><input v-model="handoffNotificationSettings.repeatEnabled" type="checkbox" /></label><label v-if="handoffNotificationSettings.repeatEnabled"><span class="field-label">Reminder after (minutes)</span><input v-model.number="handoffNotificationSettings.repeatAfterSeconds" type="number" min="1" max="1440" /></label></div><div class="notification-preference-list handoff-trigger-list"><label><span><strong>Visitor explicitly asks for a person</strong><small>Immediate handoff and notification.</small></span><input v-model="handoffNotificationSettings.notifyExplicitHumanRequest" type="checkbox" /></label><label><span><strong>AI cannot answer confidently</strong><small>Optional; disabled by default to avoid noisy escalation.</small></span><input v-model="handoffNotificationSettings.notifyKnowledgeGap" type="checkbox" /></label><label><span><strong>High-value lead needs staff</strong><small>Notify when a configured action requires staff.</small></span><input v-model="handoffNotificationSettings.notifyHighValueLead" type="checkbox" /></label><label><span><strong>Every lead submission</strong><small>Leave this off unless every lead needs an email.</small></span><input v-model="handoffNotificationSettings.notifyEveryLead" type="checkbox" /></label></div><p v-if="handoffSettingsMessage" class="saved-message">✓ {{ handoffSettingsMessage }}</p><p v-if="handoffSettingsError" class="form-error">{{ handoffSettingsError }}</p></article>
             <article v-if="authSnapshot" class="panel notification-preferences-card"><div class="panel-heading"><div><p class="eyebrow">Owner preferences</p><h3>Operational email</h3><p>Choose which non-mandatory team updates reach you by email. Billing and security notices always stay on.</p></div><button class="primary-button small" type="button" :disabled="notificationPreferencesLoading" @click="saveNotificationPreferences">{{ notificationPreferencesLoading ? 'Saving…' : 'Save preferences' }}</button></div><div class="notification-preference-list"><label><span><strong>New qualified leads</strong><small>Get an email when a qualified inquiry is captured.</small></span><input v-model="notificationPreferences.newLead" type="checkbox" /></label><label><span><strong>Human handoffs</strong><small>Know when a visitor is waiting for a team member.</small></span><input v-model="notificationPreferences.humanHandoff" type="checkbox" /></label><label><span><strong>Integration failures</strong><small>Get notified when a connected CRM needs attention.</small></span><input v-model="notificationPreferences.integrationFailure" type="checkbox" /></label></div><p v-if="notificationPreferencesMessage" class="saved-message">✓ {{ notificationPreferencesMessage }}</p><p v-if="notificationPreferencesError" class="form-error">{{ notificationPreferencesError }}</p></article><article class="panel notification-settings-panel"><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></article>
           </template>
           <article v-if="authSnapshot && ownershipVerification && currentSettingsTab === 'verification'" class="panel verification-panel"><div class="panel-heading"><div><p class="eyebrow">Website ownership</p><h2>{{ ownershipVerification.status === 'verified' ? 'Ownership verified' : 'Verify before publishing' }}</h2><p>{{ ownershipVerification.status === 'verified' ? 'This business can publish its widget and receive production leads.' : 'Complete one verification method to protect production publishing.' }}</p></div><span :class="['status-pill', ownershipVerification.status === 'verified' ? 'booked' : ownershipVerification.status === 'rejected' ? 'new' : 'qualified']">{{ formatLabel(ownershipVerification.status) }}</span></div><div v-if="ownershipVerification.status !== 'verified'" class="verification-controls"><label>Method<select v-model="verificationMethod"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><button class="outline-button small" type="button" :disabled="verificationLoading" @click="requestOwnershipVerification">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethod !== 'email' && verificationMethod !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="checkOwnershipVerification">Check now</button></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="verificationMessage" class="saved-message">✓ {{ verificationMessage }}</p><p v-if="verificationError" class="form-error">{{ verificationError }}</p></article>
@@ -5063,7 +5165,7 @@ function startMarketingDemo() {
     </div>
 
     </template>
-    <AppFeedback :loading="globalLoading || authLoading" :toasts="feedbackToasts" @dismiss="dismissToast" />
+    <AppFeedback :loading="!authInitializing && (globalLoading || authLoading)" :toasts="feedbackToasts" @dismiss="dismissToast" />
   </main>
 </template>
 

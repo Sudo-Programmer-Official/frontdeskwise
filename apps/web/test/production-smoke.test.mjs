@@ -106,6 +106,22 @@ test("embedded widget uses the responsive conversation shell", () => {
   }
 });
 
+test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
+  assert.match(widget, /renderQuickActions\(answer\.quickActions\)/);
+  assert.match(widget, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
+});
+
+test("Inbox takeover and handoff notifications keep their contracts explicit", () => {
+  assert.match(app, /headers: \{ \.\.\.\(body \?/);
+  assert.match(app, /globalLoading: false/);
+  assert.match(app, /\/conversations\/\$\{conversation\.id\}\/read/);
+  assert.match(app, /notification-settings/);
+  assert.match(app, /Save handoff alerts/);
+  assert.match(app, /Staff only/);
+  assert.match(styles, /conversation-inbox-grid \.table-row-button/);
+  assert.match(styles, /-webkit-line-clamp: 2/);
+});
+
 test("application navigation is route-driven and refresh-safe", () => {
   for (const marker of [
     'segments[0] === "auth"',
@@ -166,6 +182,7 @@ test("application feedback is visible for async work and notifications", () => {
   assert.match(app, /runWithGlobalLoading/);
   assert.match(app, /notification-badge/);
   assert.match(app, /<AppFeedback/);
+  assert.match(app, /:loading="!authInitializing && \(globalLoading \|\| authLoading\)"/);
   assert.match(feedback, /app-loading-spinner/);
   assert.match(feedback, /app-toast-region/);
   assert.match(styles, /app-loading-overlay/);
