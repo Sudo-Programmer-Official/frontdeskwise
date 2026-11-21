@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseGroundingDecision, routeQuestion } from "../src/model-routing.js";
+import { hasDirectSensitiveEvidence, parseGroundingDecision, routeQuestion } from "../src/model-routing.js";
 import {
   answerabilityDecision,
   citationMatches,
@@ -107,6 +107,16 @@ test("grounding verification fails closed on anything except SUPPORTED", () => {
   assert.equal(parseGroundingDecision("SUPPORTED\n"), true);
   assert.equal(parseGroundingDecision("UNSUPPORTED"), false);
   assert.equal(parseGroundingDecision("I think this is supported"), false);
+});
+
+test("sensitive claims require direct evidence for the requested qualifier", () => {
+  const plans = "Core costs $65 per month. Growth costs $99 per month. No credit card is required.";
+  assert.equal(hasDirectSensitiveEvidence("What exact enterprise price does this cost?", plans), false);
+  assert.equal(hasDirectSensitiveEvidence("Does this sell my data to advertisers?", "We use personal data to provide the service."), false);
+  assert.equal(hasDirectSensitiveEvidence("Does this process customer credit card payments?", plans), false);
+  assert.equal(hasDirectSensitiveEvidence("Does this integrate with Mindbody?", "We offer online booking and reminders."), false);
+  assert.equal(hasDirectSensitiveEvidence("What does this cost?", plans), true);
+  assert.equal(hasDirectSensitiveEvidence("Does this sell my data?", "We do not sell personal data to advertisers."), true);
 });
 
 test("model routing keeps clear FAQs cheap and sends lead qualification to tier 2", () => {

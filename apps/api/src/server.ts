@@ -12,7 +12,7 @@ import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js"
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
-import { generateGroundedAnswer, routeQuestion, verifyGroundedAnswer, type ModelUsage } from "./model-routing.js";
+import { generateGroundedAnswer, hasDirectSensitiveEvidence, routeQuestion, verifyGroundedAnswer, type ModelUsage } from "./model-routing.js";
 import { shapeCustomerAnswer, type AnswerTone } from "./answer-shaping.js";
 import {
   ACTION_TEMPLATES,
@@ -539,7 +539,7 @@ type Lead = {
 type KnowledgeGap = {
   question: string;
   occurrenceCount: number;
-  status: "open" | "resolved";
+  status: "open" | "resolved" | "ignored";
   approvedAnswer: string | null;
   answerMode: KnowledgeAnswerMode;
   lastSeenAt: string;
@@ -2562,7 +2562,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       {
         question: String(gap.question),
         occurrenceCount: Number(gap.occurrence_count),
-        status: gap.status === "resolved" ? "resolved" : "open",
+        status: gap.status === "resolved" ? "resolved" : gap.status === "ignored" ? "ignored" : "open",
         approvedAnswer: typeof gap.approved_answer === "string" ? gap.approved_answer : null,
         answerMode: gap.answer_mode === "fixed_response" ? "fixed_response" : "knowledge",
         lastSeenAt: toIso(gap.last_seen_at),
@@ -3110,6 +3110,33 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
     app.log.error({ error, businessId: business.id, question: gap.question }, "Knowledge answer saved but indexing failed");
     return { gap, indexingStatus: "failed" };
   }
+}
+
+async function ignoreKnowledgeGap(business: Business, question: string): Promise<KnowledgeGap> {
+  const key = question.toLowerCase().replace(/\s+/g, " ").trim();
+  const gap = business.knowledgeGaps.get(key);
+  if (!gap) throw httpError(404, "Knowledge gap not found");
+  gap.status = "ignored";
+  gap.updatedAt = new Date().toISOString();
+  if (pool) {
+    try {
+      await pool.query(
+        `update knowledge_gaps
+         set status = 'ignored', updated_at = now()
+         where business_id = $1 and question = $2`,
+        [business.id, gap.question],
+      );
+    } catch (error) {
+      if (!isMissingDatabaseColumn(error)) throw error;
+      await pool.query(
+        `update knowledge_gaps
+         set status = 'ignored'
+         where business_id = $1 and question = $2`,
+        [business.id, gap.question],
+      );
+    }
+  }
+  return gap;
 }
 
 async function persistAgentConfig(business: Business): Promise<void> {
@@ -5636,7 +5663,11 @@ async function answerQuestion(
   const match = retrieval.matches[0];
   const secondMatch = retrieval.matches[1];
   const answerability = answerabilityDecision(retrieval.matches, business.sources, intent);
-  const materiallyRelevant = answerability.answerable;
+  const directSensitiveEvidence = hasDirectSensitiveEvidence(
+    question,
+    retrieval.matches.slice(0, 4).map(({ chunk }) => chunk.content.slice(0, 1_200)).join("\n\n"),
+  );
+  const materiallyRelevant = answerability.answerable && directSensitiveEvidence;
   const margin = secondMatch ? Math.min(0.12, Math.max(0, (match?.score ?? 0) - secondMatch.score) * 50) : 0.12;
   const confidenceScore = materiallyRelevant && match
     ? Math.min(0.98, 0.35 + (match.evidenceScore * 0.5) + (retrieval.mode === "hybrid_rrf" ? 0.12 : 0.05) + margin)
@@ -5652,7 +5683,7 @@ async function answerQuestion(
     candidateCount: retrieval.matches.length,
     topScore: answerability.score,
     answerabilityThreshold: answerability.threshold,
-    answerability: answerability.reason,
+    answerability: directSensitiveEvidence ? answerability.reason : "insufficient_sensitive_claim_evidence",
     candidates: retrieval.candidates,
   };
 
@@ -10909,6 +10940,16 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
   const approvedAnswer = requiredString(body.approvedAnswer, "approvedAnswer", 4_000);
   const answerMode = body.answerMode === "fixed_response" ? "fixed_response" : "knowledge";
   return await resolveKnowledgeGap(business, question, approvedAnswer, answerMode);
+});
+
+app.post("/api/v1/demo/:slug/knowledge-gaps/ignore", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const body = asRecord(request.body);
+  const question = requiredString(body.question, "question", 1_000);
+  return { gap: await ignoreKnowledgeGap(business, question) };
 });
 
 app.get("/api/v1/demo/:slug/retrieval-diagnostics", async (request) => {

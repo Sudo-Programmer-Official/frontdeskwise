@@ -312,7 +312,7 @@ interface ActionTemplate extends Omit<ActionFlow, "id" | "createdAt" | "updatedA
 interface KnowledgeGap {
   question: string;
   occurrenceCount: number;
-  status: "open" | "resolved";
+  status: "open" | "resolved" | "ignored";
   approvedAnswer: string | null;
   answerMode: "knowledge" | "fixed_response";
   lastSeenAt: string;
@@ -341,6 +341,7 @@ interface RetrievalDiagnostic {
   grounded: boolean;
   confidenceScore: number;
   confidenceBand: "high" | "medium" | "low";
+  citations?: Array<{ title?: string; url?: string; pageType?: string }>;
   retrieval?: { mode?: string; candidateCount?: number; topScore?: number; route?: string; model?: string | null; reason?: string; latencyMs?: number };
   createdAt: string;
 }
@@ -469,6 +470,23 @@ interface WorkspaceSource {
   pageType: string;
   crawlStatus: string;
   lastCrawledAt: string;
+}
+
+type KnowledgeTab = "overview" | "sources" | "gaps" | "quality";
+type KnowledgeGapFilter = "open" | "resolved" | "ignored" | "all";
+type KnowledgeGapSort = "mostAsked" | "newest" | "highestImpact";
+type KnowledgeQualityFilter = "all" | "grounded" | "fallback" | "needsReview";
+
+interface KnowledgeSourceRow {
+  id: string;
+  title: string;
+  type: "Website" | "Document";
+  status: "ready" | "attention" | "processing";
+  statusLabel: string;
+  detail: string;
+  lastRefreshed: string | null;
+  websiteSource?: WorkspaceSource;
+  document?: OrganizationDocument;
 }
 
 type AgentPublishStatus = "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
@@ -1017,7 +1035,12 @@ const leadIntent = ref("");
 const leadSavedMessage = ref("");
 const knowledgeGaps = ref<KnowledgeGap[]>([]);
 const retrievalDiagnostics = ref<RetrievalDiagnostic[]>([]);
-const sourceLibraryOpen = ref(false);
+const knowledgeTab = ref<KnowledgeTab>("overview");
+const knowledgeGapFilter = ref<KnowledgeGapFilter>("open");
+const knowledgeGapSort = ref<KnowledgeGapSort>("mostAsked");
+const knowledgeQualityFilter = ref<KnowledgeQualityFilter>("all");
+const answerGapDrawerOpen = ref(false);
+const selectedKnowledgeGap = ref<KnowledgeGap | null>(null);
 const knowledgeError = ref("");
 const knowledgeLoading = ref(false);
 const answerDrafts = ref<Record<string, string>>({});
@@ -1164,6 +1187,7 @@ const leadDetailLoading = ref(false);
 const leadExportMessage = ref("");
 const sourceActionLoading = ref("");
 const sourceActionMessage = ref("");
+const knowledgeMoreOpen = ref(false);
 const inboxConversations = ref<InboxConversation[]>([]);
 const inboxLoading = ref(false);
 const inboxError = ref("");
@@ -1315,6 +1339,71 @@ const readinessScore = computed(() => workspaceReadiness.value);
 const semanticSearchHealthy = computed(() => workspaceKnowledge.value?.semantic?.status === "SEMANTIC_SEARCH_HEALTHY");
 const semanticSearchLabel = computed(() => semanticSearchHealthy.value ? "Semantic search ready" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_CONFIGURATION_ERROR" ? "Embedding configuration needs attention" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_BACKLOG" ? "Embeddings processing" : "Full-text fallback active");
 const knowledgeSourcesNeedAttention = computed(() => Boolean((workspaceKnowledge.value?.pendingSources ?? 0) + (workspaceKnowledge.value?.failedSources ?? 0)));
+const knowledgeWebsiteSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "web_page"));
+const knowledgeReadyWebsiteSources = computed(() => knowledgeWebsiteSources.value.filter((source) => source.crawlStatus === "ready"));
+const knowledgeWebsiteCoverage = computed(() => {
+  const total = knowledgeWebsiteSources.value.length;
+  if (!total) return { value: "—", detail: "No website pages yet" };
+  return {
+    value: `${Math.round((knowledgeReadyWebsiteSources.value.length / total) * 100)}%`,
+    detail: `${knowledgeReadyWebsiteSources.value.length} of ${total} pages ready`,
+  };
+});
+const knowledgeSourceRows = computed<KnowledgeSourceRow[]>(() => [
+  ...knowledgeWebsiteSources.value.map((source) => ({
+    id: source.id,
+    title: source.title || source.url,
+    type: "Website" as const,
+    status: source.crawlStatus === "ready" ? "ready" as const : source.crawlStatus === "failed" ? "attention" as const : "processing" as const,
+    statusLabel: source.crawlStatus === "ready" ? "Knowledge ready" : source.crawlStatus === "failed" ? "Needs attention" : "Refreshing",
+    detail: source.pageType || "Website page",
+    lastRefreshed: source.lastCrawledAt,
+    websiteSource: source,
+  })),
+  ...organizationDocuments.value.map((documentItem) => ({
+    id: documentItem.id,
+    title: documentItem.fileName,
+    type: "Document" as const,
+    status: documentItem.status === "ready" ? "ready" as const : documentItem.status === "failed" ? "attention" as const : "processing" as const,
+    statusLabel: documentItem.status === "ready" ? "Ready" : documentItem.status === "failed" ? "Needs attention" : "Processing",
+    detail: `${documentItem.contentType} · ${formatDocumentSize(documentItem.sizeBytes)}`,
+    lastRefreshed: documentItem.updatedAt ?? documentItem.createdAt,
+    document: documentItem,
+  })),
+]);
+const knowledgeReadySourceCount = computed(() => knowledgeSourceRows.value.filter((source) => source.status === "ready").length);
+const knowledgeLastUpdated = computed(() => {
+  const dates = knowledgeSourceRows.value.map((source) => source.lastRefreshed ? Date.parse(source.lastRefreshed) : NaN).filter((value) => Number.isFinite(value));
+  if (!dates.length) return "—";
+  return formatKnowledgeRelativeTime(new Date(Math.max(...dates)).toISOString());
+});
+const knowledgeHealthLabel = computed(() => {
+  if (!workspaceKnowledge.value || !knowledgeSourceRows.value.length) return "Add a website or document";
+  if (knowledgeSourcesNeedAttention.value) return "Needs attention";
+  if (workspaceKnowledge.value.status === "indexing") return "Updating knowledge";
+  if (workspaceKnowledge.value.status === "review_recommended") return "Review recommended";
+  return "Healthy";
+});
+const knowledgeGapCounts = computed(() => ({
+  open: knowledgeGaps.value.filter((gap) => gap.status === "open").length,
+  resolved: knowledgeGaps.value.filter((gap) => gap.status === "resolved").length,
+  ignored: knowledgeGaps.value.filter((gap) => gap.status === "ignored").length,
+  all: knowledgeGaps.value.length,
+}));
+const visibleKnowledgeGaps = computed(() => {
+  const filtered = knowledgeGaps.value.filter((gap) => knowledgeGapFilter.value === "all" || gap.status === knowledgeGapFilter.value);
+  return [...filtered].sort((left, right) => {
+    if (knowledgeGapSort.value === "newest") return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
+    if (knowledgeGapSort.value === "highestImpact") return knowledgeGapImpact(right) - knowledgeGapImpact(left) || right.occurrenceCount - left.occurrenceCount;
+    return right.occurrenceCount - left.occurrenceCount || Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
+  });
+});
+const visibleRetrievalDiagnostics = computed(() => retrievalDiagnostics.value.filter((diagnostic) => {
+  if (knowledgeQualityFilter.value === "grounded") return diagnostic.grounded;
+  if (knowledgeQualityFilter.value === "fallback") return !diagnostic.grounded;
+  if (knowledgeQualityFilter.value === "needsReview") return !diagnostic.grounded || diagnostic.confidenceBand === "low";
+  return true;
+}));
 const knowledgeTestAction = computed(() => {
   if (knowledgeSourcesNeedAttention.value) return { label: "Fix sources first", disabled: true };
   if (knowledgeTestContext.value === "answer") return { label: "Test this answer", disabled: false };
@@ -1664,8 +1753,38 @@ function openAgentTest(question?: string) {
 }
 
 function reviewKnowledgeGaps() {
+  knowledgeTab.value = "gaps";
+  knowledgeGapFilter.value = "open";
   if (typeof document === "undefined") return;
-  document.querySelector(".knowledge-review-grid")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  nextTick(() => document.querySelector(".knowledge-gaps-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+}
+
+function openKnowledgeAnswer(gap: KnowledgeGap) {
+  selectedKnowledgeGap.value = gap;
+  if (answerDrafts.value[gap.question] === undefined) answerDrafts.value[gap.question] = gap.approvedAnswer ?? "";
+  knowledgeAnswerError.value = "";
+  knowledgeAnswerFailedGap.value = null;
+  knowledgeAnswerStatus.value = "";
+  answerGapDrawerOpen.value = true;
+}
+
+function closeKnowledgeAnswer() {
+  if (knowledgeAnswerSaving.value) return;
+  answerGapDrawerOpen.value = false;
+  selectedKnowledgeGap.value = null;
+  knowledgeAnswerError.value = "";
+  knowledgeAnswerFailedGap.value = null;
+}
+
+async function refreshWebsiteKnowledge() {
+  const websiteSource = knowledgeWebsiteSources.value[0];
+  if (!websiteSource) {
+    await refreshWorkspaceSummary();
+    await loadKnowledge();
+    return;
+  }
+  await recrawlSource(websiteSource);
+  await loadKnowledge();
 }
 
 function clearTestResponse() {
@@ -2091,6 +2210,13 @@ function clearWorkspaceState() {
   leadExportMessage.value = "";
   knowledgeGaps.value = [];
   retrievalDiagnostics.value = [];
+  knowledgeTab.value = "overview";
+  knowledgeGapFilter.value = "open";
+  knowledgeGapSort.value = "mostAsked";
+  knowledgeQualityFilter.value = "all";
+  knowledgeMoreOpen.value = false;
+  answerGapDrawerOpen.value = false;
+  selectedKnowledgeGap.value = null;
   organizationDocuments.value = [];
   integrations.value = [];
   mcpConnections.value = [];
@@ -2126,7 +2252,6 @@ function clearWorkspaceState() {
   answerAction.value = null;
   answerFormValues.value = {};
   suggestedQuestions.value = [];
-  sourceLibraryOpen.value = false;
   readinessEvaluation.value = null;
   evaluationError.value = "";
 }
@@ -2569,6 +2694,32 @@ function selectedBusinessId(): string | null {
   return activeOrganization.value?.businesses.find((business) => business.slug === demoSlug.value)?.id ?? null;
 }
 
+function formatKnowledgeRelativeTime(value: string | null): string {
+  if (!value) return "—";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "—";
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
+  if (elapsedSeconds < 60) return "Just now";
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days} days ago`;
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: timestamp < Date.now() - 31536000000 ? "numeric" : undefined }).format(timestamp);
+}
+
+function formatKnowledgeGapReason(reason?: string | null): string {
+  if (!reason || reason === "legacy_unknown") return "No authoritative answer found";
+  return reason.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function knowledgeGapImpact(gap: KnowledgeGap): number {
+  const reasonWeight = gap.reason === "grounding_check_failed" ? 3 : gap.reason === "answer_generation_failed" ? 2 : 1;
+  return gap.occurrenceCount * reasonWeight;
+}
+
 function formatDocumentSize(sizeBytes: number): string {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
   if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
@@ -2712,7 +2863,7 @@ async function resolveKnowledgeGap(gap: KnowledgeGap) {
     answerDrafts.value[gap.question] = approvedAnswer;
     resolvedKnowledgeQuestion.value = gap.question;
     knowledgeTestContext.value = "answer";
-    knowledgeAnswerStatus.value = payload.indexingStatus === "queued" ? "Updating AI knowledge…" : "Ready ✓";
+    knowledgeAnswerStatus.value = payload.indexingStatus === "queued" ? "Updating assistant knowledge…" : "Ready ✓";
     knowledgeAnswerFailedGap.value = null;
     await refreshWorkspaceSummary(false);
     if (payload.indexingStatus === "queued") void waitForKnowledgeIndex(gap);
@@ -2720,6 +2871,35 @@ async function resolveKnowledgeGap(gap: KnowledgeGap) {
     knowledgeAnswerError.value = error instanceof Error ? error.message : "Update failed — Retry";
     knowledgeAnswerFailedGap.value = gap;
     knowledgeAnswerStatus.value = "";
+  } finally {
+    knowledgeAnswerSaving.value = false;
+  }
+}
+
+async function ignoreKnowledgeGap(gap: KnowledgeGap) {
+  if (knowledgeAnswerSaving.value) return;
+  if (!authSnapshot.value) {
+    openAuth("signup");
+    return;
+  }
+  knowledgeAnswerSaving.value = true;
+  knowledgeAnswerError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/ignore`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ question: gap.question }),
+    });
+    const payload = await response.json() as { gap?: KnowledgeGap; error?: string };
+    if (!response.ok || !payload.gap) throw new Error(payload.error ?? "Could not ignore that answer gap.");
+    Object.assign(gap, payload.gap);
+    if (selectedKnowledgeGap.value?.question === gap.question) {
+      answerGapDrawerOpen.value = false;
+      selectedKnowledgeGap.value = null;
+    }
+    await refreshWorkspaceSummary(false);
+  } catch (error) {
+    knowledgeAnswerError.value = error instanceof Error ? error.message : "Could not ignore that answer gap.";
   } finally {
     knowledgeAnswerSaving.value = false;
   }
@@ -3285,7 +3465,7 @@ async function recrawlSource(source: WorkspaceSource) {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/sources/${source.id}/recrawl`), { method: "POST", headers: ownerHeaders() });
     const payload = await response.json() as { error?: string; sourceCount?: number };
     if (!response.ok) throw new Error(payload.error ?? "Could not refresh website knowledge.");
-    sourceActionMessage.value = `Website refreshed · ${payload.sourceCount ?? 0} pages available`;
+    sourceActionMessage.value = `Website knowledge updated ✓ · ${payload.sourceCount ?? 0} pages available to your assistant`;
     await refreshWorkspaceSummary();
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : "Could not refresh website knowledge.";
@@ -3328,12 +3508,12 @@ async function reindexKnowledge() {
       headers: ownerHeaders(),
     });
     const payload = await response.json() as { status?: string; message?: string; error?: string };
-    if (!response.ok) throw new Error(response.status === 503 ? "Knowledge re-indexing is not available yet." : payload.error ?? "Could not re-index knowledge.");
-    embeddingMessage.value = payload.status === "queued" ? "Knowledge re-indexing started." : payload.message ?? "Knowledge is already up to date.";
+    if (!response.ok) throw new Error(response.status === 503 ? "Knowledge index rebuild is not available yet." : payload.error ?? "Could not rebuild the knowledge index.");
+    embeddingMessage.value = payload.status === "queued" ? "Knowledge index rebuild started." : payload.message ?? "Knowledge is already up to date.";
     knowledgeTestContext.value = "updated";
     await refreshWorkspaceSummary();
   } catch (error) {
-    knowledgeError.value = error instanceof Error ? error.message : "Could not re-index knowledge.";
+    knowledgeError.value = error instanceof Error ? error.message : "Could not rebuild the knowledge index.";
   } finally {
     embeddingLoading.value = false;
   }
@@ -5611,26 +5791,58 @@ function startMarketingDemo() {
         <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads()">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
 
 
-        <div v-else-if="view === 'knowledge'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Save an answer once. FrontDeskWise updates its searchable knowledge automatically.</p></div><div class="toolbar-actions knowledge-toolbar-actions"><span v-if="knowledgeAnswerStatus" class="saved-message">{{ knowledgeAnswerStatus }}</span><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" :title="knowledgeTestAction.disabled ? 'Review sources that need attention before testing.' : undefined" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">{{ knowledgeTestAction.label }}<span v-if="!knowledgeTestAction.disabled"> →</span></button><button class="outline-button small knowledge-toolbar-more" type="button" aria-label="Refresh knowledge" title="Refresh knowledge" @click="loadKnowledge">⋯</button></div></div>
-          <article class="knowledge-next-action panel"><div><p class="eyebrow">Next setup step</p><h3>{{ knowledgeHasOpenGaps ? 'Review answer gaps.' : knowledgeSetupReady ? 'Knowledge looks ready.' : knowledgeSourcesNeedAttention ? 'Review source health first.' : 'Build a stronger knowledge base.' }}</h3><p>{{ knowledgeHasOpenGaps ? 'You can test the assistant now while you review the questions that need stronger answers.' : knowledgeSetupReady ? 'Test your assistant with representative customer questions before you go live.' : knowledgeSourcesNeedAttention ? 'Some sources are still processing or need attention. You can still test while you review them.' : 'Add a website source or private document so the assistant has reliable information to use.' }}</p></div><div class="toolbar-actions"><button v-if="knowledgeSetupReady && !knowledgeHasOpenGaps" class="primary-button small" type="button" @click="openAgentTest()">Test assistant →</button><button v-else class="primary-button small" type="button" @click="openAgentTest()">Test assistant anyway →</button><button v-if="knowledgeHasOpenGaps" class="outline-button small" type="button" @click="reviewKnowledgeGaps">Review answer gaps</button></div></article>
-          <p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p>
-          <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
-          <article v-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message knowledge-start-panel"><strong>Start your knowledge base</strong><p>Sign-in is complete. Add your first business website and FrontDeskWise will crawl it, index the readable content, and make it available for questions.</p><button class="primary-button small" type="button" @click="openAddBusiness">Add website / domain →</button></article>
-          <article v-if="!authSnapshot || availableBusinesses.length" class="panel document-library">
-            <div class="panel-heading"><div><p class="eyebrow">Organization knowledge</p><h2>Private documents</h2><p>Upload policies, menus, service guides, and other business material. Files are private and scoped to {{ businessName || 'the selected business' }}.</p></div><label class="primary-button small document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label></div>
-            <p v-if="documentsError" class="form-error">{{ documentsError }}</p>
-            <p v-if="documentsMessage" class="saved-message">✓ {{ documentsMessage }}</p>
-            <div v-if="!authSnapshot" class="install-gate"><p>Sign in to upload organization knowledge. The public demo still uses the crawled website.</p><button class="outline-button small" type="button" @click="openAuth('signup')">Create account to upload →</button></div>
-            <div v-else-if="!organizationDocuments.length && !documentsError" class="diagnostics-empty">No private documents uploaded for this business yet.</div>
-            <div v-else class="document-list"><div v-for="documentItem in organizationDocuments" :key="documentItem.id" class="document-row"><div><strong>{{ documentItem.fileName }}</strong><small>{{ documentItem.contentType }} · {{ formatDocumentSize(documentItem.sizeBytes) }} · {{ documentItem.status }}</small></div><div class="admin-actions"><button class="outline-button small" type="button" @click="downloadDocument(documentItem)">Download</button><button class="text-button" type="button" :disabled="documentsLoading" @click="deleteDocument(documentItem)">Remove</button></div></div></div>
-          </article>
-          <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
-          <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
-          <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon"><CircleCheck :size="24" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Knowledge looks ready.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button class="primary-button small" type="button" @click="openAgentTest()">{{ knowledgeSourcesNeedAttention ? 'Test assistant anyway' : 'Test assistant' }} <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article>
-          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Ready' : '! Open gap' }}</span><h3>{{ gap.question }}</h3><small v-if="gap.intent || gap.reason" class="gap-diagnostics">Intent: {{ gap.intent ?? 'general' }} · Reason: {{ (gap.reason ?? 'legacy_unknown').replaceAll('_', ' ') }}</small></div><strong>{{ gap.occurrenceCount }}×</strong></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="gap.answerMode"><option value="knowledge">Knowledge answer · AI may summarize</option><option value="fixed_response">Fixed response · preserve wording</option></select></label><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button v-if="gap.status === 'resolved'" class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(gap)">{{ knowledgeAnswerSaving ? 'Updating…' : gap.status === 'resolved' ? 'Save answer' : 'Save answer' }}</button></div></article></div>
-          <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Answer quality</p><h2>Recent answer checks</h2><p>Review confidence and whether each answer was grounded in your knowledge.</p></div></div>
-          <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Outcome</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Needs review' }}<small>{{ diagnostic.retrieval?.candidateCount ?? 0 }} knowledge matches</small></span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No answer checks yet.</div></article>
+        <div v-else-if="view === 'knowledge'" class="view-content knowledge-workspace">
+          <div class="knowledge-page-header">
+            <div><p class="eyebrow">Website knowledge</p><h2>Website knowledge</h2><p>{{ knowledgeWebsiteSources.length }} page{{ knowledgeWebsiteSources.length === 1 ? '' : 's' }} available to your assistant · Last updated {{ knowledgeLastUpdated }}.</p></div>
+            <div class="knowledge-page-actions"><span v-if="knowledgeLoading" class="conversation-status">Refreshing…</span><button class="outline-button small" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">{{ sourceActionLoading ? 'Refreshing…' : 'Refresh website knowledge' }}</button><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">Test assistant</button></div>
+          </div>
+
+          <nav class="knowledge-tabs" role="tablist" aria-label="Knowledge sections">
+            <button type="button" role="tab" :aria-selected="knowledgeTab === 'overview'" :class="{ active: knowledgeTab === 'overview' }" @click="knowledgeTab = 'overview'">Overview</button>
+            <button type="button" role="tab" :aria-selected="knowledgeTab === 'sources'" :class="{ active: knowledgeTab === 'sources' }" @click="knowledgeTab = 'sources'">Sources <span>{{ knowledgeSourceRows.length }}</span></button>
+            <button type="button" role="tab" :aria-selected="knowledgeTab === 'gaps'" :class="{ active: knowledgeTab === 'gaps' }" @click="knowledgeTab = 'gaps'">Answer gaps <span v-if="knowledgeGapCounts.open">{{ knowledgeGapCounts.open }}</span></button>
+            <button type="button" role="tab" :aria-selected="knowledgeTab === 'quality'" :class="{ active: knowledgeTab === 'quality' }" @click="knowledgeTab = 'quality'">Quality</button>
+          </nav>
+
+          <p v-if="knowledgeError" class="form-error knowledge-inline-message">{{ knowledgeError }}</p>
+          <p v-if="documentsError" class="form-error knowledge-inline-message">{{ documentsError }}</p>
+          <p v-if="documentsMessage" class="saved-message knowledge-inline-message">✓ {{ documentsMessage }}</p>
+          <p v-if="embeddingMessage" class="saved-message knowledge-inline-message">✓ {{ embeddingMessage }}</p>
+          <article v-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message knowledge-start-panel"><strong>Start your knowledge base</strong><p>Add your first business website to make reliable information available for customer questions.</p><button class="primary-button small" type="button" @click="openAddBusiness">Add website / domain →</button></article>
+
+          <template v-if="!authSnapshot || availableBusinesses.length">
+            <section v-if="knowledgeTab === 'overview'" class="knowledge-tab-content" aria-labelledby="knowledge-overview-heading">
+              <div class="knowledge-health-strip"><div><span class="knowledge-health-indicator" :class="knowledgeHealthLabel === 'Healthy' ? 'healthy' : 'attention'"></span><div><p class="eyebrow">Knowledge health</p><h3 id="knowledge-overview-heading">{{ knowledgeHealthLabel }}</h3></div></div><span class="status-pill" :class="knowledgeHealthLabel === 'Healthy' ? 'booked' : knowledgeHealthLabel === 'Needs attention' ? 'new' : 'qualified'">{{ readinessScore }}% ready</span></div>
+              <div class="knowledge-metric-strip"><div><strong>{{ knowledgeWebsiteSources.length }}</strong><span>Website pages</span><small>{{ knowledgeWebsiteCoverage.detail }}</small></div><div><strong>{{ workspaceKnowledge?.chunkCount ?? 0 }}</strong><span>Knowledge sections</span><small>Searchable content for your assistant</small></div><div><strong>{{ knowledgeGapCounts.open }}</strong><span>Open answer gaps</span><small>{{ knowledgeGapCounts.open ? 'Questions to review' : 'Nothing waiting' }}</small></div><div><strong>{{ knowledgeLastUpdated }}</strong><span>Last updated</span><small>Across website and documents</small></div></div>
+              <div class="knowledge-overview-actions"><div class="knowledge-refresh-control"><button class="primary-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">{{ sourceActionLoading ? 'Scanning website…' : 'Refresh website knowledge' }}</button><p>Re-scan your website for new or updated pages and refresh what your assistant knows.</p><span v-if="sourceActionLoading" class="knowledge-refresh-progress" role="status" aria-live="polite">Scanning website… <span>Discovering pages</span> → <span>Reading content</span> → <span>Updating knowledge</span></span></div><label class="outline-button document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label><div class="knowledge-more-actions"><button class="outline-button knowledge-more-trigger" type="button" aria-label="More website knowledge actions" :aria-expanded="knowledgeMoreOpen" @click="knowledgeMoreOpen = !knowledgeMoreOpen"><MoreHorizontal :size="18" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="knowledgeMoreOpen" class="knowledge-more-menu" role="menu"><button type="button" role="menuitem" @click="knowledgeTab = 'quality'; knowledgeMoreOpen = false">View crawl details</button><button type="button" role="menuitem" @click="knowledgeTab = 'sources'; knowledgeMoreOpen = false">View website pages</button><button type="button" role="menuitem" :disabled="Boolean(embeddingLoading)" @click="knowledgeMoreOpen = false; void reindexKnowledge()">{{ embeddingLoading ? 'Rebuilding…' : 'Rebuild knowledge index' }}</button></div></div></div>
+              <button v-if="knowledgeSourcesNeedAttention" class="knowledge-warning-row" type="button" @click="knowledgeTab = 'sources'"><span class="knowledge-warning-icon">!</span><span><strong>{{ (workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0) }} source{{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? '' : 's' }} {{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? 'needs' : 'need' }} attention</strong><small>Review the source status before your next test.</small></span><span>Review source <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></span></button>
+              <div class="knowledge-next-step"><div><p class="eyebrow">Next best action</p><strong>{{ knowledgeHasOpenGaps ? 'Answer the questions visitors ask most.' : knowledgeSourcesNeedAttention ? 'Review the source that needs attention.' : 'Test a representative customer question.' }}</strong><small>{{ knowledgeHasOpenGaps ? `${knowledgeGapCounts.open} open answer gap${knowledgeGapCounts.open === 1 ? '' : 's'} are ready for review.` : 'Keep the path from source to answer easy to verify.' }}</small></div><button class="text-button" type="button" @click="knowledgeHasOpenGaps ? reviewKnowledgeGaps() : openAgentTest()">{{ knowledgeHasOpenGaps ? 'Review answer gaps →' : 'Test assistant →' }}</button></div>
+            </section>
+
+            <section v-else-if="knowledgeTab === 'sources'" class="knowledge-tab-content" aria-labelledby="knowledge-sources-heading">
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Source management</p><h2 id="knowledge-sources-heading">Sources</h2><p>{{ knowledgeWebsiteSources.length }} website page{{ knowledgeWebsiteSources.length === 1 ? '' : 's' }} and {{ organizationDocuments.length }} private document{{ organizationDocuments.length === 1 ? '' : 's' }} connected to this assistant.</p></div><label class="outline-button small document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label></div>
+              <div v-if="sourceActionMessage" class="saved-message source-action-message">✓ {{ sourceActionMessage }}</div>
+              <div class="knowledge-source-table" role="table" aria-label="Knowledge sources"><div class="knowledge-source-table-head" role="row"><span>Source</span><span>Type</span><span>Status</span><span>Pages / chunks</span><span>Last refreshed</span><span>Actions</span></div><div v-if="!knowledgeSourceRows.length" class="knowledge-empty-row">No sources connected yet.</div><div v-for="row in knowledgeSourceRows" :key="`${row.type}-${row.id}`" class="knowledge-source-table-row" role="row"><div class="knowledge-source-name"><span :class="['knowledge-source-icon', row.type === 'Website' ? 'website' : 'document']"><BookOpen v-if="row.type === 'Website'" :size="15" :stroke-width="1.8" aria-hidden="true" /><FileText v-else :size="15" :stroke-width="1.8" aria-hidden="true" /></span><span><strong>{{ row.title }}</strong><small>{{ row.detail }}</small></span></div><span class="knowledge-source-type">{{ row.type }}</span><span :class="['status-pill', row.status === 'ready' ? 'booked' : row.status === 'attention' ? 'new' : 'qualified']">{{ row.statusLabel }}</span><span class="knowledge-source-meta">{{ row.type === 'Website' ? 'Website page' : '—' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(row.lastRefreshed) }}</span><div class="knowledge-source-actions"><button v-if="row.websiteSource" class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(row.websiteSource)">{{ sourceActionLoading === row.id ? 'Refreshing…' : 'Refresh page' }}</button><button v-if="row.document" class="text-button" type="button" @click="downloadDocument(row.document)">Download</button><button v-if="row.websiteSource" class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(row.websiteSource)">Remove</button><button v-if="row.document" class="text-button danger-text" type="button" :disabled="documentsLoading" @click="deleteDocument(row.document)">Remove</button></div></div></div>
+              <div v-if="!authSnapshot" class="knowledge-auth-note">Sign in to upload private documents or refresh website knowledge.</div>
+            </section>
+
+            <section v-else-if="knowledgeTab === 'gaps'" class="knowledge-tab-content knowledge-gaps-panel" aria-labelledby="knowledge-gaps-heading">
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Conversation signals</p><h2 id="knowledge-gaps-heading">Answer gaps</h2><p>Turn repeated fallback questions into answers your assistant can use.</p></div><span class="knowledge-count-note">{{ knowledgeGapCounts.open }} open</span></div>
+              <div class="knowledge-filter-bar"><div class="knowledge-filter-group" role="group" aria-label="Answer gap status"><button type="button" :class="{ active: knowledgeGapFilter === 'open' }" @click="knowledgeGapFilter = 'open'">Open <span>{{ knowledgeGapCounts.open }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'resolved' }" @click="knowledgeGapFilter = 'resolved'">Resolved <span>{{ knowledgeGapCounts.resolved }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'ignored' }" @click="knowledgeGapFilter = 'ignored'">Ignored <span>{{ knowledgeGapCounts.ignored }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'all' }" @click="knowledgeGapFilter = 'all'">All <span>{{ knowledgeGapCounts.all }}</span></button></div><label class="knowledge-sort-control"><span>Sort</span><select v-model="knowledgeGapSort"><option value="mostAsked">Most asked</option><option value="newest">Newest</option><option value="highestImpact">Highest impact</option></select></label></div>
+              <div v-if="!visibleKnowledgeGaps.length" class="knowledge-empty-state"><CircleCheck :size="23" :stroke-width="1.8" aria-hidden="true" /><div><strong>{{ knowledgeGapFilter === 'open' ? 'No open answer gaps.' : 'No answer gaps in this view.' }}</strong><small>New low-confidence questions will appear here as visitors ask them.</small></div></div>
+              <div v-else class="knowledge-gap-queue"><article v-for="gap in visibleKnowledgeGaps" :key="gap.question" class="knowledge-gap-row"><div class="knowledge-gap-main"><div class="knowledge-gap-topline"><span :class="['status-pill', gap.status === 'resolved' ? 'booked' : gap.status === 'ignored' ? 'qualified' : 'new']">{{ gap.status === 'resolved' ? 'Resolved' : gap.status === 'ignored' ? 'Ignored' : 'Open' }}</span><span class="knowledge-gap-intent">{{ gap.intent || 'General intent' }}</span></div><h3>{{ gap.question }}</h3><p>{{ formatKnowledgeGapReason(gap.reason) }}</p></div><div class="knowledge-gap-stats"><strong>{{ gap.occurrenceCount }}×</strong><span>asked</span><small>Last seen {{ formatKnowledgeRelativeTime(gap.lastSeenAt) }}</small></div><div class="knowledge-gap-actions"><button class="primary-button small" type="button" @click="openKnowledgeAnswer(gap)">{{ gap.status === 'resolved' ? 'Edit answer' : 'Answer' }}</button><button class="outline-button small" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">Refresh website knowledge</button><button v-if="gap.status === 'open'" class="text-button" type="button" :disabled="knowledgeAnswerSaving" @click="ignoreKnowledgeGap(gap)">Ignore</button></div></article></div>
+            </section>
+
+            <section v-else class="knowledge-tab-content" aria-labelledby="knowledge-quality-heading">
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Answer quality</p><h2 id="knowledge-quality-heading">Recent answer checks</h2><p>See whether answers were grounded, fell back safely, or need review.</p></div><span class="knowledge-count-note">{{ retrievalDiagnostics.length }} checks</span></div>
+              <div class="knowledge-filter-bar knowledge-quality-filters" role="group" aria-label="Answer quality filters"><button type="button" :class="{ active: knowledgeQualityFilter === 'all' }" @click="knowledgeQualityFilter = 'all'">All</button><button type="button" :class="{ active: knowledgeQualityFilter === 'grounded' }" @click="knowledgeQualityFilter = 'grounded'">Grounded</button><button type="button" :class="{ active: knowledgeQualityFilter === 'fallback' }" @click="knowledgeQualityFilter = 'fallback'">Fallback</button><button type="button" :class="{ active: knowledgeQualityFilter === 'needsReview' }" @click="knowledgeQualityFilter = 'needsReview'">Needs review</button></div>
+              <div class="knowledge-quality-table" role="table" aria-label="Recent answer checks"><div class="knowledge-quality-table-head" role="row"><span>Question</span><span>Confidence</span><span>Outcome</span><span>Sources</span><span>Time</span></div><div v-if="!visibleRetrievalDiagnostics.length" class="knowledge-empty-row">No answer checks match this filter.</div><div v-for="diagnostic in visibleRetrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="knowledge-quality-table-row" role="row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}%</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Fallback' }}</span><span class="knowledge-source-meta">{{ diagnostic.citations?.length ?? 0 }} source{{ (diagnostic.citations?.length ?? 0) === 1 ? '' : 's' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(diagnostic.createdAt) }}</span></div></div>
+            </section>
+          </template>
+
+          <div v-if="answerGapDrawerOpen && selectedKnowledgeGap" class="knowledge-drawer-backdrop" role="presentation" @click.self="closeKnowledgeAnswer">
+            <aside class="knowledge-answer-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledge-answer-heading"><div class="knowledge-drawer-header"><div><p class="eyebrow">Answer editor</p><h2 id="knowledge-answer-heading">Answer this question</h2></div><button class="knowledge-close-button" type="button" aria-label="Close answer editor" @click="closeKnowledgeAnswer">×</button></div><div class="knowledge-drawer-question"><span>Question</span><strong>{{ selectedKnowledgeGap.question }}</strong><small>{{ selectedKnowledgeGap.occurrenceCount }}× asked · {{ formatKnowledgeGapReason(selectedKnowledgeGap.reason) }}</small></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="selectedKnowledgeGap.answerMode"><option value="knowledge">Knowledge answer — AI may summarize</option><option value="fixed_response">Fixed response — return controlled wording</option></select></label><label class="knowledge-answer-field"><span>Answer</span><textarea v-model="answerDrafts[selectedKnowledgeGap.question]" rows="9" placeholder="Write the answer the assistant should use…"></textarea><small>Keep it clear and specific. FrontDeskWise updates assistant knowledge automatically after you save.</small></label><p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p><div v-if="knowledgeAnswerSaving || knowledgeAnswerStatus" class="knowledge-answer-progress" role="status" aria-live="polite"><span :class="knowledgeAnswerStatus === 'Ready ✓' ? 'ready' : ''">{{ knowledgeAnswerSaving ? (knowledgeAnswerStatus || 'Saving…') : knowledgeAnswerStatus }}</span><small v-if="knowledgeAnswerStatus === 'Updating assistant knowledge…'">Your answer is saved. We’re making it available to the assistant.</small><small v-else-if="knowledgeAnswerStatus === 'Ready ✓'">The gap moved to Resolved.</small></div><div class="knowledge-drawer-actions"><button class="outline-button" type="button" :disabled="knowledgeAnswerSaving" @click="closeKnowledgeAnswer">Cancel</button><button class="primary-button" type="button" :disabled="!answerDrafts[selectedKnowledgeGap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(selectedKnowledgeGap)">{{ knowledgeAnswerSaving ? 'Saving…' : 'Save answer' }}</button></div></aside>
+          </div>
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">

@@ -78,6 +78,35 @@ export function parseGroundingDecision(value: string): boolean {
   return /^SUPPORTED\b/i.test(value.trim());
 }
 
+/**
+ * High-risk claims need direct evidence for the specific qualifier in the
+ * question. A related page is not enough to establish an enterprise price,
+ * data-selling practice, payment processing capability, or named integration.
+ */
+export function hasDirectSensitiveEvidence(question: string, context: string): boolean {
+  const normalizedQuestion = question.toLowerCase();
+  const normalizedContext = context.toLowerCase();
+
+  if (/\benterprise\b[\s\S]*\b(price|pricing|cost|rate|fee|quote)\b|\b(price|pricing|cost|rate|fee|quote)\b[\s\S]*\benterprise\b/.test(normalizedQuestion)) {
+    return /\benterprise\b/.test(normalizedContext);
+  }
+
+  if (/\b(sell|selling|sold|data broker|advertis(?:e|ing)|share)\b[\s\S]*\b(data|information|personal)\b|\b(data|information|personal)\b[\s\S]*\b(sell|selling|sold|data broker|advertis(?:e|ing)|share)\b/.test(normalizedQuestion)) {
+    return /\b(sell|selling|sold|data broker|advertis(?:e|ing)|share|disclos(?:e|ure))\b/.test(normalizedContext)
+      && /\b(data|information|personal)\b/.test(normalizedContext);
+  }
+
+  if (/\b(process|accept|take|charge)\b[\s\S]*\b(payment|payments|credit card|cards?)\b|\b(payment|payments|credit card|cards?)\b[\s\S]*\b(process|accept|take|charge)\b/.test(normalizedQuestion)) {
+    return /\b(?:process(?:es|ing)?|accept(?:s|ing)?|take|charge(?:s|d|ing)?)\b[\s\S]*\b(?:payment|payments|credit card|cards?)\b|\b(?:payment|payments|credit card|cards?)\b[\s\S]*\b(?:process(?:es|ing)?|accept(?:s|ing)?|take|charge(?:s|d|ing)?)\b/.test(normalizedContext)
+      && !/\bno credit card\b/.test(normalizedContext);
+  }
+
+  const namedIntegration = normalizedQuestion.match(/\b(?:integrat\w*|connect\w*|work)\s+(?:with|to)\s+([a-z][a-z0-9.-]{2,})\b/);
+  if (namedIntegration?.[1]) return normalizedContext.includes(namedIntegration[1]);
+
+  return true;
+}
+
 function estimateCostUsd(route: ModelRoute, inputTokens: number, outputTokens: number): number | null {
   if (route === "tier0") return 0;
   const prefix = route === "tier1" ? "FRONTDESKWISE_LLM_TIER1" : "FRONTDESKWISE_LLM_TIER2";
