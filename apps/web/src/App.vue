@@ -72,6 +72,7 @@ import AppFeedback, { type AppToast, type AppToastKind } from "./AppFeedback.vue
 import MarketingPage from "./MarketingPage.vue";
 import LandingVideo from "./components/LandingVideo.vue";
 import SupportCenter, { type SupportCase as SupportCaseRecord, type SupportCaseCategory, type SupportContext } from "./components/SupportCenter.vue";
+import WorkflowWorkspace from "./components/WorkflowWorkspace.vue";
 import { getMarketingPageByPath } from "./marketing";
 import {
   demoRoute,
@@ -101,6 +102,7 @@ interface Lead {
   intent: string;
   source: string;
   notes: string;
+  metadata: Record<string, unknown>;
   status: "New" | "Qualified" | "Booked";
   time: string;
 }
@@ -155,6 +157,23 @@ interface InboxMessage {
   sendStatus?: "pending" | "sent" | "failed";
 }
 
+interface WorkflowSummary {
+  key: string;
+  name: string;
+  status: "active" | "completed";
+  currentStepId: string | null;
+  currentState: string | null;
+  nextBestAction: string;
+  completedSteps: number;
+  totalSteps: number;
+  progressPercent: number;
+  provider: string | null;
+  missing: string[];
+  collected: Record<string, string>;
+  interruptions: number;
+  steps: Array<{ id: string; label: string; fieldKey: string | null; status: "completed" | "current" | "pending" | "skipped" }>;
+}
+
 interface InboxConversation {
   id: string;
   status: "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
@@ -163,7 +182,8 @@ interface InboxConversation {
   unreadCount: number;
   lastActivityAt: string;
   createdAt: string;
-  lead: { name?: string | null; email?: string | null; phone?: string | null; intent?: string | null } | null;
+  lead: { name?: string | null; email?: string | null; phone?: string | null; intent?: string | null; metadata?: Record<string, unknown> } | null;
+  action?: { id: string; type: string; key: string; name: string; status: "active" | "completed"; values: Record<string, string>; handoffRequired: boolean; handoffState: string | null; workflow?: WorkflowSummary } | null;
   lastMessage: InboxMessage | null;
   messages?: InboxMessage[];
   notes?: InboxNote[];
@@ -287,6 +307,7 @@ interface ActionFlow {
   executionMode?: "DIRECT_LINK" | "FORM_FLOW" | "PROVIDER_FLOW" | "PHONE" | "EMAIL" | "HANDOFF" | "API_ACTION";
   attachmentPolicy?: "always" | "sales_intent" | "high_intent_only" | "explicit_request_only" | "never_auto";
   trackingKey?: string;
+  provider?: string | null;
   destination?: { url?: string; label?: string } | null;
   fields: ActionField[];
   optionalFields?: string[];
@@ -311,7 +332,7 @@ interface ActionFlow {
     };
   };
   enabled: boolean;
-  readiness?: { ready: boolean; reason: "ready" | "disabled" | "needs_review" | "missing_tracking_key" | "missing_destination" | "invalid_destination" | "missing_configuration" };
+  readiness?: { ready: boolean; reason: "ready" | "disabled" | "needs_review" | "missing_tracking_key" | "missing_destination" | "invalid_destination" | "missing_configuration" | "missing_provider_connection" };
   origin?: "discovered" | "configured";
   confidence?: number;
   safetyPolicy?: string;
@@ -321,6 +342,8 @@ interface ActionFlow {
   updatedAt: string;
   isPrimary?: boolean;
 }
+
+type ActionEditorEntry = "actions" | "primary" | "test";
 
 interface ActionDelivery {
   id: string;
@@ -446,6 +469,7 @@ interface AgentSaveModel {
   showLeadCapture: boolean;
   showBookingAction: boolean;
   showAiDisclosure: boolean;
+  citationVisibility: "always" | "contextual" | "hidden";
   proactiveEnabled: boolean;
   proactiveDelaySeconds: number;
   proactiveMessage: string;
@@ -545,7 +569,7 @@ interface WorkspacePayload {
   slug: string;
   status: string;
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
-  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; customToneInstructions?: string; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; proactiveBehavior?: "teaser" | "open"; proactiveFrequency?: "session" | "24h" | "visit"; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean; fallbackContacts?: { phone?: string | null; email?: string | null; url?: string | null } };
+  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; customToneInstructions?: string; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; proactiveBehavior?: "teaser" | "open"; proactiveFrequency?: "session" | "24h" | "visit"; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean; citationVisibility?: "always" | "contextual" | "hidden"; fallbackContacts?: { phone?: string | null; email?: string | null; url?: string | null } };
   branding?: { colors?: string[]; source?: string };
   suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
@@ -744,8 +768,19 @@ interface AdminActionRegistryItem {
   confidence: number | null;
   enabled: boolean;
   readiness?: { ready: boolean; reason: string };
+  steps?: Array<{ id?: string; type?: string; nextStepId?: string; branches?: unknown[]; config?: Record<string, unknown> }>;
+  workflowVersion?: number;
   isPrimary: boolean;
   updatedAt: string;
+}
+
+interface AdminWorkflowAuditItem {
+  id: string;
+  eventType: string;
+  actorType: string;
+  actorName: string | null;
+  reason: string | null;
+  createdAt: string;
 }
 
 interface AdminUser {
@@ -1087,6 +1122,7 @@ const requireLeadConsent = ref(false);
 const privacyNoticeUrl = ref("");
 const retentionDays = ref(90);
 const showAiDisclosure = ref(true);
+const citationVisibility = ref<"always" | "contextual" | "hidden">("always");
 const fallbackPhone = ref("");
 const fallbackEmail = ref("");
 const fallbackContactUrl = ref("");
@@ -1207,7 +1243,11 @@ const actionsError = ref("");
 const actionsMessage = ref("");
 const selectedActionId = ref("");
 const actionDraft = ref<ActionFlow | null>(null);
+const actionEditorEntry = ref<ActionEditorEntry>("actions");
+const savedActionId = ref("");
+let savedActionHighlightTimer: number | null = null;
 const primaryActionFlow = computed(() => actionFlows.value.find((action) => action.isPrimary) ?? null);
+const savedAction = computed(() => actionFlows.value.find((action) => action.id === savedActionId.value) ?? null);
 const recommendedPrimaryAction = computed(() => actionFlows.value.find((action) => action.key === "request_demo" || /\b(try|start|see|view|explore)\b.*\b(demo|trial)\b/i.test(action.name)) ?? null);
 const actionConnectorProvider = computed(() => actionDraft.value?.completion.connector?.provider ?? "none");
 const activeActionIntegrations = computed(() => integrations.value.filter((integration) => integration.connectionStatus === "active"
@@ -1298,6 +1338,16 @@ const adminActionRegistry = ref<AdminActionRegistryItem[]>([]);
 const adminActionRegistryLoading = ref(false);
 const adminActionRegistryError = ref("");
 const adminActionRegistryMessage = ref("");
+const adminWorkflowDetailsActionId = ref("");
+const adminWorkflowAudit = ref<AdminWorkflowAuditItem[]>([]);
+const adminWorkflowAuditLoading = ref(false);
+const adminWorkflowAuditError = ref("");
+const adminWorkflowReplayConversationId = ref("");
+const adminWorkflowReplayQuestion = ref("");
+const adminWorkflowReplayLoading = ref(false);
+const adminWorkflowReplayError = ref("");
+const adminWorkflowReplayResult = ref<Record<string, unknown> | null>(null);
+const selectedAdminWorkflowAction = computed(() => adminActionRegistry.value.find((action) => action.id === adminWorkflowDetailsActionId.value) ?? null);
 const adminBillingMessage = ref("");
 const adminOverridePlanKey = ref("starter");
 const adminOverrideInterval = ref<"month" | "year">("month");
@@ -1407,6 +1457,7 @@ const navSections: Array<{ label?: string; items: Array<{ id: View; label: strin
   { label: "AI front desk", items: [
     { id: "knowledge", label: "Knowledge", icon: BookOpen },
     { id: "actions", label: "Actions", icon: Zap },
+    { id: "workflows", label: "Workflows", icon: Workflow },
     { id: "agent", label: "Agent", icon: Sparkles },
   ] },
   { label: "Business", items: [
@@ -1824,6 +1875,7 @@ const agentModel = computed<AgentSaveModel>(() => ({
   showLeadCapture: showLeadCapture.value,
   showBookingAction: showBookingAction.value,
   showAiDisclosure: showAiDisclosure.value,
+  citationVisibility: citationVisibility.value,
   proactiveEnabled: proactiveEnabled.value,
   proactiveDelaySeconds: proactiveDelaySeconds.value,
   proactiveMessage: proactiveMessage.value,
@@ -2135,6 +2187,7 @@ function runActionTest(action: ActionFlow) {
     actionsMessage.value = "Enable this action before testing it.";
     return;
   }
+  clearSavedActionHighlight();
   resetAgentConversation();
   openAgentTest(actionTestQuestion(action));
 }
@@ -2614,6 +2667,7 @@ function clearWorkspaceState() {
   privacyNoticeUrl.value = "";
   retentionDays.value = 90;
   showAiDisclosure.value = true;
+  citationVisibility.value = "always";
   fallbackPhone.value = "";
   fallbackEmail.value = "";
   fallbackContactUrl.value = "";
@@ -2751,6 +2805,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   privacyNoticeUrl.value = payload.agent?.privacyNoticeUrl ?? "";
   retentionDays.value = payload.agent?.retentionDays ?? 90;
   showAiDisclosure.value = payload.agent?.showAiDisclosure ?? true;
+  citationVisibility.value = payload.agent?.citationVisibility ?? "always";
   fallbackPhone.value = payload.agent?.fallbackContacts?.phone ?? "";
   fallbackEmail.value = payload.agent?.fallbackContacts?.email ?? "";
   fallbackContactUrl.value = payload.agent?.fallbackContacts?.url ?? "";
@@ -3690,6 +3745,7 @@ async function loadLeads(globalLoading = true) {
       intent: lead.intent ?? "General inquiry",
       source: lead.source ?? "widget",
       notes: lead.notes ?? (typeof lead.metadata?.notes === "string" ? lead.metadata.notes : ""),
+      metadata: lead.metadata ?? {},
       status: lead.status === "qualified" ? "Qualified" : lead.status === "booked" ? "Booked" : "New",
       time: lead.createdAt ? new Date(lead.createdAt).toLocaleString() : "Just now",
     }));
@@ -4445,8 +4501,62 @@ function cloneAction(action: ActionFlow): ActionFlow {
   return JSON.parse(JSON.stringify(action)) as ActionFlow;
 }
 
-function selectAction(action: ActionFlow | null) {
+function actionProvider(action: ActionFlow | null): string | null {
+  if (!action) return null;
+  if (action.provider?.trim()) return action.provider.trim().toLowerCase();
+  for (const step of action.steps ?? []) {
+    const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
+      ? step.config as Record<string, unknown>
+      : null;
+    const provider = config?.provider;
+    if (typeof provider === "string" && provider.trim()) return provider.trim().toLowerCase();
+  }
+  return null;
+}
+
+function providerIsConnected(provider: string | null): boolean {
+  if (provider === "jackrabbit") return jackrabbitIntegration.value?.connectionStatus === "active";
+  return false;
+}
+
+function actionNeedsProviderConnection(action: ActionFlow): boolean {
+  return action.executionMode === "PROVIDER_FLOW"
+    && actionProvider(action) === "jackrabbit"
+    && !providerIsConnected("jackrabbit");
+}
+
+function actionPrimarySetupHint(action: ActionFlow): string {
+  if (actionNeedsProviderConnection(action)) {
+    return "Connect and verify Jackrabbit before making this primary";
+  }
+  return !canSetPrimaryAction(action) ? "Approve, enable, and complete this action before making it primary" : "";
+}
+
+function clearSavedActionHighlight() {
+  savedActionId.value = "";
+  if (savedActionHighlightTimer !== null) {
+    window.clearTimeout(savedActionHighlightTimer);
+    savedActionHighlightTimer = null;
+  }
+}
+
+function highlightSavedAction(actionId: string) {
+  clearSavedActionHighlight();
+  savedActionId.value = actionId;
+  savedActionHighlightTimer = window.setTimeout(() => {
+    savedActionId.value = "";
+    savedActionHighlightTimer = null;
+  }, 5000);
+}
+
+function openActionTemplateChooser(entry: ActionEditorEntry = "actions") {
+  actionEditorEntry.value = entry;
+  actionTemplateChooserOpen.value = true;
+}
+
+function selectAction(action: ActionFlow | null, entry: ActionEditorEntry = "actions") {
   if (!action) {
+    actionEditorEntry.value = "actions";
     selectedActionId.value = "";
     actionDraft.value = null;
     actionTriggerText.value = "";
@@ -4457,8 +4567,10 @@ function selectAction(action: ActionFlow | null) {
     completionLinkMappingsText.value = "";
     return;
   }
+  actionEditorEntry.value = entry;
   selectedActionId.value = action.id;
   actionDraft.value = cloneAction(action);
+  actionDraft.value.provider ??= actionProvider(actionDraft.value);
   actionDraft.value.captureMode ??= "auto";
   actionDraft.value.completion.completionMode ??= "native_form";
   actionDraft.value.completion.notifyTargets ??= ["business_team"];
@@ -4473,6 +4585,16 @@ function selectAction(action: ActionFlow | null) {
   actionEditorStage.value = "trigger";
   actionFieldDrawerIndex.value = null;
   actionAdvancedOpen.value = false;
+}
+
+function openWorkflowAction(actionId: string) {
+  if (!actionId) {
+    navigateToWorkspaceView("actions");
+    return;
+  }
+  const action = actionFlows.value.find((item) => item.id === actionId);
+  if (action) selectAction(action);
+  navigateToWorkspaceView("actions");
 }
 
 function ensureCompletionLinkTemplate() {
@@ -4529,6 +4651,7 @@ function actionStatusLabel(action: ActionFlow): "Ready" | "Draft" | "Paused" | "
   const delivery = actionDeliveries.value.find((item) => item.actionId === action.id && item.status === "failed");
   if (delivery) return "Integration error";
   if (!action.enabled) return "Paused";
+  if (actionNeedsProviderConnection(action)) return "Needs setup";
   if (action.readiness) return action.readiness.ready ? "Ready" : "Needs setup";
   if (action.executionMode === "DIRECT_LINK" && !(action.completion.linkUrl || action.destination?.url)) return "Needs setup";
   if (!action.fields.length || !action.completion.createLead) return "Needs setup";
@@ -4540,6 +4663,19 @@ function actionStatusTone(status: ReturnType<typeof actionStatusLabel>): "active
   if (status === "Paused") return "paused";
   if (status === "Integration error" || status === "Needs setup") return "attention";
   return "draft";
+}
+
+function actionReadinessDetail(action: ActionFlow): string {
+  switch (action.readiness?.reason) {
+    case "disabled": return "Enable the action before making it primary.";
+    case "needs_review": return "Approve the action before making it primary.";
+    case "missing_tracking_key": return "Add a tracking key before making it primary.";
+    case "missing_destination": return "Add a destination URL before making it primary.";
+    case "invalid_destination": return "Use a valid destination URL before making it primary.";
+    case "missing_configuration": return "Complete the required action configuration before making it primary.";
+    case "missing_provider_connection": return "Connect and verify the provider before making it primary.";
+    default: return "Complete the required action configuration before making it primary.";
+  }
 }
 
 function setActionStage(stage: ActionEditorStage) {
@@ -4662,7 +4798,7 @@ async function loadActions() {
     actionTemplates.value = payload.templates ?? [];
     actionDeliveries.value = payload.deliveries ?? [];
     const selected = actionFlows.value.find((action) => action.id === selectedActionId.value) ?? null;
-    selectAction(selected);
+    selectAction(selected, selected ? actionEditorEntry.value : "actions");
   } catch (error) {
     actionsError.value = error instanceof Error ? error.message : "Could not load conversation flows.";
   } finally {
@@ -4672,6 +4808,7 @@ async function loadActions() {
 
 async function setPrimaryAction(action: ActionFlow) {
   if (actionsLoading.value) return;
+  clearSavedActionHighlight();
   primaryGoalChooserOpen.value = false;
   actionsLoading.value = true;
   actionsError.value = "";
@@ -4697,11 +4834,13 @@ function openPrimaryGoalChooser() {
     primaryGoalChooserOpen.value = true;
     return;
   }
-  actionTemplateChooserOpen.value = true;
+  openActionTemplateChooser("primary");
 }
 
 function canSetPrimaryAction(action: ActionFlow) {
-  return action.readiness?.ready === true;
+  if (action.readiness?.ready !== true) return false;
+  if (actionNeedsProviderConnection(action)) return false;
+  return true;
 }
 
 async function clearPrimaryAction(action: ActionFlow) {
@@ -4789,6 +4928,9 @@ async function addCustomAction() {
 
 async function saveAction() {
   if (!actionDraft.value || actionsLoading.value) return;
+  const savedDraft = cloneAction(actionDraft.value);
+  const savedActionEntry = actionEditorEntry.value;
+  const savedActionIdBeforeRefresh = savedDraft.id;
   actionsLoading.value = true;
   actionsError.value = "";
   actionsMessage.value = "";
@@ -4801,12 +4943,36 @@ async function saveAction() {
         triggerPhrases: actionTriggerText.value.split("\n").map((item) => item.trim()).filter(Boolean),
       }),
     });
-    const payload = await response.json() as { error?: string; primaryActionCleared?: boolean };
+    const payload = await response.json() as { error?: string; primaryActionCleared?: boolean; action?: ActionFlow };
     if (!response.ok) throw new Error(payload.error ?? "Could not save this flow.");
-    actionsMessage.value = payload.primaryActionCleared
-      ? "Saved · primary goal cleared because this action needs setup"
-      : "Saved · the assistant will use the updated flow";
+    selectedActionId.value = "";
     await loadActions();
+
+    const refreshedAction = actionFlows.value.find((action) => action.id === savedActionIdBeforeRefresh) ?? payload.action;
+    const needsMoreSetup = payload.primaryActionCleared || !refreshedAction?.readiness?.ready || Boolean(refreshedAction && actionNeedsProviderConnection(refreshedAction));
+    if (needsMoreSetup) {
+      if (refreshedAction) selectAction(refreshedAction, savedActionEntry);
+      else selectAction(savedDraft, savedActionEntry);
+      actionsMessage.value = payload.primaryActionCleared
+        ? `Saved, but this action still needs setup. ${refreshedAction ? actionReadinessDetail(refreshedAction) : "Complete the required action configuration before making it primary."}`
+        : `Saved, but this action still needs setup. ${refreshedAction && actionNeedsProviderConnection(refreshedAction) ? "Connect and verify Jackrabbit before making it primary." : refreshedAction ? actionReadinessDetail(refreshedAction) : "Complete the required action configuration before leaving the editor."}`;
+      return;
+    }
+
+    if (!refreshedAction) throw new Error("The action was saved, but could not be loaded again.");
+
+    highlightSavedAction(savedActionIdBeforeRefresh);
+    if (savedActionEntry === "primary") {
+      actionsMessage.value = `${refreshedAction.name} is ready. Choose it as your primary conversion goal.`;
+      primaryGoalChooserOpen.value = true;
+    } else if (savedActionEntry === "test") {
+      actionsMessage.value = `${refreshedAction.name} is ready to test.`;
+      runActionTest(refreshedAction);
+    } else {
+      actionsMessage.value = refreshedAction.isPrimary
+        ? `${refreshedAction.name} saved as the primary conversion goal.`
+        : `${refreshedAction.name} is ready. Set it as primary or test the flow.`;
+    }
   } catch (error) {
     actionsError.value = error instanceof Error ? error.message : "Could not save this flow.";
   } finally {
@@ -5273,6 +5439,65 @@ async function loadAdminActionRegistry() {
     adminActionRegistryError.value = error instanceof Error ? error.message : "Could not load the action registry.";
   } finally {
     adminActionRegistryLoading.value = false;
+  }
+}
+
+function adminWorkflowStats(action: AdminActionRegistryItem) {
+  const steps = action.steps ?? [];
+  return {
+    transitions: steps.filter((step) => Boolean(step.nextStepId || (step.branches?.length ?? 0))).length,
+    providerCalls: steps.filter((step) => step.type === "lookup" || step.type === "api_action" || step.type === "generate_link").length,
+    conditions: steps.filter((step) => step.type === "condition" || step.type === "decision" || Boolean(step.branches?.length)).length,
+    retries: steps.filter((step) => Boolean(step.config?.retryCount || step.config?.failureBehavior === "retry")).length,
+    failurePaths: steps.filter((step) => Boolean(step.config?.failureBehavior) || step.type === "handoff").length,
+  };
+}
+
+async function loadAdminWorkflowAudit(action: AdminActionRegistryItem) {
+  if (adminWorkflowAuditLoading.value) return;
+  if (adminWorkflowDetailsActionId.value === action.id) {
+    adminWorkflowDetailsActionId.value = "";
+    return;
+  }
+  adminWorkflowDetailsActionId.value = action.id;
+  adminWorkflowAuditLoading.value = true;
+  adminWorkflowAuditError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/action-registry/${encodeURIComponent(action.id)}/audit`), { headers: ownerHeaders() });
+    const payload = await response.json() as { audit?: AdminWorkflowAuditItem[]; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load the workflow trace.");
+    adminWorkflowAudit.value = payload.audit ?? [];
+  } catch (error) {
+    adminWorkflowAudit.value = [];
+    adminWorkflowAuditError.value = error instanceof Error ? error.message : "Could not load the workflow trace.";
+  } finally {
+    adminWorkflowAuditLoading.value = false;
+  }
+}
+
+async function replayAdminWorkflow(action: AdminActionRegistryItem) {
+  if (!adminWorkflowReplayConversationId.value.trim() || !adminWorkflowReplayQuestion.value.trim() || adminWorkflowReplayLoading.value) return;
+  adminWorkflowReplayLoading.value = true;
+  adminWorkflowReplayError.value = "";
+  adminWorkflowReplayResult.value = null;
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/workflow-replay"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({
+        businessSlug: action.businessSlug,
+        conversationId: adminWorkflowReplayConversationId.value.trim(),
+        actionId: action.id,
+        question: adminWorkflowReplayQuestion.value.trim(),
+      }),
+    });
+    const payload = await response.json() as Record<string, unknown> & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not replay this workflow turn.");
+    adminWorkflowReplayResult.value = payload;
+  } catch (error) {
+    adminWorkflowReplayError.value = error instanceof Error ? error.message : "Could not replay this workflow turn.";
+  } finally {
+    adminWorkflowReplayLoading.value = false;
   }
 }
 
@@ -6304,6 +6529,7 @@ function agentConfigRequestBody(nextModel: AgentSaveModel, publish = false): Rec
     privacyNoticeUrl: nextModel.privacyNoticeUrl || null,
     retentionDays: nextModel.retentionDays,
     showAiDisclosure: nextModel.showAiDisclosure,
+    citationVisibility: nextModel.citationVisibility,
     fallbackContacts: {
       phone: nextModel.fallbackPhone || null,
       email: nextModel.fallbackEmail || null,
@@ -6401,6 +6627,10 @@ watch(view, (nextView, previousView) => {
   if (nextView === "leads") void loadLeads();
   if (nextView === "actions") {
     if (previousView !== "actions") selectAction(null);
+    void loadActions();
+    void loadIntegrations();
+  }
+  if (nextView === "workflows") {
     void loadActions();
     void loadIntegrations();
   }
@@ -7031,32 +7261,38 @@ function startMarketingDemo() {
           </div>
         </div>
 
+        <WorkflowWorkspace v-else-if="view === 'workflows'" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" @refresh="loadActions" @open-action="openWorkflowAction" />
+
         <div v-else-if="view === 'actions'" class="view-content action-page">
           <div class="actions-page-header">
             <div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Define what your AI front desk can help visitors do.</p></div>
-            <div v-if="!actionDraft" class="toolbar-actions"><button class="text-button" type="button" @click="openSupportReport('actions')">Report a problem</button><button class="primary-button" type="button" @click="actionTemplateChooserOpen = true">+ Create action</button></div>
+            <div v-if="!actionDraft" class="toolbar-actions"><button class="text-button" type="button" @click="openSupportReport('actions')">Report a problem</button><button class="primary-button" type="button" @click="openActionTemplateChooser()">+ Create action</button></div>
             <div v-else class="toolbar-actions"><button class="outline-button small" type="button" @click="selectAction(null)">← All actions</button><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
           </div>
           <p v-if="integrationError" class="form-error">{{ integrationError }}</p>
           <p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p>
           <p v-if="actionsError" class="form-error">{{ actionsError }}</p>
-          <p v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</p>
+          <p v-if="actionsMessage && !savedActionId" class="saved-message">✓ {{ actionsMessage }}</p>
 
           <template v-if="!actionDraft">
+            <div v-if="savedAction" class="action-save-success" role="status">
+              <div><strong>✓ {{ savedAction.name }} saved.</strong><span>{{ savedAction.isPrimary ? 'This is now your primary conversion goal.' : 'It is ready for the next step.' }}</span></div>
+              <div class="action-save-success-actions"><button v-if="!savedAction.isPrimary && canSetPrimaryAction(savedAction)" class="outline-button small" type="button" :disabled="actionsLoading" @click="setPrimaryAction(savedAction)">Set as primary</button><button v-if="canSetPrimaryAction(savedAction)" class="primary-button small" type="button" @click="runActionTest(savedAction)">Test flow</button></div>
+            </div>
             <section class="primary-goal-card">
-              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose what visitors should do next' }}</h2><p>{{ primaryActionFlow ? 'This is the main action the assistant can recommend after relevant answers.' : 'Your assistant can answer questions, but no primary conversion goal is configured yet.' }}</p><div v-if="primaryActionFlow" class="primary-goal-details"><span>{{ formatLabel(primaryActionFlow.executionMode || 'FORM_FLOW') }} · {{ formatLabel(primaryActionFlow.attachmentPolicy || 'explicit_request_only') }}</span><a v-if="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" :href="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" target="_blank" rel="noreferrer">{{ primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url }}</a></div></div>
+              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose what visitors should do next' }}</h2><p>{{ primaryActionFlow ? 'This is the main action the assistant can recommend after relevant answers.' : 'Your assistant can answer questions, but no primary conversion goal is configured yet.' }}</p><div v-if="primaryActionFlow" class="primary-goal-details"><span>{{ formatLabel(primaryActionFlow.executionMode || 'FORM_FLOW') }} · {{ formatLabel(primaryActionFlow.attachmentPolicy || 'explicit_request_only') }}</span><span v-if="primaryActionFlow.executionMode === 'PROVIDER_FLOW'">Provider: {{ formatLabel(actionProvider(primaryActionFlow) || 'Not selected') }} · {{ providerIsConnected(actionProvider(primaryActionFlow)) ? 'Connected' : 'Needs connection' }}</span><a v-if="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" :href="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" target="_blank" rel="noreferrer">{{ primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url }}</a></div></div>
               <div class="primary-goal-actions"><span v-if="primaryActionFlow" class="primary-goal-status">✓ Active</span><template v-if="primaryActionFlow"><button class="outline-button small" type="button" @click="openPrimaryGoalChooser">Change goal</button><button class="primary-button small" type="button" @click="runActionTest(primaryActionFlow)">Test</button></template><button v-else class="primary-button small" type="button" @click="openPrimaryGoalChooser">Choose a primary goal</button></div>
               <div v-if="!primaryActionFlow && recommendedPrimaryAction" class="primary-goal-recommendation"><span>Recommended from your website</span><strong>{{ recommendedPrimaryAction.name }}</strong><small>{{ recommendedPrimaryAction.destination?.url || recommendedPrimaryAction.completion.linkUrl || 'Owner-confirmed action' }}</small></div>
             </section>
             <section v-if="actionFlows.length" class="action-dashboard-list">
               <div class="action-section-heading"><div><p class="eyebrow">Your actions</p><h3>Conversion flows</h3><p>Give visitors a clear next step and keep the outcome visible to your team.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
-              <article v-for="action in actionFlows" :key="action.id" class="action-summary-card">
-                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }} <span v-if="action.isPrimary" class="primary-action-label">Primary goal</span></h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span v-if="action.executionMode">{{ action.executionMode }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
-                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><span v-if="action.isPrimary" class="current-primary-note">Current primary</span><button v-else class="outline-button small" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" :title="!canSetPrimaryAction(action) ? 'Approve or enable this action before making it primary' : undefined" @click="setPrimaryAction(action)">Set as primary</button><button class="outline-button small" type="button" @click="runActionTest(action)">Test flow</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
+              <article v-for="action in actionFlows" :key="action.id" :class="['action-summary-card', { 'action-summary-card-saved': action.id === savedActionId }]">
+                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }} <span v-if="action.isPrimary" class="primary-action-label">Primary goal</span></h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span v-if="action.executionMode">{{ action.executionMode }}</span><span v-if="action.executionMode === 'PROVIDER_FLOW' && actionProvider(action)">Provider: {{ formatLabel(actionProvider(action) || '') }} · {{ providerIsConnected(actionProvider(action)) ? 'Connected' : 'Needs connection' }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
+                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><span v-if="action.isPrimary" class="current-primary-note">Current primary</span><button v-else class="outline-button small" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" :title="!canSetPrimaryAction(action) ? actionPrimarySetupHint(action) : undefined" @click="setPrimaryAction(action)">Set as primary</button><button v-if="(action.steps?.length ?? 0) > 1 || action.executionMode === 'PROVIDER_FLOW'" class="text-button" type="button" @click="openWorkflowAction(action.id)">Open workflow <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></button><button class="outline-button small" type="button" @click="runActionTest(action)">Test flow</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
               </article>
             </section>
-            <section v-else class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="actionTemplateChooserOpen = true">Create your first action <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
-            <section class="action-template-strip"><div><p class="eyebrow">Quick-start templates</p><h3>Start with a proven flow</h3></div><div class="action-template-chips"><button v-for="template in actionTemplates.slice(0, 5)" :key="template.key" type="button" @click="actionTemplateChooserOpen = true">{{ template.name }}</button><button type="button" @click="actionTemplateChooserOpen = true">Custom action</button></div></section>
+            <section v-else class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="openActionTemplateChooser()">Create your first action <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
+            <section class="action-template-strip"><div><p class="eyebrow">Quick-start templates</p><h3>Start with a proven flow</h3></div><div class="action-template-chips"><button v-for="template in actionTemplates.slice(0, 5)" :key="template.key" type="button" @click="openActionTemplateChooser()">{{ template.name }}</button><button type="button" @click="openActionTemplateChooser()">Custom action</button></div></section>
           </template>
 
           <div v-else-if="actionDraft">
@@ -7102,6 +7338,8 @@ function startMarketingDemo() {
                     <div><p class="eyebrow">Conversion semantics</p><h3>How should this action behave?</h3><p>These settings control the primary CTA and when it appears after an answer.</p></div>
                     <div v-if="actionDraft.executionMode === 'DIRECT_LINK'" class="action-customer-copy"><div><p class="eyebrow">Customer-facing copy</p><p>These words are shown to visitors. The internal template name stays out of the conversation.</p></div><div class="action-two-column action-copy-grid"><label>Action name<input v-model="actionDraft.name" type="text" placeholder="Try the demo" /></label><label>Button label<input v-model="actionDraft.completion.linkLabel" type="text" placeholder="Try the demo" /></label></div><label>Message before button<textarea v-model="actionDraft.completion.message" rows="2" placeholder="You can try SalonFlow here."></textarea></label></div>
                     <div class="action-two-column action-semantics-fields"><label>Execution mode<select v-model="actionDraft.executionMode"><option value="DIRECT_LINK">Direct link</option><option value="FORM_FLOW">Form flow</option><option value="PROVIDER_FLOW">Provider flow</option><option value="PHONE">Phone</option><option value="EMAIL">Email</option><option value="HANDOFF">Internal handoff</option><option value="API_ACTION">API action</option></select></label><label>When should this appear<select v-model="actionDraft.attachmentPolicy"><option value="sales_intent">When relevant to sales intent</option><option value="high_intent_only">Only for high intent</option><option value="explicit_request_only">Only when explicitly requested</option><option value="always">Frequently</option><option value="never_auto">Never automatically</option></select></label></div>
+                    <label v-if="actionDraft.executionMode === 'PROVIDER_FLOW'">Provider<select v-model="actionDraft.provider"><option value="">Select a provider…</option><option value="jackrabbit">Jackrabbit</option></select><small class="form-help">The provider supplies live availability and the verified registration path. Connect it in Settings before making this action primary.</small></label>
+                    <div v-if="actionDraft.executionMode === 'PROVIDER_FLOW' && actionProvider(actionDraft) === 'jackrabbit'" class="action-provider-status"><div><strong>Jackrabbit</strong><span>{{ providerIsConnected('jackrabbit') ? 'Connected and ready to verify live classes.' : 'Not connected yet.' }}</span></div><span :class="['status-pill', providerIsConnected('jackrabbit') ? 'booked' : 'qualified']">{{ providerIsConnected('jackrabbit') ? 'Connected' : 'Needs connection' }}</span><button v-if="!providerIsConnected('jackrabbit')" class="outline-button small" type="button" @click="openSettingsTab('integrations')">Connect Jackrabbit</button></div>
                     <label v-if="actionDraft.executionMode === 'DIRECT_LINK'">Destination URL<input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://yourbusiness.com/demo" /><small class="form-help">Use the verified page visitors should open. Direct-link actions need a destination before they can be primary.</small></label>
                     <label>Tracking key<input v-model="actionDraft.trackingKey" type="text" placeholder="try_demo" /><small class="form-help">Used for CTA and conversion analytics.</small></label>
                   </section>
@@ -7114,7 +7352,7 @@ function startMarketingDemo() {
             </section>
           </div>
 
-          <div v-if="primaryGoalChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="primaryGoalChooserOpen = false"><section class="action-template-modal primary-goal-chooser" role="dialog" aria-modal="true" aria-labelledby="primary-goal-title"><button class="auth-close" type="button" aria-label="Close" @click="primaryGoalChooserOpen = false">×</button><p class="eyebrow">Business objective</p><h2 id="primary-goal-title">Choose a primary goal</h2><p>Pick the approved action the assistant should recommend after relevant answers.</p><div class="primary-goal-choice-list"><button v-for="action in actionFlows" :key="action.id" class="primary-goal-choice" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" @click="setPrimaryAction(action)"><span><strong>{{ action.name }}</strong><small>{{ action.description }}</small></span><em>{{ action.isPrimary ? 'Current primary' : formatLabel(action.executionMode || 'FORM_FLOW') }}</em></button></div><div class="primary-goal-chooser-actions"><button v-if="primaryActionFlow" class="text-button danger-text" type="button" :disabled="actionsLoading" @click="clearPrimaryAction(primaryActionFlow); primaryGoalChooserOpen = false">Clear primary goal</button><button class="outline-button small" type="button" @click="primaryGoalChooserOpen = false">Cancel</button><button class="primary-button small" type="button" @click="primaryGoalChooserOpen = false; actionTemplateChooserOpen = true">Create an action</button></div></section></div>
+          <div v-if="primaryGoalChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="primaryGoalChooserOpen = false"><section class="action-template-modal primary-goal-chooser" role="dialog" aria-modal="true" aria-labelledby="primary-goal-title"><button class="auth-close" type="button" aria-label="Close" @click="primaryGoalChooserOpen = false">×</button><p class="eyebrow">Business objective</p><h2 id="primary-goal-title">Choose a primary goal</h2><p>Pick the approved action the assistant should recommend after relevant answers.</p><div class="primary-goal-choice-list"><button v-for="action in actionFlows" :key="action.id" class="primary-goal-choice" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" @click="setPrimaryAction(action)"><span><strong>{{ action.name }}</strong><small>{{ action.description }}</small></span><em>{{ action.isPrimary ? 'Current primary' : formatLabel(action.executionMode || 'FORM_FLOW') }}</em></button></div><div class="primary-goal-chooser-actions"><button v-if="primaryActionFlow" class="text-button danger-text" type="button" :disabled="actionsLoading" @click="clearPrimaryAction(primaryActionFlow); primaryGoalChooserOpen = false">Clear primary goal</button><button class="outline-button small" type="button" @click="primaryGoalChooserOpen = false">Cancel</button><button class="primary-button small" type="button" @click="primaryGoalChooserOpen = false; openActionTemplateChooser('primary')">Create an action</button></div></section></div>
           <div v-if="actionTemplateChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="actionTemplateChooserOpen = false"><section class="action-template-modal" role="dialog" aria-modal="true" aria-labelledby="create-action-title"><button class="auth-close" type="button" aria-label="Close" @click="actionTemplateChooserOpen = false">×</button><p class="eyebrow">Quick start</p><h2 id="create-action-title">Create an action</h2><p>What should visitors be able to do?</p><div class="action-template-modal-grid"><button v-for="template in actionTemplates" :key="template.key" type="button" :disabled="actionsLoading || actionFlows.some((action) => action.key === template.key)" @click="addActionTemplate(template)"><strong>{{ template.name }}</strong><small>{{ actionFlows.some((action) => action.key === template.key) ? 'Already configured' : template.description }}</small></button><button type="button" :disabled="actionsLoading" @click="addCustomAction"><strong>Custom action</strong><small>Start with a blank conversion flow.</small></button></div></section></div>
           <div v-if="actionFieldDrawerIndex !== null && selectedActionField" class="action-modal-backdrop" role="presentation" @click.self="closeActionField"><aside class="action-field-drawer" role="dialog" aria-modal="true" aria-labelledby="question-editor-title"><div class="action-drawer-header"><div><p class="eyebrow">Question {{ actionFieldDrawerIndex + 1 }}</p><h2 id="question-editor-title">Edit question</h2></div><button class="auth-close" type="button" aria-label="Close" @click="closeActionField">×</button></div><label>Label<input v-model="selectedActionField.label" type="text" /></label><label>How the AI asks<input v-model="selectedActionField.question" type="text" /></label><label>Type<select v-model="selectedActionField.type"><option value="text">Text</option><option value="email">Email</option><option value="phone">Phone</option><option value="select">Select</option><option value="date">Date</option><option value="number">Number</option></select></label><label class="toggle-row"><span>Required</span><input v-model="selectedActionField.required" type="checkbox" /></label><label>Show when<select :value="selectedActionField.condition?.field ?? ''" @change="setFieldCondition(selectedActionField, $event)"><option value="">Always</option><option v-for="conditionField in actionDraft?.fields.slice(0, actionFieldDrawerIndex)" :key="conditionField.key" :value="conditionField.key">{{ conditionField.label }}</option></select></label><div v-if="selectedActionField.type === 'select'"><label>Choices <span class="optional">comma separated</span><input :value="(selectedActionField.options ?? []).join(', ')" type="text" @input="setFieldOptions(selectedActionField, $event)" /></label></div><details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Field key<input v-model="selectedActionField.key" type="text" /></label><label>Visibility<select v-model="selectedActionField.visibility"><option value="visible">Visible</option><option value="hidden">Hidden</option></select></label><label v-if="selectedActionField.condition?.field">Equals<input :value="selectedActionField.condition?.equals ?? ''" type="text" @input="setFieldConditionEquals(selectedActionField, $event)" /></label></div></details><div class="action-drawer-footer"><div class="action-drawer-reorder"><button class="outline-button small" type="button" :disabled="actionFieldDrawerIndex === 0" @click="moveSelectedActionField(-1)">↑ Move up</button><button class="outline-button small" type="button" :disabled="actionDraft ? actionFieldDrawerIndex === actionDraft.fields.length - 1 : true" @click="moveSelectedActionField(1)">Move down ↓</button></div><button class="text-button danger-text" type="button" @click="removeActionField(actionFieldDrawerIndex); closeActionField()">Remove question</button><button class="primary-button small" type="button" @click="closeActionField">Done</button></div></aside></div>
         </div>
@@ -7270,7 +7508,7 @@ function startMarketingDemo() {
             <div class="section-toolbar"><div><p class="eyebrow">Conversion control</p><h2>Action registry review</h2><p>Review what the crawler found, keep unsafe candidates disabled, and choose the primary next step for each business.</p></div><div class="toolbar-actions"><span v-if="adminActionRegistryMessage" class="saved-message">✓ {{ adminActionRegistryMessage }}</span><button class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="loadAdminActionRegistry">{{ adminActionRegistryLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
             <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Zap :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistry.length }}</strong><small>Detected actions</small><em>Across all businesses</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><CircleCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryEnabledCount }}</strong><small>Enabled actions</small><em>Available to visitors</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryReviewCount }}</strong><small>Needs review</small><em>Disabled or below confidence threshold</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><BadgeCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryPrimaryCount }}</strong><small>Primary actions</small><em>Explicit business choices</em></article></div>
             <p v-if="adminActionRegistryError" class="form-error">{{ adminActionRegistryError }}</p>
-              <div class="action-registry-table-wrap"><div class="action-registry-table-heading"><span>Business / action</span><span>Evidence</span><span>Destination</span><span>Confidence</span><span>Controls</span></div><div v-if="!adminActionRegistry.length" class="diagnostics-empty">No crawled actions found yet.</div><div v-for="action in adminActionRegistry" :key="action.id" class="action-registry-row"><div><strong>{{ action.businessName }}</strong><small>{{ action.name }} · {{ formatLabel(action.actionType) }}</small><small>{{ action.businessSlug }}</small><small>{{ formatLabel(action.origin) }} · {{ formatLabel(action.lifecycleStatus) }}<span v-if="action.reviewReason"> · {{ formatLabel(action.reviewReason) }}</span></small><small :class="action.readiness?.ready ? 'action-readiness-ready' : 'action-readiness-attention'">{{ action.readiness?.ready ? 'Ready' : `Needs setup · ${formatLabel(action.readiness?.reason || 'incomplete')}` }}</small><span v-if="action.isPrimary" class="status-pill qualified action-primary-pill">Primary action</span></div><div><small>{{ action.evidence[0]?.quote || 'No source evidence captured' }}</small><small>{{ formatLabel(action.sourceType || 'unknown') }} · Discovered {{ action.discoveredAt ? new Date(action.discoveredAt).toLocaleString() : '—' }}</small><small v-if="action.sourceLabel">Extracted label: {{ action.sourceLabel }}</small><small v-if="action.classificationReason" :title="action.classificationReason">Why: {{ action.classificationReason }}</small><a v-if="action.sourceUrl" :href="action.sourceUrl" target="_blank" rel="noreferrer">Open source ↗</a></div><div><a v-if="action.destination?.url" :href="action.destination.url" target="_blank" rel="noreferrer">{{ action.destination.label || action.destination.url }}</a><small v-else>No destination</small><small v-if="action.provider">Provider: {{ action.provider }}</small><small>{{ formatLabel(action.safetyPolicy) }}</small></div><div><strong>{{ action.confidence === null ? '—' : `${Math.round(action.confidence * 100)}%` }}</strong><small>Priority {{ action.priority }}</small><small>{{ action.enabled ? 'Enabled' : 'Disabled' }}</small></div><div class="admin-actions action-registry-controls"><button v-if="action.enabled" class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="updateAdminRegistryAction(action, false)">Disable</button><button v-else class="outline-button small" type="button" :disabled="adminActionRegistryLoading || (action.confidence ?? 0) < 0.88 || action.safetyPolicy === 'manual_review' || (action.actionType === 'call_emergency' && !action.destination?.url?.startsWith('tel:'))" :title="(action.confidence ?? 0) < 0.88 ? 'Low-confidence actions need stronger evidence' : action.actionType === 'call_emergency' ? 'Emergency actions also require verified source ownership and evidence' : 'Approve action'" @click="updateAdminRegistryAction(action, true)">{{ action.origin === 'discovered' ? 'Approve' : 'Enable' }}</button><button class="text-button action-primary-button" type="button" :disabled="adminActionRegistryLoading || !action.enabled || !action.readiness?.ready" :title="!action.readiness?.ready ? 'Complete the action setup before making it primary' : undefined" @click="setAdminPrimaryAction(action)">{{ action.isPrimary ? 'Clear primary' : 'Set primary' }}</button></div></div></div>
+              <div class="action-registry-table-wrap"><div class="action-registry-table-heading"><span>Business / action</span><span>Evidence</span><span>Destination</span><span>Confidence</span><span>Controls</span></div><div v-if="!adminActionRegistry.length" class="diagnostics-empty">No crawled actions found yet.</div><template v-for="action in adminActionRegistry" :key="action.id"><div class="action-registry-row"><div><strong>{{ action.businessName }}</strong><small>{{ action.name }} · {{ formatLabel(action.actionType) }}</small><small v-if="action.steps?.length">Workflow: {{ action.steps.length }} steps · v{{ action.workflowVersion ?? 1 }}</small><small>{{ action.businessSlug }}</small><small>{{ formatLabel(action.origin) }} · {{ formatLabel(action.lifecycleStatus) }}<span v-if="action.reviewReason"> · {{ formatLabel(action.reviewReason) }}</span></small><small :class="action.readiness?.ready ? 'action-readiness-ready' : 'action-readiness-attention'">{{ action.readiness?.ready ? 'Ready' : `Needs setup · ${formatLabel(action.readiness?.reason || 'incomplete')}` }}</small><span v-if="action.isPrimary" class="status-pill qualified action-primary-pill">Primary action</span></div><div><small>{{ action.evidence[0]?.quote || 'No source evidence captured' }}</small><small>{{ formatLabel(action.sourceType || 'unknown') }} · Discovered {{ action.discoveredAt ? new Date(action.discoveredAt).toLocaleString() : '—' }}</small><small v-if="action.sourceLabel">Extracted label: {{ action.sourceLabel }}</small><small v-if="action.classificationReason" :title="action.classificationReason">Why: {{ action.classificationReason }}</small><a v-if="action.sourceUrl" :href="action.sourceUrl" target="_blank" rel="noreferrer">Open source ↗</a></div><div><a v-if="action.destination?.url" :href="action.destination.url" target="_blank" rel="noreferrer">{{ action.destination.label || action.destination.url }}</a><small v-else>No destination</small><small v-if="action.provider">Provider: {{ action.provider }}</small><small>{{ formatLabel(action.safetyPolicy) }}</small></div><div><strong>{{ action.confidence === null ? '—' : `${Math.round(action.confidence * 100)}%` }}</strong><small>Priority {{ action.priority }}</small><small>{{ action.enabled ? 'Enabled' : 'Disabled' }}</small></div><div class="admin-actions action-registry-controls"><button v-if="action.steps?.length" class="text-button" type="button" :disabled="adminWorkflowAuditLoading" @click="loadAdminWorkflowAudit(action)">{{ adminWorkflowDetailsActionId === action.id ? 'Hide workflow' : 'Advanced workflow' }}</button><button v-if="action.enabled" class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="updateAdminRegistryAction(action, false)">Disable</button><button v-else class="outline-button small" type="button" :disabled="adminActionRegistryLoading || (action.confidence ?? 0) < 0.88 || action.safetyPolicy === 'manual_review' || (action.actionType === 'call_emergency' && !action.destination?.url?.startsWith('tel:'))" :title="(action.confidence ?? 0) < 0.88 ? 'Low-confidence actions need stronger evidence' : action.actionType === 'call_emergency' ? 'Emergency actions also require verified source ownership and evidence' : 'Approve action'" @click="updateAdminRegistryAction(action, true)">{{ action.origin === 'discovered' ? 'Approve' : 'Enable' }}</button><button class="text-button action-primary-button" type="button" :disabled="adminActionRegistryLoading || !action.enabled || !action.readiness?.ready" :title="!action.readiness?.ready ? 'Complete the action setup before making it primary' : undefined" @click="setAdminPrimaryAction(action)">{{ action.isPrimary ? 'Clear primary' : 'Set primary' }}</button></div></div><div v-if="adminWorkflowDetailsActionId === action.id" class="admin-workflow-details"><div class="admin-workflow-details-heading"><div><p class="eyebrow">Super Admin advanced view</p><h3>Workflow execution map</h3><p>Inspect transitions, provider calls, conditions, retries, traces, and failure paths.</p></div><span v-if="adminWorkflowAuditLoading" class="conversation-status">Loading trace…</span></div><div class="admin-workflow-stat-grid"><span><strong>{{ adminWorkflowStats(action).transitions }}</strong>Transitions</span><span><strong>{{ adminWorkflowStats(action).providerCalls }}</strong>Provider calls</span><span><strong>{{ adminWorkflowStats(action).conditions }}</strong>Conditions</span><span><strong>{{ adminWorkflowStats(action).retries }}</strong>Retries</span><span><strong>{{ adminWorkflowStats(action).failurePaths }}</strong>Failure paths</span></div><div class="admin-workflow-step-list"><div v-for="(step, index) in action.steps" :key="step.id || index"><span>{{ index + 1 }}</span><strong>{{ formatLabel(step.type || 'step') }}</strong><small>{{ step.id || 'generated step' }}<span v-if="step.nextStepId"> · → {{ step.nextStepId }}</span></small></div></div><p v-if="adminWorkflowAuditError" class="form-error">{{ adminWorkflowAuditError }}</p><div v-if="!adminWorkflowAuditLoading && !adminWorkflowAudit.length" class="diagnostics-empty">No audit trace recorded for this workflow yet.</div><div v-for="event in adminWorkflowAudit" :key="event.id" class="admin-workflow-trace-row"><span>{{ formatLabel(event.eventType) }}</span><small>{{ event.actorName || event.actorType }} · {{ new Date(event.createdAt).toLocaleString() }}</small><em v-if="event.reason">{{ formatLabel(event.reason) }}</em></div></div></template></div>
           </article>
           <article v-if="adminSection === 'users'" class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users & access</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
           <article v-if="adminSection === 'demos'" class="panel admin-demo-operations">
@@ -7340,6 +7578,8 @@ function startMarketingDemo() {
       </section>
     </section>
 
+    <div v-if="view === 'admin' && adminSection === 'action-registry' && selectedAdminWorkflowAction" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="workflow-replay-title" @click.self="adminWorkflowDetailsActionId = ''"><section class="auth-card admin-workflow-replay-modal"><button class="auth-close" type="button" aria-label="Close replay" @click="adminWorkflowDetailsActionId = ''">×</button><p class="eyebrow">Replay workflow · {{ selectedAdminWorkflowAction.businessName }}</p><h2 id="workflow-replay-title">Re-run a failed turn safely</h2><p class="auth-copy">Run this visitor turn against workflow v{{ selectedAdminWorkflowAction.workflowVersion ?? 1 }}. This dry run does not change production data.</p><label>Conversation ID<input v-model="adminWorkflowReplayConversationId" type="text" placeholder="Paste the failed conversation ID" /></label><label>Visitor turn<textarea v-model="adminWorkflowReplayQuestion" rows="3" placeholder="e.g. Actually, Clearwater works better on Saturdays."></textarea></label><button class="primary-button small" type="button" :disabled="adminWorkflowReplayLoading || !adminWorkflowReplayConversationId.trim() || !adminWorkflowReplayQuestion.trim()" @click="replayAdminWorkflow(selectedAdminWorkflowAction)">{{ adminWorkflowReplayLoading ? 'Replaying…' : 'Replay turn' }}</button><p v-if="adminWorkflowReplayError" class="form-error">{{ adminWorkflowReplayError }}</p><div v-if="adminWorkflowReplayResult" class="admin-workflow-replay-result"><span>Next best action: <strong>{{ formatLabel(String(adminWorkflowReplayResult.nextBestActionAfter || 'unknown')) }}</strong></span><span>Provider result: <strong>{{ adminWorkflowReplayResult.providerResult ? 'Captured' : 'None' }}</strong></span><details><summary>View state before / after</summary><pre>{{ JSON.stringify({ stateBefore: adminWorkflowReplayResult.stateBefore, extractedFields: adminWorkflowReplayResult.extractedFields, nextBestAction: adminWorkflowReplayResult.nextBestActionAfter, providerCall: adminWorkflowReplayResult.providerCall, providerResult: adminWorkflowReplayResult.providerResult, stateAfter: adminWorkflowReplayResult.stateAfter }, null, 2) }}</pre></details></div></section></div>
+
     <div v-if="addBusinessOpen" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="add-business-title" @click.self="addBusinessOpen = false">
       <form class="auth-card" @submit.prevent="createBusiness">
         <button class="auth-close" type="button" aria-label="Close" @click="addBusinessOpen = false">×</button>
@@ -7378,6 +7618,7 @@ function startMarketingDemo() {
         <label>Status<select v-model="leadDetailStatus"><option value="New">New</option><option value="Qualified">Qualified</option><option value="Booked">Booked</option></select></label>
         <label>Internal notes<textarea v-model="leadDetailNotes" rows="5" placeholder="Add context for the team…"></textarea></label>
         <p class="lead-detail-meta"><span>Intent: {{ selectedLead.intent }}</span><span>Source: {{ selectedLead.source }}</span></p>
+        <div v-if="selectedLead.metadata.workflow || selectedLead.metadata.selectedService || selectedLead.metadata.selectedLocation" class="lead-qualification-card"><span class="eyebrow">Qualification</span><strong>{{ formatLabel(String(selectedLead.metadata.workflow || selectedLead.intent)) }}</strong><small v-if="selectedLead.metadata.selectedService">Recommended: {{ selectedLead.metadata.selectedService }}</small><small v-if="selectedLead.metadata.selectedLocation">Location: {{ selectedLead.metadata.selectedLocation }}</small><small v-if="selectedLead.metadata.schedulePreference">Schedule: {{ selectedLead.metadata.schedulePreference }}</small><small v-if="selectedLead.metadata.providerObjectId">Provider ID: {{ selectedLead.metadata.providerObjectId }}</small><small v-if="selectedLead.metadata.conversionStage">Stage: {{ formatLabel(String(selectedLead.metadata.conversionStage)) }}</small></div>
         <div class="lead-detail-actions"><button class="outline-button small danger-text" type="button" :disabled="leadDetailLoading" @click="deleteLead">Delete record</button><button class="primary-button auth-submit" type="submit" :disabled="leadDetailLoading">{{ leadDetailLoading ? 'Saving…' : 'Save lead →' }}</button></div>
       </form>
     </div>
@@ -7399,6 +7640,14 @@ function startMarketingDemo() {
         <button class="text-button auth-switch" type="button" @click="openAuth(authMode === 'signup' ? 'signin' : 'signup')">{{ authMode === 'signup' ? 'Already have an account? Sign in' : authMode === 'forgot' ? 'Back to sign in' : 'New to FrontDeskWise? Create an account' }}</button>
       </form>
     </div>
+
+    <aside v-if="view === 'inbox' && selectedInboxConversation?.action?.workflow" class="workflow-floating-card" aria-label="Workflow progress">
+      <div class="workflow-progress-heading"><div><span class="inbox-table-kicker">Workflow state</span><strong>{{ selectedInboxConversation.action.workflow.name }}</strong></div><span>{{ selectedInboxConversation.action.workflow.progressPercent }}%</span></div>
+      <div class="workflow-progress-track"><span :style="{ width: `${selectedInboxConversation.action.workflow.progressPercent}%` }"></span></div>
+      <p>Next best action: <strong>{{ formatLabel(selectedInboxConversation.action.workflow.nextBestAction) }}</strong></p>
+      <div class="workflow-step-list"><span v-for="step in selectedInboxConversation.action.workflow.steps" :key="step.id" :class="['workflow-step', step.status]"><b>{{ step.status === 'completed' ? '✓' : step.status === 'current' ? '○' : '·' }}</b>{{ step.label }}</span></div>
+      <small v-if="selectedInboxConversation.action.workflow.missing.length">Missing: {{ selectedInboxConversation.action.workflow.missing.map(formatLabel).join(', ') }}</small>
+    </aside>
 
     </template>
     <AppFeedback :loading="!authInitializing && (globalLoading || authLoading)" :toasts="feedbackToasts" @dismiss="dismissToast" />

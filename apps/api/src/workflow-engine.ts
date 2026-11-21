@@ -1,4 +1,5 @@
 import {
+  actionProviderForFlow,
   validateFieldValue,
   type ActionField,
   type ActionFlow,
@@ -13,8 +14,52 @@ export type WorkflowTransition = {
   state: ConversationActionState;
 };
 
+export type WorkflowStepStatus = "completed" | "current" | "pending" | "skipped";
+
+export type WorkflowNextBestAction =
+  | "ASK_FIELD"
+  | "ASSESS_ABILITY"
+  | "CAPTURE_DETAILS"
+  | "LOOKUP_CLASSES"
+  | "LOOKUP_OPTIONS"
+  | "RECOMMEND_OPTION"
+  | "SELECT_OPTION"
+  | "CONFIRM_SELECTION"
+  | "GENERATE_REGISTRATION_LINK"
+  | "CAPTURE_CONTACT"
+  | "BOOK"
+  | "NOTIFY_STAFF"
+  | "HANDOFF"
+  | "COMPLETED";
+
+export type WorkflowSummary = {
+  key: string;
+  name: string;
+  status: ConversationActionState["status"];
+  currentStepId: string | null;
+  currentState: string | null;
+  nextBestAction: WorkflowNextBestAction;
+  completedSteps: number;
+  totalSteps: number;
+  progressPercent: number;
+  provider: string | null;
+  missing: string[];
+  collected: Record<string, string>;
+  interruptions: number;
+  steps: Array<{
+    id: string;
+    label: string;
+    fieldKey: string | null;
+    status: WorkflowStepStatus;
+  }>;
+};
+
 function normalized(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function normalizedPhrase(value: unknown): string {
+  return normalized(value).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function valueForPath(values: Record<string, unknown>, path: string): unknown {
@@ -89,6 +134,276 @@ export function workflowFormFields(action: ActionFlow, state: ConversationAction
     if (field.condition && !conditionMatches(field.condition, state.values)) return false;
     return !state.values[field.key]?.trim();
   });
+}
+
+function workflowStepLabel(action: ActionFlow, step: ActionStep): string {
+  const field = workflowField(action, step.fieldKey);
+  return field?.label ?? step.label ?? step.question ?? step.id.replace(/[-_]+/g, " ");
+}
+
+export function workflowNextBestAction(action: ActionFlow, step: ActionStep | null): WorkflowNextBestAction {
+  if (!step) return "COMPLETED";
+  if (step.fieldKey === "ability") return "ASSESS_ABILITY";
+  if (step.type === "lookup") return actionProviderForFlow(action) ? "LOOKUP_CLASSES" : "LOOKUP_OPTIONS";
+  if (step.type === "recommend") return "RECOMMEND_OPTION";
+  if (step.type === "select") return "SELECT_OPTION";
+  if (step.type === "confirm") return "CONFIRM_SELECTION";
+  if (step.type === "generate_link") return "GENERATE_REGISTRATION_LINK";
+  if (step.type === "create_lead") return "CAPTURE_CONTACT";
+  if (step.type === "book") return "BOOK";
+  if (step.type === "notify") return "NOTIFY_STAFF";
+  if (step.type === "handoff") return "HANDOFF";
+  if (step.type === "form") return "CAPTURE_DETAILS";
+  if (step.fieldKey) return "ASK_FIELD";
+  return "CAPTURE_DETAILS";
+}
+
+export function workflowSummary(action: ActionFlow, state: ConversationActionState): WorkflowSummary {
+  const current = currentWorkflowStep(action, state);
+  const completed = new Set(state.completedStepIds ?? []);
+  const steps = (action.steps ?? []).map((step) => ({
+    id: step.id,
+    label: workflowStepLabel(action, step),
+    fieldKey: step.fieldKey ?? null,
+    status: (completed.has(step.id)
+      ? "completed"
+      : current?.id === step.id
+        ? "current"
+        : state.skipped?.includes(step.id)
+          ? "skipped"
+          : "pending") as WorkflowStepStatus,
+  }));
+  const completedSteps = steps.filter((step) => step.status === "completed").length;
+  const totalSteps = steps.length;
+  const currentState = current?.id ?? (state.status === "completed" ? "completed" : null);
+  const missing = action.fields
+    .filter((field) => field.required && field.visibility !== "hidden" && !state.skipped?.includes(field.key) && !state.values[field.key]?.trim())
+    .filter((field) => !field.condition || conditionMatches(field.condition, state.values))
+    .map((field) => field.key);
+  return {
+    key: action.key,
+    name: action.name,
+    status: state.status,
+    currentStepId: current?.id ?? null,
+    currentState,
+    nextBestAction: state.status === "completed" ? "COMPLETED" : workflowNextBestAction(action, current),
+    completedSteps,
+    totalSteps,
+    progressPercent: state.status === "completed" ? 100 : totalSteps ? Math.round((completedSteps / totalSteps) * 100) : 0,
+    provider: actionProviderForFlow(action),
+    missing,
+    collected: { ...state.values },
+    interruptions: state.interruptionStack?.length ?? 0,
+    steps,
+  };
+}
+
+export type WorkflowMigrationResult = {
+  migrated: boolean;
+  fromVersion: number;
+  toVersion: number;
+  reason: "current" | "missing_cursor" | "removed_step" | "completed_step";
+};
+
+function cloneWorkflowState(state: ConversationActionState): ConversationActionState {
+  return JSON.parse(JSON.stringify(state)) as ConversationActionState;
+}
+
+/**
+ * Safely moves a persisted conversation cursor onto the current workflow
+ * definition. Collected values are preserved; only an invalid or completed
+ * cursor is moved to the first still-actionable step.
+ */
+export function migrateWorkflowState(action: ActionFlow, state: ConversationActionState): WorkflowMigrationResult {
+  const toVersion = action.version ?? 1;
+  const fromVersion = state.workflowVersion ?? toVersion;
+  if (!action.steps?.length) return { migrated: false, fromVersion, toVersion, reason: "current" };
+
+  const stepIds = new Set(action.steps.map((step) => step.id));
+  const completed = new Set((state.completedStepIds ?? []).filter((stepId) => stepIds.has(stepId)));
+  state.completedStepIds = [...completed];
+  const current = state.currentStepId ? workflowStep(action, state.currentStepId) : null;
+  const currentIsComplete = Boolean(state.currentStepId && completed.has(state.currentStepId));
+  const currentValuePresent = Boolean(current?.fieldKey && state.values[current.fieldKey]?.trim());
+  const cursorIsValid = Boolean(current && !currentIsComplete && !currentValuePresent);
+  if (cursorIsValid && fromVersion === toVersion) {
+    state.workflowVersion = toVersion;
+    return { migrated: false, fromVersion, toVersion, reason: "current" };
+  }
+
+  const next = action.steps.find((step) => !completed.has(step.id) && !(step.fieldKey && state.values[step.fieldKey]?.trim())) ?? null;
+  state.currentStepId = next?.id;
+  state.workflowVersion = toVersion;
+  if (!next) {
+    state.status = "completed";
+    state.completedAt = state.completedAt ?? new Date().toISOString();
+  }
+  return {
+    migrated: fromVersion !== toVersion || !cursorIsValid,
+    fromVersion,
+    toVersion,
+    reason: fromVersion !== toVersion ? "removed_step" : currentIsComplete || currentValuePresent ? "completed_step" : "missing_cursor",
+  };
+}
+
+function lookupDependencyKeys(step: ActionStep): Set<string> {
+  const dependencies = new Set(["customer_type", "child_age", "ability", "goal", "location", "program", "schedule_preference", "service", "preferred_date", "preferred_time"]);
+  const config = step.config ?? {};
+  for (const [key, value] of Object.entries(config)) {
+    if (key.endsWith("Field") && typeof value === "string") dependencies.add(value);
+    if (key === "searchFields" && typeof value === "string") value.split(",").map((item) => item.trim()).filter(Boolean).forEach((item) => dependencies.add(item));
+    if (key === "searchFields" && Array.isArray(value)) value.filter((item): item is string => typeof item === "string").forEach((item) => dependencies.add(item));
+  }
+  return dependencies;
+}
+
+/** Invalidate cached provider results when a visitor changes lookup inputs. */
+export function invalidateWorkflowLookups(action: ActionFlow, state: ConversationActionState, updatedKeys: string[]): boolean {
+  if (!action.steps?.length || !updatedKeys.length) return false;
+  const lookupSteps = action.steps.filter((step) => ["lookup", "recommend", "generate_link"].includes(step.type));
+  const staleSteps = lookupSteps.filter((step) => updatedKeys.some((key) => lookupDependencyKeys(step).has(key)));
+  if (!staleSteps.length) return false;
+  const firstStaleIndex = Math.min(...staleSteps.map((step) => action.steps!.findIndex((candidate) => candidate.id === step.id)));
+  const currentIndex = state.currentStepId ? action.steps.findIndex((step) => step.id === state.currentStepId) : -1;
+  state.lookupResults = Object.fromEntries(Object.entries(state.lookupResults ?? {}).filter(([stepId]) => !staleSteps.some((step) => step.id === stepId)));
+  state.selectedActionResourceId = undefined;
+  state.completionUrl = undefined;
+  if (currentIndex >= firstStaleIndex || staleSteps.some((step) => state.completedStepIds?.includes(step.id))) {
+    const invalidatedIds = new Set(action.steps.slice(firstStaleIndex).map((step) => step.id));
+    state.completedStepIds = (state.completedStepIds ?? []).filter((stepId) => !invalidatedIds.has(stepId));
+    state.currentStepId = action.steps[firstStaleIndex]?.id;
+    state.status = "active";
+    state.completedAt = undefined;
+  }
+  return true;
+}
+
+export type WorkflowReplayResult = {
+  stateBefore: ConversationActionState;
+  extracted: Record<string, string>;
+  updated: string[];
+  nextBestActionBefore: WorkflowNextBestAction;
+  stateAfter: ConversationActionState;
+  nextBestActionAfter: WorkflowNextBestAction;
+};
+
+/** Pure, non-persisting turn replay used by certification and admin tooling. */
+export function replayWorkflowTurn(action: ActionFlow, inputState: ConversationActionState, rawInput: string): WorkflowReplayResult {
+  const state = cloneWorkflowState(inputState);
+  migrateWorkflowState(action, state);
+  const stateBefore = cloneWorkflowState(state);
+  const beforeStep = currentWorkflowStep(action, state);
+  const extracted = extractWorkflowValues(action, rawInput);
+  const applied = applyWorkflowValues(action, state, extracted);
+  invalidateWorkflowLookups(action, state, applied.updated);
+  if (!applied.updated.length) {
+    const current = currentWorkflowStep(action, state);
+    if (current?.fieldKey) applyWorkflowInput(action, state, rawInput);
+  }
+  return {
+    stateBefore,
+    extracted,
+    updated: applied.updated,
+    nextBestActionBefore: workflowNextBestAction(action, beforeStep),
+    stateAfter: state,
+    nextBestActionAfter: workflowNextBestAction(action, currentWorkflowStep(action, state)),
+  };
+}
+
+function optionForField(field: ActionField, input: string): string | null {
+  const value = normalizedPhrase(input);
+  const exact = field.options?.find((option) => normalizedPhrase(option) === value);
+  if (exact) return exact;
+  const partial = field.options?.find((option) => normalizedPhrase(option).includes(value) || value.includes(normalizedPhrase(option)));
+  if (partial) return partial;
+  if (field.key === "customer_type") {
+    if (/\b(new|first|not enrolled|never)\b/.test(value)) return "New student";
+    if (/\b(current|already|existing|enrolled)\b/.test(value)) return "Current student";
+  }
+  if (field.key === "ability") {
+    if (/\b(beginner|can t(?:\s+\w+){0,2}\s+swim|cannot(?:\s+\w+){0,2}\s+swim|can not(?:\s+\w+){0,2}\s+swim|doesn t(?:\s+\w+){0,2}\s+swim|not comfortable|not really|just starting|new to swimming)\b/.test(value)) return "Beginner";
+    if (/\b(independent|independently|confident|swims well|strong swimmer)\b/.test(value)) return "Can swim independently";
+    if (/\b(help|assistance|with an adult|with support)\b/.test(value)) return "Can swim with help";
+  }
+  if (field.key === "goal") {
+    if (/\b(learn|learning|teach|start|begin)\b/.test(value)) return "Learn to swim";
+    if (/\b(safety|safe|survival)\b/.test(value)) return "Water safety";
+    if (/\b(technique|stroke|improve|competitive)\b/.test(value)) return "Improve technique";
+    if (/\b(fun|confidence|activity)\b/.test(value)) return "Have fun";
+  }
+  return null;
+}
+
+function fieldLooksLike(field: ActionField, ...terms: string[]): boolean {
+  const haystack = `${field.key} ${field.label}`.toLowerCase();
+  return terms.some((term) => haystack.includes(term));
+}
+
+/**
+ * Extracts safe, typed values without giving the language model authority over
+ * workflow transitions. This intentionally returns only fields defined by the
+ * action; unknown text remains available to the current step as a fallback.
+ */
+export function extractWorkflowValues(action: ActionFlow, input: string): Record<string, string> {
+  const value = input.trim();
+  if (!value) return {};
+  const extracted: Record<string, string> = {};
+  const email = value.match(/\b[^\s@]+@[^\s@]+\.[^\s@]+\b/)?.[0];
+  const phone = value.match(/(?:\+?\d[\d\s().-]{6,}\d)/)?.[0]?.trim();
+  const zip = value.match(/\b\d{5}(?:-\d{4})?\b/)?.[0];
+  const age = value.match(/\b(?:age\s*|(?:is|are)\s+|(?:she|he|they)\s+(?:is|are)\s+)(\d{1,3})(?:\s*(?:years?|year)\s*old)?\b/i)?.[1];
+  const day = value.match(/\b(?:weekends?|weekdays?|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?|mornings?|afternoons?|evenings?|after school)\b/i)?.[0];
+  const location = value.match(/\b(?:location|at|in|near)\s+(?:is\s+)?([a-z][a-z0-9 &'./-]{2,60}?)(?=\s+(?:on|for|and|but|because|this|next)\b|[,.!?]|$)/i)?.[1]?.trim()
+    ?? value.match(/\bactually\s*,?\s+([A-Z][a-z0-9 &'./-]{2,60}?)(?=\s+(?:on|for|and|but|because|this|next)\b|[,.!?]|$)/)?.[1]?.trim()
+    ?? value.match(/\b(?:at|in|near)\s+([A-Z][a-z0-9 &'./-]{2,60}?)(?=\s+(?:on|for|and|but|because|this|next)\b|[,.!?]|$)/)?.[1]?.trim();
+  const correctedLocation = value.match(/\b(?:location is|prefer(?:red)? location is)\s*,?\s+([a-z][a-z0-9'-]{2,40}(?:\s+[A-Z][a-z0-9'-]{2,40})?)/i)?.[1]?.trim()
+    ?? value.match(/\bActually\s*,?\s+([A-Z][a-z0-9'-]{2,40}(?:\s+[A-Z][a-z0-9'-]{2,40})?)/)?.[1]?.trim();
+  const program = value.match(/\b(?:program|class|lesson)\s*(?:is|:)?\s*([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim();
+  const name = value.match(/\b(?:my name is|i am|i'm|parent(?:'s)? name is|guardian(?:'s)? name is)\s+([a-z][a-z .'-]{1,80})/i)?.[1]?.trim();
+
+  for (const field of action.fields) {
+    if (field.visibility === "hidden") continue;
+    if (field.type === "email" && email) extracted[field.key] = email;
+    else if (field.type === "phone" && phone) extracted[field.key] = phone;
+    else if (field.type === "number" && age && fieldLooksLike(field, "age", "year", "student", "child")) extracted[field.key] = age;
+    else if (fieldLooksLike(field, "zip", "postal", "location") && zip) extracted[field.key] = zip;
+    if (fieldLooksLike(field, "location") && (correctedLocation || location)) extracted[field.key] = correctedLocation || location!;
+    if (fieldLooksLike(field, "schedule", "day", "time") && day) extracted[field.key] = day;
+    else if (field.key === "name" || field.key === "parent_name" || fieldLooksLike(field, "guardian")) {
+      if (name) extracted[field.key] = name;
+    }
+    const option = field.type === "select" ? optionForField(field, value) : null;
+    if (option) extracted[field.key] = option;
+    if (field.key === "program") {
+      const namedProgram = program ?? value.match(/\b(?:turtle|level|program)\s*[-#]?\s*[a-z0-9]+\b/i)?.[0];
+      if (namedProgram) extracted[field.key] = namedProgram.replace(/^(program\s*)/i, "").trim();
+    }
+  }
+  return extracted;
+}
+
+export function applyWorkflowValues(
+  action: ActionFlow,
+  state: ConversationActionState,
+  values: Record<string, string>,
+): { updated: string[]; transition: WorkflowTransition } {
+  const updated: string[] = [];
+  for (const field of action.fields) {
+    const raw = values[field.key];
+    if (raw === undefined) continue;
+    const validation = validateFieldValue(field, raw);
+    if (!validation.value) continue;
+    if (state.values[field.key] !== validation.value) {
+      state.values[field.key] = validation.value;
+      updated.push(field.key);
+    }
+  }
+  let step = currentWorkflowStep(action, state);
+  while (step?.fieldKey && state.values[step.fieldKey]?.trim()) {
+    const transition = transitionWorkflow(action, state, step.id);
+    step = transition.step;
+  }
+  return { updated, transition: { step, state } };
 }
 
 export function transitionWorkflow(action: ActionFlow, state: ConversationActionState, completedStepId?: string): WorkflowTransition {

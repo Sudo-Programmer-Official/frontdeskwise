@@ -3,11 +3,14 @@ import test from "node:test";
 import {
   addWorkflowParticipant,
   applyWorkflowInput,
+  applyWorkflowValues,
   currentWorkflowStep,
+  extractWorkflowValues,
   pushWorkflowInterruption,
   resumeWorkflowInterruption,
   setWorkflowParticipantValue,
   transitionWorkflow,
+  workflowSummary,
 } from "../src/workflow-engine.js";
 import { createActionState, type ActionFlow } from "../src/action-flows.js";
 import { generateCompletionLink } from "../src/completion-links.js";
@@ -85,5 +88,57 @@ test("completion links map only explicit fields", () => {
   assert.match(result.url, /MFName=John/);
   assert.match(result.url, /S1Class1=19259740/);
   assert.doesNotMatch(result.url, /cardNumber/);
+});
+
+test("workflow extraction accepts corrections and future answers without moving the cursor blindly", () => {
+  const enrollment: ActionFlow = {
+    ...flow,
+    key: "enroll_child",
+    actionType: "enroll",
+    provider: "jackrabbit",
+    fields: [
+      { id: "child_age", key: "child_age", label: "Child age", type: "number", required: true, question: "How old is the child?" },
+      { id: "ability", key: "ability", label: "Ability", type: "select", required: true, question: "What is their ability?", options: ["Beginner", "Can swim independently"] },
+      { id: "schedule_preference", key: "schedule_preference", label: "Schedule", type: "text", required: false, question: "What schedule works?" },
+    ],
+    steps: [
+      { id: "age", type: "capture", fieldKey: "child_age" },
+      { id: "ability", type: "capture", fieldKey: "ability" },
+      { id: "details", type: "form", config: { fieldKeys: ["schedule_preference"] } },
+      { id: "done", type: "complete" },
+    ],
+  };
+  const state = createActionState(enrollment);
+  const values = extractWorkflowValues(enrollment, "Actually, she is 7 and weekends are best.");
+  assert.equal(values.child_age, "7");
+  assert.equal(values.schedule_preference, "weekends");
+  const applied = applyWorkflowValues(enrollment, state, values);
+  assert.deepEqual(applied.updated, ["child_age", "schedule_preference"]);
+  assert.equal(applied.transition.step?.id, "ability");
+  assert.equal(state.values.schedule_preference, "weekends");
+  assert.equal(extractWorkflowValues(enrollment, "Yes, but she can't really swim yet.").ability, "Beginner");
+});
+
+test("workflow summary exposes a deterministic next-best action and progress", () => {
+  const action: ActionFlow = {
+    ...flow,
+    key: "enroll_child",
+    actionType: "enroll",
+    provider: "jackrabbit",
+    steps: [
+      { id: "age", type: "capture", fieldKey: "name" },
+      { id: "lookup", type: "lookup", config: { provider: "jackrabbit" } },
+      { id: "confirm", type: "confirm", question: "Continue?" },
+      { id: "link", type: "generate_link" },
+    ],
+  };
+  const state = createActionState(action);
+  assert.equal(workflowSummary(action, state).nextBestAction, "ASK_FIELD");
+  applyWorkflowInput(action, state, "Michael");
+  const summary = workflowSummary(action, state);
+  assert.equal(summary.currentState, "lookup");
+  assert.equal(summary.nextBestAction, "LOOKUP_CLASSES");
+  assert.equal(summary.progressPercent, 25);
+  assert.deepEqual(summary.missing, ["email"]);
 });
 

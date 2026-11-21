@@ -9,6 +9,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const app = await readFile(resolve(here, "../src/App.vue"), "utf8");
 const agent = await readFile(resolve(here, "../src/AgentExperience.vue"), "utf8");
 const widgetPreview = await readFile(resolve(here, "../src/components/WidgetPreview.vue"), "utf8");
+const workflowWorkspace = await readFile(resolve(here, "../src/components/WorkflowWorkspace.vue"), "utf8");
 const widgetRenderer = await readFile(resolve(here, "../src/widget-ui/renderer.ts"), "utf8");
 const markdownRenderer = await readFile(resolve(here, "../src/widget-ui/markdown.ts"), "utf8");
 const widgetEmbed = await readFile(resolve(here, "../src/widget-embed.ts"), "utf8");
@@ -39,6 +40,9 @@ test("owner production controls remain present", () => {
     "profile-menu",
     "Test & connect securely",
     "Review tool access",
+    "Answer sources",
+    "Show answer sources",
+    "When helpful",
   ]) {
     assert.ok(ownerSurface.includes(control), `missing owner control: ${control}`);
   }
@@ -112,6 +116,7 @@ test("embedded widget uses the responsive conversation shell", () => {
     "aria-label=\"Expand assistant\"",
     "100dvh",
     "View source ↗",
+    "citationVisibility",
     "proactiveTriggers",
     "frontdeskwise:visitor:",
     "lead-consent",
@@ -187,6 +192,16 @@ test("active production widget state cannot be closed by stale updates or form r
   assert.doesNotMatch(`${rendererSource}\n${embedSource}`, /window\.addEventListener\(["'](?:blur|visibilitychange|resize)/);
 });
 
+test("widget preserves visitor messages through send and history reconciliation", () => {
+  assert.match(widgetEmbed, /addMessage\(question, "user"/);
+  assert.match(widgetEmbed, /pendingLocalMessages = state\.messages\.filter/);
+  assert.match(widgetEmbed, /messages: \[\.\.\.hydratedMessages, \.\.\.pendingLocalMessages/);
+  assert.match(widgetEmbed, /resetConversationUi\(pendingMessage\)/);
+  assert.match(widgetEmbed, /id = message\.id \|\|/);
+  assert.match(widgetRenderer, /message\.role === "user"/);
+  assert.match(widgetRenderer, /precedingMessage = state\.messages\.at\(-2\)/);
+});
+
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
   assert.match(widgetEmbed, /leadCaptured: true, leadVisible: false/);
@@ -234,6 +249,16 @@ test("Inbox takeover and handoff notifications keep their contracts explicit", (
   assert.match(styles, /-webkit-line-clamp: 2/);
   assert.match(apiServer, /const limit = Math\.min\(100/);
   assert.match(apiServer, /pagination: \{ page, pageSize: limit, total/);
+});
+
+test("Inbox exposes deterministic workflow state and lead qualification context", () => {
+  assert.match(app, /interface WorkflowSummary/);
+  assert.match(app, /workflow-floating-card/);
+  assert.match(app, /nextBestAction/);
+  assert.match(app, /lead-qualification-card/);
+  assert.match(apiServer, /workflowSummary\(action, actionState\)/);
+  assert.match(apiServer, /providerObjectId/);
+  assert.match(apiServer, /workflowProgressPercent/);
 });
 
 test("application navigation is route-driven and refresh-safe", () => {
@@ -441,4 +466,28 @@ test("Actions uses a progressive conversion-flow builder", () => {
   assert.equal(routeView(actionsRoute), "actions");
   assert.equal(routePath(actionsRoute), "/app/british-swim-school-tampa-bay/actions");
   assert.doesNotMatch(app, /actionDraft && false/);
+});
+
+test("Workflows exposes an owner-safe step builder connected to Actions", () => {
+  assert.match(router, /"workflows"/);
+  assert.match(app, /WorkflowWorkspace/);
+  assert.match(app, /Open workflow/);
+  for (const marker of [
+    "Actions are what · Workflows are how",
+    "Generate a starter workflow",
+    "Failure and handoff path is defined",
+    "Deterministic provider step",
+    "Plain-English condition",
+    "Live customer preview",
+    "Runtime will use the updated steps",
+  ]) {
+    assert.ok(workflowWorkspace.includes(marker), `missing workflow builder marker: ${marker}`);
+  }
+  assert.match(app, /Replay workflow/);
+  assert.match(app, /replayAdminWorkflow/);
+  assert.match(apiServer, /app\.post\("\/api\/v1\/admin\/workflow-replay/);
+  assert.match(apiServer, /productionDataChanged: false/);
+  const workflowsRoute = parseRoute({ pathname: "/app/british-swim-school-tampa-bay/workflows", search: "" });
+  assert.equal(routeView(workflowsRoute), "workflows");
+  assert.equal(routePath(workflowsRoute), "/app/british-swim-school-tampa-bay/workflows");
 });

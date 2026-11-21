@@ -19,6 +19,9 @@ test("swim school enrollment uses progressive capture", () => {
   const actions = defaultActionFlows("British Swim School", "swim lessons for students", ids);
   const action = detectAction(actions, "Sign me up");
   assert.equal(action?.key, "enroll_child");
+  assert.equal(action?.executionMode, "PROVIDER_FLOW");
+  assert.equal(action?.provider, "jackrabbit");
+  assert.equal(action?.attachmentPolicy, "high_intent_only");
   const state = createActionState(action!);
   assert.equal(nextActionField(action!, state)?.key, "customer_type");
   assert.match(fieldPrompt(nextActionField(action!, state)!), /new student/i);
@@ -26,6 +29,17 @@ test("swim school enrollment uses progressive capture", () => {
   assert.equal(customerType.value, "New student");
   state.values.customer_type = customerType.value!;
   assert.equal(nextActionField(action!, state)?.key, "child_age");
+  assert.ok(action!.fields.some((field) => field.key === "ability"));
+  assert.ok(action!.fields.some((field) => field.key === "goal"));
+  assert.equal(action!.steps?.find((step) => step.id === "student-ability")?.fieldKey, "ability");
+});
+
+test("canonical legacy enrollment workflows infer Jackrabbit narrowly", () => {
+  const actions = defaultActionFlows("British Swim School", "swim lessons", ids);
+  const enrollment = actions.find((action) => action.key === "enroll_child")!;
+  assert.deepEqual(actionReadiness(enrollment), { ready: true, reason: "ready" });
+  assert.deepEqual(actionReadiness({ ...enrollment, provider: null, steps: undefined }), { ready: true, reason: "ready" });
+  assert.deepEqual(actionReadiness({ ...enrollment, key: "custom_enrollment", provider: null, steps: undefined }), { ready: false, reason: "missing_configuration" });
 });
 
 test("salon booking is available from the same action engine", () => {

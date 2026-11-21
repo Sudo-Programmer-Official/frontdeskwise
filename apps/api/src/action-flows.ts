@@ -22,7 +22,7 @@ export type ActionAttachmentPolicy = "always" | "sales_intent" | "high_intent_on
 export type ActionSafetyPolicy = "standard" | "verified_contact" | "healthcare_emergency" | "manual_review";
 export type ActionOrigin = "discovered" | "configured";
 export type ActionLifecycleStatus = "discovered" | "needs_review" | "approved" | "active" | "disabled";
-export type ActionReadinessReason = "ready" | "disabled" | "needs_review" | "missing_tracking_key" | "missing_destination" | "invalid_destination" | "missing_configuration";
+export type ActionReadinessReason = "ready" | "disabled" | "needs_review" | "missing_tracking_key" | "missing_destination" | "invalid_destination" | "missing_configuration" | "missing_provider_connection";
 export type ActionReadiness = {
   ready: boolean;
   reason: ActionReadinessReason;
@@ -182,6 +182,8 @@ export type ActionFlow = {
 
 export type ConversationActionState = {
   actionId: string;
+  /** Workflow definition version captured when this conversation started. */
+  workflowVersion?: number;
   values: Record<string, string>;
   /** Current V2 workflow cursor. Legacy flows continue to use field order. */
   currentStepId?: string;
@@ -336,14 +338,16 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
   },
   {
     key: "enroll_child",
-    name: "Register or enroll",
-    description: "Progressively collect the minimum information needed to register a child or student.",
-    triggerPhrases: ["sign me up", "enroll", "register my child", "register my student", "start enrollment"],
+    name: "Find a lesson / Enroll",
+    description: "Find a suitable lesson, check live availability, and continue to Jackrabbit registration.",
+    triggerPhrases: ["find a lesson", "find swimming lessons", "swimming lessons for my child", "sign me up", "enroll", "register my child", "register my student", "start enrollment"],
     triggerIntents: ["enrollment", "registration", "lead"],
     captureMode: "hybrid",
     fields: [
       field("customer_type", "Customer type", "select", "Is this for a new student or someone already enrolled?", true, ["New student", "Current student"]),
       field("child_age", "Child’s age", "number", "How old is the student?"),
+      field("ability", "Swimming ability", "select", "How comfortable is the student in the water?", true, ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]),
+      field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Improve technique", "Have fun"]),
       field("location", "Preferred location", "text", "Which location would you prefer?"),
       field("program", "Program", "text", "Which program are you interested in?", false),
       field("schedule_preference", "Schedule preference", "text", "Do you have a preferred day or schedule?", false),
@@ -351,16 +355,24 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
       field("email", "Email", "email", "What email address should we use?"),
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
     ],
+    executionMode: "PROVIDER_FLOW",
+    attachmentPolicy: "high_intent_only",
+    provider: "jackrabbit",
     steps: [
-      { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age"], maxParticipants: 8 } },
+      { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
       { id: "student-age", type: "capture", fieldKey: "child_age" },
+      { id: "student-ability", type: "capture", fieldKey: "ability" },
+      { id: "student-goal", type: "capture", fieldKey: "goal" },
       { id: "enrollment-details", type: "form", config: { fieldKeys: ["location", "program", "schedule_preference", "parent_name", "email", "phone"] } },
       { id: "registration-options", type: "lookup", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", includeWaitlist: true } },
       { id: "enrollment-confirm", type: "confirm", question: "I have the details I need. Shall I prepare the registration link?" },
       { id: "registration-link", type: "generate_link", config: { completion: "external_provider" } },
       { id: "enrollment-complete", type: "complete" },
     ],
-    completion: completion("Thanks — your registration request is ready for the team.", "qualified", "Continue registration"),
+    completion: {
+      ...completion("Thanks — your registration request is ready for the team.", "qualified", "Continue registration"),
+      completionMode: "external_provider",
+    },
     enabled: true,
   },
   {
@@ -553,6 +565,70 @@ export function validActionDestinationUrl(value: string | null | undefined): boo
 }
 
 /**
+ * Resolve a workflow provider. The enrollment fallback is intentionally
+ * narrow: only the canonical enroll_child/enroll workflow is migrated to
+ * Jackrabbit, so an unrelated custom provider flow is never silently claimed
+ * by this connector.
+ */
+export function actionProviderForFlow(action: Pick<ActionFlow, "key" | "actionType" | "provider" | "steps">): string | null {
+  if (action.provider?.trim()) return action.provider.trim().toLowerCase();
+  for (const step of action.steps ?? []) {
+    const provider = step.config?.provider;
+    if (typeof provider === "string" && provider.trim()) return provider.trim().toLowerCase();
+  }
+  if (action.key === "enroll_child" && action.actionType === "enroll") return "jackrabbit";
+  return null;
+}
+
+/**
+ * Upgrade the built-in enrollment contract when an older persisted action is
+ * loaded. Owner-authored actions keep their exact schema; only the canonical
+ * Jackrabbit enrollment action receives the new qualification steps.
+ */
+export function normalizeCanonicalEnrollmentWorkflow(action: ActionFlow): ActionFlow {
+  if (action.key !== "enroll_child" || action.actionType !== "enroll" || actionProviderForFlow(action) !== "jackrabbit") return action;
+  const fields = [...action.fields];
+  const addField = (field: ActionFlow["fields"][number], afterKey: string) => {
+    if (fields.some((candidate) => candidate.key === field.key)) return;
+    const index = fields.findIndex((candidate) => candidate.key === afterKey);
+    fields.splice(index >= 0 ? index + 1 : fields.length, 0, field);
+  };
+  addField(field("ability", "Swimming ability", "select", "How comfortable is the student in the water?", true, ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]), "child_age");
+  addField(field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Improve technique", "Have fun"]), "ability");
+  const existingSteps = action.steps ?? [];
+  const steps = existingSteps.length ? [...existingSteps] : [
+    { id: "customer-type", type: "capture" as const, fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
+    { id: "student-age", type: "capture" as const, fieldKey: "child_age" },
+    { id: "student-ability", type: "capture" as const, fieldKey: "ability" },
+    { id: "student-goal", type: "capture" as const, fieldKey: "goal" },
+    { id: "enrollment-details", type: "form" as const, config: { fieldKeys: ["location", "program", "schedule_preference", "parent_name", "email", "phone"] } },
+    { id: "registration-options", type: "lookup" as const, config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", includeWaitlist: true } },
+    { id: "enrollment-confirm", type: "confirm" as const, question: "I have the details I need. Shall I prepare the registration link?" },
+    { id: "registration-link", type: "generate_link" as const, config: { completion: "external_provider" } },
+    { id: "enrollment-complete", type: "complete" as const },
+  ];
+  if (steps.length && steps.some((step) => step.id === "enrollment-details") && !steps.some((step) => step.id === "student-ability")) {
+    const index = steps.findIndex((step) => step.id === "enrollment-details");
+    steps.splice(index, 0,
+      { id: "student-ability", type: "capture", fieldKey: "ability" },
+      { id: "student-goal", type: "capture", fieldKey: "goal" },
+    );
+  }
+  const firstStep = steps[0];
+  if (firstStep?.config?.repeatableEntity === true) {
+    firstStep.config = { ...firstStep.config, participantFieldKeys: ["customer_type", "child_age", "ability", "goal"] };
+  }
+  return {
+    ...action,
+    fields,
+    steps,
+    requiredFields: fields.filter((item) => item.required && item.visibility !== "hidden").map((item) => item.key),
+    optionalFields: fields.filter((item) => !item.required && item.visibility !== "hidden").map((item) => item.key),
+    completion: { ...action.completion, completionMode: action.completion.completionMode ?? "external_provider" },
+  };
+}
+
+/**
  * The single readiness contract for owner UI, primary-goal selection, and runtime.
  * Keep this stricter than the lifecycle flag: a link action is not ready until
  * it has a real web destination and an analytics key.
@@ -563,6 +639,10 @@ export function actionReadiness(action: ActionFlow): ActionReadiness {
     return { ready: false, reason: "needs_review" };
   }
   if (!action.trackingKey?.trim()) return { ready: false, reason: "missing_tracking_key" };
+  if (action.executionMode === "PROVIDER_FLOW") {
+    const provider = actionProviderForFlow(action);
+    if (!provider) return { ready: false, reason: "missing_configuration" };
+  }
   if (action.executionMode === "DIRECT_LINK") {
     const destination = actionDestinationUrl(action);
     if (!destination) return { ready: false, reason: "missing_destination" };
@@ -810,6 +890,7 @@ export function createActionState(action: ActionFlow, now = new Date().toISOStri
       : [];
   return {
     actionId: action.id,
+    ...(action.steps?.length ? { workflowVersion: action.version ?? 1 } : {}),
     values: {},
     ...(action.steps?.length ? { currentStepId: action.steps[0].id, completedStepIds: [], interruptionStack: [] } : {}),
     captureMode,

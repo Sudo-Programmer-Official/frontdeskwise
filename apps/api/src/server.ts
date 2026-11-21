@@ -17,6 +17,7 @@ import { shapeCustomerAnswer, type AnswerTone } from "./answer-shaping.js";
 import {
   ACTION_TEMPLATES,
   BUSINESS_ACTION_TYPES,
+  actionProviderForFlow,
   actionReadiness,
   actionTemplate,
   classifyVisitorRequest,
@@ -27,10 +28,12 @@ import {
   formFields,
   nextActionField,
   nextConversationalField,
+  normalizeCanonicalEnrollmentWorkflow,
   validateFieldValue,
   type ActionFlow,
   type ActionAttachmentPolicy,
   type ActionExecutionMode,
+  type ActionReadiness,
   type ActionLifecycleStatus,
   type ActionOrigin,
   type ActionReviewReason,
@@ -50,15 +53,22 @@ import {
 } from "./action-registry.js";
 import {
   applyWorkflowInput,
+  applyWorkflowValues,
   addWorkflowParticipant,
   completeActiveWorkflowParticipant,
   currentWorkflowStep,
+  extractWorkflowValues,
+  invalidateWorkflowLookups,
+  migrateWorkflowState,
   pushWorkflowInterruption,
+  replayWorkflowTurn,
   resumeWorkflowInterruption,
   setWorkflowParticipantValue,
   transitionWorkflow,
   workflowField,
   workflowFormFields,
+  workflowNextBestAction,
+  workflowSummary,
 } from "./workflow-engine.js";
 import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
 import {
@@ -222,6 +232,7 @@ type WidgetMode = "compact" | "expanded" | "fullscreen";
 type ProactiveTrigger = "delay" | "scroll" | "exit" | "returning";
 type ProactiveBehavior = "teaser" | "open";
 type ProactiveFrequency = "session" | "24h" | "visit";
+type CitationVisibility = "always" | "contextual" | "hidden";
 
 type WidgetQuickAction = {
   label: string;
@@ -256,6 +267,7 @@ type AgentConfig = {
   privacyNoticeUrl: string | null;
   retentionDays: number;
   showAiDisclosure: boolean;
+  citationVisibility: CitationVisibility;
   fallbackContacts: { phone: string | null; email: string | null; url: string | null };
 };
 
@@ -783,6 +795,12 @@ function normalizedRetentionDays(value: unknown): number {
   return [30, 60, 90, 365].includes(days) ? days : 90;
 }
 
+function normalizedCitationVisibility(value: unknown, legacyShowSources?: unknown): CitationVisibility {
+  if (value === "contextual" || value === "hidden" || value === "always") return value;
+  if (legacyShowSources === false) return "hidden";
+  return "always";
+}
+
 const defaultConfig = (businessName: string): AgentConfig => ({
   assistantName: `${businessName} Assistant`,
   welcomeMessage: `Hi! I’m the ${businessName} assistant. I can answer questions, help you explore features, or get you started.`,
@@ -811,6 +829,7 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   privacyNoticeUrl: null,
   retentionDays: 90,
   showAiDisclosure: true,
+  citationVisibility: "always",
   fallbackContacts: { phone: null, email: null, url: null },
 });
 
@@ -854,6 +873,7 @@ function agentConfigFromValue(value: unknown, businessName: string): AgentConfig
     privacyNoticeUrl: typeof config.privacyNoticeUrl === "string" && config.privacyNoticeUrl.trim() ? config.privacyNoticeUrl.trim() : null,
     retentionDays: normalizedRetentionDays(config.retentionDays),
     showAiDisclosure: config.showAiDisclosure !== false,
+    citationVisibility: normalizedCitationVisibility(config.citationVisibility, config.showSources),
     fallbackContacts: {
       phone: typeof (config.fallbackPhone ?? fallbackContactConfig.phone) === "string" && String(config.fallbackPhone ?? fallbackContactConfig.phone).trim() ? String(config.fallbackPhone ?? fallbackContactConfig.phone).trim().slice(0, 80) : fallback.fallbackContacts.phone,
       email: normalizedNotificationEmail(config.fallbackEmail ?? fallbackContactConfig.email) ?? fallback.fallbackContacts.email,
@@ -1594,7 +1614,9 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
       : undefined,
     trackingKey: typeof row.tracking_key === "string" && row.tracking_key.trim() ? row.tracking_key : String(row.action_key),
     destination: row.destination && typeof row.destination === "object" ? row.destination as ActionFlow["destination"] : null,
-    provider: typeof row.provider === "string" ? row.provider : null,
+    provider: typeof row.provider === "string" && row.provider.trim()
+      ? row.provider
+      : String(row.action_key ?? "") === "enroll_child" && String(row.action_type ?? "") === "enroll" ? "jackrabbit" : null,
     priority: Number(row.priority ?? 500),
     requiredFields: persistedRequiredFields.length ? persistedRequiredFields : fields.filter((field) => field.required && field.visibility !== "hidden").map((field) => field.key),
     optionalFields: persistedOptionalFields.length ? persistedOptionalFields : fields.filter((field) => !field.required && field.visibility !== "hidden").map((field) => field.key),
@@ -1621,7 +1643,8 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
     createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
     updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
   };
-  return { ...action, readiness: actionReadiness(action) };
+  const normalizedAction = normalizeCanonicalEnrollmentWorkflow(action);
+  return { ...normalizedAction, readiness: actionReadiness(normalizedAction) };
 }
 
 function actionResourceFromRow(row: Record<string, unknown>): ActionResource {
@@ -2637,8 +2660,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     }
 
     await client.query(
-      `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+      `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, citation_visibility, tone_instructions)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
        on conflict (business_id) do update set
          assistant_name = excluded.assistant_name,
          welcome_message = excluded.welcome_message,
@@ -2666,6 +2689,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
          privacy_notice_url = excluded.privacy_notice_url,
          retention_days = excluded.retention_days,
          show_ai_disclosure = excluded.show_ai_disclosure,
+         citation_visibility = excluded.citation_visibility,
          tone_instructions = excluded.tone_instructions,
          updated_at = now()`,
       [
@@ -2696,6 +2720,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.agentConfig.privacyNoticeUrl,
         business.agentConfig.retentionDays,
         business.agentConfig.showAiDisclosure,
+        business.agentConfig.citationVisibility,
         business.agentConfig.customToneInstructions,
       ],
     );
@@ -2981,6 +3006,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       privacyNoticeUrl: config.privacy_notice_url,
       retentionDays: config.retention_days,
       showAiDisclosure: config.show_ai_disclosure,
+      citationVisibility: config.citation_visibility,
       fallbackPhone: config.fallback_phone,
       fallbackEmail: config.fallback_email,
       fallbackContactUrl: config.fallback_contact_url,
@@ -3560,8 +3586,8 @@ async function ignoreKnowledgeGap(business: Business, question: string): Promise
 async function persistAgentConfig(business: Business): Promise<void> {
   if (!pool) return;
   await pool.query(
-    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions, fallback_phone, fallback_email, fallback_contact_url)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, citation_visibility, tone_instructions, fallback_phone, fallback_email, fallback_contact_url)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
      on conflict (business_id) do update set
        assistant_name = excluded.assistant_name,
        welcome_message = excluded.welcome_message,
@@ -3589,12 +3615,13 @@ async function persistAgentConfig(business: Business): Promise<void> {
        privacy_notice_url = excluded.privacy_notice_url,
        retention_days = excluded.retention_days,
        show_ai_disclosure = excluded.show_ai_disclosure,
+       citation_visibility = excluded.citation_visibility,
        tone_instructions = excluded.tone_instructions,
        fallback_phone = excluded.fallback_phone,
        fallback_email = excluded.fallback_email,
        fallback_contact_url = excluded.fallback_contact_url,
        updated_at = now()`,
-    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.proactiveBehavior, business.agentConfig.proactiveFrequency, business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions, business.agentConfig.fallbackContacts.phone, business.agentConfig.fallbackContacts.email, business.agentConfig.fallbackContacts.url],
+    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.proactiveBehavior, business.agentConfig.proactiveFrequency, business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.citationVisibility, business.agentConfig.customToneInstructions, business.agentConfig.fallbackContacts.phone, business.agentConfig.fallbackContacts.email, business.agentConfig.fallbackContacts.url],
   );
 }
 
@@ -4206,7 +4233,8 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
       : (base.attachmentPolicy ?? (actionType === "call_emergency" || ["request_demo", "contact_team"].includes(String(body.key ?? base.key)) ? "explicit_request_only" : "sales_intent")),
     trackingKey: optionalString(body.trackingKey, 120) ?? base.trackingKey ?? (optionalString(body.key, 80) ?? base.key),
     destination,
-    provider: optionalString(body.provider, 160) ?? (base.provider ?? null),
+    provider: optionalString(body.provider, 160)
+      ?? (base.provider ?? (actionType === "enroll" && (optionalString(body.key, 80) ?? base.key) === "enroll_child" ? "jackrabbit" : null)),
     priority: Number.isFinite(Number(body.priority ?? base.priority)) ? Math.max(0, Math.min(10_000, Number(body.priority ?? base.priority))) : (base.priority ?? 500),
     requiredFields,
     optionalFields,
@@ -6023,6 +6051,7 @@ function inboxConversationPayload(business: Business, conversation: Conversation
       values: Object.fromEntries(Object.entries(actionState.values).filter(([, value]) => typeof value === "string").slice(0, 50)),
       handoffRequired: action.completion.requiresStaff,
       handoffState: conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
+      ...(action.steps?.length ? { workflow: workflowSummary(action, actionState) } : {}),
     } : null,
     lastMessage: latestMessage ? inboxMessagePayload(latestMessage) : null,
   };
@@ -6710,7 +6739,7 @@ async function answerQuestion(
 
   if (modelGenerationFailed && materiallyRelevant && match) {
     return {
-      answer: "I found information about this, but I’m having trouble formatting the answer right now. Please try again in a moment.",
+      answer: "I found relevant information, but I’m having trouble formatting the answer right now.",
       grounded: false,
       citations,
       knowledgeGap: null,
@@ -6822,6 +6851,7 @@ type ConversationAnswerResult = Omit<AnswerResult, "failure"> & {
     linkLabel?: string;
     lookup?: Record<string, unknown>;
     form?: ActionFormSchema;
+    workflow?: ReturnType<typeof workflowSummary>;
   };
 };
 
@@ -6842,8 +6872,8 @@ function temporaryConversationAnswer(
   };
   return {
     answer: retrievedEvidence
-      ? "I found information about this, but I’m having trouble formatting the answer right now. Please try again in a moment."
-      : "I’m having trouble responding right now. Please try again in a moment.",
+      ? "I found relevant information, but I’m having trouble formatting the answer right now."
+      : "I’m having trouble responding right now.",
     grounded: false,
     citations,
     knowledgeGap: null,
@@ -6865,6 +6895,7 @@ function actionFormSchema(action: ActionFlow, state: ConversationActionState): A
 
 function actionStatePayload(action: ActionFlow, state: ConversationActionState): ConversationAnswerResult["action"] {
   const workflow = action.steps?.length ? currentWorkflowStep(action, state) : null;
+  const workflowState = action.steps?.length ? workflowSummary(action, state) : null;
   const next = workflow?.fieldKey
     ? action.fields.find((field) => field.key === workflow.fieldKey || field.id === workflow.fieldKey) ?? null
     : nextConversationalField(action, state);
@@ -6886,6 +6917,12 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
       : {}),
     ...(Object.keys(lookup).length ? { lookup } : {}),
     ...(showForm ? { form: actionFormSchema(action, state) } : {}),
+    ...(workflowState ? {
+      workflow: {
+        ...workflowState,
+        collected: Object.fromEntries(Object.entries(workflowState.collected).filter(([key]) => !/^(email|phone|name|parent_name)$/i.test(key))),
+      },
+    } : {}),
   };
 }
 
@@ -6958,14 +6995,57 @@ function actionConfigString(config: Record<string, unknown>, key: string): strin
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function configuredActionProvider(action: ActionFlow): string | null {
+  return actionProviderForFlow(action);
+}
+
+async function providerIntegrationConnected(businessId: string, provider: string | null): Promise<boolean> {
+  if (!provider) return false;
+  if (!pool) return provider === "jackrabbit" && jackrabbitEnvironmentFallbackAllowed() && Boolean(process.env.FRONTDESKWISE_JACKRABBIT_API_TOKEN?.trim());
+  const result = await pool.query(
+    `select 1 from crm_integrations
+     where business_id = $1 and provider = $2 and connection_status = 'active'
+     limit 1`,
+    [businessId, provider],
+  );
+  return Boolean(result.rowCount);
+}
+
+async function actionReadinessForBusiness(business: Pick<Business, "id">, action: ActionFlow): Promise<ActionReadiness> {
+  const readiness = actionReadiness(action);
+  if (!readiness.ready || action.executionMode !== "PROVIDER_FLOW") return readiness;
+  const provider = configuredActionProvider(action);
+  if (!provider) return { ready: false, reason: "missing_configuration" };
+  if (!(await providerIntegrationConnected(business.id, provider))) {
+    return { ready: false, reason: "missing_provider_connection" };
+  }
+  return readiness;
+}
+
 function actionConfigValue(config: Record<string, unknown>, state: ConversationActionState, key: string, defaultField: string): string | null {
   const configuredField = actionConfigString(config, key);
   const value = state.values[configuredField ?? defaultField];
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function workflowLookupResolutions(state: ConversationActionState): Array<{ status?: string; matches: Array<{ id: string; name: string; location: string | null; day: string | null; startTime: string | null; price: string | number | null; availability: number | null; destination?: { url: string } | null }> }> {
-  return Object.values(state.lookupResults ?? {}).filter((value): value is { status?: string; matches: Array<{ id: string; name: string; location: string | null; day: string | null; startTime: string | null; price: string | number | null; availability: number | null; destination?: { url: string } | null }> } => Boolean(value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).matches))) as Array<{ status?: string; matches: Array<{ id: string; name: string; location: string | null; day: string | null; startTime: string | null; price: string | number | null; availability: number | null; destination?: { url: string } | null }> }>;
+type WorkflowLookupMatch = {
+  id: string;
+  providerObjectId?: string | null;
+  name: string;
+  location: string | null;
+  day: string | null;
+  startTime: string | null;
+  price: string | number | null;
+  availability: number | null;
+  destination?: { url: string } | null;
+};
+
+type WorkflowLookupResolution = { status?: string; matches: WorkflowLookupMatch[] };
+
+function workflowLookupResolutions(state: ConversationActionState): WorkflowLookupResolution[] {
+  return Object.values(state.lookupResults ?? {}).filter((value): value is WorkflowLookupResolution => Boolean(
+    value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).matches),
+  ));
 }
 
 function workflowLookupPrompt(state: ConversationActionState): string | null {
@@ -6987,6 +7067,7 @@ function workflowLookupPrompt(state: ConversationActionState): string | null {
 
 async function resolveWorkflowActionResources(
   business: Business,
+  action: ActionFlow,
   step: NonNullable<ReturnType<typeof currentWorkflowStep>>,
   state: ConversationActionState,
 ): Promise<ReturnType<typeof resolveAction>> {
@@ -7009,7 +7090,7 @@ async function resolveWorkflowActionResources(
     const fromState = actionConfigValue(config, state, configKey, field);
     if (constant ?? fromState) filters[field] = constant ?? fromState;
   }
-  const provider = actionConfigString(config, "provider");
+  const provider = actionConfigString(config, "provider") ?? configuredActionProvider(action);
   if (provider === "jackrabbit") {
     const program = typeof filters.program === "string" ? filters.program : "";
     if (!program) return { status: "not_found", matches: [] };
@@ -7054,9 +7135,12 @@ async function advanceWorkflowAutomation(
   while (step && !visited.has(step.id) && ["lookup", "recommend", "generate_link", "create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type)) {
     visited.add(step.id);
     if (step.type === "lookup" || step.type === "recommend") {
-      const result = step.config?.provider || step.config?.resourceType || step.config?.filters
-        ? await resolveWorkflowActionResources(business, step, state)
-        : step.config?.result;
+        const cachedResult = state.lookupResults?.[step.id];
+        const result = cachedResult !== undefined
+          ? cachedResult
+          : step.config?.provider || step.config?.resourceType || step.config?.filters || configuredActionProvider(action)
+            ? await resolveWorkflowActionResources(business, action, step, state)
+            : step.config?.result;
       if (result !== undefined) state.lookupResults = { ...(state.lookupResults ?? {}), [step.id]: result };
     }
     if (step.type === "generate_link") {
@@ -7110,20 +7194,42 @@ async function continueWorkflowActionConversation(
 ): Promise<ConversationAnswerResult> {
   const state = conversation.actionState ?? createActionState(action);
   conversation.actionState = state;
+  migrateWorkflowState(action, state);
   if (!state.currentStepId) state.currentStepId = action.steps?.[0]?.id;
   const repeatable = repeatableWorkflowConfig(action);
   if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
 
   const requestClassification = classifyVisitorRequest(question);
-  if (requestClassification.mode === "informational") {
-    const current = currentWorkflowStep(action, state);
+  // A visitor can answer several questions in one sentence, or correct an
+  // earlier answer while the workflow is waiting on a different field. Apply
+  // only values declared by the action; the cursor still advances
+  // deterministically from the current step.
+  const extractedValues = extractWorkflowValues(action, question);
+  const extracted = applyWorkflowValues(action, state, extractedValues);
+  invalidateWorkflowLookups(action, state, extracted.updated);
+  for (const fieldKey of extracted.updated) {
+    const field = workflowField(action, fieldKey);
+    if (repeatable && field && repeatable.fieldKeys.includes(field.key)) setWorkflowParticipantValue(state, field.key, state.values[field.key]);
+    await recordConversionEvent(business, {
+      event: "FIELD_COMPLETED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      fieldId: fieldKey,
+      metadata: { extracted: true },
+    });
+  }
+  const currentAfterExtraction = currentWorkflowStep(action, state);
+  const questionLike = /^(how|what|when|where|why|who|is|are|can|could|does|do|tell me|explain)\b/i.test(question.trim());
+  const isSideQuestion = actionKnowledgeIntents.has(classifyQuestionIntent(question))
+    || (requestClassification.mode === "informational" && questionLike && !Object.keys(extractedValues).length);
+  if (isSideQuestion) {
     pushWorkflowInterruption(state, {
       intent: classifyQuestionIntent(question),
       question,
-      returnStepId: current?.id ?? state.currentStepId ?? null,
+      returnStepId: currentAfterExtraction?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question);
-    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current) : "The workflow is ready to continue.");
+    return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction) : "The workflow is ready to continue.");
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
@@ -7187,15 +7293,21 @@ async function continueWorkflowActionConversation(
     if (!field && !step.fieldKey) {
       transitionWorkflow(action, state, step.id);
     } else {
-      const input = applyWorkflowInput(action, state, question);
-      if (!input.ok) return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step)}`);
-      if (repeatable && input.value && repeatable.fieldKeys.includes(field?.key ?? step.fieldKey ?? "")) setWorkflowParticipantValue(state, field?.key ?? step.fieldKey ?? "", input.value);
-      await recordConversionEvent(business, {
-        event: "FIELD_COMPLETED",
-        conversationId: conversation.id,
-        flowId: action.id,
-        fieldId: field?.key ?? step.fieldKey ?? step.id,
-      });
+      const alreadyExtracted = field?.key ? extracted.updated.includes(field.key) : false;
+      if (!alreadyExtracted) {
+        if (extracted.updated.length) {
+          return actionAnswer(action, state, `Thanks — ${workflowPrompt(action, state, step)}`);
+        }
+        const input = applyWorkflowInput(action, state, question);
+        if (!input.ok) return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step)}`);
+        if (repeatable && input.value && repeatable.fieldKeys.includes(field?.key ?? step.fieldKey ?? "")) setWorkflowParticipantValue(state, field?.key ?? step.fieldKey ?? "", input.value);
+        await recordConversionEvent(business, {
+          event: "FIELD_COMPLETED",
+          conversationId: conversation.id,
+          flowId: action.id,
+          fieldId: field?.key ?? step.fieldKey ?? step.id,
+        });
+      }
     }
   }
 
@@ -7224,6 +7336,14 @@ async function continueActionConversation(
   if (!action || conversation.actionState?.status === "completed") {
     action = detectAction(business.actions, question, business.primaryActionId);
     if (!action) return null;
+    const readiness = await actionReadinessForBusiness(business, action);
+    if (!readiness.ready) {
+      // Provider-backed actions must fail closed. The ordinary knowledge path
+      // can still answer the visitor or offer a safe human follow-up, but a
+      // missing connection must never start a flow that cannot verify live
+      // availability or produce a trusted destination.
+      return null;
+    }
     const state = createActionState(action);
     state.sourcePage = options.sourcePage ?? null;
     conversation.actionState = state;
@@ -7276,6 +7396,9 @@ async function continueActionConversation(
     }
     return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + fieldPrompt(next));
   }
+
+  const activeReadiness = await actionReadinessForBusiness(business, action);
+  if (!activeReadiness.ready) return null;
 
   if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question);
 
@@ -7353,6 +7476,26 @@ async function completeActionConversation(
   action: ActionFlow,
   state: ConversationActionState,
 ): Promise<ConversationAnswerResult> {
+  const summary = action.steps?.length ? workflowSummary(action, state) : null;
+  const resolutions = workflowLookupResolutions(state);
+  const candidates = resolutions.flatMap((resolution) => resolution.matches);
+  const selectedResource = state.selectedActionResourceId
+    ? candidates.find((match) => match.id === state.selectedActionResourceId)
+    : candidates.length === 1 ? candidates[0] : undefined;
+  const qualification = Object.fromEntries(Object.entries(state.values).filter(([key]) => !/^(email|phone|name|parent_name)$/i.test(key)));
+  const structuredWorkflowMetadata = {
+    workflow: action.key,
+    workflowState: summary?.currentState ?? (state.status === "completed" ? "completed" : "collecting"),
+    nextBestAction: summary?.nextBestAction ?? "CAPTURE_DETAILS",
+    workflowProgressPercent: summary?.progressPercent ?? null,
+    workflowMissing: summary?.missing ?? [],
+    qualification,
+    selectedService: selectedResource?.name ?? state.values.program ?? null,
+    selectedLocation: selectedResource?.location ?? state.values.location ?? null,
+    schedulePreference: state.values.schedule_preference ?? null,
+    providerObjectId: selectedResource?.providerObjectId ?? state.selectedActionResourceId ?? null,
+    conversionStage: state.completionUrl ? "registration_link_sent" : state.status === "completed" ? "qualified" : "in_progress",
+  };
   const submission = await persistActionSubmission(business, action, conversation, state.values, state.sourcePage ?? null);
   if (submission.status === "completed") {
     state.status = "completed";
@@ -7396,7 +7539,14 @@ async function completeActionConversation(
         referrer: null,
         consentAt: null,
         idempotencyKey: "action:" + conversation.id + ":" + action.id,
-        metadata: { actionKey: action.key, actionId: action.id, fields: values, participants: state.participants ?? [] },
+        metadata: {
+          actionKey: action.key,
+          actionId: action.id,
+          fields: values,
+          participants: state.participants ?? [],
+          ...structuredWorkflowMetadata,
+          conversionStage: state.completionUrl ? "registration_link_sent" : structuredWorkflowMetadata.conversionStage,
+        },
         createdAt: new Date().toISOString(),
       };
       const persisted = await persistLead(business, lead);
@@ -7514,6 +7664,7 @@ async function submitActionForm(
   if (!action || !state || state.actionId !== actionId) {
     throw httpError(400, "This action form is no longer active");
   }
+  migrateWorkflowState(action, state);
   if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
   if (state.status === "completed") {
     const submission = business.actionSubmissions.find((item) => item.conversationId === conversation.id && item.actionId === action.id);
@@ -8322,8 +8473,9 @@ async function persistConversationExchange(
   recordAnswer(result.modelUsage.latencyMs);
   if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer") recordLowConfidenceFallback();
   const now = new Date().toISOString();
-  const userMessage: Message = { id: clientMessageId, role: "user", content: userContent, createdAt: now };
+  const userMessage: Message = { id: clientMessageId ?? randomUUID(), role: "user", content: userContent, createdAt: now };
   const assistantMessage: Message | null = result.silent ? null : {
+    id: randomUUID(),
     role: "assistant",
     content: result.answer,
     grounded: result.grounded,
@@ -10319,10 +10471,9 @@ app.get("/api/v1/admin/action-registry", async (request) => {
      limit 500`,
     [businessId],
   );
-  return {
-    actions: result.rows.map((row) => {
+  const actions = await Promise.all(result.rows.map(async (row) => {
       const parsedAction = actionFromRow(row);
-      const readiness = actionReadiness(parsedAction);
+      const readiness = await actionReadinessForBusiness({ id: String(row.business_id) }, parsedAction);
       return {
       id: String(row.id),
       businessId: String(row.business_id),
@@ -10335,10 +10486,12 @@ app.get("/api/v1/admin/action-registry", async (request) => {
       description: String(row.description ?? ""),
       mode: String(row.mode ?? "transactional"),
       destination: row.destination && typeof row.destination === "object" ? asRecord(row.destination) : null,
-      provider: typeof row.provider === "string" ? row.provider : null,
+      provider: parsedAction.provider,
       priority: Number(row.priority ?? 0),
       requiredFields: Array.isArray(row.required_fields) ? row.required_fields : [],
       conditions: Array.isArray(row.conditions) ? row.conditions : [],
+      steps: parsedAction.steps ?? [],
+      workflowVersion: parsedAction.version ?? 1,
       safetyPolicy: String(row.safety_policy ?? "standard"),
       sourceUrl: typeof row.source_url === "string" ? row.source_url : null,
       sourceType: typeof row.source_type === "string" ? row.source_type : null,
@@ -10355,8 +10508,8 @@ app.get("/api/v1/admin/action-registry", async (request) => {
       isPrimary: String(row.id) === String(row.primary_action_id ?? "") && readiness.ready,
       updatedAt: toIso(row.updated_at),
       };
-    }),
-  };
+    }));
+  return { actions };
 });
 
 app.patch("/api/v1/admin/action-registry/:actionId", async (request) => {
@@ -10465,8 +10618,12 @@ app.patch("/api/v1/admin/businesses/:businessId/primary-action", async (request)
       [actionId, businessId],
     );
     if (!actionResult.rowCount) throw httpError(400, "Primary action must be an approved, enabled action belonging to this business");
-    const readiness = actionReadiness(actionFromRow(actionResult.rows[0]));
-    if (!readiness.ready) throw httpError(400, "Primary action must be an enabled, approved, ready action with complete conversion settings");
+    const readiness = await actionReadinessForBusiness({ id: businessId }, actionFromRow(actionResult.rows[0]));
+    if (!readiness.ready) {
+      throw httpError(400, readiness.reason === "missing_provider_connection"
+        ? "Connect and verify the provider before making this action primary"
+        : "Primary action must be an enabled, approved, ready action with complete conversion settings");
+    }
   }
   await pool.query("update businesses set primary_action_id = $2, updated_at = now() where id = $1", [businessId, actionId]);
   if (actionId) {
@@ -10533,6 +10690,55 @@ app.get("/api/v1/admin/action-registry/:actionId/audit", async (request) => {
     if (!isMissingDatabaseTable(error)) throw error;
     return { audit: [] };
   }
+});
+
+app.post("/api/v1/admin/workflow-replay", async (request) => {
+  await requireSuperAdmin(request);
+  const body = asRecord(request.body);
+  const businessSlug = requiredString(body.businessSlug, "businessSlug", 120);
+  const conversationId = requiredString(body.conversationId, "conversationId", 120);
+  const question = requiredString(body.question, "question", 4_000);
+  const business = await getBusiness(businessSlug);
+  const conversation = maybeConversation(business, conversationId);
+  const requestedActionId = optionalString(body.actionId, 120);
+  const actionId = requestedActionId ?? conversation.actionState?.actionId;
+  const action = actionId ? business.actions.find((candidate) => candidate.id === actionId) : null;
+  if (!action) throw httpError(404, "The conversation workflow could not be found");
+  if (!action.steps?.length) throw httpError(400, "Replay is available only for versioned workflows");
+
+  const inputState = conversation.actionState ?? createActionState(action);
+  const replay = replayWorkflowTurn(action, inputState, question);
+  const simulatedState = replay.stateAfter;
+  const providerStep = currentWorkflowStep(action, simulatedState);
+  let providerCall: Record<string, unknown> | null = null;
+  let providerResult: unknown = null;
+  if (providerStep && ["lookup", "recommend", "generate_link"].includes(providerStep.type)) {
+    providerCall = {
+      stepId: providerStep.id,
+      type: providerStep.type,
+      provider: actionConfigString(providerStep.config ?? {}, "provider") ?? configuredActionProvider(action),
+      operation: actionConfigString(providerStep.config ?? {}, "operation") ?? (providerStep.type === "generate_link" ? "build_registration_link" : "lookup"),
+      input: { ...simulatedState.values },
+    };
+    await advanceWorkflowAutomation(business, action, simulatedState);
+    providerResult = simulatedState.lookupResults?.[providerStep.id] ?? (simulatedState.completionUrl ? { completionUrl: simulatedState.completionUrl } : null);
+  }
+  const afterStep = currentWorkflowStep(action, simulatedState);
+  return {
+    replayed: true,
+    productionDataChanged: false,
+    conversationId: conversation.id,
+    actionId: action.id,
+    workflowVersion: action.version ?? 1,
+    stateBefore: replay.stateBefore,
+    extractedFields: replay.extracted,
+    updatedFields: replay.updated,
+    nextBestActionBefore: replay.nextBestActionBefore,
+    providerCall,
+    providerResult,
+    stateAfter: simulatedState,
+    nextBestActionAfter: workflowNextBestAction(action, afterStep),
+  };
 });
 
 app.post("/api/v1/admin/businesses/:businessId/verification/approve", async (request) => {
@@ -11971,6 +12177,16 @@ app.post("/api/v1/demo/:slug/integrations/:integrationId/test", async (request) 
       `update crm_integrations set connection_status = 'error', last_tested_at = now(), last_error = $2, updated_at = now() where id = $1`,
       [integration.rows[0].id, message],
     );
+    if (integration.rows[0].provider === "jackrabbit") {
+      const primaryAction = business.actions.find((action) => business.primaryActionId === action.id && configuredActionProvider(action) === "jackrabbit");
+      if (primaryAction) {
+        business.primaryActionId = null;
+        await pool.query(
+          "update businesses set primary_action_id = null, updated_at = now() where id = $1 and primary_action_id = $2",
+          [business.id, primaryAction.id],
+        );
+      }
+    }
     throw httpError(502, "CRM connection test failed. Check the endpoint and try again.");
   }
   return { ok: true, status: "active" };
@@ -12027,6 +12243,13 @@ app.delete("/api/v1/demo/:slug/integrations/:integrationId", async (request) => 
     [integrationId, business.id],
   );
   if (!result.rowCount) throw httpError(404, "CRM integration not found");
+  if (existing.rows[0].provider === "jackrabbit") {
+    const primaryAction = business.actions.find((action) => business.primaryActionId === action.id && configuredActionProvider(action) === "jackrabbit");
+    if (primaryAction) {
+      business.primaryActionId = null;
+      await pool.query("update businesses set primary_action_id = null, updated_at = now() where id = $1 and primary_action_id = $2", [business.id, primaryAction.id]);
+    }
+  }
   return { ok: true, integrationId };
 });
 
@@ -12798,13 +13021,19 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
     const existingIndex = conversation.messages.findIndex((message) => message.id === clientMessageId && message.role === "user");
     if (existingIndex >= 0) {
       const existingAnswer = conversation.messages.slice(existingIndex + 1).find((message) => message.role === "assistant");
+      const existingFailure = Boolean(existingAnswer && /I found relevant information|I’m having trouble responding right now/i.test(existingAnswer.content));
       return {
         conversationId: conversation.id,
         messageId: clientMessageId,
+        assistantMessageId: existingAnswer?.id,
         conversation: conversationStatusPayload(conversation),
         answer: existingAnswer?.content ?? "",
         grounded: existingAnswer?.grounded ?? false,
         citations: existingAnswer?.citations ?? [],
+        ...(existingFailure ? {
+          quickActions: [{ label: "Try again", question }, knowledgeGapContactAction],
+          failure: { kind: "temporary_ai" as const, retryable: true, retrievedEvidence: Boolean(existingAnswer?.citations?.length) },
+        } : {}),
       };
     }
   }
@@ -12812,6 +13041,12 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
   const requestReceivedAt = new Date().toISOString();
   const requestStartedAt = performance.now();
   const result = await recordConversationQuestion(business, conversation, question, { currentPage, clientMessageId });
+  const userMessageIndex = clientMessageId
+    ? conversation.messages.findIndex((message) => message.id === clientMessageId && message.role === "user")
+    : -1;
+  const assistantMessage = userMessageIndex >= 0
+    ? conversation.messages.slice(userMessageIndex + 1).find((message) => message.role === "assistant")
+    : undefined;
   void recordWidgetPerformance(business, {
     event: "message_backend",
     conversationId: conversation.id,
@@ -12828,7 +13063,13 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
       request_received_at: requestReceivedAt,
     },
   }).catch((error) => app.log.warn({ error: error instanceof Error ? error.message : "unknown performance telemetry error", requestId: request.id }, "Widget performance telemetry failed"));
-  return { conversationId: conversation.id, messageId: clientMessageId, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
+  return {
+    conversationId: conversation.id,
+    messageId: clientMessageId,
+    assistantMessageId: assistantMessage?.id,
+    conversation: conversationStatusPayload(conversation),
+    ...customerAnswerPayload(result),
+  };
 });
 
 app.get("/api/v1/widget/:siteKey/conversations/:conversationId", async (request) => {
@@ -13117,10 +13358,13 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   // Keep disabled/archived definitions visible to owners so they can restore
   // them; detectAction and the widget runtime still exclude them.
   const configuredActions = business.actions;
-  const actions = configuredActions.map((action) => ({
-    ...action,
-    readiness: actionReadiness(action),
-    isPrimary: business.primaryActionId === action.id && actionReadiness(action).ready,
+  const actions = await Promise.all(configuredActions.map(async (action) => {
+    const readiness = await actionReadinessForBusiness(business, action);
+    return {
+      ...action,
+      readiness,
+      isPrimary: business.primaryActionId === action.id && readiness.ready,
+    };
   }));
   if (!pool) return { actions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
   let deliveries: Array<Record<string, unknown>> = [];
@@ -13211,7 +13455,8 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   const duplicate = business.actions.find((item, index) => index !== actionIndex && item.key === action.key);
   if (duplicate) throw httpError(409, "An action with this key already exists");
   business.actions[actionIndex] = action;
-  const primaryActionCleared = business.primaryActionId === action.id && !actionReadiness(action).ready;
+  const readiness = await actionReadinessForBusiness(business, action);
+  const primaryActionCleared = business.primaryActionId === action.id && !readiness.ready;
   if (primaryActionCleared) {
     business.primaryActionId = null;
     if (pool) {
@@ -13224,7 +13469,7 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
       actorType: "owner",
       eventType: "primary_cleared",
       previousValue: { primaryActionId: action.id },
-      newValue: { primaryActionId: null, readiness: actionReadiness(action) },
+      newValue: { primaryActionId: null, readiness },
       reason: "owner_override",
     });
   }
@@ -13253,7 +13498,7 @@ app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
   const actionId = requiredString(params.actionId, "actionId", 120);
   const action = business.actions.find((candidate) => candidate.id === actionId);
   if (!action) throw httpError(404, "Action not found");
-  const readiness = actionReadiness(action);
+  const readiness = await actionReadinessForBusiness(business, action);
   if (!readiness.ready) {
     const message = readiness.reason === "missing_destination"
       ? "Direct-link actions need a destination URL before they can be the primary conversion goal"
@@ -13261,8 +13506,17 @@ app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
         ? "Direct-link actions need a valid http(s) destination URL before they can be the primary conversion goal"
         : readiness.reason === "missing_tracking_key"
           ? "Actions need a tracking key before they can be the primary conversion goal"
+          : readiness.reason === "missing_provider_connection"
+            ? "Connect and verify the provider before making this provider flow the primary conversion goal"
           : "Only an enabled, approved, ready action can be the primary conversion goal";
     throw httpError(400, message);
+  }
+  if (action.executionMode === "PROVIDER_FLOW" && configuredActionProvider(action) === "jackrabbit") {
+    try {
+      await resolveJackrabbitCredentials(business.id);
+    } catch {
+      throw httpError(400, "Connect and verify Jackrabbit before making this provider flow the primary conversion goal");
+    }
   }
   const previousActionId = business.primaryActionId;
   business.primaryActionId = action.id;
@@ -13527,6 +13781,7 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   }
   if (body.retentionDays !== undefined) business.agentConfig.retentionDays = normalizedRetentionDays(body.retentionDays);
   if (typeof body.showAiDisclosure === "boolean") business.agentConfig.showAiDisclosure = body.showAiDisclosure;
+  if (body.citationVisibility !== undefined) business.agentConfig.citationVisibility = normalizedCitationVisibility(body.citationVisibility);
   await persistAgentConfig(business);
   if (publish) {
     business.agentPublishedAt = new Date().toISOString();

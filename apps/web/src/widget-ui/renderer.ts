@@ -47,6 +47,7 @@ export interface WidgetMessage {
   status?: "sending" | "sent" | "failed";
   retryable?: boolean;
   clientMessageId?: string;
+  inReplyToClientMessageId?: string;
 }
 
 export interface WidgetFallbackContacts {
@@ -89,6 +90,7 @@ export interface WidgetConfig {
   showAiDisclosure: boolean;
   showPoweredBy?: boolean;
   showSources?: boolean;
+  citationVisibility?: "always" | "contextual" | "hidden";
   showLeadCapture?: boolean;
   requireLeadConsent?: boolean;
   privacyNoticeUrl?: string | null;
@@ -167,11 +169,21 @@ export const DEFAULT_CONFIG: WidgetConfig = {
   showAiDisclosure: true,
   showPoweredBy: true,
   showSources: true,
+  citationVisibility: "always",
   showLeadCapture: true,
   requireLeadConsent: false,
 };
 
 const SYMBOL = "<svg class=\"fdw-brand-symbol\" viewBox=\"0 0 64 64\" aria-hidden=\"true\"><path d=\"m32 12 4.8 12.2L49 29l-12.2 4.8L32 46l-4.8-12.2L15 29l12.2-4.8L32 12Z\" fill=\"currentColor\"></path></svg>";
+
+const CONTEXTUAL_CITATION_TERMS = /\b(price|pricing|cost|rate|fee|plan|subscription|privacy|data|security|terms|policy|policies|legal|service|services|support|hours|location|address|booking|book|appointment)\b/i;
+
+function shouldShowCitation(message: WidgetMessage, config: WidgetConfig): boolean {
+  if (message.role !== "assistant" || config.showSources === false) return false;
+  const visibility = config.citationVisibility ?? "always";
+  if (visibility === "hidden") return false;
+  return visibility !== "contextual" || CONTEXTUAL_CITATION_TERMS.test(message.content);
+}
 
 const WIDGET_STYLES = `
   :host { all: initial; }
@@ -204,7 +216,7 @@ const WIDGET_STYLES = `
   .fdw-panel.fdw-theme-dark .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
   .fdw-panel.fdw-theme-dark .fdw-composer { background: #182a43; border-color: #2f4768; }
   .fdw-panel.fdw-theme-dark .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
-  .fdw-system-status { display: none; align-items: flex-start; gap: 8px; margin: 10px 15px 0; padding: 10px 11px; border: 1px solid #d7e5f5; border-radius: 10px; color: #36577e; background: #f4f8fe; font-size: 11px; line-height: 1.4; }
+  .fdw-system-status { display: none; align-items: flex-start; gap: 8px; margin: 10px 15px 0; padding: 10px 11px; border: 1px solid #cbdcf1; border-radius: 10px; color: #36577e; background: #f5f9ff; font-size: 11px; line-height: 1.4; }
   .fdw-system-status.fdw-visible { display: flex; }
   .fdw-system-status.fdw-warning { border-color: #f0d6a7; color: #7a5a1d; background: #fff9ed; }
   .fdw-system-status.fdw-error { border-color: #efc7c5; color: #8b403b; background: #fff5f4; }
@@ -245,6 +257,9 @@ const WIDGET_STYLES = `
   .fdw-quick-actions:empty { display: none; }
   .fdw-quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
   .fdw-quick-actions button:hover, .fdw-quick-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
+  .fdw-quick-actions .fdw-retry-cta { min-height: 40px; padding: 9px 14px; border-color: #1f73d8; border-radius: 10px; color: #fff; background: #1f73d8; box-shadow: 0 4px 10px rgba(31,115,216,.18); }
+  .fdw-quick-actions .fdw-retry-cta:hover, .fdw-quick-actions .fdw-retry-cta:focus-visible { border-color: #185fb5; color: #fff; background: #185fb5; outline: 3px solid rgba(31,115,216,.22); outline-offset: 2px; }
+  .fdw-quick-actions .fdw-secondary-cta { border-color: #bfd4ed; color: #20558e; background: #fff; }
   .fdw-quick-actions .fdw-primary-cta { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 9px 13px; border-color: #1f73d8; border-radius: 10px; color: #fff; background: #1f73d8; box-shadow: 0 4px 10px rgba(31,115,216,.18); font-weight: 800; text-decoration: none; transition: transform .16s ease, background-color .16s ease, box-shadow .16s ease; }
   .fdw-quick-actions .fdw-primary-cta:hover { color: #fff; background: #185fb5; box-shadow: 0 6px 14px rgba(31,115,216,.24); transform: translateY(-1px); }
   .fdw-quick-actions .fdw-primary-cta:focus-visible { color: #fff; background: #185fb5; outline: 3px solid rgba(31,115,216,.3); outline-offset: 3px; }
@@ -459,7 +474,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       const item = element<HTMLDivElement>(documentRef, "div", `fdw-message${message.role === "user" ? " fdw-user" : ""}${message.status === "failed" ? " fdw-message-failed" : ""}`);
       if (message.role === "assistant") renderMarkdownInto(documentRef, item, message.content);
       else item.textContent = message.content;
-      if (message.role === "assistant" && config.showSources !== false) {
+      if (shouldShowCitation(message, config)) {
         const citation = message.citations?.find((candidate) => candidate?.url);
         if (citation?.url) {
           const link = element<HTMLAnchorElement>(documentRef, "a");
@@ -468,7 +483,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
             link.href = safeUrl;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
-            link.textContent = "View source ↗";
+            link.textContent = state.healthState === "TEMPORARY_ERROR" && message.citations?.length ? "View source information ↗" : "View source ↗";
             item.appendChild(link);
           }
         }
@@ -494,15 +509,28 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       typing.innerHTML = `<span></span><span></span><span></span>${state.typingMessage ? `<small>${state.typingMessage}</small>` : ""}`;
       messages.appendChild(typing);
     }
-    messages.scrollTop = messages.scrollHeight;
+    const lastMessage = state.messages.at(-1);
+    const lastItem = messages.lastElementChild as HTMLElement | null;
+    const previousItem = messages.children.length > 1 ? messages.children[messages.children.length - 2] as HTMLElement : null;
+    const precedingMessage = state.messages.at(-2);
+    if (lastMessage?.role === "assistant" && precedingMessage?.role === "user" && previousItem) {
+      // Keep the visitor's question and the beginning of the answer together
+      // instead of jumping straight to the bottom of a long response.
+      messages.scrollTop = Math.max(0, previousItem.offsetTop - 12);
+    } else if (lastItem) {
+      messages.scrollTop = messages.scrollHeight;
+    }
   }
 
   function renderQuickActions(): void {
     quickActions.replaceChildren();
     const primaryCta = state.primaryCta;
-    if (primaryCta?.label) {
+    const failureState = state.healthState === "TEMPORARY_ERROR" || state.healthState === "MESSAGE_FAILED";
+    const renderPrimaryCta = (secondary = false): void => {
+      if (!primaryCta?.label) return;
+      const className = secondary ? "fdw-secondary-cta" : "fdw-primary-cta";
       if (primaryCta.url) {
-        const link = element<HTMLAnchorElement>(documentRef, "a", "fdw-primary-cta");
+        const link = element<HTMLAnchorElement>(documentRef, "a", className);
         const safeUrl = safeLinkUrl(primaryCta.url);
         if (safeUrl) {
           link.href = safeUrl;
@@ -514,7 +542,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
           quickActions.appendChild(link);
         }
       } else {
-        const button = element<HTMLButtonElement>(documentRef, "button", "fdw-primary-cta");
+        const button = element<HTMLButtonElement>(documentRef, "button", className);
         button.type = "button";
         button.textContent = primaryCta.label;
         button.addEventListener("click", () => {
@@ -523,21 +551,36 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
         });
         quickActions.appendChild(button);
       }
-    }
+    };
+    if (!failureState) renderPrimaryCta();
     for (const action of state.quickActions.slice(0, 4)) {
       if (!action?.label) continue;
-      const button = element<HTMLButtonElement>(documentRef, "button");
+      const normalizedLabel = action.label.trim().toLowerCase();
+      const actionClass = failureState && normalizedLabel === "try again"
+        ? "fdw-retry-cta"
+        : failureState && normalizedLabel === "contact the team"
+          ? "fdw-secondary-cta"
+          : "";
+      const button = element<HTMLButtonElement>(documentRef, "button", actionClass);
       button.type = "button";
       button.textContent = action.label;
       button.addEventListener("click", () => {
         if (action.question) {
           composerInput.value = "";
+          if (failureState && normalizedLabel === "try again") {
+            const message = [...state.messages].reverse().find((candidate) => candidate.role === "user" && candidate.content === action.question);
+            if (message) {
+              options.onRetryMessage?.(message);
+              return;
+            }
+          }
           options.onAsk?.(action.question);
         }
         else composerInput.focus();
       });
       quickActions.appendChild(button);
     }
+    if (failureState) renderPrimaryCta(true);
   }
 
   function renderActionForm(): void {
@@ -640,7 +683,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     systemStatus.classList.toggle("fdw-error", state.healthState === "CONFIG_ERROR" || state.healthState === "MESSAGE_FAILED" || state.healthState === "ACTION_FAILED" || state.healthState === "TEMPORARY_ERROR");
     systemStatusCopy.textContent = offline ? (state.connectionState === "reconnecting" ? "Connection lost — trying to reconnect…" : "Connection lost — you can keep typing and we’ll retry when you’re back online.") : status;
     systemStatusActions.replaceChildren();
-    if (state.statusMessage && state.healthState !== "OFFLINE") {
+    if (state.statusMessage && state.statusAction && state.healthState !== "OFFLINE") {
       const retry = element<HTMLButtonElement>(documentRef, "button");
       retry.type = "button";
       retry.textContent = state.statusAction === "new_conversation" ? "Start new conversation" : "Try again";
@@ -654,7 +697,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       });
       systemStatusActions.appendChild(retry);
     }
-    const contacts = state.statusContacts || config.fallbackContacts;
+    const contacts = state.statusAction || offline ? state.statusContacts || config.fallbackContacts : undefined;
     const addContact = (label: string, href: string): void => {
       const link = element<HTMLAnchorElement>(documentRef, "a");
       link.href = href;

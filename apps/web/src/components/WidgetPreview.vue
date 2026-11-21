@@ -31,6 +31,7 @@ const props = withDefaults(defineProps<{
   requireLeadConsent?: boolean;
   privacyNoticeUrl?: string;
   showAiDisclosure?: boolean;
+  citationVisibility?: "always" | "contextual" | "hidden";
   tone?: "friendly" | "professional" | "concise" | "custom";
   fallbackBehavior?: "contact_form" | "human" | "unavailable";
   humanHandoffEnabled?: boolean;
@@ -51,6 +52,7 @@ const props = withDefaults(defineProps<{
   requireLeadConsent: false,
   privacyNoticeUrl: "",
   showAiDisclosure: true,
+  citationVisibility: "always",
   tone: "friendly",
   fallbackBehavior: "contact_form",
   humanHandoffEnabled: true,
@@ -172,6 +174,7 @@ const widgetConfig = computed<WidgetConfig>(() => ({
   showAiDisclosure: props.showAiDisclosure,
   showPoweredBy: true,
   showSources: true,
+  citationVisibility: props.citationVisibility,
   showLeadCapture: props.showLeadCapture,
   requireLeadConsent: props.requireLeadConsent,
   privacyNoticeUrl: props.privacyNoticeUrl || null,

@@ -1,6 +1,6 @@
 import { marketingRoutePaths } from "../marketing.js";
 const workspaceViews = new Set([
-    "overview", "support", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
+    "overview", "support", "inbox", "team", "conversations", "leads", "knowledge", "actions", "workflows", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set(["general", "team", "integrations", "verification", "notifications", "billing"]);
 const agentTabs = new Set(["capabilities", "behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);

@@ -104,8 +104,10 @@ type FrontDeskWiseWindow = Window & {
   const HANDOFF_NOTICE_TIMEOUT_MS = 6000;
   const MESSAGE_SOFT_TIMEOUT_MS = 8_000;
   const MESSAGE_TIMEOUT_MS = 15_000;
+  const STATUS_NOTICE_TIMEOUT_MS = 5_000;
   let online = typeof navigator === "undefined" ? true : navigator.onLine !== false;
   let restoredStatusTimer: number | null = null;
+  let statusNoticeTimer: number | null = null;
 
   function accessibleTextColor(hex: string): string {
     const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
@@ -122,6 +124,14 @@ type FrontDeskWiseWindow = Window & {
 
   function setHealth(healthState: WidgetHealthState, statusMessage = "", patch: Partial<WidgetState> = {}): void {
     updateState({ healthState, statusMessage, ...patch });
+  }
+
+  function dismissTransientStatusLater(message: string): void {
+    if (statusNoticeTimer !== null) window.clearTimeout(statusNoticeTimer);
+    statusNoticeTimer = window.setTimeout(() => {
+      statusNoticeTimer = null;
+      if (state.statusMessage === message) updateState({ statusMessage: "", statusAction: undefined });
+    }, STATUS_NOTICE_TIMEOUT_MS);
   }
 
   function getVisitorId(): string {
@@ -307,8 +317,28 @@ type FrontDeskWiseWindow = Window & {
     hideHandoffNotice();
   }
 
-  function addMessage(content: string, role: WidgetMessage["role"], citations: WidgetMessage["citations"] = [], remoteKey?: string, messageOptions: Pick<WidgetMessage, "status" | "retryable" | "clientMessageId"> = {}): string {
-    if (remoteKey && renderedRemoteMessages[remoteKey]) return remoteKey;
+  function addMessage(
+    content: string,
+    role: WidgetMessage["role"],
+    citations: WidgetMessage["citations"] = [],
+    remoteKey?: string,
+    messageOptions: Pick<WidgetMessage, "status" | "retryable" | "clientMessageId" | "inReplyToClientMessageId"> = {},
+  ): string {
+    const existingIndex = remoteKey
+      ? state.messages.findIndex((message) => message.id === remoteKey || message.remoteKey === remoteKey || message.clientMessageId === remoteKey)
+      : -1;
+    if (existingIndex >= 0) {
+      const messages = [...state.messages];
+      messages[existingIndex] = {
+        ...messages[existingIndex],
+        content,
+        citations,
+        remoteKey: remoteKey || messages[existingIndex].remoteKey,
+        ...messageOptions,
+      };
+      updateState({ messages });
+      return messages[existingIndex].id || remoteKey || `${role}-${Date.now()}`;
+    }
     if (remoteKey) renderedRemoteMessages[remoteKey] = true;
     const id = remoteKey || `${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     updateState({ messages: [...state.messages, { id, remoteKey, role, content, citations, ...messageOptions }] });
@@ -321,6 +351,25 @@ type FrontDeskWiseWindow = Window & {
     const messages = [...state.messages];
     messages[index] = { ...messages[index], ...patch };
     updateState({ messages });
+  }
+
+  function addAssistantResponse(
+    content: string,
+    citations: WidgetMessage["citations"],
+    clientMessageId: string,
+    assistantMessageId?: string,
+  ): string {
+    const existing = [...state.messages].reverse().find((message) => message.role === "assistant" && message.inReplyToClientMessageId === clientMessageId);
+    if (existing?.id) {
+      updateMessage(existing.id, {
+        content,
+        citations,
+        remoteKey: assistantMessageId || existing.remoteKey,
+      });
+      if (assistantMessageId) renderedRemoteMessages[assistantMessageId] = true;
+      return existing.id;
+    }
+    return addMessage(content, "assistant", citations, assistantMessageId, { inReplyToClientMessageId: clientMessageId });
   }
 
   function fallbackContacts(): WidgetFallbackContacts {
@@ -350,6 +399,67 @@ type FrontDeskWiseWindow = Window & {
     }
   }
 
+  function mergeRemoteMessages(remoteMessages: NonNullable<ConversationPayload["messages"]>, replaceHistory = false): void {
+    const localMessages = state.messages;
+    const hydratedMessages: WidgetMessage[] = [];
+    const consumedLocalIds = new Set<string>();
+    const seenRemoteIds = new Set<string>();
+
+    remoteMessages.forEach((message, index) => {
+      const id = message.id || `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`;
+      if (seenRemoteIds.has(id)) return;
+      seenRemoteIds.add(id);
+      const role = message.role === "user" ? "user" as const : "assistant" as const;
+      const previousRemoteMessage = remoteMessages[index - 1];
+      const inReplyToClientMessageId = role === "assistant" && previousRemoteMessage?.role === "user"
+        ? previousRemoteMessage.id
+        : undefined;
+      const localIndex = localMessages.findIndex((candidate) => (
+        candidate.id === id
+        || candidate.remoteKey === id
+        || (inReplyToClientMessageId && candidate.inReplyToClientMessageId === inReplyToClientMessageId)
+      ));
+      const localMessage = localIndex >= 0 ? localMessages[localIndex] : undefined;
+      if (localMessage?.id) consumedLocalIds.add(localMessage.id);
+      hydratedMessages.push({
+        ...localMessage,
+        id,
+        remoteKey: id,
+        role,
+        content: `${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`,
+        citations: message.citations || [],
+        ...(inReplyToClientMessageId ? { inReplyToClientMessageId } : {}),
+        ...(role === "user" ? { status: "sent" as const, retryable: false } : { status: undefined, retryable: undefined }),
+      });
+      renderedRemoteMessages[id] = true;
+    });
+
+    if (replaceHistory) {
+      const pendingLocalMessages = state.messages.filter((message) => (
+        (message.status === "sending" || message.status === "failed")
+        && Boolean(message.id)
+        && !consumedLocalIds.has(message.id as string)
+      ));
+      state = { ...state, messages: [...hydratedMessages, ...pendingLocalMessages] };
+      renderer.update({ state });
+      return;
+    }
+
+    const nextMessages = [...localMessages];
+    for (const hydratedMessage of hydratedMessages) {
+      const index = nextMessages.findIndex((candidate) => (
+        candidate.id === hydratedMessage.id
+        || candidate.remoteKey === hydratedMessage.remoteKey
+        || (hydratedMessage.inReplyToClientMessageId && candidate.inReplyToClientMessageId === hydratedMessage.inReplyToClientMessageId)
+      ));
+      if (index >= 0) nextMessages[index] = { ...nextMessages[index], ...hydratedMessage };
+      else nextMessages.push(hydratedMessage);
+    }
+    if (nextMessages.length !== localMessages.length || hydratedMessages.some((message) => localMessages.some((candidate) => candidate.id === message.id))) {
+      updateState({ messages: nextMessages });
+    }
+  }
+
   async function syncConversation(includeHistory = false): Promise<void> {
     if (!conversationId) return;
     try {
@@ -363,25 +473,7 @@ type FrontDeskWiseWindow = Window & {
       if (payload.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       renderConversationStatus(payload.conversation?.status, { returning: includeHistory, notificationStatus: payload.conversation?.handoffNotificationStatus });
       const remoteMessages = payload.messages || [];
-      if (includeHistory && remoteMessages.length) {
-        state = {
-          ...state,
-          messages: remoteMessages.map((message) => ({
-            id: `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`,
-            remoteKey: `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`,
-            role: message.role === "user" ? "user" : "assistant",
-            content: `${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`,
-            citations: message.citations || [],
-          })),
-        };
-        renderer.update({ state });
-      } else {
-        for (const message of remoteMessages) {
-          if (message.role !== "human" && message.role !== "system") continue;
-          const key = `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`;
-          addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, "assistant", [], key);
-        }
-      }
+      if (remoteMessages.length) mergeRemoteMessages(remoteMessages, includeHistory);
       markPerformance("conversation_restored", { requestId: lastRequestId });
       setHealth("READY", "", { statusAction: undefined });
       flushPerformance();
@@ -470,6 +562,7 @@ type FrontDeskWiseWindow = Window & {
       showAiDisclosure: agent.showAiDisclosure !== false,
       showPoweredBy: true,
       showSources: true,
+      citationVisibility: agent.citationVisibility || "always",
       showLeadCapture: agent.collectLeads !== false,
       requireLeadConsent: agent.requireLeadConsent === true,
       privacyNoticeUrl: agent.privacyNoticeUrl || null,
@@ -672,9 +765,13 @@ type FrontDeskWiseWindow = Window & {
 
   async function ask(question: string, retry: { messageId?: string; clientMessageId?: string } = {}): Promise<void> {
     if (!question) return;
+    if (statusNoticeTimer !== null) {
+      window.clearTimeout(statusNoticeTimer);
+      statusNoticeTimer = null;
+    }
     const sendStartedAt = performance.now();
     const clientMessageId = retry.clientMessageId || window.crypto?.randomUUID?.() || `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const messageId = retry.messageId || addMessage(question, "user", [], undefined, { status: "sending", retryable: true, clientMessageId });
+    const messageId = retry.messageId || addMessage(question, "user", [], clientMessageId, { status: "sending", retryable: true, clientMessageId });
     if (retry.messageId) markPerformance("message_retry", { metadata: { retryable: true } });
     if (!online) {
       updateMessage(messageId, { status: "failed", retryable: true });
@@ -701,7 +798,7 @@ type FrontDeskWiseWindow = Window & {
       updateState({ typing: true });
       updateState({ typingMessage: "Assistant is thinking…", healthState: "LOADING" });
       const responseStartedAt = performance.now();
-      const answer = await api<{ conversationId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; primaryCta?: WidgetPrimaryCta | null; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: { status?: string; leadCaptured?: boolean; updatedAt?: string; handoffNotificationStatus?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
+      const answer = await api<{ conversationId?: string; messageId?: string; assistantMessageId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; primaryCta?: WidgetPrimaryCta | null; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: { status?: string; leadCaptured?: boolean; updatedAt?: string; handoffNotificationStatus?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
       const responseCompletedAt = performance.now();
       markPerformance("first_assistant_content_available", {
         durationMs: Math.round(responseCompletedAt - responseStartedAt),
@@ -709,12 +806,16 @@ type FrontDeskWiseWindow = Window & {
         metadata: { network_round_trip_ms: Math.round(responseCompletedAt - responseStartedAt) },
       });
       updateMessage(messageId, { status: "sent", retryable: false });
-      updateState({ typing: false, typingMessage: "", healthState: answer.failure ? "TEMPORARY_ERROR" : "READY", statusMessage: answer.failure ? "I’m having trouble responding right now. Please try again in a moment." : "", statusAction: answer.failure ? "retry" : undefined });
+      updateState({ typing: false, typingMessage: "", healthState: answer.failure ? "TEMPORARY_ERROR" : "READY", statusMessage: "", statusAction: undefined });
       if (answer.conversationId && answer.conversationId !== conversationId) {
+        const pendingMessage = state.messages.find((message) => message.id === messageId);
         conversationId = answer.conversationId;
-        resetConversationUi();
+        // A terminal/expired conversation can rotate to a new id while the
+        // answer request is completing. Keep the visitor's question visible
+        // when resetting the conversation-scoped UI.
+        resetConversationUi(pendingMessage);
       }
-      if (answer.answer?.trim()) addMessage(answer.answer, "assistant", answer.citations || []);
+      if (answer.answer?.trim()) addAssistantResponse(answer.answer, answer.citations || [], clientMessageId, answer.assistantMessageId);
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       renderConversationStatus(answer.conversation?.status, { notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
       if (conversationId && state.isOpen) startPolling();
@@ -751,9 +852,24 @@ type FrontDeskWiseWindow = Window & {
         flushPerformance();
       });
     } catch (error) {
-      updateMessage(messageId, { status: "failed", retryable: true });
+      updateMessage(messageId, { status: undefined, retryable: false });
       const offlineFailure = !navigator.onLine || (error instanceof WidgetRequestError && error.status === 0 && !error.timedOut);
-      updateState({ typing: false, typingMessage: "", healthState: offlineFailure ? "OFFLINE" : "MESSAGE_FAILED", statusMessage: offlineFailure ? "Connection lost — trying to reconnect…" : errorMessage(error, "I’m having trouble responding right now. Please try again in a moment."), statusAction: "retry", statusContacts: fallbackContacts() });
+      addAssistantResponse(
+        "I’m having trouble responding right now.",
+        [],
+        clientMessageId,
+      );
+      updateState({
+        typing: false,
+        typingMessage: "",
+        healthState: offlineFailure ? "OFFLINE" : "MESSAGE_FAILED",
+        quickActions: [{ label: "Try again", question }, { label: "Contact the team", question: "I want to speak to someone about this." }],
+        primaryCta: null,
+        statusMessage: "Temporary issue. You can retry below.",
+        statusAction: undefined,
+        statusContacts: undefined,
+      });
+      dismissTransientStatusLater("Temporary issue. You can retry below.");
       markPerformance("response_error", { requestId: lastRequestId, metadata: { retryable: true, timedOut: error instanceof WidgetRequestError && error.timedOut } });
       flushPerformance();
     } finally {
@@ -867,7 +983,7 @@ type FrontDeskWiseWindow = Window & {
       telemetry(cta.executionMode === "DIRECT_LINK" ? "DEMO_LINK_OPENED" : "CTA_CLICKED", { flowId: cta.actionId, metadata: { source: "primary-conversion", actionId: cta.actionId, actionKey: cta.key, trackingKey: cta.trackingKey, executionMode: cta.executionMode } });
     },
     onRetryConfig: () => { void loadConfig(); },
-    onRetryMessage: (message) => { void ask(message.content, { messageId: message.id, clientMessageId: message.status === "failed" ? message.clientMessageId : undefined }); },
+    onRetryMessage: (message) => { void ask(message.content, { messageId: message.id, clientMessageId: message.clientMessageId || message.id }); },
     onActionSubmit: (values, action) => { void submitAction(values, action); },
     onActionValuesChange: (values, action) => {
       if (state.action?.id !== action.id) return;

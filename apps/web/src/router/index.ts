@@ -9,6 +9,7 @@ export type WorkspaceView =
   | "leads"
   | "knowledge"
   | "actions"
+  | "workflows"
   | "connections"
   | "agent"
   | "analytics"
@@ -39,7 +40,7 @@ export type AppRoute =
   | { kind: "not-found"; path: string };
 
 const workspaceViews = new Set<WorkspaceView>([
-  "overview", "support", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
+  "overview", "support", "inbox", "team", "conversations", "leads", "knowledge", "actions", "workflows", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set<SettingsRouteTab>(["general", "team", "integrations", "verification", "notifications", "billing"]);
 const agentTabs = new Set<AgentRouteTab>(["capabilities", "behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
@@ -149,7 +150,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
   return { kind: "not-found", path };
 }
 
-export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "support" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
+export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "support" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "workflows" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
   if (route.kind === "marketing") return "marketing";
   if (route.kind === "legal") return route.page;
   if (route.kind === "agent-shortcut") return "agent";
