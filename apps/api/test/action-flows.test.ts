@@ -78,3 +78,11 @@ test("capture mode minimizes friction for simple leads and preserves qualificati
   assert.ok(formFields(enrollment, state).some((field) => field.key === "email"));
   assert.ok(formFields(enrollment, state).some((field) => field.key === "location"));
 });
+
+test("action templates expose one canonical versioned field contract", () => {
+  const actions = defaultActionFlows("Example Business", "appointments and enrollment", ids);
+  const booking = actions.find((action) => action.key === "book_appointment")!;
+  assert.equal(booking.version, 1);
+  assert.deepEqual(booking.optionalFields, booking.fields.filter((field) => !field.required).map((field) => field.key));
+  assert.equal(booking.handoffBehavior?.mode, "notify_staff");
+});

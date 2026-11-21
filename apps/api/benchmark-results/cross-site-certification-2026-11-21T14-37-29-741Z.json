@@ -1,0 +1,2031 @@
+{
+  "generatedAt": "2026-11-21T14:37:29.675Z",
+  "isolated": true,
+  "productionDatabaseTouched": false,
+  "embeddingCredentialConfigured": false,
+  "llmCredentialConfigured": false,
+  "sites": [
+    {
+      "id": "british-swim-school-tampa-bay",
+      "url": "https://britishswimschool.com/tampa-bay/",
+      "archetypes": [
+        "local service",
+        "enrollment/program-based",
+        "multi-location"
+      ],
+      "durationMs": 46,
+      "crawl": {
+        "frameworkOrSiteType": "static-or-server-rendered",
+        "robots": null,
+        "sitemap": null,
+        "pagesDiscovered": 0,
+        "internalLinksDiscovered": 0,
+        "pagesIndexed": 0,
+        "renderedFallbackCount": 0,
+        "extractedCharacters": 0,
+        "chunks": 0,
+        "embeddedChunks": 0,
+        "failedOrRejectedPages": 0,
+        "rejectionReasons": {},
+        "renderDiagnostics": [],
+        "crawlModeCounts": {}
+      },
+      "actions": [
+        {
+          "actionType": "contact_team",
+          "name": "Capture a lead",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "enroll",
+          "name": "Register or enroll",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        }
+      ],
+      "questions": [
+        {
+          "question": "What is British Swim School Tampa Bay?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 3.2,
+          "pass": false
+        },
+        {
+          "question": "What swim programs do you offer?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 1.9,
+          "pass": false
+        },
+        {
+          "question": "What swim levels or ages do you support?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "support",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How much do swim lessons cost?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "quote",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "pricing",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What are the class schedules?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "Where are your Tampa Bay locations?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "location",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How can I contact British Swim School Tampa Bay?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "lead",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "contact",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How does enrollment work?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "enrollment",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "getting_started",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Sign my child up.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "enrollment",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": {
+            "actionType": "enroll",
+            "name": "Register or enroll",
+            "destination": null,
+            "confidence": 0.5
+          },
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.2,
+          "pass": false
+        },
+        {
+          "question": "Do you share my personal data?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "privacy",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "What happens if we miss a lesson?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "Can you tell me about private lessons?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "privacy",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        }
+      ],
+      "score": {
+        "passed": 0,
+        "total": 12,
+        "passRate": 0
+      },
+      "error": "The website did not contain readable pages for a demo"
+    },
+    {
+      "id": "daycarespots",
+      "url": "https://www.daycarespots.com/",
+      "archetypes": [
+        "marketplace",
+        "local service",
+        "enrollment/program-based"
+      ],
+      "durationMs": 4,
+      "crawl": {
+        "frameworkOrSiteType": "static-or-server-rendered",
+        "robots": null,
+        "sitemap": null,
+        "pagesDiscovered": 0,
+        "internalLinksDiscovered": 0,
+        "pagesIndexed": 0,
+        "renderedFallbackCount": 0,
+        "extractedCharacters": 0,
+        "chunks": 0,
+        "embeddedChunks": 0,
+        "failedOrRejectedPages": 0,
+        "rejectionReasons": {},
+        "renderDiagnostics": [],
+        "crawlModeCounts": {}
+      },
+      "actions": [
+        {
+          "actionType": "contact_team",
+          "name": "Capture a lead",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "external_booking",
+          "name": "Book a tour",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        }
+      ],
+      "questions": [
+        {
+          "question": "What is DaycareSpots?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "How do I find a daycare with open spots?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you show daycare pricing?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "quote",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "pricing",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What are daycare hours?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Where do you have daycare providers?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "location",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How does requesting a tour work?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "tour",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "getting_started",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Schedule a tour.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "booking",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": {
+            "actionType": "external_booking",
+            "name": "Book a tour",
+            "destination": null,
+            "confidence": 0.5
+          },
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "How do I contact a provider?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "lead",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "contact",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Join the waitlist.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "waitlist",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": false,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you diagnose developmental conditions?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you share parent information?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "What does a provider account do?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        }
+      ],
+      "score": {
+        "passed": 0,
+        "total": 12,
+        "passRate": 0
+      },
+      "error": "The website did not contain readable pages for a demo"
+    },
+    {
+      "id": "munchkin-town-usa",
+      "url": "https://www.munchkintownusa.com/",
+      "archetypes": [
+        "local service",
+        "appointment-based",
+        "transactional"
+      ],
+      "durationMs": 4,
+      "crawl": {
+        "frameworkOrSiteType": "static-or-server-rendered",
+        "robots": null,
+        "sitemap": null,
+        "pagesDiscovered": 0,
+        "internalLinksDiscovered": 0,
+        "pagesIndexed": 0,
+        "renderedFallbackCount": 0,
+        "extractedCharacters": 0,
+        "chunks": 0,
+        "embeddedChunks": 0,
+        "failedOrRejectedPages": 0,
+        "rejectionReasons": {},
+        "renderDiagnostics": [],
+        "crawlModeCounts": {}
+      },
+      "actions": [
+        {
+          "actionType": "contact_team",
+          "name": "Capture a lead",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "book_appointment",
+          "name": "Book an appointment",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "request_quote",
+          "name": "Request a quote",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        }
+      ],
+      "questions": [
+        {
+          "question": "What is Munchkin Town?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What is included in open play?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How do birthday parties work?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you offer memberships?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What are your hours?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Where are you located?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "location",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How much does open play cost?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "pricing",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do I need a waiver?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Book a birthday party.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "booking",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "booking",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": {
+            "actionType": "book_appointment",
+            "name": "Book an appointment",
+            "destination": null,
+            "confidence": 0.5
+          },
+          "actionCorrect": false,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Can I book open play?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you provide medical treatment for children?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How can I contact Munchkin Town?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "lead",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "contact",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        }
+      ],
+      "score": {
+        "passed": 0,
+        "total": 12,
+        "passRate": 0
+      },
+      "error": "The website did not contain readable pages for a demo"
+    },
+    {
+      "id": "bay-breeze-air",
+      "url": "https://www.baybreezeair.com/",
+      "archetypes": [
+        "local service",
+        "emergency/high-intent",
+        "appointment-based"
+      ],
+      "durationMs": 4,
+      "crawl": {
+        "frameworkOrSiteType": "static-or-server-rendered",
+        "robots": null,
+        "sitemap": null,
+        "pagesDiscovered": 0,
+        "internalLinksDiscovered": 0,
+        "pagesIndexed": 0,
+        "renderedFallbackCount": 0,
+        "extractedCharacters": 0,
+        "chunks": 0,
+        "embeddedChunks": 0,
+        "failedOrRejectedPages": 0,
+        "rejectionReasons": {},
+        "renderDiagnostics": [],
+        "crawlModeCounts": {}
+      },
+      "actions": [
+        {
+          "actionType": "contact_team",
+          "name": "Capture a lead",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "book_appointment",
+          "name": "Book an appointment",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "request_quote",
+          "name": "Request a quote",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        }
+      ],
+      "questions": [
+        {
+          "question": "What services does Bay Breeze Air provide?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.1,
+          "pass": false
+        },
+        {
+          "question": "Do you repair air conditioners?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you replace AC systems?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you offer maintenance?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What areas do you serve?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "location",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you offer emergency HVAC service?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "emergency",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What are your business hours?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How can I contact Bay Breeze Air?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "lead",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "contact",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Schedule service.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "booking",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": {
+            "actionType": "book_appointment",
+            "name": "Book an appointment",
+            "destination": null,
+            "confidence": 0.5
+          },
+          "actionCorrect": false,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "I need emergency AC repair now.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "emergency",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": false,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How much will my repair cost?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "quote",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "pricing",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you process credit cards?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0.3,
+          "pass": false
+        }
+      ],
+      "score": {
+        "passed": 0,
+        "total": 12,
+        "passRate": 0
+      },
+      "error": "The website did not contain readable pages for a demo"
+    },
+    {
+      "id": "mtv-nails-salonflow",
+      "url": "https://mtvnails.salonflow.studio/",
+      "archetypes": [
+        "SaaS/product",
+        "appointment-based",
+        "local service"
+      ],
+      "durationMs": 4,
+      "crawl": {
+        "frameworkOrSiteType": "static-or-server-rendered",
+        "robots": null,
+        "sitemap": null,
+        "pagesDiscovered": 0,
+        "internalLinksDiscovered": 0,
+        "pagesIndexed": 0,
+        "renderedFallbackCount": 0,
+        "extractedCharacters": 0,
+        "chunks": 0,
+        "embeddedChunks": 0,
+        "failedOrRejectedPages": 0,
+        "rejectionReasons": {},
+        "renderDiagnostics": [],
+        "crawlModeCounts": {}
+      },
+      "actions": [
+        {
+          "actionType": "contact_team",
+          "name": "Capture a lead",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "book_appointment",
+          "name": "Book an appointment",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        }
+      ],
+      "questions": [
+        {
+          "question": "What is SalonFlow?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What features does SalonFlow offer?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How can SalonFlow help my salon?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "support",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Does SalonFlow support appointments?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "support",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How does booking work?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "getting_started",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Does it manage customers?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Does it support QR check-in?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "support",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Does it have reminders?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "reminders",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Does it support reviews or loyalty?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "support",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What does SalonFlow cost?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "quote",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "pricing",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "I want a demo.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "demo",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": false,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How can I contact SalonFlow?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "lead",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "contact",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        }
+      ],
+      "score": {
+        "passed": 0,
+        "total": 12,
+        "passRate": 0
+      },
+      "error": "The website did not contain readable pages for a demo"
+    },
+    {
+      "id": "dental-walk-in",
+      "url": "https://dentalwalkin.com/",
+      "archetypes": [
+        "healthcare",
+        "emergency/high-intent",
+        "appointment-based",
+        "local service"
+      ],
+      "durationMs": 3,
+      "crawl": {
+        "frameworkOrSiteType": "static-or-server-rendered",
+        "robots": null,
+        "sitemap": null,
+        "pagesDiscovered": 0,
+        "internalLinksDiscovered": 0,
+        "pagesIndexed": 0,
+        "renderedFallbackCount": 0,
+        "extractedCharacters": 0,
+        "chunks": 0,
+        "embeddedChunks": 0,
+        "failedOrRejectedPages": 0,
+        "rejectionReasons": {},
+        "renderDiagnostics": [],
+        "crawlModeCounts": {}
+      },
+      "actions": [
+        {
+          "actionType": "contact_team",
+          "name": "Capture a lead",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        },
+        {
+          "actionType": "book_appointment",
+          "name": "Schedule a consultation",
+          "destination": null,
+          "provider": null,
+          "confidence": 0.5,
+          "sourceUrl": null
+        }
+      ],
+      "questions": [
+        {
+          "question": "What services does Dental Walk-In provide?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you provide emergency dental care?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "emergency",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How do appointments work?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "booking",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What are your office hours?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "hours",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Where is Dental Walk-In located?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "location",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What dental procedures do you offer?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "services",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How much does a visit cost?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "quote",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "pricing",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "How can I contact Dental Walk-In?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "lead",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "contact",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Schedule an appointment.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "booking",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "booking",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": {
+            "actionType": "book_appointment",
+            "name": "Schedule a consultation",
+            "destination": null,
+            "confidence": 0.5
+          },
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "I need an emergency dentist now.",
+          "expectedMode": "transactional",
+          "classification": {
+            "mode": "transactional",
+            "actionIntent": "emergency",
+            "confidence": 0.94,
+            "reason": "explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": false,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "What treatment do I need for my tooth pain?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.93,
+            "reason": "explanatory_question"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        },
+        {
+          "question": "Do you share patient information?",
+          "expectedMode": "informational",
+          "classification": {
+            "mode": "informational",
+            "actionIntent": "general",
+            "confidence": 0.72,
+            "reason": "no_explicit_action_request"
+          },
+          "intent": "general",
+          "topEvidence": [],
+          "grounding": false,
+          "retrievalRelevant": false,
+          "citationCorrect": false,
+          "citations": [],
+          "selectedAction": null,
+          "actionCorrect": true,
+          "fallbackCorrect": true,
+          "answer": "I couldn't verify that from the website knowledge available.",
+          "fallbackReason": "no_candidates",
+          "latencyMs": 0,
+          "pass": false
+        }
+      ],
+      "score": {
+        "passed": 0,
+        "total": 12,
+        "passRate": 0
+      },
+      "error": "The website did not contain readable pages for a demo"
+    }
+  ],
+  "summary": {
+    "totalQuestions": 72,
+    "expectedQuestions": 72,
+    "crawlDurationMs": 65,
+    "crawlerHighValuePageCoverage": null,
+    "top3RetrievalRelevance": 0,
+    "groundedCorrectness": 0,
+    "citationCorrectness": 0,
+    "fallbackCorrectness": 1,
+    "actionRoutingCorrectness": 0.9167,
+    "criticalHallucinations": 0
+  }
+}

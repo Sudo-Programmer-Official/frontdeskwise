@@ -4,13 +4,14 @@ This document describes the architecture implemented in the current FrontDeskWis
 
 ## Architecture status
 
-The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, lead capture, knowledge-gap approval, configurable action flows, versioned workflow steps, business-scoped team access, durable human handoff, staff notifications, assignments, internal notes, demo billing state, widget installation, and durable CRM lead delivery.
+The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvector, with a Vue owner dashboard and a standalone public widget. It supports URL-to-demo onboarding, bounded crawling, full-text retrieval, optional vector retrieval, confidence-aware answers, structured business facts with provenance and freshness, lead capture, knowledge-gap approval, configurable action flows, versioned workflow steps, business-scoped team access, durable human handoff, staff notifications, assignments, internal notes, demo billing state, widget installation, and durable CRM lead delivery.
 
 The remaining intentionally limited areas are:
 
 - Additional CRM OAuth adapters and provider-specific field mapping beyond the current HubSpot and signed-webhook adapters.
 - Scheduled recrawls, change detection, and production CDN verification.
 - SMS/Slack notification channels and multi-channel realtime transport; the current handoff path uses in-app notifications, optional SES email, and visitor polling.
+- Provider-specific fact sync jobs and inbound webhooks beyond the current action/provider seams; those should write normalized facts only after the provider confirms the result.
 
 Firebase authentication, Stripe checkout/webhooks/customer portal, S3 private document storage with PDF/DOCX/spreadsheet extraction, SES transactional mail, website ownership verification, and the super-admin demo operations are implemented behind their required environment configuration.
 
@@ -55,7 +56,28 @@ flowchart LR
 | Embedding client | `apps/api/src/embeddings.ts` | Optional provider calls and vector formatting |
 | Database adapter | `apps/api/src/database.ts` | Database-name guard, SSL normalization, PostgreSQL pool creation |
 | Migration runner | `apps/api/src/migrate.ts` | Ordered, checksum-verified, advisory-locked migrations |
-| Database schema | `infra/db/001_initial.sql` through `020_human_handoff_inbox.sql` | Tenant data, knowledge, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, private document processing, model usage diagnostics, team access, handoff state, notifications, assignments, and internal notes |
+| Database schema | `infra/db/001_initial.sql` through the latest numbered migration | Tenant data, knowledge, structured business facts, billing, access sessions, retrieval, widget, lead events, CRM job state, organization billing, audited demo operations, ownership verification, private document processing, model usage diagnostics, team access, handoff state, notifications, assignments, and internal notes |
+
+## Normalized business model and write boundary
+
+FrontDeskWise treats website pages, documents, owner-entered details, and connected providers as inputs to one tenant-scoped business model. They do not compete as undifferentiated chunks:
+
+```text
+Sources              → normalized entities/facts → resolver → AI front desk
+Website / documents  → semantic chunks           ↗
+Owner details        → business_facts            ↗
+Live providers       → business_facts/actions    ↗
+```
+
+`business_facts` stores the canonical structured read model for hours, pricing, locations, contacts, services, policies, schedules, and availability. Each fact carries `source_type`, `source_id`, explicit `authority`, `observed_at`, `freshness_policy`, `confidence`, and an optional expiry. Resolution ranks fresh system-of-record data above owner-verified structured data, documents, website evidence, and inferred information, and records conflicts instead of choosing by vector similarity. The deterministic resolver currently handles structured answers for hours, pricing, locations, contacts, policies, and services before semantic retrieval runs.
+
+The write path remains explicit. External systems are not mutated by retrieval or by free-form model output. A provider command must pass through an allowlisted action connector/outbox with idempotency and retry state; only a successful provider response should update the local normalized model. FrontDeskWise-owned facts use the business-facts CRUD boundary directly. This keeps the model bi-directional without giving the assistant arbitrary write access.
+
+### Action registry review boundary
+
+`business_actions` distinguishes owner intent (`origin = configured`) from website discoveries (`origin = discovered`). Discovered actions carry their source URL/type, extracted label, discovery timestamp, evidence, confidence, and classification reason, and enter `needs_review` disabled. The Super Admin registry can move them through `approved` and `active`; only approved/active enabled actions reach visitor action detection. Recrawls update discovered provenance, preserve configured actions, and disable removed discoveries with `source_removed` rather than deleting history.
+
+Primary-action selection is explicit and stored on `businesses.primary_action_id`. A recrawl never replaces it. Enable/disable and primary changes invalidate the in-process tenant cache and write before/after values to `action_registry_audit`. Emergency actions additionally require verified business ownership, a website source with evidence, an explicit `call_emergency` type, and a telephone destination.
 
 ## Primary flow: URL to demo
 

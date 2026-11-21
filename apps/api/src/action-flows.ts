@@ -1,4 +1,36 @@
 import type { ActionConnectorSettings } from "./action-connectors.js";
+import type { WebsiteActionCandidate, WebsiteActionType } from "./website-actions.js";
+
+export const BUSINESS_ACTION_TYPES = [
+  "request_demo",
+  "book_appointment",
+  "enroll",
+  "schedule_service",
+  "request_quote",
+  "call_business",
+  "call_emergency",
+  "external_booking",
+  "join_waitlist",
+  "contact_team",
+] as const;
+
+export type BusinessActionType = typeof BUSINESS_ACTION_TYPES[number];
+export type ActionMode = "transactional";
+export type ActionSafetyPolicy = "standard" | "verified_contact" | "healthcare_emergency" | "manual_review";
+export type ActionOrigin = "discovered" | "configured";
+export type ActionLifecycleStatus = "discovered" | "needs_review" | "approved" | "active" | "disabled";
+export type ActionHandoffBehavior = {
+  mode: "none" | "notify_staff" | "require_staff";
+  reason?: string;
+};
+export type ActionReviewReason = "low_confidence" | "unsafe_destination" | "duplicate_action" | "owner_override" | "source_removed" | null;
+export type ActionSourceType = "website" | "manual" | "document" | "integration" | "system";
+
+export type ActionEvidence = {
+  sourceUrl: string;
+  quote: string;
+  confidence: number;
+};
 
 export type ActionFieldType = "text" | "email" | "phone" | "select" | "date" | "number";
 export type ActionCaptureMode = "auto" | "conversational" | "form" | "hybrid";
@@ -100,6 +132,8 @@ export type ActionCompletion = {
 export type ActionFlow = {
   id: string;
   key: string;
+  actionType: BusinessActionType;
+  businessId?: string;
   name: string;
   description: string;
   triggerPhrases: string[];
@@ -109,7 +143,27 @@ export type ActionFlow = {
   /** Present for versioned workflow actions; absent means legacy field flow. */
   steps?: ActionStep[];
   completion: ActionCompletion;
+  mode: ActionMode;
+  destination: { url: string; label?: string } | null;
+  provider: string | null;
+  priority: number;
+  requiredFields: string[];
+  conditions: Array<{ field: string; contains?: string; equals?: string }>;
+  safetyPolicy: ActionSafetyPolicy;
+  sourceUrl: string | null;
+  sourceType?: ActionSourceType | null;
+  sourceLabel?: string | null;
+  classificationReason?: string | null;
+  discoveredAt?: string | null;
+  origin?: ActionOrigin;
+  lifecycleStatus?: ActionLifecycleStatus;
+  reviewReason?: ActionReviewReason;
+  evidence: ActionEvidence[];
+  confidence: number;
   enabled: boolean;
+  optionalFields?: string[];
+  handoffBehavior?: ActionHandoffBehavior;
+  version?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -127,6 +181,7 @@ export type ConversationActionState = {
   activeParticipantId?: string;
   interruptionStack?: ActionInterruption[];
   skipped?: string[];
+  sourcePage?: string | null;
   captureMode: ResolvedActionCaptureMode;
   conversationalKeys: string[];
   formShown?: boolean;
@@ -151,7 +206,24 @@ export type ActionInterruption = {
   startedAt: string;
 };
 
-type ActionTemplate = Omit<ActionFlow, "id" | "createdAt" | "updatedAt">;
+type ActionMetadata = Pick<ActionFlow, "actionType" | "businessId" | "mode" | "destination" | "provider" | "priority" | "requiredFields" | "conditions" | "safetyPolicy" | "sourceUrl" | "sourceType" | "sourceLabel" | "classificationReason" | "discoveredAt" | "origin" | "lifecycleStatus" | "reviewReason" | "evidence" | "confidence">;
+type ActionTemplate = Omit<ActionFlow, "id" | "createdAt" | "updatedAt" | keyof ActionMetadata> & Partial<ActionMetadata>;
+
+const actionTypeForKey: Record<string, BusinessActionType> = {
+  capture_lead: "contact_team",
+  book_appointment: "book_appointment",
+  request_demo: "request_demo",
+  request_quote: "request_quote",
+  enroll_child: "enroll",
+  schedule_consultation: "book_appointment",
+  book_tour: "external_booking",
+  schedule_service: "schedule_service",
+  call_business: "call_business",
+  call_emergency: "call_emergency",
+  external_booking: "external_booking",
+  join_waitlist: "join_waitlist",
+  contact_team: "contact_team",
+};
 
 const field = (
   key: string,
@@ -292,20 +364,161 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
     completion: completion("Thanks — your tour request is ready for the team.", "qualified"),
     enabled: true,
   },
+  {
+    key: "request_demo",
+    name: "Request a demo",
+    description: "Collect business context and contact details before sending the visitor to the demo request flow.",
+    triggerPhrases: ["request a demo", "book a demo", "I want a demo", "show me a demo"],
+    triggerIntents: ["demo", "lead"],
+    captureMode: "hybrid",
+    fields: [
+      field("business_name", "Business name", "text", "What is your business name?"),
+      field("name", "Name", "text", "What’s your name?"),
+      field("email", "Email", "email", "What email address should we use?"),
+      field("phone", "Phone", "phone", "What’s the best phone number?", false),
+    ],
+    completion: completion("Thanks — your demo request is ready to send to the team.", "qualified", "Continue to demo"),
+    enabled: true,
+  },
+  {
+    key: "schedule_service",
+    name: "Schedule service",
+    description: "Collect the issue and contact details needed to schedule a service visit.",
+    triggerPhrases: ["schedule service", "schedule repair", "book service", "schedule maintenance"],
+    triggerIntents: ["service", "booking", "lead"],
+    captureMode: "hybrid",
+    fields: [field("service", "Service", "text", "What service do you need?"), field("name", "Name", "text", "What’s your name?"), field("email", "Email", "email", "What email address should we use?"), field("phone", "Phone", "phone", "What’s the best phone number?", false)],
+    completion: completion("Thanks — your service request is ready for the team.", "qualified"),
+    enabled: true,
+  },
+  {
+    key: "call_business",
+    name: "Call the business",
+    description: "Offer a verified business phone destination.",
+    triggerPhrases: ["call the business", "call now", "call someone", "phone number"],
+    triggerIntents: ["call", "contact"],
+    captureMode: "form",
+    fields: [],
+    completion: completion("Here is the verified phone number for the business."),
+    enabled: true,
+  },
+  {
+    key: "call_emergency",
+    name: "Call emergency support",
+    description: "Route an explicit emergency request only to a verified emergency contact.",
+    triggerPhrases: ["call emergency support", "call for emergency service", "emergency phone number"],
+    triggerIntents: ["emergency", "call"],
+    captureMode: "form",
+    fields: [],
+    completion: completion("For an emergency, use the verified emergency contact below."),
+    enabled: true,
+  },
+  {
+    key: "external_booking",
+    name: "Continue to booking",
+    description: "Send the visitor to the business's verified external booking provider.",
+    triggerPhrases: ["book online", "continue to booking", "book a birthday", "book open play"],
+    triggerIntents: ["booking", "reservation"],
+    captureMode: "form",
+    fields: [],
+    completion: completion("The verified booking link is ready.", "booked", "Continue to booking"),
+    enabled: true,
+  },
+  {
+    key: "join_waitlist",
+    name: "Join the waitlist",
+    description: "Collect contact details for a verified waitlist request.",
+    triggerPhrases: ["join the waitlist", "join a waiting list", "add me to the waitlist"],
+    triggerIntents: ["waitlist", "lead"],
+    captureMode: "hybrid",
+    fields: [field("name", "Name", "text", "What’s your name?"), field("email", "Email", "email", "What email address should we use?")],
+    completion: completion("Thanks — your waitlist request is ready for the team.", "qualified"),
+    enabled: true,
+  },
+  {
+    key: "contact_team",
+    name: "Contact the team",
+    description: "Collect a message and contact details for the business team.",
+    triggerPhrases: ["contact the team", "send a message", "talk to someone", "have someone reach out"],
+    triggerIntents: ["contact", "lead"],
+    captureMode: "hybrid",
+    fields: [field("message", "Message", "text", "What would you like the team to know?"), field("name", "Name", "text", "What’s your name?"), field("email", "Email", "email", "What email address should we use?")],
+    completion: completion("Thanks — your message is ready for the team."),
+    enabled: true,
+  },
 ];
 
 function cloneTemplate(template: ActionTemplate, id: string, now: string): ActionFlow {
-  return JSON.parse(JSON.stringify({ ...template, id, createdAt: now, updatedAt: now })) as ActionFlow;
+  return JSON.parse(JSON.stringify({
+    ...template,
+    actionType: template.actionType ?? actionTypeForKey[template.key] ?? "contact_team",
+    mode: template.mode ?? "transactional",
+    destination: template.destination ?? null,
+    provider: template.provider ?? null,
+    priority: template.priority ?? 500,
+    requiredFields: template.requiredFields ?? template.fields.map((item) => item.key),
+    optionalFields: template.fields.filter((item) => !item.required).map((item) => item.key),
+    conditions: template.conditions ?? [],
+    safetyPolicy: template.safetyPolicy ?? "standard",
+    sourceUrl: template.sourceUrl ?? null,
+    sourceType: template.sourceType ?? "manual",
+    sourceLabel: template.sourceLabel ?? template.name,
+    classificationReason: template.classificationReason ?? null,
+    discoveredAt: template.discoveredAt ?? null,
+    origin: template.origin ?? "configured",
+    lifecycleStatus: template.lifecycleStatus ?? (template.enabled === false ? "disabled" : "active"),
+    reviewReason: template.reviewReason ?? null,
+    evidence: template.evidence ?? [],
+    confidence: template.confidence ?? 0.5,
+    handoffBehavior: template.completion.requiresStaff
+      ? { mode: "require_staff", reason: "Configured action requires staff" }
+      : template.completion.notifyStaff
+        ? { mode: "notify_staff" }
+        : { mode: "none" },
+    version: 1,
+    id,
+    createdAt: now,
+    updatedAt: now,
+  })) as ActionFlow;
 }
 
 export function actionTemplate(key: string): ActionTemplate | null {
   return ACTION_TEMPLATES.find((template) => template.key === key) ?? null;
 }
 
-export function defaultActionFlows(name: string, websiteContent: string, idFactory: (key: string) => string): ActionFlow[] {
+function templateKeyForActionType(type: WebsiteActionType | BusinessActionType): string | null {
+  const keys: Record<string, string> = {
+    request_demo: "request_demo",
+    book_appointment: "book_appointment",
+    enroll: "enroll_child",
+    schedule_service: "schedule_service",
+    request_quote: "request_quote",
+    call_business: "call_business",
+    call_emergency: "call_emergency",
+    external_booking: "external_booking",
+    join_waitlist: "join_waitlist",
+    contact_team: "contact_team",
+  };
+  return keys[type] ?? null;
+}
+
+export function defaultActionFlows(
+  name: string,
+  websiteContent: string,
+  idFactory: (key: string) => string,
+  candidates: WebsiteActionCandidate[] = [],
+): ActionFlow[] {
   const value = (name + " " + websiteContent).toLowerCase();
   const keys = new Set<string>(["capture_lead"]);
-  if (/daycare|childcare|preschool|nursery|tour/.test(value)) keys.add("book_tour");
+  const bestCandidateByType = new Map<string, WebsiteActionCandidate>();
+  for (const candidate of candidates.sort((left, right) => right.priority - left.priority || right.confidence - left.confidence)) {
+    if (!bestCandidateByType.has(candidate.actionType)) bestCandidateByType.set(candidate.actionType, candidate);
+  }
+  for (const candidate of bestCandidateByType.values()) {
+    const key = templateKeyForActionType(candidate.actionType);
+    if (key) keys.add(key);
+  }
+  if (keys.size === 1 && /daycare|childcare|preschool|nursery|tour/.test(value)) keys.add("book_tour");
   else if (/swim|lesson|student|school|class/.test(value)) keys.add("enroll_child");
   else if (/salon|stylist|barber|spa|appointment/.test(value)) keys.add("book_appointment");
   else if (/hvac|air condition|heating|cooling|plumb|roof|repair/.test(value)) keys.add("request_quote");
@@ -315,9 +528,42 @@ export function defaultActionFlows(name: string, websiteContent: string, idFacto
     keys.add("request_quote");
   }
   const now = new Date().toISOString();
+  const candidateByKey = new Map([...bestCandidateByType.values()].map((candidate) => [templateKeyForActionType(candidate.actionType), candidate]));
   return [...keys].map((key) => {
     const template = actionTemplate(key);
-    return template ? cloneTemplate(template, idFactory(key), now) : null;
+    if (!template) return null;
+    const action = cloneTemplate(template, idFactory(key), now);
+    const candidate = candidateByKey.get(key);
+    if (!candidate) return action;
+    return {
+      ...action,
+      actionType: candidate.actionType,
+      name: candidate.label || action.name,
+      description: candidate.description || action.description,
+      destination: candidate.destination,
+      provider: candidate.provider,
+      priority: candidate.priority,
+      requiredFields: candidate.requiredFields,
+      conditions: candidate.conditions,
+      safetyPolicy: candidate.safetyPolicy,
+      sourceUrl: candidate.sourceUrl,
+      sourceType: candidate.sourceType,
+      sourceLabel: candidate.sourceLabel,
+      classificationReason: candidate.classificationReason,
+      discoveredAt: candidate.discoveredAt,
+      origin: "discovered",
+      lifecycleStatus: "needs_review",
+      reviewReason: candidate.reviewReason,
+      evidence: [{ sourceUrl: candidate.sourceUrl, quote: candidate.evidence[0] ?? candidate.label, confidence: candidate.confidence }],
+      confidence: candidate.confidence,
+      // Website-derived actions must be reviewed by Super Admin before they
+      // can affect a visitor conversation.
+      enabled: false,
+      completion: {
+        ...action.completion,
+        ...(candidate.destination?.url ? { linkUrl: candidate.destination.url, linkLabel: candidate.destination.label ?? candidate.label, completionMode: "external_provider" as const } : {}),
+      },
+    };
   }).filter((item): item is ActionFlow => Boolean(item));
 }
 
@@ -325,29 +571,57 @@ function normalize(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-export function inferActionIntent(question: string): string {
+export type VisitorRequestMode = "informational" | "transactional";
+
+export type VisitorRequestClassification = {
+  mode: VisitorRequestMode;
+  actionIntent: string;
+  confidence: number;
+  reason: string;
+};
+
+export function classifyVisitorRequest(question: string): VisitorRequestClassification {
   const value = normalize(question);
-  if (/sign me up|enroll|register|registration|new student|current student/.test(value)) return "enrollment";
-  if (/book|appointment|schedule|reserve/.test(value)) return "booking";
-  if (/quote|estimate|how much|cost|pricing/.test(value)) return "quote";
-  if (/consult|specialist/.test(value)) return "consultation";
-  if (/tour|visit the (daycare|school)/.test(value)) return "tour";
-  if (/contact|reach|talk to someone|call me/.test(value)) return "lead";
-  return "general";
+  const informational = /^(how|what|when|where|why|does|is|are|can i|could i|tell me|explain)\b/.test(value)
+    || /\bhow does\b|\bwhat happens\b|\bwhat is the process\b/.test(value);
+  const explicitRequest = /^(i want|i d like|id like|i need|please|help me|sign|enroll|register|book|schedule|request|get|call|connect me|send me|take me|let s|lets|join)\b/.test(value)
+    || /\b(sign my child up|sign me up|book an appointment|schedule service|request a demo|book a demo|join the waitlist|call now|call emergency)\b/.test(value);
+  const pricingKnowledge = /\b(pricing|price|prices|cost|costs|how much)\b/.test(value)
+    && !/\b(request|requesting|get|getting|quote|estimate|book|schedule|appointment)\b/.test(value);
+  let actionIntent = "general";
+  if (/demo/.test(value)) actionIntent = "demo";
+  else if (/sign my child up|sign me up|enroll|register|registration|new student|current student/.test(value)) actionIntent = "enrollment";
+  else if (/book|appointment|schedule|reserve|birthday|open play/.test(value)) actionIntent = "booking";
+  else if (/quote|estimate|how much|cost|pricing/.test(value)) actionIntent = "quote";
+  else if (/consult|specialist/.test(value)) actionIntent = "consultation";
+  else if (/tour|visit the (daycare|school)/.test(value)) actionIntent = "tour";
+  else if (/waitlist|waiting list/.test(value)) actionIntent = "waitlist";
+  else if (/emergency|urgent/.test(value)) actionIntent = "emergency";
+  else if (/contact|reach|talk to someone|call me|call now/.test(value)) actionIntent = "lead";
+  if (pricingKnowledge) return { mode: "informational", actionIntent, confidence: 0.93, reason: "pricing_information_request" };
+  if (explicitRequest && !informational) return { mode: "transactional", actionIntent, confidence: 0.94, reason: "explicit_action_request" };
+  return { mode: "informational", actionIntent, confidence: informational ? 0.93 : 0.72, reason: informational ? "explanatory_question" : "no_explicit_action_request" };
 }
 
-export function detectAction(actions: ActionFlow[], question: string): ActionFlow | null {
+export function inferActionIntent(question: string): string {
+  return classifyVisitorRequest(question).actionIntent;
+}
+
+export function detectAction(actions: ActionFlow[], question: string, primaryActionId?: string | null): ActionFlow | null {
+  const request = classifyVisitorRequest(question);
+  if (request.mode !== "transactional") return null;
   const value = normalize(question);
-  const intent = inferActionIntent(question);
+  const intent = request.actionIntent;
   return actions
-    .filter((action) => action.enabled)
+    .filter((action) => action.enabled && (!action.lifecycleStatus || action.lifecycleStatus === "active" || action.lifecycleStatus === "approved"))
     .map((action) => ({
       action,
       phraseScore: action.triggerPhrases.reduce((score, phrase) => value.includes(normalize(phrase)) ? score + normalize(phrase).length + 10 : score, 0),
       intentScore: action.triggerIntents.some((item) => normalize(item) === intent) ? 4 : 0,
+      primaryScore: primaryActionId && action.id === primaryActionId ? 100_000 : 0,
     }))
     .filter((item) => item.phraseScore > 0 || item.intentScore > 0)
-    .sort((left, right) => right.phraseScore + right.intentScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
+    .sort((left, right) => right.primaryScore + right.phraseScore + right.intentScore - left.primaryScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
 }
 
 export function isContactField(field: ActionField): boolean {

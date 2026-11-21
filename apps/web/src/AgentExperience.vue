@@ -16,7 +16,7 @@ import WidgetPreview from "./components/WidgetPreview.vue";
 import { getAccessibleTextColor, isHexColor } from "./utils/color";
 import type { WidgetAction, WidgetState } from "./widget-ui/renderer";
 
-type AgentTab = "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
+type AgentTab = "capabilities" | "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
 type Tone = "friendly" | "professional" | "concise" | "custom";
 type FallbackBehavior = "contact_form" | "human" | "unavailable";
 type WidgetTheme = "light" | "dark" | "auto";
@@ -28,6 +28,7 @@ type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 type InstallPlatform = "wordpress" | "wix" | "shopify" | "squarespace" | "custom" | "not_sure";
 type SupportContactMethod = "email" | "phone";
 type AgentPublishStatus = "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+type CapabilityAction = "integrations" | "actions" | "knowledge" | "agent" | "test" | "overview";
 
 interface AgentPublishing {
   status: Exclude<AgentPublishStatus, "PUBLISHING">;
@@ -77,6 +78,9 @@ interface AgentModel {
   requireLeadConsent: boolean;
   privacyNoticeUrl: string;
   retentionDays: number;
+  fallbackPhone?: string;
+  fallbackEmail?: string;
+  fallbackContactUrl?: string;
 }
 
 interface TestActionField {
@@ -142,6 +146,15 @@ interface KnowledgeModel {
   sources?: Array<{ lastCrawledAt: string }>;
 }
 
+interface AgentCapability {
+  id: string;
+  title: string;
+  description: string;
+  ready: boolean;
+  target: CapabilityAction;
+  actionLabel: string;
+}
+
 const props = defineProps<{
   tab: AgentTab;
   businessKey: string;
@@ -176,6 +189,7 @@ const props = defineProps<{
   installationSupportError: string;
   openSupportRequest: number;
   test: TestModel;
+  capabilities: AgentCapability[];
 }>();
 
 const emit = defineEmits<{
@@ -196,14 +210,15 @@ const emit = defineEmits<{
   (event: "view-leads"): void;
   (event: "request-install-help", payload: InstallationSupportPayload): void;
   (event: "clear-install-help-message"): void;
+  (event: "open-capability-action", target: CapabilityAction): void;
 }>();
 
 function cloneModel(model: AgentModel): AgentModel {
   return { ...model, widgetQuickActions: model.widgetQuickActions.map((action) => ({ ...action })) };
 }
 
-const draft = reactive<AgentModel>(cloneModel(props.model));
-const agentDraft = computed(() => draft);
+const draft = ref<AgentModel>(cloneModel(props.model));
+const agentDraft = computed(() => draft.value);
 const previewMode = ref<"desktop" | "mobile">("desktop");
 const quickActionEditorOpen = ref(false);
 const editingActionIndex = ref<number | null>(null);
@@ -258,7 +273,7 @@ const installInstructions = computed(() => ({
   custom: "Paste this snippet before </body> on your website.",
   not_sure: "We can identify the right place to add this snippet with you.",
 }[installPlatform.value]));
-const safeWidgetColor = computed(() => isHexColor(draft.widgetColor) ? draft.widgetColor : "#2563EB");
+const safeWidgetColor = computed(() => isHexColor(draft.value.widgetColor) ? draft.value.widgetColor : "#2563EB");
 const accessibleWidgetText = computed(() => getAccessibleTextColor(safeWidgetColor.value));
 const publishStatus = computed<AgentPublishStatus>(() => props.publishingLoading ? "PUBLISHING" : props.publishing.status);
 const isLive = computed(() => publishStatus.value === "LIVE" || publishStatus.value === "LIVE_WITH_UNPUBLISHED_CHANGES");
@@ -291,7 +306,7 @@ const supportMessage = toRef(supportForm, "message");
 const supportScreenshotUrl = toRef(supportForm, "screenshotUrl");
 
 function syncModel(model: AgentModel): void {
-  Object.assign(draft, cloneModel(model));
+  draft.value = cloneModel(model);
   logoPreview.value = model.widgetLogoUrl;
   logoFileName.value = "";
 }
@@ -316,25 +331,25 @@ function saveChanges(): void {
     emit("require-auth");
     return;
   }
-  if (!isHexColor(draft.widgetColor)) return;
+  if (!isHexColor(draft.value.widgetColor)) return;
   localSaved.value = true;
   window.setTimeout(() => (localSaved.value = false), 2600);
-  emit("save", cloneModel(draft));
+  emit("save", cloneModel(draft.value));
 }
 
 function publishDraft(): void {
-  emit("publish", cloneModel(draft));
+  emit("publish", cloneModel(draft.value));
 }
 
 function hasProactiveTrigger(trigger: ProactiveTrigger): boolean {
-  return draft.proactiveTriggers.includes(trigger);
+  return draft.value.proactiveTriggers.includes(trigger);
 }
 
 function toggleProactiveTrigger(trigger: ProactiveTrigger, enabled: boolean): void {
-  const next = new Set(draft.proactiveTriggers);
+  const next = new Set(draft.value.proactiveTriggers);
   if (enabled) next.add(trigger);
   else next.delete(trigger);
-  draft.proactiveTriggers = [...next];
+  draft.value.proactiveTriggers = [...next];
 }
 
 function selectTab(tab: AgentTab): void {
@@ -347,7 +362,7 @@ function handleGoLive(): void {
     emit("view-dashboard");
     return;
   }
-  emit("publish", cloneModel(draft));
+  emit("publish", cloneModel(draft.value));
 }
 
 function startAddAction(): void {
@@ -359,28 +374,28 @@ function startAddAction(): void {
 
 function editAction(index: number): void {
   editingActionIndex.value = index;
-  actionDraft.label = draft.widgetQuickActions[index]?.label ?? "";
-  actionDraft.question = draft.widgetQuickActions[index]?.question ?? "";
+  actionDraft.label = draft.value.widgetQuickActions[index]?.label ?? "";
+  actionDraft.question = draft.value.widgetQuickActions[index]?.question ?? "";
   quickActionEditorOpen.value = true;
 }
 
 function saveAction(): void {
   const action = { label: actionDraft.label.trim(), question: actionDraft.question.trim() };
   if (!action.label || !action.question) return;
-  if (editingActionIndex.value === null) draft.widgetQuickActions.push(action);
-  else draft.widgetQuickActions.splice(editingActionIndex.value, 1, action);
+  if (editingActionIndex.value === null) draft.value.widgetQuickActions.push(action);
+  else draft.value.widgetQuickActions.splice(editingActionIndex.value, 1, action);
   quickActionEditorOpen.value = false;
 }
 
 function removeAction(index: number): void {
-  draft.widgetQuickActions.splice(index, 1);
+  draft.value.widgetQuickActions.splice(index, 1);
 }
 
 function moveAction(index: number, direction: -1 | 1): void {
   const nextIndex = index + direction;
-  if (nextIndex < 0 || nextIndex >= draft.widgetQuickActions.length) return;
-  const [action] = draft.widgetQuickActions.splice(index, 1);
-  draft.widgetQuickActions.splice(nextIndex, 0, action);
+  if (nextIndex < 0 || nextIndex >= draft.value.widgetQuickActions.length) return;
+  const [action] = draft.value.widgetQuickActions.splice(index, 1);
+  draft.value.widgetQuickActions.splice(nextIndex, 0, action);
 }
 
 function previewLogo(file: File): void {
@@ -456,7 +471,7 @@ function openLiveWebsite(): void {
       </div>
       <div class="agent-header-actions">
         <span v-if="savedMessage || localSaved" class="saved-message"><Check :size="14" :stroke-width="2" aria-hidden="true" /> {{ savedMessage || "Saved" }}</span>
-        <Button v-if="tab !== 'test' && tab !== 'install'" variant="primary" size="small" @click="saveChanges">Save changes</Button>
+        <Button v-if="!['capabilities', 'test', 'install'].includes(tab)" variant="primary" size="small" @click="saveChanges">Save changes</Button>
         <Button v-if="tab === 'test'" variant="secondary" size="small" @click="emit('reset-conversation')">Reset conversation</Button>
         <Button v-if="tab === 'install' && publishStatus === 'NOT_PUBLISHED'" variant="primary" size="small" :disabled="ownershipStatus !== 'verified' || billingReadOnly" @click="publishDraft">Publish AI front desk</Button>
         <Button v-if="tab === 'install' && publishStatus === 'PUBLISHING'" variant="primary" size="small" disabled>Publishing…</Button>
@@ -474,7 +489,30 @@ function openLiveWebsite(): void {
     </div>
     <div v-else-if="publishStatus === 'PUBLISHING'" class="agent-live-banner agent-live-banner-publishing" role="status"><strong>Publishing…</strong></div>
 
-    <div v-if="tab === 'behavior'" class="agent-config-layout">
+    <div v-if="tab === 'capabilities'" class="agent-capabilities-layout">
+      <section class="agent-capabilities-intro panel">
+        <div>
+          <p class="section-kicker">Guidance layer</p>
+          <h3>What your AI front desk can do</h3>
+          <p>Keep connections in Settings. This view shows which business outcomes are ready and what to set up next.</p>
+        </div>
+        <span class="capability-summary-count">{{ capabilities.filter((capability) => capability.ready).length }}/{{ capabilities.length }} ready</span>
+      </section>
+      <section class="agent-capability-list panel" aria-label="Agent capabilities">
+        <article v-for="capability in capabilities" :key="capability.id" :class="['agent-capability-row', { ready: capability.ready }]">
+          <span :class="['capability-status-icon', { ready: capability.ready }]">{{ capability.ready ? '✓' : '○' }}</span>
+          <div class="agent-capability-copy"><strong>{{ capability.title }}</strong><p>{{ capability.description }}</p></div>
+          <span :class="['capability-status-label', { ready: capability.ready }]">{{ capability.ready ? 'Ready' : 'Set up' }}</span>
+          <button class="capability-action" type="button" @click="emit('open-capability-action', capability.target)">{{ capability.actionLabel }} →</button>
+        </article>
+      </section>
+      <aside class="agent-capabilities-note panel">
+        <div><p class="section-kicker">Where connections live</p><h3>Settings is the connection center</h3><p>Agent keeps the outcome visible without duplicating HubSpot, Zapier, webhook, or MCP configuration.</p></div>
+        <button class="outline-button small" type="button" @click="emit('open-capability-action', 'integrations')">Open integrations →</button>
+      </aside>
+    </div>
+
+    <div v-else-if="tab === 'behavior'" class="agent-config-layout">
       <Card class="agent-form-panel">
         <FormSection eyebrow="Identity" title="Assistant identity">
           <FormField label="Assistant name" required><TextInput v-model="draft.assistantName" :maxlength="120" /></FormField>
@@ -506,6 +544,11 @@ function openLiveWebsite(): void {
         <FormSection eyebrow="When AI cannot answer" title="Make the next step clear">
           <FormField label="Fallback behavior"><Select v-model="draft.fallbackBehavior" :options="fallbackOptions" placeholder="" /></FormField>
           <Switch v-model="draft.humanHandoffEnabled" label="Human handoff" description="Let visitors ask for your team when they need help." />
+          <div class="field-grid">
+            <FormField label="Fallback phone" hint="Shown to visitors during an outage."><TextInput v-model="draft.fallbackPhone" type="tel" placeholder="(555) 555-0123" /></FormField>
+            <FormField label="Fallback email"><TextInput v-model="draft.fallbackEmail" type="email" placeholder="help@business.com" /></FormField>
+          </div>
+          <FormField label="Fallback contact page" hint="Optional HTTPS link for support or contact details."><TextInput v-model="draft.fallbackContactUrl" type="url" placeholder="https://business.com/contact" /></FormField>
         </FormSection>
         <section class="agent-section agent-section-footer">
           <div><strong>Conversation behavior is ready to review.</strong><p>Save changes to use this configuration in the live widget.</p></div>
@@ -683,6 +726,23 @@ function openLiveWebsite(): void {
 .action-preview-card { width: min(100%, 360px); margin: 50px auto 0; padding: 18px; }
 .action-preview-card .preview-action-button { margin-top: 10px; cursor: default; }
 .agent-test-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 22px; align-items: start; }
+.agent-capabilities-layout { display: grid; max-width: 980px; gap: 16px; }
+.agent-capabilities-intro, .agent-capabilities-note { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 22px; }
+.agent-capabilities-intro h3, .agent-capabilities-note h3 { margin: 0; color: var(--agent-ink); font-size: 18px; letter-spacing: -.025em; }
+.agent-capabilities-intro p:not(.section-kicker), .agent-capabilities-note p:not(.section-kicker) { max-width: 650px; margin: 7px 0 0; color: var(--agent-muted); font-size: 12px; line-height: 1.5; }
+.capability-summary-count { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; color: #08785d; background: #e7f8f1; font-size: 11px; font-weight: 800; }
+.agent-capability-list { overflow: hidden; }
+.agent-capability-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 17px 20px; border-bottom: 1px solid var(--agent-border); }
+.agent-capability-row:last-child { border-bottom: 0; }
+.capability-status-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid #d7e0eb; border-radius: 50%; color: #8a9ab1; background: #f8fafd; font-size: 12px; font-weight: 800; }
+.capability-status-icon.ready { border-color: #b9e8d9; color: #08785d; background: #edfaf5; }
+.agent-capability-copy { min-width: 0; }
+.agent-capability-copy strong { color: var(--agent-ink); font-size: 13px; }
+.agent-capability-copy p { margin: 4px 0 0; color: var(--agent-muted); font-size: 11px; line-height: 1.45; }
+.capability-status-label { padding: 5px 8px; border-radius: 999px; color: #95630c; background: #fff5df; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.capability-status-label.ready { color: #08785d; background: #e7f8f1; }
+.capability-action { padding: 6px 0; border: 0; color: #2168d8; background: transparent; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.agent-capabilities-note { align-items: center; border-color: #cfe0f3; background: linear-gradient(135deg, #f8fbff, #f1f8ff); }
 .agent-knowledge-layout { display: grid; max-width: 900px; gap: 18px; }
 .agent-knowledge-summary { padding: 24px; }
 .knowledge-readiness-pill { padding: 5px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; }
@@ -767,5 +827,5 @@ function openLiveWebsite(): void {
 .publish-step { background: #f8fbff; }
 @media (max-width: 980px) { .agent-config-layout, .agent-test-layout { grid-template-columns: 1fr; } .preview-sticky { position: static; } .agent-preview-column { order: -1; } .install-step-grid { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .install-support { display: block; } .install-support-actions { justify-content: flex-start; margin-top: 16px; } .install-support-drawer { padding: 24px 18px; } }
-@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer, .agent-live-banner { display: block; } .agent-header-actions, .agent-live-actions { margin-top: 16px; } .field-grid, .agent-knowledge-metrics { grid-template-columns: 1fr 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } }
+@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer, .agent-live-banner, .agent-capabilities-intro, .agent-capabilities-note { display: block; } .agent-header-actions, .agent-live-actions { margin-top: 16px; } .field-grid, .agent-knowledge-metrics { grid-template-columns: 1fr 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } .agent-capability-row { grid-template-columns: 28px minmax(0, 1fr) auto; } .agent-capability-row .capability-action { grid-column: 2 / -1; justify-self: start; padding-top: 0; } .agent-capabilities-note .outline-button { margin-top: 16px; } }
 </style>

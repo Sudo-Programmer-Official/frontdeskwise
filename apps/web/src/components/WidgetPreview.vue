@@ -196,7 +196,7 @@ const widgetState = computed<WidgetState>(() => {
       },
     } : null,
     handoffStatus: nextScenario === "human-handoff" ? "WAITING_FOR_STAFF" : nextScenario === "staff-joined" ? "HUMAN_ACTIVE" : "AI_ACTIVE",
-    handoffNotice: nextScenario === "human-handoff" && !handoffNoticeDismissed.value ? { visible: true, message: "A team member has been notified." } : { visible: false, message: "" },
+    handoffNotice: nextScenario === "human-handoff" && !handoffNoticeDismissed.value ? { visible: true, message: "You still have a conversation waiting for the team.", choice: true } : { visible: false, message: "" },
     proactive: props.proactiveEnabled && props.proactiveBehavior === "teaser" && nextScenario === "default" && !proactiveDismissed.value ? { visible: true, message: props.proactiveMessage || "Looking for the right service? I can help." } : { visible: false, message: "" },
   };
   if (props.state) return { ...sampleState, ...props.state, messages: props.state.messages ?? sampleState.messages, quickActions: props.state.quickActions ?? sampleState.quickActions };
@@ -239,6 +239,14 @@ onMounted(() => {
       handoffNoticeDismissed.value = true;
       clearHandoffNoticeTimer();
       syncRenderer();
+    },
+    onHandoffContinue: () => {
+      handoffNoticeDismissed.value = true;
+      clearHandoffNoticeTimer();
+      syncRenderer();
+    },
+    onNewConversation: () => {
+      selectScenario("conversation");
     },
     onProactiveDismiss: () => {
       proactiveDismissed.value = true;

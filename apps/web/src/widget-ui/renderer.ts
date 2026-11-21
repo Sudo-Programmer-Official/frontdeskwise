@@ -4,6 +4,8 @@ export type WidgetTheme = "light" | "dark" | "auto";
 export type WidgetPosition = "bottom-right" | "bottom-left";
 export type WidgetOpeningMode = "compact" | "expanded" | "fullscreen";
 export type WidgetSurface = "embed" | "preview";
+export type WidgetHealthState = "READY" | "LOADING" | "DEGRADED" | "OFFLINE" | "TEMPORARY_ERROR" | "CONFIG_ERROR" | "MESSAGE_FAILED" | "ACTION_FAILED" | "HANDOFF_DEGRADED";
+export type WidgetConnectionState = "online" | "offline" | "reconnecting" | "restored";
 export type WidgetScenario =
   | "default"
   | "conversation"
@@ -32,6 +34,15 @@ export interface WidgetMessage {
   role: "assistant" | "user";
   content: string;
   citations?: WidgetCitation[];
+  status?: "sending" | "sent" | "failed";
+  retryable?: boolean;
+  clientMessageId?: string;
+}
+
+export interface WidgetFallbackContacts {
+  phone?: string | null;
+  email?: string | null;
+  url?: string | null;
 }
 
 export interface WidgetFormField {
@@ -74,9 +85,10 @@ export interface WidgetConfig {
   fallbackBehavior?: "contact_form" | "human" | "unavailable";
   humanHandoffEnabled?: boolean;
   tone?: "friendly" | "professional" | "concise" | "custom";
+  fallbackContacts?: WidgetFallbackContacts;
 }
 
-export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_REQUESTED" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED";
+export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_REQUESTED" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
 
 export interface WidgetState {
   isOpen: boolean;
@@ -93,8 +105,15 @@ export interface WidgetState {
   leadSubmitting?: boolean;
   typing?: boolean;
   handoffStatus?: WidgetHandoffStatus;
-  handoffNotice?: { visible: boolean; message: string };
+  handoffNotice?: { visible: boolean; message: string; choice?: boolean };
   proactive?: { visible: boolean; message: string };
+  healthState?: WidgetHealthState;
+  connectionState?: WidgetConnectionState;
+  statusMessage?: string;
+  statusAction?: "retry" | "new_conversation";
+  typingMessage?: string;
+  statusContacts?: WidgetFallbackContacts;
+  actionError?: string;
 }
 
 export interface WidgetRendererOptions {
@@ -109,7 +128,11 @@ export interface WidgetRendererOptions {
   onActionValuesChange?: (values: Record<string, string>, action: WidgetAction) => void;
   onConsentChange?: (consent: boolean) => void;
   onHandoffDismiss?: () => void;
+  onHandoffContinue?: () => void;
+  onNewConversation?: () => void;
   onProactiveDismiss?: () => void;
+  onRetryMessage?: (message: WidgetMessage) => void;
+  onRetryConfig?: () => void;
 }
 
 export interface WidgetRendererController {
@@ -169,6 +192,19 @@ const WIDGET_STYLES = `
   .fdw-panel.fdw-theme-dark .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
   .fdw-panel.fdw-theme-dark .fdw-composer { background: #182a43; border-color: #2f4768; }
   .fdw-panel.fdw-theme-dark .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+  .fdw-system-status { display: none; align-items: flex-start; gap: 8px; margin: 10px 15px 0; padding: 10px 11px; border: 1px solid #d7e5f5; border-radius: 10px; color: #36577e; background: #f4f8fe; font-size: 11px; line-height: 1.4; }
+  .fdw-system-status.fdw-visible { display: flex; }
+  .fdw-system-status.fdw-warning { border-color: #f0d6a7; color: #7a5a1d; background: #fff9ed; }
+  .fdw-system-status.fdw-error { border-color: #efc7c5; color: #8b403b; background: #fff5f4; }
+  .fdw-system-status-copy { min-width: 0; flex: 1; }
+  .fdw-system-status-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+  .fdw-system-status-actions button, .fdw-system-status-actions a { padding: 5px 7px; border: 1px solid #b9d0ec; border-radius: 6px; color: #24588d; background: #fff; cursor: pointer; font-size: 10px; font-weight: 750; text-decoration: none; }
+  .fdw-system-status-actions button:hover, .fdw-system-status-actions a:hover, .fdw-system-status-actions button:focus-visible, .fdw-system-status-actions a:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
+  .fdw-message-meta { display: flex; align-items: center; gap: 7px; margin-top: 7px; color: #8a98aa; font-size: 10px; }
+  .fdw-message.fdw-message-failed { border-color: #efc7c5; background: #fff8f7; }
+  .fdw-message-retry { padding: 0; border: 0; color: #b34843; background: transparent; cursor: pointer; font-size: 10px; font-weight: 800; text-decoration: underline; }
+  .fdw-panel.fdw-theme-dark .fdw-system-status, .fdw-panel.fdw-theme-auto .fdw-system-status { background: #243b5c; border-color: #385578; color: #e4edf9; }
+  .fdw-panel.fdw-theme-dark .fdw-message.fdw-message-failed, .fdw-panel.fdw-theme-auto .fdw-message.fdw-message-failed { background: #49343d; border-color: #74505b; }
   .fdw-header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); }
   .fdw-identity { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
   .fdw-logo, .fdw-orb { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.2); }
@@ -196,6 +232,7 @@ const WIDGET_STYLES = `
   .fdw-quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
   .fdw-quick-actions button:hover, .fdw-quick-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
   .fdw-action-form, .fdw-lead { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
+  .fdw-action-error { color: #a54b45; font-size: 11px; line-height: 1.4; }
   .fdw-action-form:empty, .fdw-lead[hidden] { display: none; }
   .fdw-action-form label, .fdw-lead label:not(.fdw-consent-row) { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
   .fdw-action-form label > span:first-child, .fdw-lead label:not(.fdw-consent-row) > span { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
@@ -219,7 +256,12 @@ const WIDGET_STYLES = `
   .fdw-consent-saved-mark { color: #1d9b78; font-weight: 800; }
   .fdw-handoff-status { display: none; align-items: flex-start; gap: 8px; margin: 0 15px 10px; padding: 9px 8px 9px 11px; border: 1px solid #cfe0f7; border-radius: 9px; color: #36577e; background: #f3f8ff; font-size: 11px; line-height: 1.4; }
   .fdw-handoff-status.fdw-visible { display: flex; }
-  .fdw-handoff-copy { min-width: 0; flex: 1; }
+  .fdw-handoff-content { display: grid; gap: 8px; min-width: 0; flex: 1; }
+  .fdw-handoff-copy { min-width: 0; }
+  .fdw-handoff-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .fdw-handoff-actions[hidden] { display: none; }
+  .fdw-handoff-actions button { padding: 5px 7px; border: 1px solid #b9d0ec; border-radius: 6px; color: #24588d; background: #fff; cursor: pointer; font-size: 10px; font-weight: 750; }
+  .fdw-handoff-actions button:hover, .fdw-handoff-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
   .fdw-handoff-dismiss { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; margin: -4px -3px 0 0; padding: 0; border: 0; border-radius: 50%; color: #547194; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
   .fdw-handoff-dismiss:hover, .fdw-handoff-dismiss:focus-visible { color: #244d7e; background: #e3effd; outline: none; }
   .fdw-composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e6edf5; background: #fff; }
@@ -237,6 +279,7 @@ const WIDGET_STYLES = `
   .fdw-typing span { width: 5px; height: 5px; border-radius: 50%; background: #7f91aa; animation: fdw-typing-bounce 1s infinite ease-in-out; }
   .fdw-typing span:nth-child(2) { animation-delay: .14s; }
   .fdw-typing span:nth-child(3) { animation-delay: .28s; }
+  .fdw-typing small { margin-left: 4px; color: #7f91aa; font-size: 10px; font-weight: 650; }
   @keyframes fdw-typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
   .fdw-preview-root { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
   .fdw-preview-root .fdw-launcher, .fdw-preview-root .fdw-proactive-teaser, .fdw-preview-root .fdw-panel { position: absolute; pointer-events: auto; }
@@ -338,10 +381,11 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     <section class="fdw-panel fdw-mode-compact" aria-label="AI front desk" aria-hidden="true">
       <header class="fdw-header">
         <div class="fdw-identity"><span class="fdw-orb">${SYMBOL}</span><div class="fdw-title-group"><strong class="fdw-title"></strong><small class="fdw-subtitle"><span class="fdw-status-dot" aria-hidden="true"></span><span class="fdw-subtitle-text"></span></small></div></div>
-        <div class="fdw-header-actions"><button class="fdw-expand" type="button" aria-label="Expand assistant" title="Expand assistant">↗</button><button class="fdw-close" type="button" aria-label="Close assistant" title="Close assistant">×</button></div>
+        <div class="fdw-header-actions"><button class="fdw-new-conversation" type="button" aria-label="Start new conversation" title="Start new conversation">＋</button><button class="fdw-expand" type="button" aria-label="Expand assistant" title="Expand assistant">↗</button><button class="fdw-close" type="button" aria-label="Close assistant" title="Close assistant">×</button></div>
       </header>
+      <div class="fdw-system-status" role="status" aria-live="polite"><div class="fdw-system-status-copy"></div><div class="fdw-system-status-actions"></div></div>
       <div class="fdw-messages"></div>
-      <div class="fdw-handoff-status" role="status" aria-live="polite"><span class="fdw-handoff-copy"></span><button class="fdw-handoff-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button></div>
+      <div class="fdw-handoff-status" role="status" aria-live="polite"><div class="fdw-handoff-content"><span class="fdw-handoff-copy"></span><div class="fdw-handoff-actions" hidden><button class="fdw-handoff-continue" type="button">Continue conversation</button><button class="fdw-handoff-new" type="button">Ask a new question</button></div></div><button class="fdw-handoff-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button></div>
       <div class="fdw-quick-actions"></div>
       <form class="fdw-action-form"></form>
       <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><div class="fdw-consent-saved" hidden><span class="fdw-consent-saved-mark" aria-hidden="true">✓</span><span>Consent saved for this visit.</span></div><button type="submit">Continue</button></form>
@@ -359,6 +403,9 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   const subtitleText = root.querySelector<HTMLElement>(".fdw-subtitle-text")!;
   const logoSlot = root.querySelector<HTMLElement>(".fdw-orb")!;
   const messages = root.querySelector<HTMLElement>(".fdw-messages")!;
+  const systemStatus = root.querySelector<HTMLElement>(".fdw-system-status")!;
+  const systemStatusCopy = root.querySelector<HTMLElement>(".fdw-system-status-copy")!;
+  const systemStatusActions = root.querySelector<HTMLElement>(".fdw-system-status-actions")!;
   const quickActions = root.querySelector<HTMLElement>(".fdw-quick-actions")!;
   const actionForm = root.querySelector<HTMLFormElement>(".fdw-action-form")!;
   const lead = root.querySelector<HTMLFormElement>(".fdw-lead")!;
@@ -366,6 +413,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   const composerInput = composer.querySelector<HTMLInputElement>("input")!;
   const handoffStatus = root.querySelector<HTMLElement>(".fdw-handoff-status")!;
   const handoffCopy = root.querySelector<HTMLElement>(".fdw-handoff-copy")!;
+  const handoffActions = root.querySelector<HTMLElement>(".fdw-handoff-actions")!;
   const poweredBy = root.querySelector<HTMLElement>(".fdw-powered-by")!;
   const leadConsentRow = root.querySelector<HTMLElement>(".fdw-consent-row")!;
   const leadConsentSaved = root.querySelector<HTMLElement>(".fdw-consent-saved")!;
@@ -387,7 +435,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   function renderMessages(): void {
     messages.replaceChildren();
     for (const message of state.messages) {
-      const item = element<HTMLDivElement>(documentRef, "div", `fdw-message${message.role === "user" ? " fdw-user" : ""}`);
+      const item = element<HTMLDivElement>(documentRef, "div", `fdw-message${message.role === "user" ? " fdw-user" : ""}${message.status === "failed" ? " fdw-message-failed" : ""}`);
       if (message.role === "assistant") renderMarkdownInto(documentRef, item, message.content);
       else item.textContent = message.content;
       if (message.role === "assistant" && config.showSources !== false) {
@@ -404,13 +452,25 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
           }
         }
       }
+      if (message.status && message.role === "user") {
+        const meta = element<HTMLDivElement>(documentRef, "div", "fdw-message-meta");
+        meta.textContent = message.status === "sending" ? "Sending…" : message.status === "failed" ? "⚠ Not sent" : "";
+        if (message.status === "failed" && message.retryable) {
+          const retry = element<HTMLButtonElement>(documentRef, "button", "fdw-message-retry");
+          retry.type = "button";
+          retry.textContent = "Retry";
+          retry.addEventListener("click", () => options.onRetryMessage?.(message));
+          meta.appendChild(retry);
+        }
+        if (meta.textContent || message.status === "failed") item.appendChild(meta);
+      }
       messages.appendChild(item);
     }
     if (state.typing) {
       const typing = element<HTMLDivElement>(documentRef, "div", "fdw-typing");
       typing.setAttribute("role", "status");
-      typing.setAttribute("aria-label", "Assistant is typing");
-      typing.innerHTML = "<span></span><span></span><span></span>";
+      typing.setAttribute("aria-label", state.typingMessage || "Assistant is typing");
+      typing.innerHTML = `<span></span><span></span><span></span>${state.typingMessage ? `<small>${state.typingMessage}</small>` : ""}`;
       messages.appendChild(typing);
     }
     messages.scrollTop = messages.scrollHeight;
@@ -493,6 +553,11 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
         actionForm.appendChild(consent);
       }
     }
+    if (state.actionError) {
+      const error = element<HTMLDivElement>(documentRef, "div", "fdw-action-error");
+      error.textContent = state.actionError;
+      actionForm.appendChild(error);
+    }
     const submit = element<HTMLButtonElement>(documentRef, "button");
     submit.type = "submit";
     submit.disabled = Boolean(state.actionSubmitting);
@@ -506,10 +571,48 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") subtitleText.textContent = "Waiting for a team member";
     else if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED") subtitleText.textContent = "Connected to the team";
     else if (status === "RESOLVED") subtitleText.textContent = "Conversation resolved";
+    else if (status === "EXPIRED") subtitleText.textContent = "Starting a fresh conversation";
     else subtitleText.textContent = config.showAiDisclosure === false ? "Here to help" : "Usually replies in a few seconds";
     const notice = state.handoffNotice;
     handoffCopy.textContent = notice?.message ?? "";
+    handoffActions.hidden = notice?.choice !== true;
     handoffStatus.classList.toggle("fdw-visible", Boolean(notice?.visible));
+  }
+
+  function renderSystemStatus(): void {
+    const status = state.statusMessage?.trim() || "";
+    const offline = state.connectionState === "offline" || state.connectionState === "reconnecting";
+    const visible = Boolean(status || offline);
+    systemStatus.classList.toggle("fdw-visible", visible);
+    systemStatus.classList.toggle("fdw-warning", offline || state.healthState === "DEGRADED" || state.healthState === "HANDOFF_DEGRADED");
+    systemStatus.classList.toggle("fdw-error", state.healthState === "CONFIG_ERROR" || state.healthState === "MESSAGE_FAILED" || state.healthState === "ACTION_FAILED" || state.healthState === "TEMPORARY_ERROR");
+    systemStatusCopy.textContent = offline ? (state.connectionState === "reconnecting" ? "Connection lost — trying to reconnect…" : "Connection lost — you can keep typing and we’ll retry when you’re back online.") : status;
+    systemStatusActions.replaceChildren();
+    if (state.statusMessage && state.healthState !== "OFFLINE") {
+      const retry = element<HTMLButtonElement>(documentRef, "button");
+      retry.type = "button";
+      retry.textContent = state.statusAction === "new_conversation" ? "Start new conversation" : "Try again";
+      retry.addEventListener("click", () => {
+        if (state.healthState === "CONFIG_ERROR") options.onRetryConfig?.();
+        else if (state.statusAction === "new_conversation") options.onNewConversation?.();
+        else {
+          const message = [...state.messages].reverse().find((candidate) => candidate.role === "user" && (candidate.status === "failed" || state.statusAction === "retry"));
+          if (message) options.onRetryMessage?.(message);
+        }
+      });
+      systemStatusActions.appendChild(retry);
+    }
+    const contacts = state.statusContacts || config.fallbackContacts;
+    const addContact = (label: string, href: string): void => {
+      const link = element<HTMLAnchorElement>(documentRef, "a");
+      link.href = href;
+      link.textContent = label;
+      if (href.startsWith("http")) { link.target = "_blank"; link.rel = "noopener noreferrer"; }
+      systemStatusActions.appendChild(link);
+    };
+    if (contacts?.phone) addContact("Call", `tel:${contacts.phone}`);
+    if (contacts?.email) addContact("Email", `mailto:${contacts.email}`);
+    if (contacts?.url) addContact("Contact the team", contacts.url);
   }
 
   function render(): void {
@@ -537,6 +640,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     teaser.hidden = !state.proactive?.visible;
     teaserMessage.textContent = state.proactive?.message ?? "";
     renderHandoff();
+    renderSystemStatus();
     renderMessages();
     renderQuickActions();
     renderActionForm();
@@ -589,12 +693,15 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     options.onProactiveDismiss?.();
   });
   root.querySelector<HTMLButtonElement>(".fdw-close")!.addEventListener("click", close);
+  root.querySelector<HTMLButtonElement>(".fdw-new-conversation")!.addEventListener("click", () => options.onNewConversation?.());
   root.querySelector<HTMLButtonElement>(".fdw-expand")!.addEventListener("click", () => {
     if (!config.widgetAllowExpand) return;
     config = { ...config, widgetDefaultMode: config.widgetDefaultMode === "compact" ? "expanded" : "compact" };
     render();
   });
   root.querySelector<HTMLButtonElement>(".fdw-handoff-dismiss")!.addEventListener("click", () => options.onHandoffDismiss?.());
+  root.querySelector<HTMLButtonElement>(".fdw-handoff-continue")!.addEventListener("click", () => options.onHandoffContinue?.());
+  root.querySelector<HTMLButtonElement>(".fdw-handoff-new")!.addEventListener("click", () => options.onNewConversation?.());
   composer.addEventListener("submit", (event) => {
     event.preventDefault();
     const question = composerInput.value.trim();
@@ -611,6 +718,11 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   });
   actionForm.addEventListener("input", rememberActionValues);
   actionForm.addEventListener("change", rememberActionValues);
+  actionForm.addEventListener("focusin", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    window.setTimeout(() => target.scrollIntoView({ block: "center", behavior: "smooth" }), 0);
+  });
   actionForm.addEventListener("change", (event) => {
     const control = event.target as HTMLInputElement | null;
     if (control?.type === "checkbox" && control.name === "consent") {

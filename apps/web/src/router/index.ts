@@ -2,6 +2,7 @@ import { marketingRoutePaths } from "../marketing.js";
 
 export type WorkspaceView =
   | "overview"
+  | "support"
   | "inbox"
   | "team"
   | "conversations"
@@ -16,8 +17,8 @@ export type WorkspaceView =
   | "billing";
 
 export type SettingsRouteTab = "general" | "team" | "integrations" | "verification" | "notifications" | "billing";
-export type AgentRouteTab = "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
-export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "users" | "demos" | "messaging" | "installation-support" | "operations";
+export type AgentRouteTab = "capabilities" | "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
+export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "action-registry" | "users" | "demos" | "messaging" | "support" | "installation-support" | "operations";
 export type OnboardingRouteStep = "index" | "business" | "knowledge" | "agent" | "install";
 
 export type AppRoute =
@@ -38,10 +39,10 @@ export type AppRoute =
   | { kind: "not-found"; path: string };
 
 const workspaceViews = new Set<WorkspaceView>([
-  "overview", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
+  "overview", "support", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set<SettingsRouteTab>(["general", "team", "integrations", "verification", "notifications", "billing"]);
-const agentTabs = new Set<AgentRouteTab>(["behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
+const agentTabs = new Set<AgentRouteTab>(["capabilities", "behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
 
 function cleanPath(pathname: string): string {
   const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
@@ -120,9 +121,11 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     if (segments[1] === "organizations" && segments[2]) return { kind: "platform", section: "organization-detail", organizationId: segments[2] };
     if (segments[1] === "organizations") return { kind: "platform", section: "organizations" };
     if (segments[1] === "businesses" && segments[2]) return { kind: "platform", section: "business-detail", businessId: segments[2] };
+    if (segments[1] === "action-registry") return { kind: "platform", section: "action-registry" };
     if (segments[1] === "users") return { kind: "platform", section: "users" };
     if (segments[1] === "demos") return { kind: "platform", section: "demos" };
     if (segments[1] === "messaging") return { kind: "platform", section: "messaging" };
+    if (segments[1] === "support") return { kind: "platform", section: "support" };
     if (segments[1] === "installation-support") return { kind: "platform", section: "installation-support" };
     if (segments[1] === "operations") return { kind: "platform", section: "operations" };
     return { kind: "platform", section: "overview" };
@@ -146,7 +149,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
   return { kind: "not-found", path };
 }
 
-export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
+export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "support" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
   if (route.kind === "marketing") return "marketing";
   if (route.kind === "legal") return route.page;
   if (route.kind === "agent-shortcut") return "agent";

@@ -3,6 +3,8 @@ import {
   DEFAULT_CONFIG,
   type WidgetAction,
   type WidgetConfig,
+  type WidgetFallbackContacts,
+  type WidgetHealthState,
   type WidgetHandoffStatus,
   type WidgetMessage,
   type WidgetRendererController,
@@ -29,6 +31,7 @@ type WidgetBootstrap = {
   openOnReady?: boolean;
   openSource?: "launcher" | "proactive";
   configPromise?: Promise<unknown>;
+  configError?: boolean;
   performance: WidgetPerformanceRuntime;
 };
 
@@ -64,13 +67,26 @@ type FrontDeskWiseWindow = Window & {
     proactiveFrequency?: "session" | "24h" | "visit";
   };
   type WidgetConfigResponse = { agent?: AgentConfig };
-  type ConversationPayload = { conversation?: { status?: string; leadCaptured?: boolean }; messages?: Array<{ role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
+  type ConversationPayload = { conversation?: { id?: string; status?: string; leadCaptured?: boolean; lastActivityAt?: string; handoffNotificationStatus?: string }; messages?: Array<{ id?: string; role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
+
+  class WidgetRequestError extends Error {
+    readonly retryable: boolean;
+    readonly timedOut: boolean;
+    readonly status: number;
+    constructor(message: string, options: { retryable?: boolean; timedOut?: boolean; status?: number } = {}) {
+      super(message);
+      this.name = "WidgetRequestError";
+      this.retryable = options.retryable !== false;
+      this.timedOut = options.timedOut === true;
+      this.status = options.status ?? 0;
+    }
+  }
 
   let config: AgentConfig | null = null;
   let visitorId = "";
   let conversationId: string | null = null;
   let lastQuestion = "";
-  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, consentGiven: false, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
+  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, consentGiven: false, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" }, healthState: "LOADING", connectionState: "online" };
   let renderer: WidgetRendererController;
   let pollTimer: number | null = null;
   let handoffNoticeTimer: number | null = null;
@@ -83,6 +99,10 @@ type FrontDeskWiseWindow = Window & {
   let lastRequestId = "";
   const renderedRemoteMessages: Record<string, boolean> = {};
   const HANDOFF_NOTICE_TIMEOUT_MS = 6000;
+  const MESSAGE_SOFT_TIMEOUT_MS = 8_000;
+  const MESSAGE_TIMEOUT_MS = 15_000;
+  let online = typeof navigator === "undefined" ? true : navigator.onLine !== false;
+  let restoredStatusTimer: number | null = null;
 
   function accessibleTextColor(hex: string): string {
     const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
@@ -97,10 +117,15 @@ type FrontDeskWiseWindow = Window & {
     renderer.update({ state });
   }
 
+  function setHealth(healthState: WidgetHealthState, statusMessage = "", patch: Partial<WidgetState> = {}): void {
+    updateState({ healthState, statusMessage, ...patch });
+  }
+
   function getVisitorId(): string {
     try {
-      const key = "frontdeskwise:visitor:" + siteKey;
-      const existing = window.localStorage.getItem(key);
+      const key = `fdw:${siteKey}:visitorId`;
+      const legacyKey = "frontdeskwise:visitor:" + siteKey;
+      const existing = window.localStorage.getItem(key) || window.localStorage.getItem(legacyKey);
       if (existing) return existing;
       const value = window.crypto?.randomUUID?.() || `visitor-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       window.localStorage.setItem(key, value);
@@ -113,6 +138,11 @@ type FrontDeskWiseWindow = Window & {
   function interactionStorageKey(): string {
     const hostName = window.location.hostname || "unknown-host";
     return `frontdeskwise:${siteKey}:${hostName}:interaction`;
+  }
+
+  function currentConversationStorageKey(): string {
+    const hostName = window.location.hostname || "unknown-host";
+    return `fdw:${siteKey}:${hostName}:currentConversationId`;
   }
 
   function consentStorageKey(): string {
@@ -146,6 +176,8 @@ type FrontDeskWiseWindow = Window & {
 
   function persistInteractionState(): void {
     try {
+      if (conversationId) window.sessionStorage.setItem(currentConversationStorageKey(), conversationId);
+      else window.sessionStorage.removeItem(currentConversationStorageKey());
       if (!conversationId && !state.action) {
         window.sessionStorage.removeItem(interactionStorageKey());
         return;
@@ -167,7 +199,9 @@ type FrontDeskWiseWindow = Window & {
       const raw = window.sessionStorage.getItem(interactionStorageKey());
       if (!raw) return;
       const saved = JSON.parse(raw) as { conversationId?: unknown; action?: unknown; actionStep?: unknown; actionValues?: unknown; leadCaptured?: unknown };
-      if (typeof saved.conversationId === "string" && saved.conversationId) conversationId = saved.conversationId;
+      const savedConversationId = window.sessionStorage.getItem(currentConversationStorageKey());
+      if (savedConversationId) conversationId = savedConversationId;
+      else if (typeof saved.conversationId === "string" && saved.conversationId) conversationId = saved.conversationId;
       const action = saved.action && typeof saved.action === "object" ? saved.action as WidgetAction : null;
       const actionValues = saved.actionValues && typeof saved.actionValues === "object" ? saved.actionValues as Record<string, string> : {};
       state = {
@@ -234,9 +268,9 @@ type FrontDeskWiseWindow = Window & {
     updateState({ handoffNotice: { visible: false, message: "" } });
   }
 
-  function showHandoffNotice(message: string): void {
+  function showHandoffNotice(message: string, choice = false): void {
     if (handoffNoticeDismissed()) return;
-    updateState({ handoffNotice: { visible: true, message } });
+    updateState({ handoffNotice: { visible: true, message, choice } });
     if (handoffNoticeTimer !== null) window.clearTimeout(handoffNoticeTimer);
     handoffNoticeTimer = window.setTimeout(() => {
       handoffNoticeTimer = null;
@@ -244,10 +278,9 @@ type FrontDeskWiseWindow = Window & {
     }, HANDOFF_NOTICE_TIMEOUT_MS);
   }
 
-  function renderConversationStatus(status: string | undefined): void {
+  function renderConversationStatus(status: string | undefined, options: { returning?: boolean; notificationStatus?: string } = {}): void {
     const waitingForStaff = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
     const normalizedStatus = (status || "AI_ACTIVE") as WidgetHandoffStatus;
-    rememberHandoffStatus(normalizedStatus);
     if (normalizedStatus === "HUMAN_ACTIVE" || waitingForStaff) {
       clearProactiveEngagement();
       proactiveShown = true;
@@ -256,8 +289,14 @@ type FrontDeskWiseWindow = Window & {
       updateState({ handoffStatus: normalizedStatus });
       if (!handoffWaiting) {
         handoffWaiting = true;
-        showHandoffNotice("A team member has been notified.");
+        showHandoffNotice(
+          options.notificationStatus === "failed"
+            ? "Your message has been saved for the team."
+            : options.returning ? "You still have a conversation waiting for the team." : "A team member has been notified.",
+          options.returning,
+        );
       }
+      if (options.notificationStatus === "failed") setHealth("HANDOFF_DEGRADED", "Your message has been saved for the team.", { statusContacts: fallbackContacts() });
       return;
     }
     handoffWaiting = false;
@@ -265,34 +304,89 @@ type FrontDeskWiseWindow = Window & {
     hideHandoffNotice();
   }
 
-  function addMessage(content: string, role: WidgetMessage["role"], citations: WidgetMessage["citations"] = [], remoteKey?: string): void {
-    if (remoteKey && renderedRemoteMessages[remoteKey]) return;
+  function addMessage(content: string, role: WidgetMessage["role"], citations: WidgetMessage["citations"] = [], remoteKey?: string, messageOptions: Pick<WidgetMessage, "status" | "retryable" | "clientMessageId"> = {}): string {
+    if (remoteKey && renderedRemoteMessages[remoteKey]) return remoteKey;
     if (remoteKey) renderedRemoteMessages[remoteKey] = true;
-    updateState({ messages: [...state.messages, { id: remoteKey || `${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`, remoteKey, role, content, citations }] });
+    const id = remoteKey || `${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    updateState({ messages: [...state.messages, { id, remoteKey, role, content, citations, ...messageOptions }] });
+    return id;
   }
 
-  async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(apiBase + path, { headers: { "content-type": "application/json", ...(init.headers || {}) }, ...init });
-    lastRequestId = response.headers.get("x-request-id") || "";
-    const payload = await response.json() as T & { error?: string };
-    if (!response.ok) throw new Error(payload.error || "The front desk is unavailable.");
-    return payload;
+  function updateMessage(messageId: string, patch: Partial<WidgetMessage>): void {
+    const index = state.messages.findIndex((message) => message.id === messageId);
+    if (index < 0) return;
+    const messages = [...state.messages];
+    messages[index] = { ...messages[index], ...patch };
+    updateState({ messages });
   }
 
-  async function syncConversation(): Promise<void> {
+  function fallbackContacts(): WidgetFallbackContacts {
+    return config?.fallbackContacts || {};
+  }
+
+  function errorMessage(error: unknown, fallback: string): string {
+    if (error instanceof WidgetRequestError && error.timedOut) return "This is taking longer than expected.";
+    return error instanceof Error && error.message && !/^HTTP \d+$/i.test(error.message) ? error.message : fallback;
+  }
+
+  async function api<T>(path: string, init: RequestInit = {}, timeoutMs = 15_000): Promise<T> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(apiBase + path, { headers: { "content-type": "application/json", ...(init.headers || {}) }, ...init, signal: init.signal || controller.signal });
+      lastRequestId = response.headers.get("x-request-id") || "";
+      const payload = await response.json().catch(() => ({})) as T & { error?: string };
+      if (!response.ok) throw new WidgetRequestError(payload.error || "The front desk is temporarily unavailable.", { status: response.status, retryable: response.status >= 500 || response.status === 408 || response.status === 429 });
+      return payload;
+    } catch (error) {
+      if (error instanceof WidgetRequestError) throw error;
+      if (error instanceof DOMException && error.name === "AbortError") throw new WidgetRequestError("This is taking longer than expected.", { timedOut: true });
+      throw new WidgetRequestError("The front desk is temporarily unavailable.");
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function syncConversation(includeHistory = false): Promise<void> {
     if (!conversationId) return;
     try {
       const payload = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+      if (payload.conversation?.status === "RESOLVED" || payload.conversation?.status === "EXPIRED") {
+        conversationId = null;
+        resetConversationUi();
+        return;
+      }
       if (payload.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
-      renderConversationStatus(payload.conversation?.status);
-      for (const message of payload.messages || []) {
-        if (message.role !== "human" && message.role !== "system") continue;
-        const key = `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`;
-        addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, "assistant", [], key);
+      renderConversationStatus(payload.conversation?.status, { returning: includeHistory, notificationStatus: payload.conversation?.handoffNotificationStatus });
+      const remoteMessages = payload.messages || [];
+      if (includeHistory && remoteMessages.length) {
+        state = {
+          ...state,
+          messages: remoteMessages.map((message) => ({
+            id: `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`,
+            remoteKey: `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`,
+            role: message.role === "user" ? "user" : "assistant",
+            content: `${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`,
+            citations: message.citations || [],
+          })),
+        };
+        renderer.update({ state });
+      } else {
+        for (const message of remoteMessages) {
+          if (message.role !== "human" && message.role !== "system") continue;
+          const key = `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`;
+          addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, "assistant", [], key);
+        }
       }
       markPerformance("conversation_restored", { requestId: lastRequestId });
+      setHealth("READY", "", { statusAction: undefined });
       flushPerformance();
     } catch {
+      if (includeHistory) {
+        markPerformance("conversation_restore_failed", { requestId: lastRequestId });
+        setHealth("DEGRADED", "We couldn’t restore your previous conversation, but you can start a new one.", { statusAction: "new_conversation" });
+        addMessage("We couldn’t restore your previous conversation, but you can start a new one.", "assistant");
+      }
       // Polling is best-effort; the visitor can continue using the assistant.
     }
   }
@@ -319,13 +413,20 @@ type FrontDeskWiseWindow = Window & {
   }
 
   async function loadConfig(): Promise<void> {
-    const pendingConfig = bootstrap?.configPromise ? await bootstrap.configPromise : null;
-    const payload = bootstrap?.config
-      ? { agent: bootstrap.config as Partial<AgentConfig> }
-      : pendingConfig
-        ? { agent: pendingConfig as Partial<AgentConfig> }
-        : await api<WidgetConfigResponse>(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`, { cache: "default" });
-    const agent: Partial<AgentConfig> = payload.agent || {};
+    setHealth("LOADING", "Connecting to the front desk…");
+    let agent: Partial<AgentConfig> = {};
+    let configFailed = Boolean(bootstrap?.configError);
+    try {
+      const pendingConfig = bootstrap?.configPromise ? await bootstrap.configPromise : null;
+      const payload = bootstrap?.config && !bootstrap.configError
+        ? { agent: bootstrap.config as Partial<AgentConfig> }
+        : pendingConfig
+          ? { agent: pendingConfig as Partial<AgentConfig> }
+          : await api<WidgetConfigResponse>(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`, { cache: "default" });
+      agent = payload.agent || {};
+    } catch {
+      configFailed = true;
+    }
     config = {
       assistantName: agent.assistantName || "AI front desk",
       welcomeMessage: agent.welcomeMessage || "Hi! How can I help?",
@@ -345,6 +446,7 @@ type FrontDeskWiseWindow = Window & {
       fallbackBehavior: agent.fallbackBehavior,
       humanHandoffEnabled: agent.humanHandoffEnabled,
       tone: agent.tone,
+      fallbackContacts: agent.fallbackContacts || {},
       proactiveEnabled: agent.proactiveEnabled === true,
       proactiveDelaySeconds: Number(agent.proactiveDelaySeconds || 20),
       proactiveMessage: agent.proactiveMessage || "Looking for the right service? I can help.",
@@ -352,10 +454,19 @@ type FrontDeskWiseWindow = Window & {
       proactiveBehavior: agent.proactiveBehavior === "open" ? "open" : "teaser",
       proactiveFrequency: agent.proactiveFrequency === "24h" || agent.proactiveFrequency === "visit" ? agent.proactiveFrequency : "session",
     };
+    if (bootstrap) bootstrap.configError = configFailed;
+    if (configFailed) markPerformance("bootstrap_config_failed");
+    const shouldHydrateHistory = Boolean(conversationId && !state.messages.length);
     renderer.update({ config, state: { quickActions: state.quickActions.length ? state.quickActions : config.widgetQuickActions } });
     if (!state.messages.length) addMessage(config.welcomeMessage, "assistant");
+    updateState({
+      healthState: configFailed ? "CONFIG_ERROR" : "READY",
+      statusMessage: configFailed ? "Front desk temporarily unavailable. Please try again in a moment." : "",
+      statusContacts: config.fallbackContacts,
+      statusAction: configFailed ? "retry" : undefined,
+    });
     markPerformance("bootstrap_config_completed", { metadata: { source: bootstrap?.config ? "loader" : "shell" } });
-    if (conversationId && state.isOpen) void syncConversation();
+    if (conversationId && state.isOpen) void syncConversation(shouldHydrateHistory);
     if (!bootstrap) armProactiveEngagement(agent);
   }
 
@@ -390,32 +501,9 @@ type FrontDeskWiseWindow = Window & {
     }
   }
 
-  function handoffStatusStorageKey(): string {
-    return `frontdeskwise:${siteKey}:handoff:${visitorId}`;
-  }
-
   function hasActiveHandoff(): boolean {
-    // Handoff status is visitor-scoped for recovery, but it must not suppress
-    // proactive engagement in a new session that has no current conversation.
     if (!conversationId) return false;
-    try {
-      const status = window.localStorage.getItem(handoffStatusStorageKey());
-      return status === "HUMAN_ACTIVE" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
-    } catch {
-      return false;
-    }
-  }
-
-  function rememberHandoffStatus(status: string | undefined): void {
-    try {
-      if (status === "HUMAN_ACTIVE" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") {
-        window.localStorage.setItem(handoffStatusStorageKey(), status);
-      } else {
-        window.localStorage.removeItem(handoffStatusStorageKey());
-      }
-    } catch {
-      // Best effort.
-    }
+    return state.handoffStatus === "HUMAN_ACTIVE" || state.handoffStatus === "WAITING_FOR_STAFF" || state.handoffStatus === "HANDOFF_REQUESTED";
   }
 
   function clearProactiveEngagement(): void {
@@ -507,43 +595,99 @@ type FrontDeskWiseWindow = Window & {
     }
   }
 
-  async function ask(question: string): Promise<void> {
+  function resetConversationUi(preserveMessage?: WidgetMessage): void {
+    stopPolling();
+    handoffWaiting = false;
+    handoffDismissedKey = null;
+    if (handoffNoticeTimer !== null) {
+      window.clearTimeout(handoffNoticeTimer);
+      handoffNoticeTimer = null;
+    }
+    Object.keys(renderedRemoteMessages).forEach((key) => delete renderedRemoteMessages[key]);
+    state = {
+      ...state,
+      messages: preserveMessage ? [preserveMessage] : [],
+      quickActions: config?.widgetQuickActions || [],
+      action: null,
+      actionStep: 0,
+      actionValues: {},
+      leadCaptured: false,
+      leadVisible: false,
+      handoffStatus: "AI_ACTIVE",
+      handoffNotice: { visible: false, message: "" },
+    };
+    renderer.update({ state });
+    if (!preserveMessage && config?.welcomeMessage) addMessage(config.welcomeMessage, "assistant");
+    else persistInteractionState();
+  }
+
+  async function startNewConversation(): Promise<void> {
+    try {
+      const started = await api<{ conversationId: string; resumed?: boolean }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations`, {
+        method: "POST",
+        body: JSON.stringify({ sessionId: visitorId, newConversation: true }),
+      });
+      conversationId = started.conversationId;
+      resetConversationUi();
+      setHealth("READY", "", { statusAction: undefined });
+    } catch (error) {
+      setHealth("TEMPORARY_ERROR", errorMessage(error, "We couldn’t start a new conversation. Please try again."), { statusAction: "new_conversation", statusContacts: fallbackContacts() });
+    }
+  }
+
+  async function ask(question: string, retry: { messageId?: string; clientMessageId?: string } = {}): Promise<void> {
     if (!question) return;
     const sendStartedAt = performance.now();
+    const clientMessageId = retry.clientMessageId || window.crypto?.randomUUID?.() || `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const messageId = retry.messageId || addMessage(question, "user", [], undefined, { status: "sending", retryable: true, clientMessageId });
+    if (retry.messageId) markPerformance("message_retry", { metadata: { retryable: true } });
+    if (!online) {
+      updateMessage(messageId, { status: "failed", retryable: true });
+      setHealth("OFFLINE", "You’re offline. Your message is saved here and ready to retry when you reconnect.", { statusContacts: fallbackContacts() });
+      return;
+    }
     markPerformance("user_message_sent");
-    updateState({ quickActions: [], leadVisible: false, typing: false });
+    updateState({ quickActions: [], leadVisible: false, typing: false, statusMessage: "", statusAction: undefined });
     lastQuestion = question;
+    const softTimer = window.setTimeout(() => updateState({ typingMessage: "Still working…" }), MESSAGE_SOFT_TIMEOUT_MS);
     try {
-      if (!conversationId) {
-        const started = await api<{ conversationId: string; resumed?: boolean }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations`, { method: "POST", body: JSON.stringify({ sessionId: visitorId }) });
-        conversationId = started.conversationId;
-        if (started.resumed) {
-          const history = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
-          if (history.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
-          for (const message of history.messages || []) addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, message.role === "user" ? "user" : "assistant", message.citations, `${message.createdAt || ""}:history`);
-          renderConversationStatus(history.conversation?.status);
-        }
+      const started = await api<{ conversationId: string; resumed?: boolean }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations`, {
+        method: "POST",
+        body: JSON.stringify({ sessionId: visitorId }),
+      });
+      const conversationChanged = conversationId !== started.conversationId;
+      conversationId = started.conversationId;
+      if (conversationChanged) {
+        const pendingMessage = state.messages.find((message) => message.id === messageId);
+        resetConversationUi(pendingMessage);
       }
-      addMessage(question, "user");
+      if (started.resumed && (conversationChanged || state.messages.length <= 1)) await syncConversation(true);
+      updateMessage(messageId, { status: "sending" });
       updateState({ typing: true });
+      updateState({ typingMessage: "Assistant is thinking…", healthState: "LOADING" });
       const responseStartedAt = performance.now();
-      const answer = await api<{ answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, pageUrl: window.location.href }) });
+      const answer = await api<{ conversationId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: { status?: string; leadCaptured?: boolean; handoffNotificationStatus?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
       const responseCompletedAt = performance.now();
       markPerformance("first_assistant_content_available", {
         durationMs: Math.round(responseCompletedAt - responseStartedAt),
         requestId: lastRequestId,
         metadata: { network_round_trip_ms: Math.round(responseCompletedAt - responseStartedAt) },
       });
-      updateState({ typing: false });
-      addMessage(answer.answer, "assistant", answer.citations || []);
-      renderConversationStatus(answer.conversation?.status);
+      updateMessage(messageId, { status: "sent", retryable: false });
+      updateState({ typing: false, typingMessage: "", healthState: answer.failure ? "TEMPORARY_ERROR" : "READY", statusMessage: answer.failure ? "I’m having trouble responding right now. Please try again in a moment." : "", statusAction: answer.failure ? "retry" : undefined });
+      if (answer.conversationId && answer.conversationId !== conversationId) {
+        conversationId = answer.conversationId;
+        resetConversationUi();
+      }
+      if (answer.answer?.trim()) addMessage(answer.answer, "assistant", answer.citations || []);
+      renderConversationStatus(answer.conversation?.status, { notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
       if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
       updateState({ quickActions: answer.quickActions || [] });
       renderActionForm(answer.action);
       const leadCaptured = state.leadCaptured === true || answer.conversation?.leadCaptured === true;
       if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       if (answer.action) updateState({ leadVisible: false });
-      if (!leadCaptured && !answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
+      if (!leadCaptured && !answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && !answer.failure && config?.showLeadCapture !== false) updateState({ leadVisible: true });
       requestAnimationFrame(() => {
         const renderedAt = performance.now();
         markPerformance("full_response_rendered", {
@@ -559,10 +703,13 @@ type FrontDeskWiseWindow = Window & {
         flushPerformance();
       });
     } catch (error) {
-      updateState({ typing: false });
-      addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", "assistant");
-      markPerformance("response_error", { requestId: lastRequestId });
+      updateMessage(messageId, { status: "failed", retryable: true });
+      const offlineFailure = !navigator.onLine || (error instanceof WidgetRequestError && error.status === 0 && !error.timedOut);
+      updateState({ typing: false, typingMessage: "", healthState: offlineFailure ? "OFFLINE" : "MESSAGE_FAILED", statusMessage: offlineFailure ? "Connection lost — trying to reconnect…" : errorMessage(error, "I’m having trouble responding right now. Please try again in a moment."), statusAction: "retry", statusContacts: fallbackContacts() });
+      markPerformance("response_error", { requestId: lastRequestId, metadata: { retryable: true, timedOut: error instanceof WidgetRequestError && error.timedOut } });
       flushPerformance();
+    } finally {
+      window.clearTimeout(softTimer);
     }
   }
 
@@ -572,16 +719,20 @@ type FrontDeskWiseWindow = Window & {
     const consent = state.consentGiven === true || values.consent === "true" || values.consent === "on";
     if (consent) rememberConsent();
     delete values.consent;
-    addMessage("Submitted your details.", "user");
+    const submissionMessageId = addMessage("Submitted your details.", "user", [], undefined, { status: "sending", retryable: false });
+    updateState({ actionError: "" });
     try {
-      const answer = await api<{ answer: string; citations?: WidgetMessage["citations"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent }) });
+      const answer = await api<{ answer: string; citations?: WidgetMessage["citations"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent, pageUrl: window.location.href }) });
+      updateMessage(submissionMessageId, { status: "sent" });
       addMessage(answer.answer, "assistant", answer.citations || []);
+      updateState({ actionError: "", healthState: "READY" });
       renderConversationStatus(answer.conversation?.status);
       if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
       if (answer.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       renderActionForm(answer.action);
     } catch (error) {
-      addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
+      updateMessage(submissionMessageId, { status: "failed", retryable: false });
+      updateState({ actionError: "We couldn’t send your details. Your entries are still here — please try again.", healthState: "ACTION_FAILED" });
     } finally {
       updateState({ actionSubmitting: false });
     }
@@ -601,7 +752,8 @@ type FrontDeskWiseWindow = Window & {
       updateState({ leadCaptured: true, leadVisible: false });
       addMessage("Thanks — the team can follow up with you.", "assistant");
     } catch (error) {
-      addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
+      addMessage("We couldn’t send your details. Your entries are still here — please try again.", "assistant");
+      setHealth("ACTION_FAILED", "", { statusContacts: fallbackContacts() });
     } finally {
       updateState({ leadSubmitting: false });
     }
@@ -616,6 +768,21 @@ type FrontDeskWiseWindow = Window & {
   visitorId = getVisitorId();
   state = { ...state, consentGiven: hasRememberedConsent() };
   restoreInteractionState();
+  window.addEventListener("offline", () => {
+    online = false;
+    markPerformance("network_offline");
+    setHealth("OFFLINE", "", { connectionState: "offline", statusContacts: fallbackContacts() });
+  });
+  window.addEventListener("online", () => {
+    online = true;
+    markPerformance("network_restored");
+    if (restoredStatusTimer !== null) window.clearTimeout(restoredStatusTimer);
+    setHealth("READY", "Connected", { connectionState: "restored", statusAction: undefined, statusContacts: undefined });
+    restoredStatusTimer = window.setTimeout(() => {
+      restoredStatusTimer = null;
+      updateState({ statusMessage: "", connectionState: "online" });
+    }, 2200);
+  });
   renderer = createWidgetRenderer(mount, {
     surface: "embed",
     config: DEFAULT_CONFIG,
@@ -646,6 +813,8 @@ type FrontDeskWiseWindow = Window & {
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
     },
     onAsk: (question) => { void ask(question); },
+    onRetryConfig: () => { void loadConfig(); },
+    onRetryMessage: (message) => { void ask(message.content, { messageId: message.id, clientMessageId: message.status === "failed" ? message.clientMessageId : undefined }); },
     onActionSubmit: (values, action) => { void submitAction(values, action); },
     onActionValuesChange: (values, action) => {
       if (state.action?.id !== action.id) return;
@@ -659,6 +828,10 @@ type FrontDeskWiseWindow = Window & {
       persistInteractionState();
     },
     onLeadSubmit: (values) => { void submitLead(values); },
+    onHandoffContinue: () => {
+      showHandoffNotice(state.healthState === "HANDOFF_DEGRADED" ? "Your message has been saved for the team." : "A team member has been notified.");
+    },
+    onNewConversation: () => { void startNewConversation(); },
     onHandoffDismiss: () => {
       persistHandoffDismissal();
       hideHandoffNotice();

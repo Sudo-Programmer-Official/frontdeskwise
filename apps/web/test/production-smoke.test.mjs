@@ -211,11 +211,18 @@ test("Inbox takeover and handoff notifications keep their contracts explicit", (
   assert.match(app, /headers: \{ \.\.\.\(body \?/);
   assert.match(app, /globalLoading: false/);
   assert.match(app, /\/conversations\/\$\{conversation\.id\}\/read/);
+  assert.match(app, /const inboxPageSize = 50/);
+  assert.match(app, /class="collection-pagination"/);
+  assert.match(app, /loadInbox\(inboxPage - 1\)/);
   assert.match(app, /notification-settings/);
   assert.match(app, /Save handoff alerts/);
   assert.match(app, /Staff only/);
   assert.match(styles, /conversation-inbox-grid \.table-row-button/);
+  assert.match(styles, /\.collection-viewport/);
+  assert.match(styles, /max-height: min\(560px, calc\(100vh - 470px\)\)/);
   assert.match(styles, /-webkit-line-clamp: 2/);
+  assert.match(apiServer, /const limit = Math\.min\(100/);
+  assert.match(apiServer, /pagination: \{ page, pageSize: limit, total/);
 });
 
 test("application navigation is route-driven and refresh-safe", () => {
@@ -344,7 +351,7 @@ test("Agent Test keeps conversation loading local to the chat thread", () => {
 });
 
 test("all Agent tabs keep the Agent shell on direct URLs and refresh", () => {
-  for (const tab of ["behavior", "appearance", "quick-actions", "test", "install"]) {
+  for (const tab of ["capabilities", "behavior", "appearance", "quick-actions", "test", "install"]) {
     const pathname = `/app/british-swim-school-tampa-bay/agent/${tab}`;
     const route = parseRoute({ pathname, search: "" });
     assert.equal(routeView(route), "agent");
@@ -364,13 +371,15 @@ test("all Agent tabs keep the Agent shell on direct URLs and refresh", () => {
 });
 
 test("Agent experience exposes one stable tab strip and customer-facing test flow", () => {
-  for (const label of ["Behavior", "Appearance", "Quick actions", "Test", "Install"]) {
+  for (const label of ["Capabilities", "Behavior", "Appearance", "Quick actions", "Test", "Install"]) {
     assert.ok(app.includes(`label: "${label}"`) || app.includes(`{{ tab.label }}`) && app.includes(label), `missing Agent tab: ${label}`);
   }
   assert.match(app, /AgentExperience/);
   assert.match(app, /view === 'agent'/);
   assert.match(agent, /Test what customers will experience/);
   assert.match(agent, /Test lead captured/);
+  assert.match(agent, /What your AI front desk can do/);
+  assert.match(agent, /Where connections live/);
   assert.doesNotMatch(agent, /<h2>Capture a lead<\/h2>/);
 });
 
@@ -402,6 +411,8 @@ test("Actions uses a progressive conversion-flow builder", () => {
     "Drag the ≡ handle to reorder",
     "Delivery history",
     "Capture",
+    "Test flow",
+    "runActionTest",
   ]) {
     assert.ok(app.includes(marker), `missing Actions builder marker: ${marker}`);
   }

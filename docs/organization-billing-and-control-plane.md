@@ -34,6 +34,11 @@ Firebase user
 
 The API enforces this boundary server-side on every mutating workspace route. Trial/active/grace organizations can write; paused/cancelled or expired trials remain readable but are read-only until billing is restored. A separate ownership boundary blocks production publishing, CRM connection, booking actions, and lead capture until the business website is verified.
 
+Renewal payment failures enter `grace` and preserve the already-paid active plan
+for the grace window. A failed upgrade is different: it keeps the organization on
+the previous active plan without starting renewal grace, leaves the requested plan
+pending, and sends an upgrade-payment action email.
+
 The demo organization remains `sandbox` and does not require a Stripe subscription. Customer-specific terms belong in `organization_plan_overrides`; no customer price is hard-coded in application code.
 
 ## Database ownership
@@ -89,10 +94,22 @@ Super-admin:
 - `DELETE /api/v1/admin/organizations/:organizationId/plan-override`
 
 For an organization that already has a non-canceled Stripe subscription, a plan
-change updates that subscription's price. It does not create a second
-subscription. Downgrades are immediate in V1 with Stripe proration; existing
-businesses are retained and only future business creation is limited by the new
-entitlement.
+change updates that subscription rather than creating a second subscription.
+`organizations.plan_key` is the last successfully paid, entitlement-authoritative
+plan. A requested or Stripe-observed price does not change entitlements by itself;
+the active plan advances only after a successful active payment is reconciled from
+Stripe.
+
+Upgrades use an immediate proration invoice with `pending_if_incomplete`, so an
+incomplete or failed payment cannot grant the higher plan. Downgrades use a Stripe
+subscription schedule with no proration: the current plan and entitlements remain
+active through the current billing period, while `pending_plan_key`,
+`pending_plan_change_type`, and `pending_plan_change_at` expose the scheduled
+change. A `SUBSCRIPTION_CHANGE_SCHEDULED` lifecycle event sends the customer the
+effective date and next plan. The initial Customer Portal configuration keeps plan
+switching disabled; Portal remains available for payment methods, invoices, and
+period-end cancellation. `POST /api/v1/billing/resume` reverses a pending
+cancellation or scheduled downgrade.
 
 The initial super-admin bootstrap uses a verified Firebase identity plus the server-only `FRONTDESKWISE_SUPER_ADMIN_EMAILS` allowlist. The first successful admin request inserts that user into `super_admin_users`; subsequent authorization comes from the database record.
 

@@ -1,9 +1,9 @@
 import { marketingRoutePaths } from "../marketing.js";
 const workspaceViews = new Set([
-    "overview", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
+    "overview", "support", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set(["general", "team", "integrations", "verification", "notifications", "billing"]);
-const agentTabs = new Set(["behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
+const agentTabs = new Set(["capabilities", "behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
 function cleanPath(pathname) {
     const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
     return path || "/";
@@ -88,12 +88,16 @@ export function parseRoute(location = window.location) {
             return { kind: "platform", section: "organizations" };
         if (segments[1] === "businesses" && segments[2])
             return { kind: "platform", section: "business-detail", businessId: segments[2] };
+        if (segments[1] === "action-registry")
+            return { kind: "platform", section: "action-registry" };
         if (segments[1] === "users")
             return { kind: "platform", section: "users" };
         if (segments[1] === "demos")
             return { kind: "platform", section: "demos" };
         if (segments[1] === "messaging")
             return { kind: "platform", section: "messaging" };
+        if (segments[1] === "support")
+            return { kind: "platform", section: "support" };
         if (segments[1] === "installation-support")
             return { kind: "platform", section: "installation-support" };
         if (segments[1] === "operations")

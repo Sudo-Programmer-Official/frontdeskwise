@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { classifyPage, crawlPriority, type PageType } from "./page-classification.js";
+import { extractWebsiteActions, type WebsiteActionCandidate } from "./website-actions.js";
 
 const MAX_HTML_BYTES = 1_000_000;
 const CRAWL_TIMEOUT_MS = 8_000;
@@ -26,7 +28,7 @@ export type CrawledPage = {
   canonicalUrl: string;
   title: string;
   contentHash: string;
-  pageType: string;
+  pageType: PageType;
   lastCrawledAt: string;
   chunks: CrawlChunk[];
   httpStatus?: number | null;
@@ -37,8 +39,10 @@ export type CrawledPage = {
   renderAttempted?: boolean;
   renderSuccess?: boolean;
   renderDurationMs?: number | null;
+  renderDiagnostics?: RenderDiagnostics | null;
   crawlDepth?: number;
   discoveryParentUrl?: string | null;
+  actionCandidates?: WebsiteActionCandidate[];
 };
 
 export type CrawlRejection = {
@@ -90,6 +94,7 @@ export type CrawlAudit = {
     renderAttempted: boolean;
     renderSuccess: boolean;
     renderDurationMs: number | null;
+    renderDiagnostics?: RenderDiagnostics | null;
     extractedCharacters: number;
     discoveredLinks: string[];
     chunks: number;
@@ -115,6 +120,13 @@ export type RenderDiagnostics = {
   durationMs: number;
   failureReason?: string | null;
   httpStatus?: number | null;
+  rootSelector?: string | null;
+  initialTextCharacters?: number;
+  renderedTextCharacters?: number;
+  domBytes?: number;
+  networkSettled?: boolean;
+  timeoutStage?: string | null;
+  routeType?: string | null;
 };
 
 export type RenderedPage = {
@@ -336,16 +348,6 @@ function extractPage(html: string, url: string): { title: string; sections: Sect
   return { title, sections, links, visibleText, canonicalUrl: extractCanonicalTag(html, url) };
 }
 
-function pageType(url: string, title: string): string {
-  const value = `${url} ${title}`.toLowerCase();
-  if (/price|pricing|cost|rate/.test(value)) return "pricing";
-  if (/faq|question/.test(value)) return "faq";
-  if (/policy|cancel|terms|privacy|cookie|legal/.test(value)) return "policy";
-  if (/location|contact|hours|about/.test(value)) return "location";
-  if (/service|solution|product|feature|planner|task|reminder|recap|voice|calendar|workspace|team|offering|program|class|treatment/.test(value)) return "service";
-  return "web_page";
-}
-
 function chunkSections(sections: Section[], pageTypeValue: string, brandColors: string[] = []): CrawlChunk[] {
   const blocks = sections.map((section) => {
     const heading = section.headingPath.length ? `${section.headingPath.join(" > ")}\n` : "";
@@ -500,7 +502,7 @@ function sameSite(candidate: URL, root: URL): boolean {
 export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {}): Promise<{ pages: CrawledPage[]; audit: CrawlAudit }> {
   const initialUrl = normalizeCrawlUrl(normalisePublicUrl(websiteUrl));
   const root = new URL(initialUrl);
-  const queue: Array<{ url: string; depth: number; discoveryParentUrl: string | null }> = [{ url: initialUrl, depth: 0, discoveryParentUrl: null }];
+  const queue: Array<{ url: string; depth: number; discoveryParentUrl: string | null; priority: number }> = [{ url: initialUrl, depth: 0, discoveryParentUrl: null, priority: Number.MAX_SAFE_INTEGER }];
   const queued = new Set<string>([initialUrl]);
   const visited = new Set<string>();
   const seenCanonicalUrls = new Set<string>();
@@ -562,7 +564,8 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     if (visited.has(normalized) || queued.has(normalized)) return;
     queued.add(normalized);
     audit.acceptedInternalLinks.push(normalized);
-    queue.push({ url: normalized, depth, discoveryParentUrl });
+    queue.push({ url: normalized, depth, discoveryParentUrl, priority: crawlPriority(normalized, depth) });
+    queue.sort((left, right) => right.priority - left.priority);
   };
 
   try {
@@ -664,6 +667,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     let renderAttempted = false;
     let renderSuccess = false;
     let renderDurationMs: number | null = null;
+    let renderDiagnostics: RenderDiagnostics | null = null;
     if (next.depth === 0) {
       audit.extractedVisibleTextSize = extracted.visibleText.length;
       audit.spaIndicators = shellIndicators;
@@ -675,6 +679,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
       const renderStartedAt = Date.now();
       try {
         const rendered = await options.renderPage(responseUrl);
+        renderDiagnostics = rendered?.renderDiagnostics ?? null;
         renderDurationMs = rendered?.renderDiagnostics?.durationMs ?? Math.max(0, Date.now() - renderStartedAt);
         if (rendered?.html) {
           renderedPageUsed = true;
@@ -730,6 +735,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
       renderAttempted,
       renderSuccess,
       renderDurationMs,
+      renderDiagnostics,
       extractedCharacters: readable.length,
       discoveredLinks,
       chunks: 0,
@@ -752,8 +758,11 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     } else {
       const canonicalKey = normalizeCrawlUrl(canonicalCandidate);
       const contentHash = hash(readable);
-      const type = pageType(responseUrl, extracted.title);
-      if (!seenCanonicalUrls.has(canonicalKey) && !seenContentHashes.has(contentHash)) {
+      const type = classifyPage(responseUrl, extracted.title, readable);
+      const actionCandidates = extractWebsiteActions(html, responseUrl);
+      if (type === "cart" || type === "checkout" || type === "account") {
+        rejectRoute("low_value_page_type");
+      } else if (!seenCanonicalUrls.has(canonicalKey) && !seenContentHashes.has(contentHash)) {
         const chunks = chunkSections(extracted.sections, type, brandColors);
         seenCanonicalUrls.add(canonicalKey);
         seenContentHashes.add(contentHash);
@@ -786,8 +795,10 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
           renderAttempted,
           renderSuccess,
           renderDurationMs,
+          renderDiagnostics,
           crawlDepth: next.depth,
           discoveryParentUrl: next.discoveryParentUrl,
+          actionCandidates,
         });
       } else {
         rejectRoute(seenCanonicalUrls.has(canonicalKey) ? "duplicate_canonical" : "duplicate_content");

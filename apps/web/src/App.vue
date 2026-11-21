@@ -71,6 +71,7 @@ import AgentExperience from "./AgentExperience.vue";
 import AppFeedback, { type AppToast, type AppToastKind } from "./AppFeedback.vue";
 import MarketingPage from "./MarketingPage.vue";
 import LandingVideo from "./components/LandingVideo.vue";
+import SupportCenter, { type SupportCase as SupportCaseRecord, type SupportCaseCategory, type SupportContext } from "./components/SupportCenter.vue";
 import { getMarketingPageByPath } from "./marketing";
 import {
   demoRoute,
@@ -144,16 +145,19 @@ interface McpConnection {
 type ActionConnectorProvider = "generic_webhook" | "email" | "hubspot" | "jackrabbit" | "square" | "mindbody" | "calendly";
 
 interface InboxMessage {
+  id?: string;
   role: "user" | "assistant" | "human" | "system";
   kind?: string;
   authorName?: string | null;
   content: string;
   createdAt: string;
+  clientMessageId?: string;
+  sendStatus?: "pending" | "sent" | "failed";
 }
 
 interface InboxConversation {
   id: string;
-  status: "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED";
+  status: "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
   assignedUserId: string | null;
   handoffReason: string | null;
   unreadCount: number;
@@ -163,6 +167,13 @@ interface InboxConversation {
   lastMessage: InboxMessage | null;
   messages?: InboxMessage[];
   notes?: InboxNote[];
+}
+
+interface InboxPageSummary {
+  needsResponse: number;
+  unread: number;
+  ai: number;
+  resolved: number;
 }
 
 interface InboxNote {
@@ -265,12 +276,14 @@ type TestAnswerPayload = {
 interface ActionFlow {
   id: string;
   key: string;
+  actionType?: string;
   name: string;
   description: string;
   triggerPhrases: string[];
   triggerIntents: string[];
   captureMode: "auto" | "conversational" | "form" | "hybrid";
   fields: ActionField[];
+  optionalFields?: string[];
   steps?: Array<Record<string, unknown>>;
   completion: {
     createLead: boolean;
@@ -292,6 +305,8 @@ interface ActionFlow {
     };
   };
   enabled: boolean;
+  lifecycleStatus?: string;
+  version?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -318,6 +333,7 @@ interface KnowledgeGap {
   lastSeenAt: string;
   intent?: string | null;
   reason?: string | null;
+  variants?: string[];
 }
 
 interface OrganizationDocument {
@@ -428,6 +444,9 @@ interface AgentSaveModel {
   requireLeadConsent: boolean;
   privacyNoticeUrl: string;
   retentionDays: number;
+  fallbackPhone?: string;
+  fallbackEmail?: string;
+  fallbackContactUrl?: string;
 }
 
 interface WorkspaceStats {
@@ -476,6 +495,10 @@ type KnowledgeTab = "overview" | "sources" | "gaps" | "quality";
 type KnowledgeGapFilter = "open" | "resolved" | "ignored" | "all";
 type KnowledgeGapSort = "mostAsked" | "newest" | "highestImpact";
 type KnowledgeQualityFilter = "all" | "grounded" | "fallback" | "needsReview";
+type KnowledgeQualityRange = "7" | "30" | "all";
+type KnowledgeSourceTypeFilter = "all" | "website" | "document";
+type KnowledgeSourceStatusFilter = "all" | "ready" | "attention" | "processing";
+type KnowledgeSourceGroupKey = "website" | "documents" | "manual" | "connected";
 
 interface KnowledgeSourceRow {
   id: string;
@@ -487,6 +510,16 @@ interface KnowledgeSourceRow {
   lastRefreshed: string | null;
   websiteSource?: WorkspaceSource;
   document?: OrganizationDocument;
+}
+
+interface KnowledgeSourceGroup {
+  key: KnowledgeSourceGroupKey;
+  label: string;
+  detail: string;
+  count: number;
+  status: "ready" | "attention" | "processing";
+  statusLabel: string;
+  expandable: boolean;
 }
 
 type AgentPublishStatus = "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
@@ -501,7 +534,7 @@ interface WorkspacePayload {
   slug: string;
   status: string;
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
-  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; customToneInstructions?: string; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; proactiveBehavior?: "teaser" | "open"; proactiveFrequency?: "session" | "24h" | "visit"; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean };
+  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; customToneInstructions?: string; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; proactiveBehavior?: "teaser" | "open"; proactiveFrequency?: "session" | "24h" | "visit"; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean; fallbackContacts?: { phone?: string | null; email?: string | null; url?: string | null } };
   branding?: { colors?: string[]; source?: string };
   suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
@@ -512,6 +545,26 @@ interface WorkspacePayload {
 }
 
 type SetupStepId = "domain_verified" | "knowledge_ready" | "agent_tested" | "widget_installed" | "agent_published";
+type GuidanceTarget = "integrations" | "actions" | "knowledge" | "agent" | "test" | "overview";
+
+interface AgentCapability {
+  id: string;
+  title: string;
+  description: string;
+  ready: boolean;
+  target: GuidanceTarget;
+  actionLabel: string;
+}
+
+interface GuidanceRecommendation {
+  id: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+  target: GuidanceTarget;
+  actionLabel: string;
+  ready: boolean;
+}
 
 interface BillingPlan {
   key: string;
@@ -542,6 +595,9 @@ interface BillingSnapshot {
     checkoutSessionId: string | null;
     pendingPlanKey: string | null;
     pendingBillingInterval: string | null;
+    pendingPlanChangeType: "upgrade" | "downgrade" | null;
+    pendingPlanChangeAt: string | null;
+    stripeSubscriptionScheduleId: string | null;
     cancelAtPeriodEnd: boolean;
     lastPaymentStatus: string | null;
     activationEmailQueuedAt: string | null;
@@ -600,6 +656,8 @@ interface AdminOrganizationDetail {
       checkoutSessionId?: string | null;
       pendingPlanKey?: string | null;
       pendingBillingInterval?: string | null;
+      pendingPlanChangeType?: "upgrade" | "downgrade" | null;
+      pendingPlanChangeAt?: string | null;
       cancelAtPeriodEnd?: boolean;
       lastPaymentStatus?: string | null;
       amountCents: number | null;
@@ -644,6 +702,38 @@ interface AdminBusinessDetail {
     updatedAt: string | null;
   };
   owners: Array<{ email: string; name: string; role: string }>;
+}
+
+interface AdminActionRegistryItem {
+  id: string;
+  businessId: string;
+  businessName: string;
+  businessSlug: string;
+  websiteUrl: string;
+  actionKey: string;
+  actionType: string;
+  name: string;
+  description: string;
+  mode: string;
+  destination: { url?: string; label?: string } | null;
+  provider: string | null;
+  priority: number;
+  requiredFields: string[];
+  conditions: Array<Record<string, unknown>>;
+  safetyPolicy: string;
+  sourceUrl: string | null;
+  sourceType: string | null;
+  sourceLabel: string | null;
+  classificationReason: string | null;
+  discoveredAt: string | null;
+  origin: "discovered" | "configured";
+  lifecycleStatus: "discovered" | "needs_review" | "approved" | "active" | "disabled";
+  reviewReason: string | null;
+  evidence: Array<{ sourceUrl?: string; quote?: string; confidence?: number }>;
+  confidence: number | null;
+  enabled: boolean;
+  isPrimary: boolean;
+  updatedAt: string;
 }
 
 interface AdminUser {
@@ -925,6 +1015,8 @@ let generationProgressTimer: ReturnType<typeof setInterval> | null = null;
 const demoSlug = ref("british-swim-school-tampa-bay");
 const demoAccessToken = ref(typeof window !== "undefined" ? window.localStorage.getItem("frontdeskwiseDemoAccessToken") ?? "" : "");
 const publicDemoMode = ref(false);
+const supportViewMode = ref(typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("support_view") === "1" : false);
+const supportViewCaseId = ref(typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("support_case") ?? "" : "");
 const firebaseToken = ref("");
 const authSnapshot = ref<AuthSnapshot | null>(null);
 const authModalOpen = ref(false);
@@ -983,6 +1075,9 @@ const requireLeadConsent = ref(false);
 const privacyNoticeUrl = ref("");
 const retentionDays = ref(90);
 const showAiDisclosure = ref(true);
+const fallbackPhone = ref("");
+const fallbackEmail = ref("");
+const fallbackContactUrl = ref("");
 const savedMessage = ref("");
 const conversationId = ref("");
 const testQuestion = ref("");
@@ -1037,10 +1132,29 @@ const knowledgeGaps = ref<KnowledgeGap[]>([]);
 const retrievalDiagnostics = ref<RetrievalDiagnostic[]>([]);
 const knowledgeTab = ref<KnowledgeTab>("overview");
 const knowledgeGapFilter = ref<KnowledgeGapFilter>("open");
-const knowledgeGapSort = ref<KnowledgeGapSort>("mostAsked");
+const knowledgeGapSort = ref<KnowledgeGapSort>("highestImpact");
+const knowledgeGapSearch = ref("");
+const knowledgeGapIntentFilter = ref("all");
+const knowledgeGapFrequencyFilter = ref("all");
+const knowledgeGapRange = ref<KnowledgeQualityRange>("30");
+const knowledgeGapPage = ref(1);
+const knowledgeSourceSearch = ref("");
+const knowledgeSourceTypeFilter = ref<KnowledgeSourceTypeFilter>("all");
+const knowledgeSourceStatusFilter = ref<KnowledgeSourceStatusFilter>("all");
+const knowledgeSourcePage = ref(1);
+const knowledgeSourceGroupOpen = ref<KnowledgeSourceGroupKey | null>(null);
 const knowledgeQualityFilter = ref<KnowledgeQualityFilter>("all");
+const knowledgeQualityRange = ref<KnowledgeQualityRange>("30");
+const knowledgeQualitySearch = ref("");
+const knowledgeQualityPage = ref(1);
+const knowledgeQualityTotal = ref(0);
+const knowledgeQualityHasNext = ref(false);
+const knowledgeQualityHasPrevious = ref(false);
+const knowledgeQualityLoading = ref(false);
+let knowledgeQualitySearchTimer: number | null = null;
 const answerGapDrawerOpen = ref(false);
 const selectedKnowledgeGap = ref<KnowledgeGap | null>(null);
+const knowledgeGapMenuOpen = ref<string | null>(null);
 const knowledgeError = ref("");
 const knowledgeLoading = ref(false);
 const answerDrafts = ref<Record<string, string>>({});
@@ -1139,14 +1253,36 @@ const installationSupportSummary = ref({ new: 0, inProgress: 0, resolved: 0 });
 const installationSupportLoading = ref(false);
 const installationSupportError = ref("");
 const installationSupportMessage = ref("");
+const adminSupportCases = ref<SupportCaseRecord[]>([]);
+const adminSupportAssignees = ref<InstallationSupportAssignee[]>([]);
+const adminSupportSummary = ref({ open: 0, inProgress: 0, resolved: 0 });
+const adminSupportLoading = ref(false);
+const adminSupportError = ref("");
+const adminSupportMessage = ref("");
 const installationSupportOwnerLoading = ref(false);
 const installationSupportOwnerError = ref("");
 const installationSupportOwnerMessage = ref("");
 const openSupportRequest = ref(0);
+const supportCases = ref<SupportCaseRecord[]>([]);
+const supportContext = ref<SupportContext | null>(null);
+const supportLoading = ref(false);
+const supportError = ref("");
+const supportSubmitting = ref(false);
+const supportSubmitError = ref("");
+const supportSubmitMessage = ref("");
+const supportOpenReportRequest = ref(0);
+const supportSourcePage = ref("Support");
+const supportCategory = ref<SupportCaseCategory>("general");
+const supportProvider = ref("");
+const supportConnectionId = ref("");
 const adminOrganizationDetail = ref<AdminOrganizationDetail | null>(null);
 const adminOrganizationDetailLoading = ref(false);
 const adminBusinessDetail = ref<AdminBusinessDetail | null>(null);
 const adminBusinessDetailLoading = ref(false);
+const adminActionRegistry = ref<AdminActionRegistryItem[]>([]);
+const adminActionRegistryLoading = ref(false);
+const adminActionRegistryError = ref("");
+const adminActionRegistryMessage = ref("");
 const adminBillingMessage = ref("");
 const adminOverridePlanKey = ref("starter");
 const adminOverrideInterval = ref<"month" | "year">("month");
@@ -1193,12 +1329,24 @@ const inboxLoading = ref(false);
 const inboxError = ref("");
 const inboxStatusFilter = ref<"all" | InboxConversation["status"]>("all");
 const inboxAssignmentFilter = ref<"all" | "unassigned" | "mine" | string>("all");
+const inboxPageSize = 50;
+const inboxPage = ref(1);
+const inboxTotal = ref(0);
+const inboxHasNext = ref(false);
+const inboxHasPrevious = ref(false);
+const inboxSummary = ref<InboxPageSummary>({ needsResponse: 0, unread: 0, ai: 0, resolved: 0 });
 const selectedInboxConversation = ref<InboxConversation | null>(null);
 const inboxReply = ref("");
 const inboxNote = ref("");
 const inboxSuggestion = ref("");
 const inboxActionLoading = ref(false);
 const inboxMessage = ref("");
+const inboxThread = ref<HTMLElement | null>(null);
+const inboxComposer = ref<HTMLTextAreaElement | null>(null);
+const inboxNearBottom = ref(true);
+const inboxNewMessageCount = ref(0);
+const inboxLocalMessages = ref<Record<string, InboxMessage[]>>({});
+let inboxRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const teamMembers = ref<TeamMember[]>([]);
 const teamBusinesses = ref<Array<{ id: string; name: string; slug: string }>>([]);
 const teamLoading = ref(false);
@@ -1235,6 +1383,7 @@ const embeddingMessage = ref("");
 
 const navSections: Array<{ label?: string; items: Array<{ id: View; label: string; icon: LucideIcon }> }> = [
   { items: [{ id: "overview", label: "Overview", icon: House }] },
+  { items: [{ id: "support", label: "Help & Support", icon: Headset }] },
   { label: "Customers", items: [
     { id: "inbox", label: "Inbox", icon: Inbox },
     { id: "leads", label: "Leads", icon: UserRoundPlus },
@@ -1263,6 +1412,7 @@ const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
 ];
 
 const agentTabs: Array<{ id: AgentTab; label: string }> = [
+  { id: "capabilities", label: "Capabilities" },
   { id: "behavior", label: "Behavior" },
   { id: "knowledge", label: "Knowledge" },
   { id: "appearance", label: "Appearance" },
@@ -1274,9 +1424,11 @@ const agentTabs: Array<{ id: AgentTab; label: string }> = [
 const adminNavItems: Array<{ id: AdminSection; label: string; icon: LucideIcon }> = [
   { id: "overview", label: "Command center", icon: LayoutDashboard },
   { id: "organizations", label: "Organizations", icon: Building2 },
+  { id: "action-registry", label: "Action registry", icon: Zap },
   { id: "users", label: "Users & access", icon: UsersRound },
   { id: "demos", label: "Demo operations", icon: Sparkles },
   { id: "messaging", label: "Messaging", icon: Mail },
+  { id: "support", label: "Support cases", icon: Headset },
   { id: "installation-support", label: "Installation support", icon: Headset },
   { id: "operations", label: "System health", icon: Activity },
 ];
@@ -1316,6 +1468,9 @@ const adminTrialCount = computed(() => adminOrganizations.value.filter((organiza
 const adminPausedCount = computed(() => adminOrganizations.value.filter((organization) => organization.status === "paused" || organization.status === "cancelled").length);
 const adminFailedDemoCount = computed(() => adminDemoRequests.value.filter((item) => item.status === "failed" || item.status === "expired").length);
 const adminDisabledUserCount = computed(() => adminUsers.value.filter((user) => user.status !== "active").length);
+const adminActionRegistryEnabledCount = computed(() => adminActionRegistry.value.filter((action) => action.enabled).length);
+const adminActionRegistryReviewCount = computed(() => adminActionRegistry.value.filter((action) => !action.enabled || (action.confidence ?? 0) < 0.88).length);
+const adminActionRegistryPrimaryCount = computed(() => adminActionRegistry.value.filter((action) => action.isPrimary).length);
 
 const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== "Booked").length);
 const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
@@ -1334,16 +1489,19 @@ const availableBusinesses = computed(() => {
 });
 const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "?").toUpperCase());
 const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
-const inboxUnreadCount = computed(() => inboxConversations.value.reduce((total, conversation) => total + (conversation.unreadCount ?? 0), 0));
-const inboxNeedsResponseCount = computed(() => inboxConversations.value.filter((conversation) => conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF").length);
-const inboxAiCount = computed(() => inboxConversations.value.filter((conversation) => conversation.status === "AI_ACTIVE" || conversation.status === "AI_ASSISTED").length);
-const inboxResolvedCount = computed(() => inboxConversations.value.filter((conversation) => conversation.status === "RESOLVED").length);
+const inboxUnreadCount = computed(() => inboxSummary.value.unread);
+const inboxNeedsResponseCount = computed(() => inboxSummary.value.needsResponse);
+const inboxAiCount = computed(() => inboxSummary.value.ai);
+const inboxResolvedCount = computed(() => inboxSummary.value.resolved);
+const inboxRangeStart = computed(() => inboxTotal.value ? ((inboxPage.value - 1) * inboxPageSize) + 1 : 0);
+const inboxRangeEnd = computed(() => Math.min(inboxTotal.value, inboxPage.value * inboxPageSize));
 const readinessScore = computed(() => workspaceReadiness.value);
 const semanticSearchHealthy = computed(() => workspaceKnowledge.value?.semantic?.status === "SEMANTIC_SEARCH_HEALTHY");
 const semanticSearchLabel = computed(() => semanticSearchHealthy.value ? "Semantic search ready" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_CONFIGURATION_ERROR" ? "Embedding configuration needs attention" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_BACKLOG" ? "Embeddings processing" : "Full-text fallback active");
 const knowledgeSourcesNeedAttention = computed(() => Boolean((workspaceKnowledge.value?.pendingSources ?? 0) + (workspaceKnowledge.value?.failedSources ?? 0)));
 const knowledgeWebsiteSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "web_page"));
 const knowledgeReadyWebsiteSources = computed(() => knowledgeWebsiteSources.value.filter((source) => source.crawlStatus === "ready"));
+const knowledgeManualAnswerSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "faq"));
 const knowledgeWebsiteCoverage = computed(() => {
   const total = knowledgeWebsiteSources.value.length;
   if (!total) return { value: "—", detail: "No website pages yet" };
@@ -1380,6 +1538,47 @@ const knowledgeLastUpdated = computed(() => {
   if (!dates.length) return "—";
   return formatKnowledgeRelativeTime(new Date(Math.max(...dates)).toISOString());
 });
+const knowledgeLastSuccessfulRefresh = computed(() => {
+  const dates = knowledgeSourceRows.value
+    .filter((source) => source.status === "ready")
+    .map((source) => source.lastRefreshed ? Date.parse(source.lastRefreshed) : NaN)
+    .filter((value) => Number.isFinite(value));
+  if (!dates.length) return "—";
+  return formatKnowledgeRelativeTime(new Date(Math.max(...dates)).toISOString());
+});
+const knowledgeSourceGroups = computed<KnowledgeSourceGroup[]>(() => {
+  const summarize = (rows: KnowledgeSourceRow[]): Pick<KnowledgeSourceGroup, "status" | "statusLabel"> => {
+    if (rows.some((row) => row.status === "attention")) return { status: "attention", statusLabel: "Needs attention" };
+    if (rows.some((row) => row.status === "processing")) return { status: "processing", statusLabel: "Processing" };
+    return { status: "ready", statusLabel: rows.length ? "Ready" : "Not connected" };
+  };
+  const websiteStatus = summarize(knowledgeSourceRows.value.filter((row) => row.type === "Website"));
+  const documentStatus = summarize(knowledgeSourceRows.value.filter((row) => row.type === "Document"));
+  const connectedSystems = integrations.value.filter((integration) => integration.connectionStatus !== "disabled");
+  return [
+    { key: "website", label: "Website", detail: `${knowledgeWebsiteSources.value.length} page${knowledgeWebsiteSources.value.length === 1 ? "" : "s"}`, count: knowledgeWebsiteSources.value.length, ...websiteStatus, expandable: true },
+    { key: "documents", label: "Documents", detail: `${organizationDocuments.value.length} file${organizationDocuments.value.length === 1 ? "" : "s"}`, count: organizationDocuments.value.length, ...documentStatus, expandable: true },
+    { key: "manual", label: "Manual answers", detail: knowledgeManualAnswerSources.value.length ? `${knowledgeManualAnswerSources.value.length} answer${knowledgeManualAnswerSources.value.length === 1 ? "" : "s"}` : "No manual answers yet", count: knowledgeManualAnswerSources.value.length, status: knowledgeManualAnswerSources.value.length ? "ready" : "processing", statusLabel: knowledgeManualAnswerSources.value.length ? "Ready" : "Not connected", expandable: false },
+    { key: "connected", label: "Connected systems", detail: connectedSystems.length ? connectedSystems.map((integration) => integration.displayName || integration.provider).join(" · ") : "No systems connected", count: connectedSystems.length, status: connectedSystems.some((integration) => integration.connectionStatus === "error") ? "attention" : connectedSystems.length ? "ready" : "processing", statusLabel: connectedSystems.some((integration) => integration.connectionStatus === "error") ? "Needs attention" : connectedSystems.length ? "Connected" : "Not connected", expandable: false },
+  ];
+});
+const filteredKnowledgeSourceRows = computed(() => {
+  const search = knowledgeSourceSearch.value.trim().toLowerCase();
+  return knowledgeSourceRows.value.filter((row) => {
+    const typeMatch = knowledgeSourceTypeFilter.value === "all"
+      || (knowledgeSourceTypeFilter.value === "website" && row.type === "Website")
+      || (knowledgeSourceTypeFilter.value === "document" && row.type === "Document");
+    const statusMatch = knowledgeSourceStatusFilter.value === "all" || row.status === knowledgeSourceStatusFilter.value;
+    const searchMatch = !search || [row.title, row.detail, row.websiteSource?.url, row.document?.fileName].some((value) => value?.toLowerCase().includes(search));
+    return typeMatch && statusMatch && searchMatch;
+  });
+});
+const visibleKnowledgeSourceRows = computed(() => filteredKnowledgeSourceRows.value.slice((knowledgeSourcePage.value - 1) * 25, knowledgeSourcePage.value * 25));
+const knowledgeSourceTotal = computed(() => filteredKnowledgeSourceRows.value.length);
+const knowledgeSourceHasPrevious = computed(() => knowledgeSourcePage.value > 1);
+const knowledgeSourceHasNext = computed(() => knowledgeSourcePage.value * 25 < knowledgeSourceTotal.value);
+const knowledgeSourceRangeStart = computed(() => knowledgeSourceTotal.value ? (knowledgeSourcePage.value - 1) * 25 + 1 : 0);
+const knowledgeSourceRangeEnd = computed(() => Math.min(knowledgeSourceTotal.value, knowledgeSourcePage.value * 25));
 const knowledgeHealthLabel = computed(() => {
   if (!workspaceKnowledge.value || !knowledgeSourceRows.value.length) return "Add a website or document";
   if (knowledgeSourcesNeedAttention.value) return "Needs attention";
@@ -1393,20 +1592,37 @@ const knowledgeGapCounts = computed(() => ({
   ignored: knowledgeGaps.value.filter((gap) => gap.status === "ignored").length,
   all: knowledgeGaps.value.length,
 }));
-const visibleKnowledgeGaps = computed(() => {
-  const filtered = knowledgeGaps.value.filter((gap) => knowledgeGapFilter.value === "all" || gap.status === knowledgeGapFilter.value);
+const knowledgeGapIntentOptions = computed(() => [...new Set(knowledgeGaps.value.map((gap) => gap.intent).filter((intent): intent is string => Boolean(intent)))].sort());
+const filteredKnowledgeGaps = computed(() => {
+  const search = knowledgeGapSearch.value.trim().toLowerCase();
+  const cutoff = knowledgeGapRange.value === "all" ? null : Date.now() - Number(knowledgeGapRange.value) * 24 * 60 * 60 * 1_000;
+  const filtered = knowledgeGaps.value.filter((gap) => {
+    const statusMatch = knowledgeGapFilter.value === "all" || gap.status === knowledgeGapFilter.value;
+    const intentMatch = knowledgeGapIntentFilter.value === "all" || (gap.intent ?? "general") === knowledgeGapIntentFilter.value;
+    const frequencyMatch = knowledgeGapFrequencyFilter.value === "all"
+      || (knowledgeGapFrequencyFilter.value === "10+" && gap.occurrenceCount >= 10)
+      || (knowledgeGapFrequencyFilter.value === "3+" && gap.occurrenceCount >= 3)
+      || (knowledgeGapFrequencyFilter.value === "1" && gap.occurrenceCount === 1);
+    const dateMatch = cutoff === null || Date.parse(gap.lastSeenAt) >= cutoff;
+    const searchMatch = !search || [gap.question, gap.intent, gap.reason, ...(gap.variants ?? [])].some((value) => value?.toLowerCase().includes(search));
+    return statusMatch && intentMatch && frequencyMatch && dateMatch && searchMatch;
+  });
   return [...filtered].sort((left, right) => {
     if (knowledgeGapSort.value === "newest") return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
     if (knowledgeGapSort.value === "highestImpact") return knowledgeGapImpact(right) - knowledgeGapImpact(left) || right.occurrenceCount - left.occurrenceCount;
     return right.occurrenceCount - left.occurrenceCount || Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
   });
 });
-const visibleRetrievalDiagnostics = computed(() => retrievalDiagnostics.value.filter((diagnostic) => {
-  if (knowledgeQualityFilter.value === "grounded") return diagnostic.grounded;
-  if (knowledgeQualityFilter.value === "fallback") return !diagnostic.grounded;
-  if (knowledgeQualityFilter.value === "needsReview") return !diagnostic.grounded || diagnostic.confidenceBand === "low";
-  return true;
-}));
+const visibleKnowledgeGaps = computed(() => filteredKnowledgeGaps.value.slice((knowledgeGapPage.value - 1) * 25, knowledgeGapPage.value * 25));
+const knowledgeGapTotal = computed(() => filteredKnowledgeGaps.value.length);
+const knowledgeGapHasPrevious = computed(() => knowledgeGapPage.value > 1);
+const knowledgeGapHasNext = computed(() => knowledgeGapPage.value * 25 < knowledgeGapTotal.value);
+const knowledgeGapRangeStart = computed(() => knowledgeGapTotal.value ? (knowledgeGapPage.value - 1) * 25 + 1 : 0);
+const knowledgeGapRangeEnd = computed(() => Math.min(knowledgeGapTotal.value, knowledgeGapPage.value * 25));
+const visibleRetrievalDiagnostics = computed(() => retrievalDiagnostics.value);
+const knowledgeQualityRangeLabel = computed(() => knowledgeQualityRange.value === "all" ? "all time" : `last ${knowledgeQualityRange.value} days`);
+const knowledgeQualityRangeStart = computed(() => knowledgeQualityTotal.value ? (knowledgeQualityPage.value - 1) * 25 + 1 : 0);
+const knowledgeQualityRangeEnd = computed(() => Math.min(knowledgeQualityTotal.value, knowledgeQualityPage.value * 25));
 const knowledgeTestAction = computed(() => {
   if (knowledgeSourcesNeedAttention.value) return { label: "Fix sources first", disabled: true };
   if (knowledgeTestContext.value === "answer") return { label: "Test this answer", disabled: false };
@@ -1447,13 +1663,104 @@ const showSetupCard = computed(() => !adminSurfaceMode.value && Boolean(workspac
 const setupSteps = computed(() => workspaceStats.value?.setup.steps ?? []);
 const knowledgeSetupReady = computed(() => setupSteps.value.find((step) => step.id === "knowledge_ready")?.complete ?? false);
 const knowledgeHasOpenGaps = computed(() => (workspaceKnowledge.value?.openGaps ?? 0) > 0);
+const activeLeadDeliveryIntegration = computed(() => integrations.value.find((integration) => integration.connectionStatus === "active"
+  && ["webhook", "hubspot", "jackrabbit"].includes(integration.provider)) ?? null);
+const bookingActionReady = computed(() => actionFlows.value.some((action) => action.enabled
+  && (action.key === "book_appointment"
+    || action.completion.leadStatus === "booked"
+    || action.completion.completionMode === "booking_connector"
+    || action.steps?.some((step) => ["book", "generate_link", "redirect"].includes(String(step.type))))));
+const agentCapabilities = computed<AgentCapability[]>(() => [
+  {
+    id: "answer",
+    title: "Answer questions",
+    description: knowledgeSetupReady.value
+      ? `${workspaceKnowledge.value?.sourceCount ?? 0} source${(workspaceKnowledge.value?.sourceCount ?? 0) === 1 ? "" : "s"} are backing grounded answers.`
+      : "Review your website knowledge so the assistant can answer with confidence.",
+    ready: knowledgeSetupReady.value,
+    target: "knowledge",
+    actionLabel: knowledgeSetupReady.value ? "Review knowledge" : "Set up knowledge",
+  },
+  {
+    id: "capture",
+    title: "Capture leads",
+    description: showLeadCapture.value ? "Visitors can share their details with your team." : "Turn on lead capture when you are ready to collect demand.",
+    ready: showLeadCapture.value,
+    target: "agent",
+    actionLabel: showLeadCapture.value ? "Review behavior" : "Set up lead capture",
+  },
+  {
+    id: "handoff",
+    title: "Hand off to your team",
+    description: humanHandoffEnabled.value ? "Visitors can reach a person when AI should step aside." : "Give visitors a clear path to your team when they need help.",
+    ready: humanHandoffEnabled.value,
+    target: "agent",
+    actionLabel: humanHandoffEnabled.value ? "Review behavior" : "Enable handoff",
+  },
+  {
+    id: "lead-delivery",
+    title: "Send leads to your CRM",
+    description: activeLeadDeliveryIntegration.value
+      ? `Leads are syncing through ${activeLeadDeliveryIntegration.value.displayName}.`
+      : "Connect HubSpot, Zapier, or a webhook to send captured leads into your sales workflow.",
+    ready: Boolean(activeLeadDeliveryIntegration.value),
+    target: "integrations",
+    actionLabel: activeLeadDeliveryIntegration.value ? "Manage connection" : "Connect lead delivery",
+  },
+  {
+    id: "booking",
+    title: "Book customers",
+    description: bookingActionReady.value ? "A booking flow is ready for visitors to use." : "Create a booking or demo action so visitors can take the next step directly from chat.",
+    ready: bookingActionReady.value,
+    target: "actions",
+    actionLabel: bookingActionReady.value ? "Review booking action" : "Create booking action",
+  },
+  {
+    id: "proactive",
+    title: "Engage visitors proactively",
+    description: proactiveEnabled.value ? "Your assistant can invite high-intent visitors into a conversation." : "Invite visitors to chat when they pause, scroll, return, or show intent.",
+    ready: proactiveEnabled.value,
+    target: "agent",
+    actionLabel: proactiveEnabled.value ? "Review engagement" : "Configure engagement",
+  },
+]);
+const nextGuidance = computed<GuidanceRecommendation>(() => {
+  if (publicDemoMode.value) return {
+    id: "preview",
+    eyebrow: "Live preview",
+    title: "Your AI front desk is live ✓",
+    description: "Explore the customer experience, then create your own workspace to connect business systems.",
+    target: "overview",
+    actionLabel: "View dashboard",
+    ready: true,
+  };
+  const next = agentCapabilities.value.find((capability) => ["lead-delivery", "booking", "proactive"].includes(capability.id) && !capability.ready);
+  if (next) return {
+    id: next.id,
+    eyebrow: "Recommended next step",
+    title: next.title,
+    description: next.description,
+    target: next.target,
+    actionLabel: next.actionLabel,
+    ready: false,
+  };
+  return {
+    id: "optimized",
+    eyebrow: "Optimized",
+    title: "You’re fully optimized ✓",
+    description: "Your AI front desk is ready. It is answering, converting, and connected to the tools that run your business.",
+    target: "overview",
+    actionLabel: "View dashboard",
+    ready: true,
+  };
+});
 const nextSetupStep = computed<SetupStepId | null>(() => {
   if (!availableBusinesses.value.length) return null;
   return workspaceStats.value?.setup.nextRequiredStep ?? setupSteps.value.find((step) => !step.complete)?.id ?? null;
 });
 const setupCardContent = computed(() => {
   if (!availableBusinesses.value.length) return { eyebrow: "Get started", title: "Add your first business", description: "Add a website to create your AI front desk.", action: "Add business" };
-  if (!nextSetupStep.value) return { eyebrow: "Live", title: "Your AI front desk is live ✓", description: "Your AI front desk is ready and live. Everything is connected and published.", action: "View dashboard" };
+  if (!nextSetupStep.value) return { eyebrow: nextGuidance.value.eyebrow, title: nextGuidance.value.title, description: nextGuidance.value.description, action: nextGuidance.value.actionLabel };
   const content: Record<SetupStepId, { eyebrow: string; title: string; description: string; action: string }> = {
     domain_verified: { eyebrow: "Needs attention", title: "Verify your website", description: "Verify ownership before installing the live widget.", action: "Verify website" },
     knowledge_ready: { eyebrow: "Next step", title: "Review your knowledge", description: "Make sure your assistant has reliable information.", action: "Review knowledge" },
@@ -1511,6 +1818,9 @@ const agentModel = computed<AgentSaveModel>(() => ({
   requireLeadConsent: requireLeadConsent.value,
   privacyNoticeUrl: privacyNoticeUrl.value,
   retentionDays: retentionDays.value,
+  fallbackPhone: fallbackPhone.value,
+  fallbackEmail: fallbackEmail.value,
+  fallbackContactUrl: fallbackContactUrl.value,
 }));
 
 const agentTestModel = computed(() => ({
@@ -1521,7 +1831,7 @@ const agentTestModel = computed(() => ({
 }));
 
 function ownerHeaders(): Record<string, string> {
-  const token = firebaseToken.value || demoAccessToken.value;
+  const token = supportViewMode.value ? demoAccessToken.value : firebaseToken.value || demoAccessToken.value;
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
@@ -1639,9 +1949,11 @@ async function applyRouteState(nextRoute: AppRoute) {
     else if (nextRoute.section === "business-detail" && nextRoute.businessId) await loadAdminBusinessDetail(nextRoute.businessId, false);
     else {
       void loadAdminOrganizations();
+      void loadAdminActionRegistry();
       void loadAdminUsers();
       void loadAdminDemoRequests();
       void loadAdminInstallationSupport();
+      void loadAdminSupportCases();
       void loadAdminMessaging();
       void loadAdminHealth();
     }
@@ -1689,6 +2001,7 @@ async function applyRouteState(nextRoute: AppRoute) {
     demoSlug.value = nextSlug;
     if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
     if (needsReload) await loadBusinessWorkspace(nextSlug, isPublic);
+    if (nextRoute.view === "support") await loadSupport();
     if (nextRoute.agentTab) void loadWidgetInstall();
     if (nextRoute.agentTab === "test" && nextRoute.testQuestion) void runRoutedTestQuestion(nextRoute.testQuestion);
     else if (nextRoute.agentTab !== "test") routedTestQuestion.value = "";
@@ -1710,7 +2023,32 @@ function continueSetup() {
     openAddBusiness();
     return;
   }
-  openSetupStep(nextSetupStep.value);
+  if (nextSetupStep.value) openSetupStep(nextSetupStep.value);
+  else openGuidance(nextGuidance.value);
+}
+
+function openGuidance(recommendation: Pick<GuidanceRecommendation, "target">) {
+  if (recommendation.target === "integrations") {
+    openSettingsTab("integrations");
+    return;
+  }
+  if (recommendation.target === "actions") {
+    navigateToWorkspaceView("actions");
+    return;
+  }
+  if (recommendation.target === "knowledge") {
+    navigateToWorkspaceView("knowledge");
+    return;
+  }
+  if (recommendation.target === "overview") {
+    navigateToWorkspaceView("overview");
+    return;
+  }
+  selectAgentTab(recommendation.target === "test" ? "test" : "behavior");
+}
+
+function openCapabilityAction(target: GuidanceTarget) {
+  openGuidance({ target });
 }
 
 function openSetupStep(step: SetupStepId | null) {
@@ -1755,6 +2093,15 @@ function openAgentTest(question?: string) {
   commitRoute(nextRoute);
 }
 
+function runActionTest(action: ActionFlow) {
+  if (!action.enabled) {
+    actionsMessage.value = "Enable this action before testing it.";
+    return;
+  }
+  resetAgentConversation();
+  openAgentTest(action.triggerPhrases.find((phrase) => phrase.trim()) || action.name);
+}
+
 function reviewKnowledgeGaps() {
   knowledgeTab.value = "gaps";
   knowledgeGapFilter.value = "open";
@@ -1763,6 +2110,7 @@ function reviewKnowledgeGaps() {
 }
 
 function openKnowledgeAnswer(gap: KnowledgeGap) {
+  knowledgeGapMenuOpen.value = null;
   selectedKnowledgeGap.value = gap;
   if (answerDrafts.value[gap.question] === undefined) answerDrafts.value[gap.question] = gap.approvedAnswer ?? "";
   knowledgeAnswerError.value = "";
@@ -1777,6 +2125,30 @@ function closeKnowledgeAnswer() {
   selectedKnowledgeGap.value = null;
   knowledgeAnswerError.value = "";
   knowledgeAnswerFailedGap.value = null;
+}
+
+function toggleKnowledgeGapMenu(question: string) {
+  knowledgeGapMenuOpen.value = knowledgeGapMenuOpen.value === question ? null : question;
+}
+
+function viewKnowledgeGapConversation() {
+  knowledgeGapMenuOpen.value = null;
+  view.value = "inbox";
+}
+
+function viewKnowledgeGapRetrieval(gap: KnowledgeGap) {
+  knowledgeGapMenuOpen.value = null;
+  knowledgeTab.value = "quality";
+  knowledgeQualitySearch.value = gap.question;
+  knowledgeQualityRange.value = "all";
+  applyKnowledgeQualityFilters();
+}
+
+function toggleKnowledgeSourceGroup(key: KnowledgeSourceGroupKey) {
+  knowledgeSourceGroupOpen.value = knowledgeSourceGroupOpen.value === key ? null : key;
+  if (key === "website") knowledgeSourceTypeFilter.value = "website";
+  if (key === "documents") knowledgeSourceTypeFilter.value = "document";
+  knowledgeSourcePage.value = 1;
 }
 
 async function refreshWebsiteKnowledge() {
@@ -1816,8 +2188,22 @@ function openHelpAndSupport() {
   sidebarAccountMenuOpen.value = false;
   profileMenuOpen.value = false;
   notificationMenuOpen.value = false;
-  selectAgentTab("install");
-  openSupportRequest.value += 1;
+  supportSourcePage.value = pageTitle.value;
+  supportCategory.value = "general";
+  supportProvider.value = "";
+  supportConnectionId.value = "";
+  navigateToWorkspaceView("support");
+}
+
+function openSupportReport(category: SupportCaseCategory = "general", provider = "", connectionId = "") {
+  supportSourcePage.value = pageTitle.value;
+  supportCategory.value = category;
+  supportProvider.value = provider;
+  supportConnectionId.value = connectionId;
+  supportSubmitError.value = "";
+  supportSubmitMessage.value = "";
+  supportOpenReportRequest.value += 1;
+  if (view.value !== "support") navigateToWorkspaceView("support");
 }
 
 function isProtectedRoute(candidate: AppRoute = route.value): boolean {
@@ -2147,6 +2533,9 @@ function closeInboxConversation() {
   selectedInboxConversation.value = null;
   inboxReply.value = "";
   inboxNote.value = "";
+  inboxLocalMessages.value = {};
+  inboxNewMessageCount.value = 0;
+  inboxNearBottom.value = true;
 }
 
 function requireAccountForPublish() {
@@ -2188,11 +2577,24 @@ function clearWorkspaceState() {
   privacyNoticeUrl.value = "";
   retentionDays.value = 90;
   showAiDisclosure.value = true;
+  fallbackPhone.value = "";
+  fallbackEmail.value = "";
+  fallbackContactUrl.value = "";
   workspaceStats.value = null;
   workspaceKnowledge.value = null;
   workspaceReadiness.value = 0;
+  supportCases.value = [];
+  supportContext.value = null;
+  supportError.value = "";
+  supportSubmitError.value = "";
+  supportSubmitMessage.value = "";
   leads.value = [];
   inboxConversations.value = [];
+  inboxPage.value = 1;
+  inboxTotal.value = 0;
+  inboxHasNext.value = false;
+  inboxHasPrevious.value = false;
+  inboxSummary.value = { needsResponse: 0, unread: 0, ai: 0, resolved: 0 };
   selectedInboxConversation.value = null;
   inboxReply.value = "";
   inboxNote.value = "";
@@ -2215,9 +2617,26 @@ function clearWorkspaceState() {
   retrievalDiagnostics.value = [];
   knowledgeTab.value = "overview";
   knowledgeGapFilter.value = "open";
-  knowledgeGapSort.value = "mostAsked";
+  knowledgeGapSort.value = "highestImpact";
+  knowledgeGapSearch.value = "";
+  knowledgeGapIntentFilter.value = "all";
+  knowledgeGapFrequencyFilter.value = "all";
+  knowledgeGapRange.value = "30";
+  knowledgeGapPage.value = 1;
+  knowledgeSourceSearch.value = "";
+  knowledgeSourceTypeFilter.value = "all";
+  knowledgeSourceStatusFilter.value = "all";
+  knowledgeSourcePage.value = 1;
+  knowledgeSourceGroupOpen.value = null;
   knowledgeQualityFilter.value = "all";
+  knowledgeQualityRange.value = "30";
+  knowledgeQualitySearch.value = "";
+  knowledgeQualityPage.value = 1;
+  knowledgeQualityTotal.value = 0;
+  knowledgeQualityHasNext.value = false;
+  knowledgeQualityHasPrevious.value = false;
   knowledgeMoreOpen.value = false;
+  knowledgeGapMenuOpen.value = null;
   answerGapDrawerOpen.value = false;
   selectedKnowledgeGap.value = null;
   organizationDocuments.value = [];
@@ -2295,6 +2714,9 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   privacyNoticeUrl.value = payload.agent?.privacyNoticeUrl ?? "";
   retentionDays.value = payload.agent?.retentionDays ?? 90;
   showAiDisclosure.value = payload.agent?.showAiDisclosure ?? true;
+  fallbackPhone.value = payload.agent?.fallbackContacts?.phone ?? "";
+  fallbackEmail.value = payload.agent?.fallbackContacts?.email ?? "";
+  fallbackContactUrl.value = payload.agent?.fallbackContacts?.url ?? "";
   suggestedQuestions.value = payload.suggestedQuestions ?? [];
   ownershipVerification.value = payload.ownership ?? null;
   agentPublishing.value = payload.publishing ?? {
@@ -2321,7 +2743,7 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
     if (!response.ok) throw new Error(payload.error ?? "Could not load this workspace.");
     applyWorkspacePayload(payload);
     if (!publicOnly) {
-      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadMcpConnections(), loadDocuments(), loadOwnershipVerification(), loadNotifications()]);
+      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadMcpConnections(), loadActions(), loadDocuments(), loadOwnershipVerification(), loadNotifications()]);
     }
   } catch (error) {
     workspaceError.value = error instanceof Error ? error.message : "Could not load this workspace.";
@@ -2428,6 +2850,7 @@ async function settleAuthenticatedSession(returnTo?: string): Promise<void> {
     } else await reconcileBillingReturn();
   }
   if (isSuperAdmin.value && (isPlatformRoute() || !hasBusiness)) await loadAdminOrganizations();
+  if (supportViewMode.value && demoAccessToken.value && hasBusiness === false) return;
   if (isSuperAdmin.value && !hasBusiness) {
     navigateToAdminSection("overview");
     return;
@@ -2643,6 +3066,8 @@ async function consumeDemoLink() {
   if (typeof window === "undefined") return;
   const token = new URLSearchParams(window.location.search).get("demo");
   if (!token) return;
+  supportViewMode.value = new URLSearchParams(window.location.search).get("support_view") === "1";
+  supportViewCaseId.value = new URLSearchParams(window.location.search).get("support_case") ?? "";
   try {
     const response = await trackedFetch(apiUrl("/api/v1/demo-access/exchange"), {
       method: "POST",
@@ -2663,34 +3088,104 @@ async function consumeDemoLink() {
   }
 }
 
+async function openAdminSupportView(item: SupportCaseRecord) {
+  if (adminSupportLoading.value) return;
+  adminSupportLoading.value = true;
+  adminSupportError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/support-cases/${encodeURIComponent(item.id)}/view`), {
+      method: "POST",
+      headers: ownerHeaders(),
+    });
+    const payload = await response.json() as { error?: string; viewUrl?: string };
+    if (!response.ok || !payload.viewUrl) throw new Error(payload.error ?? "Could not open the support view.");
+    window.location.assign(payload.viewUrl);
+  } catch (error) {
+    adminSupportError.value = error instanceof Error ? error.message : "Could not open the support view.";
+    adminSupportLoading.value = false;
+  }
+}
+
+function exitSupportView() {
+  supportViewMode.value = false;
+  supportViewCaseId.value = "";
+  publicDemoMode.value = false;
+  forgetDemoAccessToken();
+  navigateToAdminSection("support");
+}
+
 async function loadKnowledge() {
   if ((!firebaseToken.value && !demoAccessToken.value) || knowledgeLoading.value) return;
   if (authSnapshot.value && !selectedBusinessId()) {
     knowledgeGaps.value = [];
     retrievalDiagnostics.value = [];
+    knowledgeQualityTotal.value = 0;
     return;
   }
   knowledgeLoading.value = true;
   knowledgeError.value = "";
   try {
-    const [gapsResponse, diagnosticsResponse] = await Promise.all([
-      trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps`), { headers: ownerHeaders() }),
-      trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/retrieval-diagnostics`), { headers: ownerHeaders() }),
-    ]);
-    if (!gapsResponse.ok || !diagnosticsResponse.ok) throw new Error("We could not load the knowledge review. Refresh the page and try again.");
+    const gapsResponse = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps`), { headers: ownerHeaders() });
+    if (!gapsResponse.ok) throw new Error("We could not load the knowledge review. Refresh the page and try again.");
     const gapsPayload = await gapsResponse.json() as { gaps?: KnowledgeGap[] };
-    const diagnosticsPayload = await diagnosticsResponse.json() as { diagnostics?: RetrievalDiagnostic[] };
     knowledgeGaps.value = gapsPayload.gaps ?? [];
-    retrievalDiagnostics.value = diagnosticsPayload.diagnostics ?? [];
     for (const gap of knowledgeGaps.value) {
       if (answerDrafts.value[gap.question] === undefined) answerDrafts.value[gap.question] = gap.approvedAnswer ?? "";
       if (!gap.answerMode) gap.answerMode = "knowledge";
     }
+    await loadKnowledgeQuality();
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : "Could not load knowledge review.";
   } finally {
     knowledgeLoading.value = false;
   }
+}
+
+async function loadKnowledgeQuality() {
+  if ((!firebaseToken.value && !demoAccessToken.value) || knowledgeQualityLoading.value) return;
+  if (authSnapshot.value && !selectedBusinessId()) {
+    retrievalDiagnostics.value = [];
+    knowledgeQualityTotal.value = 0;
+    return;
+  }
+  knowledgeQualityLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      page: String(knowledgeQualityPage.value),
+      limit: "25",
+      window: knowledgeQualityRange.value,
+    });
+    if (knowledgeQualitySearch.value.trim()) params.set("q", knowledgeQualitySearch.value.trim());
+    if (knowledgeQualityFilter.value !== "all") params.set("status", knowledgeQualityFilter.value === "needsReview" ? "needs_review" : knowledgeQualityFilter.value);
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/retrieval-diagnostics?${params.toString()}`), { headers: ownerHeaders() });
+    const payload = await response.json() as { diagnostics?: RetrievalDiagnostic[]; pagination?: { page?: number; total?: number; hasNext?: boolean; hasPrevious?: boolean }; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load answer quality checks.");
+    retrievalDiagnostics.value = payload.diagnostics ?? [];
+    knowledgeQualityTotal.value = payload.pagination?.total ?? retrievalDiagnostics.value.length;
+    knowledgeQualityPage.value = payload.pagination?.page ?? knowledgeQualityPage.value;
+    knowledgeQualityHasNext.value = Boolean(payload.pagination?.hasNext);
+    knowledgeQualityHasPrevious.value = Boolean(payload.pagination?.hasPrevious);
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : "Could not load answer quality checks.";
+  } finally {
+    knowledgeQualityLoading.value = false;
+  }
+}
+
+function applyKnowledgeQualityFilters() {
+  knowledgeQualityPage.value = 1;
+  void loadKnowledgeQuality();
+}
+
+function queueKnowledgeQualitySearch() {
+  if (knowledgeQualitySearchTimer !== null) window.clearTimeout(knowledgeQualitySearchTimer);
+  knowledgeQualitySearchTimer = window.setTimeout(applyKnowledgeQualityFilters, 320);
+}
+
+function changeKnowledgeQualityPage(page: number) {
+  if (page < 1 || (page > knowledgeQualityPage.value && !knowledgeQualityHasNext.value) || (page < knowledgeQualityPage.value && !knowledgeQualityHasPrevious.value)) return;
+  knowledgeQualityPage.value = page;
+  void loadKnowledgeQuality();
 }
 
 function selectedBusinessId(): string | null {
@@ -2858,7 +3353,7 @@ async function resolveKnowledgeGap(gap: KnowledgeGap) {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/resolve`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
-      body: JSON.stringify({ question: gap.question, approvedAnswer, answerMode: gap.answerMode || "knowledge" }),
+      body: JSON.stringify({ question: gap.question, questions: gap.variants ?? [], approvedAnswer, answerMode: gap.answerMode || "knowledge" }),
     });
     const payload = await response.json() as { gap?: KnowledgeGap; indexingStatus?: "queued" | "ready"; error?: string };
     if (!response.ok || !payload.gap) throw new Error(payload.error ?? "Could not save that answer.");
@@ -2891,7 +3386,7 @@ async function ignoreKnowledgeGap(gap: KnowledgeGap) {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/ignore`), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
-      body: JSON.stringify({ question: gap.question }),
+      body: JSON.stringify({ question: gap.question, questions: gap.variants ?? [] }),
     });
     const payload = await response.json() as { gap?: KnowledgeGap; error?: string };
     if (!response.ok || !payload.gap) throw new Error(payload.error ?? "Could not ignore that answer gap.");
@@ -2942,6 +3437,89 @@ async function loadWidgetInstall() {
   const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
   if (!response.ok) return;
   widgetInstall.value = await response.json() as WidgetInstall;
+}
+
+function setLocalSupportContext() {
+  const failedSources = (workspaceKnowledge.value?.sources ?? []).filter((source) => source.crawlStatus === "failed");
+  const pendingSources = (workspaceKnowledge.value?.sources ?? []).filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling");
+  const refreshDates = (workspaceKnowledge.value?.sources ?? []).map((source) => Date.parse(source.lastCrawledAt)).filter((value) => Number.isFinite(value));
+  supportContext.value = {
+    diagnostics: {
+      business: businessName.value,
+      businessId: selectedBusinessId(),
+      page: supportSourcePage.value,
+      source: websiteUrl.value,
+      lastRefresh: refreshDates.length ? new Date(Math.max(...refreshDates)).toISOString() : null,
+      crawlerStatus: failedSources.length ? "render_failed" : pendingSources.length ? "refreshing" : "ready",
+      failedSources: failedSources.slice(0, 5).map((source) => ({ url: source.url })),
+      pendingSourceCount: pendingSources.length,
+      widget: { detected: Boolean(widgetInstall.value?.verification.loadCount), lastLoadedAt: widgetInstall.value?.verification.lastLoadedAt ?? null, loadCount: widgetInstall.value?.verification.loadCount ?? 0 },
+    },
+    systemStatus: {
+      api: "operational",
+      knowledge: failedSources.length ? "needs_attention" : "healthy",
+      widget: widgetInstall.value?.verification.loadCount ? "detected" : "not_detected",
+      integrations: "available_on_request",
+    },
+  };
+}
+
+async function loadSupport() {
+  supportLoading.value = true;
+  supportError.value = "";
+  setLocalSupportContext();
+  if (!demoSlug.value || (publicDemoMode.value && !firebaseToken.value && !demoAccessToken.value)) {
+    supportCases.value = [];
+    supportLoading.value = false;
+    return;
+  }
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${encodeURIComponent(demoSlug.value)}/support?page=${encodeURIComponent(supportSourcePage.value)}`), { headers: ownerHeaders() });
+    const payload = await response.json() as { context?: SupportContext; cases?: SupportCaseRecord[]; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load support status.");
+    supportContext.value = payload.context ?? supportContext.value;
+    supportCases.value = payload.cases ?? [];
+  } catch (error) {
+    supportError.value = error instanceof Error ? error.message : "Could not load support status.";
+  } finally {
+    supportLoading.value = false;
+  }
+}
+
+async function submitSupportCase(payload: {
+  subject: string;
+  category: SupportCaseCategory;
+  provider: string;
+  connectionId: string;
+  description: string;
+  severity: "normal" | "urgent";
+  sourcePage: string;
+  sourceUrl: string;
+  diagnostics: Record<string, unknown>;
+}) {
+  if (!authSnapshot.value) {
+    openAuth("signin");
+    return;
+  }
+  supportSubmitting.value = true;
+  supportSubmitError.value = "";
+  supportSubmitMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${encodeURIComponent(demoSlug.value)}/support/cases`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json() as { case?: SupportCaseRecord; error?: string };
+    if (!response.ok || !result.case) throw new Error(result.error ?? "Could not create the support case.");
+    supportCases.value = [result.case, ...supportCases.value];
+    supportSubmitMessage.value = `Case ${result.case.correlationId} is open. Our team has the diagnostics.`;
+    notifySuccess("Support case created. Our team has the diagnostics.", "Support case opened");
+  } catch (error) {
+    supportSubmitError.value = error instanceof Error ? error.message : "Could not create the support case.";
+  } finally {
+    supportSubmitting.value = false;
+  }
 }
 
 async function requestInstallationHelp(payload: InstallationSupportFormPayload) {
@@ -3085,24 +3663,202 @@ async function loadLeads(globalLoading = true) {
   }
 }
 
-async function loadInbox() {
+function inboxMessageKey(message: InboxMessage): string {
+  return message.id ?? `${message.role}:${message.createdAt}:${message.content}`;
+}
+
+function rememberInboxLocalMessage(conversationId: string, message: InboxMessage) {
+  const current = inboxLocalMessages.value[conversationId] ?? [];
+  const next = current.some((item) => item.id === message.id)
+    ? current.map((item) => item.id === message.id ? message : item)
+    : [...current, message];
+  inboxLocalMessages.value = { ...inboxLocalMessages.value, [conversationId]: next };
+}
+
+function forgetInboxLocalMessage(conversationId: string, temporaryId: string) {
+  const current = inboxLocalMessages.value[conversationId] ?? [];
+  const next = current.filter((message) => message.id !== temporaryId);
+  if (next.length) inboxLocalMessages.value = { ...inboxLocalMessages.value, [conversationId]: next };
+  else {
+    const remaining = { ...inboxLocalMessages.value };
+    delete remaining[conversationId];
+    inboxLocalMessages.value = remaining;
+  }
+}
+
+function mergeInboxMessages(serverMessages: InboxMessage[], localMessages: InboxMessage[] = []): InboxMessage[] {
+  const messages: InboxMessage[] = serverMessages.map((message) => ({ ...message, sendStatus: message.sendStatus === "failed" ? "failed" : "sent" }));
+  const serverIds = new Set(messages.flatMap((message) => [message.id, message.clientMessageId].filter((value): value is string => Boolean(value))));
+  const localById = new Map(localMessages.filter((message) => message.id?.startsWith("temp_"))
+    .map((message) => [message.id as string, message] as const));
+  for (const localMessage of localById.values()) {
+    if (!localMessage.id?.startsWith("temp_")) continue;
+    if (localMessage.clientMessageId && serverIds.has(localMessage.clientMessageId)) continue;
+    messages.push({ ...localMessage });
+  }
+  return messages.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+}
+
+function reconcileInboxRows(serverRows: InboxConversation[]): InboxConversation[] {
+  return serverRows.map((serverRow) => {
+    const localRow = inboxConversations.value.find((row) => row.id === serverRow.id);
+    const localMessage = localRow?.lastMessage;
+    if (localRow && localMessage?.id?.startsWith("temp_")) {
+      return { ...serverRow, lastMessage: localMessage, lastActivityAt: localRow.lastActivityAt };
+    }
+    return serverRow;
+  });
+}
+
+function inboxStatusBucket(status: InboxConversation["status"]): keyof InboxPageSummary | null {
+  if (status === "HANDOFF_REQUESTED" || status === "WAITING_FOR_STAFF") return "needsResponse";
+  if (status === "AI_ACTIVE" || status === "AI_ASSISTED") return "ai";
+  if (status === "RESOLVED") return "resolved";
+  return null;
+}
+
+function patchInboxConversationById(conversationId: string, patch: Partial<InboxConversation>) {
+  const index = inboxConversations.value.findIndex((conversation) => conversation.id === conversationId);
+  const previous = index >= 0 ? inboxConversations.value[index] : null;
+  if (index >= 0 && previous) {
+    const next = { ...previous, ...patch };
+    inboxConversations.value = inboxConversations.value.map((conversation, itemIndex) => itemIndex === index ? next : conversation);
+    const previousBucket = inboxStatusBucket(previous.status);
+    const nextBucket = inboxStatusBucket(next.status);
+    if (previousBucket !== nextBucket) {
+      if (previousBucket) inboxSummary.value[previousBucket] = Math.max(0, inboxSummary.value[previousBucket] - 1);
+      if (nextBucket) inboxSummary.value[nextBucket] += 1;
+    }
+  }
+  if (selectedInboxConversation.value?.id === conversationId) {
+    selectedInboxConversation.value = { ...selectedInboxConversation.value, ...patch };
+  }
+}
+
+function updateInboxMessage(conversationId: string, temporaryId: string, update: (message: InboxMessage) => InboxMessage) {
+  const remembered = inboxLocalMessages.value[conversationId]?.find((message) => message.id === temporaryId);
+  if (remembered) {
+    const nextMessage = update(remembered);
+    if (nextMessage.id?.startsWith("temp_")) rememberInboxLocalMessage(conversationId, nextMessage);
+    else forgetInboxLocalMessage(conversationId, temporaryId);
+  }
+  if (selectedInboxConversation.value?.id === conversationId) {
+    const messages = selectedInboxConversation.value.messages ?? [];
+    selectedInboxConversation.value = {
+      ...selectedInboxConversation.value,
+      messages: messages.map((message) => message.id === temporaryId ? update(message) : message),
+    };
+  }
+  const row = inboxConversations.value.find((conversation) => conversation.id === conversationId);
+  if (row?.lastMessage?.id === temporaryId) {
+    inboxConversations.value = inboxConversations.value.map((conversation) => conversation.id === conversationId
+      ? { ...conversation, lastMessage: update(conversation.lastMessage as InboxMessage) }
+      : conversation);
+  }
+}
+
+function inboxThreadIsNearBottom(element = inboxThread.value): boolean {
+  if (!element) return true;
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= 120;
+}
+
+function handleInboxThreadScroll() {
+  inboxNearBottom.value = inboxThreadIsNearBottom();
+  if (inboxNearBottom.value) inboxNewMessageCount.value = 0;
+}
+
+function scrollInboxToLatest(behavior: ScrollBehavior = "smooth") {
+  void nextTick(() => {
+    const element = inboxThread.value;
+    if (!element) return;
+    element.scrollTo({ top: element.scrollHeight, behavior });
+    inboxNearBottom.value = true;
+    inboxNewMessageCount.value = 0;
+  });
+}
+
+async function refreshSelectedInboxConversation() {
+  const current = selectedInboxConversation.value;
+  if (!current) return;
+  const wasNearBottom = inboxThreadIsNearBottom();
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${current.id}`), { headers: ownerHeaders() }, { globalLoading: false });
+    const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[] };
+    if (!response.ok || !payload.conversation || selectedInboxConversation.value?.id !== current.id) return;
+    const oldMessages = current.messages ?? [];
+    const nextMessages = mergeInboxMessages(payload.conversation.messages ?? [], oldMessages);
+    const oldKeys = new Set(oldMessages.map(inboxMessageKey));
+    const optimisticClientIds = new Set(oldMessages.flatMap((message) => message.id?.startsWith("temp_") && message.clientMessageId ? [message.clientMessageId] : []));
+    const newServerMessages = (payload.conversation.messages ?? []).filter((message) => !oldKeys.has(inboxMessageKey(message)) && !(message.id && optimisticClientIds.has(message.id)));
+    selectedInboxConversation.value = {
+      ...current,
+      ...payload.conversation,
+      messages: nextMessages,
+      notes: payload.notes ?? current.notes ?? [],
+    };
+    const { messages: _messages, notes: _notes, ...conversationSummary } = payload.conversation;
+    patchInboxConversationById(current.id, conversationSummary);
+    if (newServerMessages.length) {
+      if (wasNearBottom) scrollInboxToLatest("smooth");
+      else inboxNewMessageCount.value += newServerMessages.length;
+    }
+  } catch {
+    // Background reconciliation is best-effort; the visible thread remains usable.
+  }
+}
+
+function startInboxPolling() {
+  if (inboxRefreshTimer !== null) return;
+  inboxRefreshTimer = window.setInterval(() => {
+    if (view.value !== "inbox" || inboxLoading.value) return;
+    void loadInbox(inboxPage.value, { globalLoading: false, refreshSelected: true });
+  }, 10_000);
+}
+
+function stopInboxPolling() {
+  if (inboxRefreshTimer === null) return;
+  window.clearInterval(inboxRefreshTimer);
+  inboxRefreshTimer = null;
+}
+
+async function loadInbox(page = inboxPage.value, options: { globalLoading?: boolean; refreshSelected?: boolean } = {}) {
   if (!firebaseToken.value && !demoAccessToken.value) return;
   inboxLoading.value = true;
   inboxError.value = "";
+  inboxPage.value = Math.max(1, page);
   try {
     const params = new URLSearchParams();
+    params.set("page", String(inboxPage.value));
+    params.set("limit", String(inboxPageSize));
     if (inboxStatusFilter.value !== "all") params.set("status", inboxStatusFilter.value);
     if (inboxAssignmentFilter.value === "mine" && authSnapshot.value?.user.id) params.set("assignedTo", authSnapshot.value.user.id);
     else if (inboxAssignmentFilter.value === "unassigned") params.set("assignedTo", "unassigned");
     else if (inboxAssignmentFilter.value !== "all") params.set("assignedTo", inboxAssignmentFilter.value);
     const query = params.toString() ? `?${params.toString()}` : "";
-    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/inbox${query}`), { headers: ownerHeaders() });
-    const payload = await response.json() as { error?: string; conversations?: InboxConversation[] };
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/inbox${query}`), { headers: ownerHeaders() }, { globalLoading: options.globalLoading ?? true });
+    const payload = await response.json() as { error?: string; conversations?: InboxConversation[]; pagination?: { page?: number; pageSize?: number; total?: number; hasNext?: boolean; hasPrevious?: boolean }; summary?: InboxPageSummary };
     if (!response.ok) throw new Error(payload.error ?? "Could not load the inbox.");
-    inboxConversations.value = payload.conversations ?? [];
+    inboxConversations.value = reconcileInboxRows(payload.conversations ?? []);
+    inboxPage.value = payload.pagination?.page ?? inboxPage.value;
+    inboxTotal.value = payload.pagination?.total ?? inboxConversations.value.length;
+    inboxHasNext.value = Boolean(payload.pagination?.hasNext);
+    inboxHasPrevious.value = Boolean(payload.pagination?.hasPrevious);
+    inboxSummary.value = payload.summary ?? {
+      needsResponse: inboxConversations.value.filter((conversation) => conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF").length,
+      unread: inboxConversations.value.reduce((total, conversation) => total + (conversation.unreadCount ?? 0), 0),
+      ai: inboxConversations.value.filter((conversation) => conversation.status === "AI_ACTIVE" || conversation.status === "AI_ASSISTED").length,
+      resolved: inboxConversations.value.filter((conversation) => conversation.status === "RESOLVED").length,
+    };
     if (selectedInboxConversation.value) {
       const current = inboxConversations.value.find((conversation) => conversation.id === selectedInboxConversation.value?.id);
-      if (current) await openInboxConversation(current);
+      if (current) {
+        selectedInboxConversation.value = { ...selectedInboxConversation.value, ...current };
+        if (options.refreshSelected) await refreshSelectedInboxConversation();
+      }
+      else {
+        selectedInboxConversation.value = null;
+        inboxReply.value = "";
+      }
     } else {
       const requestedConversationId = new URLSearchParams(window.location.search).get("conversation");
       const requested = requestedConversationId ? inboxConversations.value.find((conversation) => conversation.id === requestedConversationId) : null;
@@ -3226,28 +3982,44 @@ async function markNotificationRead(notification: StaffNotification) {
 }
 
 async function openInboxConversation(conversation: InboxConversation) {
+  const previousConversation = selectedInboxConversation.value;
+  const isSameConversation = previousConversation?.id === conversation.id;
   try {
-    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}`), { headers: ownerHeaders() }, { globalLoading: false });
     const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[] };
     if (!response.ok || !payload.conversation) throw new Error(payload.error ?? "Could not open this conversation.");
-    selectedInboxConversation.value = { ...payload.conversation, notes: payload.notes ?? [] };
+    selectedInboxConversation.value = {
+      ...payload.conversation,
+      messages: mergeInboxMessages(payload.conversation.messages ?? [], [
+        ...(isSameConversation ? previousConversation?.messages ?? [] : []),
+        ...(inboxLocalMessages.value[conversation.id] ?? []),
+      ]),
+      notes: payload.notes ?? [],
+    };
+    if (!isSameConversation) {
+      inboxReply.value = "";
+      inboxNewMessageCount.value = 0;
+    }
     await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}/read`), {
       method: "POST",
       headers: ownerHeaders(),
     }, { globalLoading: false });
+    const previousUnreadCount = inboxConversations.value.find((item) => item.id === conversation.id)?.unreadCount ?? 0;
     selectedInboxConversation.value.unreadCount = 0;
+    inboxSummary.value.unread = Math.max(0, inboxSummary.value.unread - previousUnreadCount);
     const index = inboxConversations.value.findIndex((item) => item.id === conversation.id);
-    if (index >= 0) inboxConversations.value[index] = { ...inboxConversations.value[index], ...selectedInboxConversation.value, unreadCount: 0 };
+    if (index >= 0) inboxConversations.value[index] = { ...inboxConversations.value[index], ...payload.conversation, unreadCount: 0 };
+    if (!isSameConversation) scrollInboxToLatest("auto");
   } catch (error) {
     inboxError.value = error instanceof Error ? error.message : "Could not open this conversation.";
   }
 }
 
-type InboxMutationRequest = { content: string } | undefined;
+type InboxMutationRequest = { content: string; clientMessageId?: string } | undefined;
 type InboxMutationResponse = { error?: string; conversation?: InboxConversation; message?: InboxMessage; note?: InboxNote };
 
-async function inboxMutation(path: string, body?: InboxMutationRequest): Promise<void> {
-  if (inboxActionLoading.value) return;
+async function inboxMutation(path: string, body?: InboxMutationRequest): Promise<InboxMutationResponse | null> {
+  if (inboxActionLoading.value) return null;
   inboxActionLoading.value = true;
   inboxError.value = "";
   try {
@@ -3258,13 +4030,21 @@ async function inboxMutation(path: string, body?: InboxMutationRequest): Promise
     }, { globalLoading: false });
     const payload = await response.json() as InboxMutationResponse;
     if (!response.ok) throw new Error(payload.error ?? "Could not update this conversation.");
+    const conversationId = selectedInboxConversation.value?.id;
+    if (conversationId && payload.conversation) patchInboxConversationById(conversationId, payload.conversation);
+    if (conversationId && payload.note && selectedInboxConversation.value?.id === conversationId) {
+      selectedInboxConversation.value = {
+        ...selectedInboxConversation.value,
+        notes: [payload.note, ...(selectedInboxConversation.value.notes ?? [])],
+      };
+    }
     inboxMessage.value = "Inbox updated";
-    await loadInbox();
-    if (selectedInboxConversation.value) await openInboxConversation(selectedInboxConversation.value);
     window.setTimeout(() => (inboxMessage.value = ""), 2400);
+    return payload;
   } catch (error) {
     inboxError.value = "We couldn't update this conversation. Try again.";
     notifyError(error, inboxError.value);
+    return null;
   } finally {
     inboxActionLoading.value = false;
   }
@@ -3273,6 +4053,10 @@ async function inboxMutation(path: string, body?: InboxMutationRequest): Promise
 async function takeOverConversation() {
   if (!selectedInboxConversation.value) return;
   await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/takeover`);
+  if (selectedInboxConversation.value?.status === "HUMAN_ACTIVE") {
+    await nextTick();
+    inboxComposer.value?.focus();
+  }
 }
 
 async function returnConversationToAi() {
@@ -3285,16 +4069,82 @@ async function resolveConversation() {
   await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/resolve`);
 }
 
+function handleInboxComposerKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  if (inboxReply.value.trim()) void sendInboxReply();
+}
+
 async function sendInboxReply() {
-  if (!selectedInboxConversation.value || !inboxReply.value.trim()) return;
+  if (!selectedInboxConversation.value || selectedInboxConversation.value.status !== "HUMAN_ACTIVE" || !inboxReply.value.trim()) return;
   const content = inboxReply.value.trim();
-  await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/messages/human`, { content });
+  inboxReply.value = "";
+  await sendInboxMessage(content);
+}
+
+async function sendInboxMessage(content: string, existingTemporaryId?: string, existingClientMessageId?: string) {
+  const conversation = selectedInboxConversation.value;
+  if (!conversation || conversation.status !== "HUMAN_ACTIVE") return;
+  const clientMessageId = existingClientMessageId ?? crypto.randomUUID();
+  const temporaryId = existingTemporaryId ?? `temp_${clientMessageId}`;
+  const optimisticMessage: InboxMessage = {
+    id: temporaryId,
+    clientMessageId,
+    role: "human",
+    kind: "message",
+    authorName: authSnapshot.value?.user.name ?? "You",
+    content,
+    createdAt: new Date().toISOString(),
+    sendStatus: "pending",
+  };
+  if (existingTemporaryId) {
+    updateInboxMessage(conversation.id, temporaryId, () => optimisticMessage);
+  } else {
+    const messages = conversation.messages ?? [];
+    const nextConversation = { ...conversation, messages: [...messages, optimisticMessage], lastMessage: optimisticMessage, lastActivityAt: optimisticMessage.createdAt };
+    selectedInboxConversation.value = nextConversation;
+    patchInboxConversationById(conversation.id, { lastMessage: optimisticMessage, lastActivityAt: optimisticMessage.createdAt });
+  }
+  rememberInboxLocalMessage(conversation.id, optimisticMessage);
+  await nextTick();
+  scrollInboxToLatest("smooth");
+  inboxComposer.value?.focus();
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}/messages/human`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ content, clientMessageId }),
+    }, { globalLoading: false });
+    const payload = await response.json() as InboxMutationResponse;
+    if (!response.ok || !payload.message) throw new Error(payload.error ?? "Could not send this reply.");
+    const canonicalMessage: InboxMessage = { ...payload.message, id: payload.message.id ?? clientMessageId, clientMessageId, sendStatus: "sent" };
+    updateInboxMessage(conversation.id, temporaryId, () => canonicalMessage);
+    forgetInboxLocalMessage(conversation.id, temporaryId);
+    patchInboxConversationById(conversation.id, {
+      ...(payload.conversation ?? {}),
+      lastMessage: canonicalMessage,
+      lastActivityAt: canonicalMessage.createdAt,
+    });
+    inboxError.value = "";
+  } catch (error) {
+    updateInboxMessage(conversation.id, temporaryId, (message) => ({ ...message, sendStatus: "failed" }));
+    inboxError.value = "We couldn't send that reply.";
+    notifyError(error, inboxError.value);
+  } finally {
+    inboxComposer.value?.focus();
+  }
+}
+
+async function retryInboxReply(message: InboxMessage) {
+  if (!message.id?.startsWith("temp_") || message.sendStatus !== "failed") return;
+  await sendInboxMessage(message.content, message.id, message.clientMessageId ?? message.id.slice("temp_".length));
 }
 
 async function addInboxNote() {
   if (!selectedInboxConversation.value || !inboxNote.value.trim()) return;
   const content = inboxNote.value.trim();
-  await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/notes`, { content });
+  const result = await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/notes`, { content });
+  if (result?.note) inboxNote.value = "";
 }
 
 async function suggestInboxReply() {
@@ -4197,6 +5047,59 @@ async function updateAdminInstallationSupport(item: InstallationSupportRequest) 
   }
 }
 
+async function loadAdminSupportCases() {
+  if (!authSnapshot.value || adminSupportLoading.value) return;
+  adminSupportLoading.value = true;
+  adminSupportError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/support-cases?limit=500"), { headers: ownerHeaders() });
+    const payload = await response.json() as { cases?: SupportCaseRecord[]; assignees?: InstallationSupportAssignee[]; summary?: { open?: number; inProgress?: number; resolved?: number }; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load support cases.");
+    adminSupportCases.value = payload.cases ?? [];
+    adminSupportAssignees.value = payload.assignees ?? [];
+    adminSupportSummary.value = { open: payload.summary?.open ?? 0, inProgress: payload.summary?.inProgress ?? 0, resolved: payload.summary?.resolved ?? 0 };
+  } catch (error) {
+    adminSupportError.value = error instanceof Error ? error.message : "Could not load support cases.";
+  } finally {
+    adminSupportLoading.value = false;
+  }
+}
+
+async function updateAdminSupportCase(item: SupportCaseRecord) {
+  if (adminSupportLoading.value) return;
+  adminSupportLoading.value = true;
+  adminSupportError.value = "";
+  adminSupportMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/support-cases/${encodeURIComponent(item.id)}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ status: item.status, assignedUserId: item.assignedUserId }),
+    });
+    const payload = await response.json() as { case?: SupportCaseRecord; error?: string };
+    if (!response.ok || !payload.case) throw new Error(payload.error ?? "Could not update support case.");
+    const index = adminSupportCases.value.findIndex((candidate) => candidate.id === item.id);
+    if (index >= 0) adminSupportCases.value.splice(index, 1, payload.case);
+    adminSupportMessage.value = "Support case updated.";
+    const summary = adminSupportCases.value.reduce((result, candidate) => {
+      if (candidate.status === "open") result.open += 1;
+      else if (candidate.status === "in_progress") result.inProgress += 1;
+      else result.resolved += 1;
+      return result;
+    }, { open: 0, inProgress: 0, resolved: 0 });
+    adminSupportSummary.value = summary;
+  } catch (error) {
+    adminSupportError.value = error instanceof Error ? error.message : "Could not update support case.";
+    await loadAdminSupportCases();
+  } finally {
+    adminSupportLoading.value = false;
+  }
+}
+
+function openAdminSupportBusiness(item: SupportCaseRecord) {
+  navigateToAdminSection("business-detail", { businessId: item.businessId });
+}
+
 async function loadAdminOrganizations() {
   if (!authSnapshot.value || adminLoading.value) return;
   adminLoading.value = true;
@@ -4258,6 +5161,78 @@ async function loadAdminBusinessDetail(businessId: string, activate = true) {
     adminError.value = error instanceof Error ? error.message : "Could not load business detail.";
   } finally {
     adminBusinessDetailLoading.value = false;
+  }
+}
+
+async function loadAdminActionRegistry() {
+  if (!authSnapshot.value || adminActionRegistryLoading.value) return;
+  adminActionRegistryLoading.value = true;
+  adminActionRegistryError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/action-registry"), { headers: ownerHeaders() });
+    const payload = await response.json() as { actions?: AdminActionRegistryItem[]; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load the action registry.");
+    adminActionRegistry.value = payload.actions ?? [];
+  } catch (error) {
+    adminActionRegistryError.value = error instanceof Error ? error.message : "Could not load the action registry.";
+  } finally {
+    adminActionRegistryLoading.value = false;
+  }
+}
+
+async function updateAdminRegistryAction(action: AdminActionRegistryItem, enabled: boolean) {
+  if (adminActionRegistryLoading.value) return;
+  adminActionRegistryLoading.value = true;
+  adminActionRegistryError.value = "";
+  adminActionRegistryMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/action-registry/${encodeURIComponent(action.id)}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({
+        enabled,
+        status: enabled ? (action.origin === "discovered" ? "approved" : "active") : "disabled",
+        reason: enabled ? null : "owner_override",
+      }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not update this action.");
+    action.enabled = enabled;
+    action.lifecycleStatus = enabled ? (action.origin === "discovered" ? "approved" : "active") : "disabled";
+    action.reviewReason = enabled ? null : "owner_override";
+    if (!enabled) action.isPrimary = false;
+    adminActionRegistryMessage.value = enabled ? `${action.name} is enabled.` : `${action.name} is disabled.`;
+  } catch (error) {
+    adminActionRegistryError.value = error instanceof Error ? error.message : "Could not update this action.";
+    await loadAdminActionRegistry();
+  } finally {
+    adminActionRegistryLoading.value = false;
+  }
+}
+
+async function setAdminPrimaryAction(action: AdminActionRegistryItem) {
+  if (adminActionRegistryLoading.value || !action.enabled) return;
+  const wasPrimary = action.isPrimary;
+  adminActionRegistryLoading.value = true;
+  adminActionRegistryError.value = "";
+  adminActionRegistryMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/businesses/${encodeURIComponent(action.businessId)}/primary-action`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ actionId: wasPrimary ? null : action.id }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not update the primary action.");
+    adminActionRegistry.value.forEach((candidate) => {
+      if (candidate.businessId === action.businessId) candidate.isPrimary = !wasPrimary && candidate.id === action.id;
+    });
+    adminActionRegistryMessage.value = wasPrimary ? "Primary action cleared." : `${action.name} is now the primary conversion action.`;
+  } catch (error) {
+    adminActionRegistryError.value = error instanceof Error ? error.message : "Could not update the primary action.";
+    await loadAdminActionRegistry();
+  } finally {
+    adminActionRegistryLoading.value = false;
   }
 }
 
@@ -4702,9 +5677,15 @@ async function startCheckout(plan: BillingPlan) {
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ organizationId: authSnapshot.value.activeOrganizationId, planKey: plan.key, interval: "month" }),
     });
-    const payload = await response.json() as { url?: string | null; subscriptionUpdated?: boolean; planKey?: string; error?: string };
+    const payload = await response.json() as { url?: string | null; subscriptionUpdated?: boolean; planKey?: string; changeType?: "upgrade" | "downgrade" | "none"; effectiveAt?: string | null; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "This plan is not ready for checkout yet.");
     if (payload.subscriptionUpdated) {
+      if (payload.changeType === "downgrade") {
+        await loadBilling(false);
+        billingFlow.value = "complete";
+        billingMessage.value = `Your ${billingSnapshot.value?.billing.plan.displayName ?? "current"} plan stays active until ${formatBillingDate(payload.effectiveAt ?? billingSnapshot.value?.billing.pendingPlanChangeAt ?? null)}. The change to ${formatPlanLabel(payload.planKey ?? plan.key)} is scheduled.`;
+        return;
+      }
       billingFlow.value = "processing";
       billingMessage.value = "Your plan change was received. Confirming the updated subscription…";
       const settled = await waitForBillingState(payload.planKey ?? plan.key);
@@ -4721,6 +5702,27 @@ async function startCheckout(plan: BillingPlan) {
     window.location.assign(payload.url);
   } catch (error) {
     billingError.value = error instanceof Error ? error.message : "Could not start checkout.";
+  } finally {
+    billingLoading.value = false;
+  }
+}
+
+async function resumeBilling() {
+  if (!authSnapshot.value || billingLoading.value) return;
+  billingLoading.value = true;
+  billingError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/billing/resume"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ organizationId: authSnapshot.value.activeOrganizationId }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not resume the current plan.");
+    await loadBilling(false);
+    billingMessage.value = "Your current plan will continue without a scheduled change.";
+  } catch (error) {
+    billingError.value = error instanceof Error ? error.message : "Could not resume the current plan.";
   } finally {
     billingLoading.value = false;
   }
@@ -5205,6 +6207,11 @@ function agentConfigRequestBody(nextModel: AgentSaveModel, publish = false): Rec
     privacyNoticeUrl: nextModel.privacyNoticeUrl || null,
     retentionDays: nextModel.retentionDays,
     showAiDisclosure: nextModel.showAiDisclosure,
+    fallbackContacts: {
+      phone: nextModel.fallbackPhone || null,
+      email: nextModel.fallbackEmail || null,
+      url: nextModel.fallbackContactUrl || null,
+    },
     ...(publish ? { publish: true } : {}),
   };
 }
@@ -5268,14 +6275,26 @@ function resetAgentConversation() {
 
 watch(() => setupDismissalKey.value, hydrateSetupDismissal, { immediate: true });
 
+watch([knowledgeSourceSearch, knowledgeSourceTypeFilter, knowledgeSourceStatusFilter], () => {
+  knowledgeSourcePage.value = 1;
+});
+
+watch([knowledgeGapFilter, knowledgeGapSort, knowledgeGapSearch, knowledgeGapIntentFilter, knowledgeGapFrequencyFilter, knowledgeGapRange], () => {
+  knowledgeGapPage.value = 1;
+});
+
 watch(adminSection, (nextSection, previousSection) => {
   if (nextSection === previousSection || route.value.kind !== "platform" || route.value.section === nextSection) return;
+  if (nextSection === "action-registry") void loadAdminActionRegistry();
+  if (nextSection === "support") void loadAdminSupportCases();
   commitRoute(platformRoute(nextSection));
 });
 
 watch(view, (nextView, previousView) => {
   if (nextView === "overview") consumeBillingSuccessToast();
-  if (nextView === "inbox") { void loadInbox(); void loadNotifications(); }
+  if (nextView === "support") void loadSupport();
+  if (previousView === "inbox" && nextView !== "inbox") stopInboxPolling();
+  if (nextView === "inbox") { startInboxPolling(); void loadInbox(); void loadNotifications(); }
   if (nextView === "team") { settingsTab.value = "team"; void loadTeam(); }
   if (nextView === "knowledge") {
     void loadKnowledge();
@@ -5298,6 +6317,7 @@ watch(view, (nextView, previousView) => {
   if (nextView === "settings" && !["general", "verification", "notifications"].includes(settingsTab.value)) settingsTab.value = "general";
   if (nextView === "admin") {
     void loadAdminOrganizations();
+    void loadAdminActionRegistry();
     void loadAdminUsers();
     void loadAdminDemoRequests();
     void loadAdminInstallationSupport();
@@ -5346,6 +6366,7 @@ watch(view, updateDocumentMetadata);
 onMounted(() => {
   updateDocumentMetadata();
   void consumeDemoLink();
+  if (view.value === "inbox") startInboxPolling();
   if (typeof window !== "undefined") {
     window.addEventListener("popstate", handleRouteChange);
     window.addEventListener("keydown", handleMobileNavKeydown);
@@ -5370,6 +6391,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopFirebaseObserver?.();
   stopGenerationProgress();
+  stopInboxPolling();
   if (landingHeroTimer !== null) window.clearInterval(landingHeroTimer);
   if (typeof document !== "undefined") document.body.style.overflow = previousBodyOverflow;
   if (typeof window !== "undefined") {
@@ -5637,7 +6659,7 @@ function startMarketingDemo() {
         <nav v-else class="sidebar-nav" aria-label="Workspace navigation">
           <div v-for="section in navSections" :key="section.label || 'overview'" class="nav-section">
             <p v-if="section.label" class="nav-section-label">{{ section.label }}</p>
-            <button v-for="item in section.items" :key="item.id" type="button" :disabled="publicDemoMode && item.id !== 'overview'" :class="['nav-item', { active: view === item.id }]" @click="navigateToWorkspaceView(item.id)"><span class="nav-icon"><component :is="item.icon" :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>{{ item.label }}</span><b v-if="item.id === 'inbox' && inboxUnreadCount">{{ inboxUnreadCount }}</b></button>
+            <button v-for="item in section.items" :key="item.id" type="button" :disabled="publicDemoMode && !['overview', 'support'].includes(item.id)" :class="['nav-item', { active: view === item.id }]" @click="navigateToWorkspaceView(item.id)"><span class="nav-icon"><component :is="item.icon" :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>{{ item.label }}</span><b v-if="item.id === 'inbox' && inboxUnreadCount">{{ inboxUnreadCount }}</b></button>
           </div>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon"><ShieldCheck :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>Admin control plane</span></button>
         </nav>
@@ -5651,13 +6673,13 @@ function startMarketingDemo() {
               <button class="sidebar-setup-action" type="button" @click="continueSetup">{{ setupCardContent.action }} →</button>
             </template>
             <template v-else>
-              <div class="setup-row"><span>Setup</span><strong>{{ setupSteps.filter((step) => step.complete).length }}/{{ setupSteps.length }}</strong></div>
+              <div class="setup-row"><span>{{ nextSetupStep ? 'Setup' : setupCardContent.eyebrow }}</span><strong>{{ nextSetupStep ? `${setupSteps.filter((step) => step.complete).length}/${setupSteps.length}` : 'Next' }}</strong></div>
               <strong class="setup-card-title">{{ setupCardContent.title }}</strong>
               <small>{{ setupCardContent.description }}</small>
               <small v-if="knowledgeSourcesNeedAttention" class="setup-attention-line">{{ (workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0) }} source{{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? '' : 's' }} {{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? 'needs' : 'need' }} attention</small>
               <button class="sidebar-setup-action" type="button" @click="continueSetup">Continue →</button>
-              <button class="setup-progress-toggle" type="button" :aria-expanded="setupProgressOpen" @click="setupProgressOpen = !setupProgressOpen">{{ setupProgressOpen ? 'Hide' : 'Show' }} setup progress</button>
-              <div v-if="setupProgressOpen" class="setup-progress-list"><div v-for="step in setupSteps" :key="step.id" :class="['setup-progress-step', { complete: step.complete }]" @click="step.complete ? undefined : openSetupStep(step.id)"><span>{{ step.complete ? '✓' : '○' }}</span><small>{{ step.label }}</small></div></div>
+              <button v-if="nextSetupStep" class="setup-progress-toggle" type="button" :aria-expanded="setupProgressOpen" @click="setupProgressOpen = !setupProgressOpen">{{ setupProgressOpen ? 'Hide' : 'Show' }} setup progress</button>
+              <div v-if="nextSetupStep && setupProgressOpen" class="setup-progress-list"><div v-for="step in setupSteps" :key="step.id" :class="['setup-progress-step', { complete: step.complete }]" @click="step.complete ? undefined : openSetupStep(step.id)"><span>{{ step.complete ? '✓' : '○' }}</span><small>{{ step.label }}</small></div></div>
             </template>
           </div>
           <div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div>
@@ -5675,7 +6697,8 @@ function startMarketingDemo() {
         </header>
         <div v-if="notificationMenuOpen && authSnapshot" class="notification-menu mobile-notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div>
         <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
-        <div v-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
+        <div v-if="!adminSurfaceMode && supportViewMode" class="trial-banner warning support-view-banner"><span><strong>You are viewing {{ businessName || 'this business' }} as support.</strong><small>Read-only support view · case {{ supportViewCaseId || 'linked case' }} · access expires automatically and this session is audited.</small></span><button class="primary-button small" type="button" @click="exitSupportView">Exit support view</button></div>
+        <div v-else-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
         <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger compact"><span><strong>Your workspace is read-only</strong><small>· Restore billing to resume publishing</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Restore billing →</button></div>
         <div v-if="!adminSurfaceMode && billingFlow !== 'idle'" :class="['billing-return-banner', billingFlow === 'complete' ? 'success' : billingFlow === 'cancelled' ? 'neutral' : 'warning']" role="status" aria-live="polite"><span><strong>{{ billingMessage }}</strong><small v-if="billingFlow === 'processing'">We’ll keep checking for the signed Stripe webhook.</small><small v-else-if="billingFlow === 'pending'">Your data is safe. Refresh this page to check again.</small></span><button v-if="billingFlow === 'pending'" class="outline-button small" type="button" @click="void retryBillingRefresh()">Refresh</button></div>
@@ -5723,6 +6746,7 @@ function startMarketingDemo() {
             :installation-support-error="installationSupportOwnerError"
             :open-support-request="openSupportRequest"
             :test="agentTestModel"
+            :capabilities="agentCapabilities"
             @select-tab="selectAgentTab"
             @save="saveAgent"
             @publish="publishAgent"
@@ -5740,8 +6764,35 @@ function startMarketingDemo() {
             @view-leads="view = 'leads'"
             @request-install-help="requestInstallationHelp"
             @clear-install-help-message="clearInstallationSupportOwnerState"
+            @open-capability-action="openCapabilityAction"
           />
         </div>
+
+        <SupportCenter
+          v-else-if="view === 'support'"
+          :business-name="businessName"
+          :website-url="websiteUrl"
+          :auth-ready="Boolean(authSnapshot) && !supportViewMode"
+          :public-demo-mode="publicDemoMode"
+          :auth-user-name="authSnapshot?.user.name ?? ''"
+          :auth-user-email="authSnapshot?.user.email ?? ''"
+          :loading="supportLoading"
+          :error="supportError"
+          :context="supportContext"
+          :cases="supportCases"
+          :submitting="supportSubmitting"
+          :submit-error="supportSubmitError"
+          :submit-message="supportSubmitMessage"
+          :initial-category="supportCategory"
+          :initial-provider="supportProvider"
+          :initial-connection-id="supportConnectionId"
+          :initial-page="supportSourcePage"
+          :open-report-request="supportOpenReportRequest"
+          @refresh="loadSupport"
+          @require-auth="openAuth('signin')"
+          @submit-case="submitSupportCase"
+          @navigate="(target) => target === 'install' ? selectAgentTab('install') : target === 'knowledge' ? navigateToWorkspaceView('knowledge') : target === 'connections' ? navigateToWorkspaceView('connections') : target === 'actions' ? navigateToWorkspaceView('actions') : target === 'billing' ? openSettingsTab('billing') : openSettingsTab('verification')"
+        />
 
         <div v-else-if="view === 'overview'" class="view-content">
           <div v-if="workspaceError" class="panel workspace-message"><strong>Workspace data unavailable</strong><p>{{ workspaceError }}</p><button class="outline-button small" type="button" @click="loadBusinessWorkspace(demoSlug)">Retry</button></div>
@@ -5784,7 +6835,7 @@ function startMarketingDemo() {
             </div>
             <div class="inbox-hero-actions">
               <span v-if="inboxMessage" class="saved-message">✓ {{ inboxMessage }}</span>
-              <button class="outline-button small inbox-refresh-button" type="button" :disabled="inboxLoading" @click="loadInbox"><RefreshCw :size="14" :stroke-width="1.9" :class="{ 'is-spinning': inboxLoading }" aria-hidden="true" />{{ inboxLoading ? 'Refreshing…' : 'Refresh queue' }}</button>
+              <button class="outline-button small inbox-refresh-button" type="button" :disabled="inboxLoading" @click="() => loadInbox()"><RefreshCw :size="14" :stroke-width="1.9" :class="{ 'is-spinning': inboxLoading }" aria-hidden="true" />{{ inboxLoading ? 'Refreshing…' : 'Refresh queue' }}</button>
             </div>
           </div>
           <p v-if="inboxError" class="form-error">{{ inboxError }}</p>
@@ -5797,15 +6848,16 @@ function startMarketingDemo() {
           </div>
 
           <div class="inbox-queue-toolbar">
-            <div class="inbox-queue-view"><span class="inbox-toolbar-label">Queue view</span><div class="inbox-assignment-shortcuts" aria-label="Inbox assignment shortcuts"><button type="button" :class="{ active: inboxAssignmentFilter === 'all' }" @click="inboxAssignmentFilter = 'all'; loadInbox()">All conversations</button><button type="button" :class="{ active: inboxAssignmentFilter === 'unassigned' }" @click="inboxAssignmentFilter = 'unassigned'; loadInbox()">Unassigned</button><button v-if="authSnapshot?.user.id" type="button" :class="{ active: inboxAssignmentFilter === 'mine' }" @click="inboxAssignmentFilter = 'mine'; loadInbox()">Assigned to me</button></div></div>
-            <div class="inbox-queue-count"><strong>{{ inboxConversations.length }}</strong> {{ inboxConversations.length === 1 ? 'conversation' : 'conversations' }}<span></span><strong>{{ inboxUnreadCount }}</strong> unread</div>
+            <div class="inbox-queue-view"><span class="inbox-toolbar-label">Queue view</span><div class="inbox-assignment-shortcuts" aria-label="Inbox assignment shortcuts"><button type="button" :class="{ active: inboxAssignmentFilter === 'all' }" @click="inboxPage = 1; inboxAssignmentFilter = 'all'; loadInbox()">All conversations</button><button type="button" :class="{ active: inboxAssignmentFilter === 'unassigned' }" @click="inboxPage = 1; inboxAssignmentFilter = 'unassigned'; loadInbox()">Unassigned</button><button v-if="authSnapshot?.user.id" type="button" :class="{ active: inboxAssignmentFilter === 'mine' }" @click="inboxPage = 1; inboxAssignmentFilter = 'mine'; loadInbox()">Assigned to me</button></div></div>
+            <div class="inbox-queue-count"><strong>{{ inboxTotal }}</strong> {{ inboxTotal === 1 ? 'conversation' : 'conversations' }}<span></span><strong>{{ inboxUnreadCount }}</strong> unread</div>
           </div>
 
           <article v-if="selectedInboxConversation?.notes?.length" class="panel inbox-notes-panel"><div class="panel-heading"><div><p class="eyebrow">Staff only</p><h3>Internal notes</h3><p>These notes stay in the Inbox and are never sent to the visitor.</p></div></div><div class="internal-note-list"><div v-for="note in selectedInboxConversation.notes" :key="note.id" class="internal-note"><strong>{{ note.authorName || 'Team member' }}</strong><small>{{ new Date(note.createdAt).toLocaleString() }}</small><p>{{ note.content }}</p></div></div></article>
 
-          <div class="panel lead-filters inbox-filter-bar"><div class="inbox-filter-copy"><span>Filter queue</span><small>Focus your next response</small></div><label><span>Status</span><select v-model="inboxStatusFilter" @change="loadInbox"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option></select></label><label><span>Assignment</span><select v-model="inboxAssignmentFilter" @change="loadInbox"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span class="inbox-filter-result"><strong>{{ inboxConversations.length }}</strong> {{ inboxConversations.length === 1 ? 'thread' : 'threads' }}<i>·</i>{{ inboxUnreadCount }} unread</span></div>
+          <div class="panel lead-filters inbox-filter-bar"><div class="inbox-filter-copy"><span>Filter queue</span><small>Focus your next response</small></div><label><span>Status</span><select v-model="inboxStatusFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option><option value="EXPIRED">Expired</option></select></label><label><span>Assignment</span><select v-model="inboxAssignmentFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span class="inbox-filter-result"><strong>{{ inboxTotal }}</strong> {{ inboxTotal === 1 ? 'thread' : 'threads' }}<i>·</i>{{ inboxUnreadCount }} unread</span></div>
 
-          <div :class="['dashboard-grid', 'conversation-inbox-grid', { 'inbox-detail-open': selectedInboxConversation }]" ><article class="panel table-panel inbox-table-panel"><div class="inbox-table-titlebar"><div><span class="inbox-table-kicker">Live queue</span><h3>Conversations</h3></div><span class="inbox-table-count">{{ inboxConversations.length }} total</span></div><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div v-if="!inboxConversations.length" class="inbox-empty-state"><span class="inbox-empty-icon"><Inbox :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No conversations in this view</strong><p>Try a different filter or check back when a visitor needs your team.</p></div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'HUMAN_ACTIVE' ? 'active' : conversation.status === 'AI_ACTIVE' || conversation.status === 'AI_ASSISTED' ? 'new' : 'qualified']"><span class="status-pill-dot"></span>{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount">{{ conversation.unreadCount }}</b></span><small class="inbox-activity-time">{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading inbox-detail-heading"><div><button class="mobile-inbox-back" type="button" @click="closeInboxConversation"><ArrowLeft :size="16" :stroke-width="1.8" aria-hidden="true" /> Back to Inbox</button><div class="inbox-detail-kicker"><span class="inbox-live-dot"></span>Conversation detail</div><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} <span>·</span> {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div class="inbox-message-thread"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="`${message.createdAt}-${index}`" :class="['message-thread-item', message.role]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}</small><p>{{ message.content }}</p></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><form class="question-form" @submit.prevent="sendInboxReply"><input v-model="inboxReply" type="text" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" /><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || inboxActionLoading"><Send :size="14" :stroke-width="1.9" aria-hidden="true" />Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message inbox-select-state"><span class="inbox-select-icon"><MessageSquare :size="22" :stroke-width="1.8" aria-hidden="true" /></span><div><span class="inbox-table-kicker">Workspace context</span><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></div></article></div>
+          <div :class="['dashboard-grid', 'conversation-inbox-grid', { 'inbox-detail-open': selectedInboxConversation }]" ><article class="panel table-panel inbox-table-panel"><div class="inbox-table-titlebar"><div><span class="inbox-table-kicker">Live queue</span><h3>Conversations</h3></div><span class="inbox-table-count">{{ inboxTotal }} total</span></div><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div class="collection-viewport inbox-collection-viewport"><div v-if="!inboxConversations.length" class="inbox-empty-state"><span class="inbox-empty-icon"><Inbox :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No conversations in this view</strong><p>Try a different filter or check back when a visitor needs your team.</p></div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'HUMAN_ACTIVE' ? 'active' : conversation.status === 'AI_ACTIVE' || conversation.status === 'AI_ASSISTED' ? 'new' : 'qualified']"><span class="status-pill-dot"></span>{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount">{{ conversation.unreadCount }}</b></span><small class="inbox-activity-time">{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></div><div v-if="inboxTotal" class="collection-pagination"><span>Showing {{ inboxRangeStart }}–{{ inboxRangeEnd }} of {{ inboxTotal }}</span><div><button class="outline-button small" type="button" :disabled="inboxLoading || !inboxHasPrevious" @click="() => loadInbox(inboxPage - 1)">Previous</button><button class="outline-button small" type="button" :disabled="inboxLoading || !inboxHasNext" @click="() => loadInbox(inboxPage + 1)">Next</button></div></div></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading inbox-detail-heading"><div><button class="mobile-inbox-back" type="button" @click="closeInboxConversation"><ArrowLeft :size="16" :stroke-width="1.8" aria-hidden="true" /> Back to Inbox</button><div class="inbox-detail-kicker"><span class="inbox-live-dot"></span>Conversation detail</div><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} <span>·</span> {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div ref="inboxThread" class="inbox-message-thread" @scroll="handleInboxThreadScroll"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="message.id || `${message.createdAt}-${message.role}-${index}`" :class="['message-thread-item', message.role, { 'message-pending': message.sendStatus === 'pending', 'message-failed': message.sendStatus === 'failed' }]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}<span v-if="message.sendStatus === 'pending'"> · Sending…</span></small><p>{{ message.content }}</p><div v-if="message.sendStatus === 'failed'" class="message-send-failed"><span>Failed to send</span><button type="button" @click.stop="retryInboxReply(message)">Retry</button></div></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><button v-if="inboxNewMessageCount" class="inbox-new-message-indicator" type="button" @click="scrollInboxToLatest('smooth')">{{ inboxNewMessageCount }} new message{{ inboxNewMessageCount === 1 ? '' : 's' }} ↓</button><form class="question-form inbox-composer-form" @submit.prevent="sendInboxReply"><textarea ref="inboxComposer" v-model="inboxReply" rows="1" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" @keydown="handleInboxComposerKeydown"></textarea><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || selectedInboxConversation.status !== 'HUMAN_ACTIVE'"><Send :size="14" :stroke-width="1.9" aria-hidden="true" />Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message inbox-select-state"><span class="inbox-select-icon"><MessageSquare :size="22" :stroke-width="1.8" aria-hidden="true" /></span><div><span class="inbox-table-kicker">Workspace context</span><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></div></article></div>
+
         </div>
 
         <div v-else-if="view === 'team'" class="view-content">
@@ -5816,13 +6868,13 @@ function startMarketingDemo() {
         </div>
 
 
-        <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads()">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
+        <div v-else-if="view === 'leads'" class="view-content"><div class="section-toolbar"><div><p class="eyebrow">Revenue outcomes</p><h2>Captured leads</h2><p>Review, qualify, and export the contacts FrontDeskWise captured.</p></div><div class="toolbar-actions"><span v-if="leadExportMessage" class="saved-message">✓ {{ leadExportMessage }}</span><button class="outline-button small" type="button" :disabled="leadsLoading" @click="loadLeads()">{{ leadsLoading ? 'Refreshing…' : 'Refresh' }}</button><button class="outline-button small" type="button" :disabled="!visibleLeads.length" @click="exportLeadsCsv">Export CSV</button><button class="primary-button small" type="button" @click="view = 'agent'">Configure lead capture</button></div></div><p v-if="leadsError" class="form-error">{{ leadsError }}</p><div class="panel lead-filters"><label>Search<input v-model="leadSearch" type="search" placeholder="Name, email, intent…" /></label><label>Status<select v-model="leadStatusFilter"><option value="all">All statuses</option><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label><span>{{ visibleLeads.length }} of {{ leads.length }} lead{{ leads.length === 1 ? '' : 's' }}</span></div><div class="panel table-panel collection-panel-scroll"><div class="table-heading"><span>Lead</span><span>Intent</span><span>Status</span><span>Captured</span></div><div v-if="!visibleLeads.length && !leadsError" class="diagnostics-empty">{{ leads.length ? 'No leads match these filters.' : 'No leads captured yet.' }}</div><button v-for="lead in visibleLeads" :key="lead.id" class="table-row table-row-button" type="button" @click="openLeadDetail(lead)"><div class="lead-name"><span class="lead-avatar">{{ lead.name.charAt(0).toUpperCase() }}</span><span><strong>{{ lead.name }}</strong><small>{{ lead.email || lead.phone || 'Contact details not provided' }}</small></span></div><span>{{ lead.intent }}</span><span :class="['status-pill', lead.status.toLowerCase()]">{{ lead.status }}</span><small>{{ lead.time }}</small></button></div></div>
 
 
         <div v-else-if="view === 'knowledge'" class="view-content knowledge-workspace">
           <div class="knowledge-page-header">
-            <div><p class="eyebrow">Website knowledge</p><h2>Website knowledge</h2><p>{{ knowledgeWebsiteSources.length }} page{{ knowledgeWebsiteSources.length === 1 ? '' : 's' }} available to your assistant · Last updated {{ knowledgeLastUpdated }}.</p></div>
-            <div class="knowledge-page-actions"><span v-if="knowledgeLoading" class="conversation-status">Refreshing…</span><button class="outline-button small" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">{{ sourceActionLoading ? 'Refreshing…' : 'Refresh website knowledge' }}</button><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">Test assistant</button></div>
+            <div><p class="eyebrow">Knowledge</p><h2>Knowledge</h2><p>{{ knowledgeSourceRows.length }} connected source{{ knowledgeSourceRows.length === 1 ? '' : 's' }} available to your assistant · Last successful refresh {{ knowledgeLastSuccessfulRefresh }}.</p></div>
+            <div class="knowledge-page-actions"><span v-if="knowledgeLoading" class="conversation-status">Refreshing…</span><button class="outline-button small" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">{{ sourceActionLoading ? 'Refreshing…' : 'Refresh website knowledge' }}</button><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">Test assistant</button><button class="text-button" type="button" @click="openSupportReport('knowledge')">Report a problem</button></div>
           </div>
 
           <nav class="knowledge-tabs" role="tablist" aria-label="Knowledge sections">
@@ -5841,42 +6893,51 @@ function startMarketingDemo() {
           <template v-if="!authSnapshot || availableBusinesses.length">
             <section v-if="knowledgeTab === 'overview'" class="knowledge-tab-content" aria-labelledby="knowledge-overview-heading">
               <div class="knowledge-health-strip"><div><span class="knowledge-health-indicator" :class="knowledgeHealthLabel === 'Healthy' ? 'healthy' : 'attention'"></span><div><p class="eyebrow">Knowledge health</p><h3 id="knowledge-overview-heading">{{ knowledgeHealthLabel }}</h3></div></div><span class="status-pill" :class="knowledgeHealthLabel === 'Healthy' ? 'booked' : knowledgeHealthLabel === 'Needs attention' ? 'new' : 'qualified'">{{ readinessScore }}% ready</span></div>
-              <div class="knowledge-metric-strip"><div><strong>{{ knowledgeWebsiteSources.length }}</strong><span>Website pages</span><small>{{ knowledgeWebsiteCoverage.detail }}</small></div><div><strong>{{ workspaceKnowledge?.chunkCount ?? 0 }}</strong><span>Knowledge sections</span><small>Searchable content for your assistant</small></div><div><strong>{{ knowledgeGapCounts.open }}</strong><span>Open answer gaps</span><small>{{ knowledgeGapCounts.open ? 'Questions to review' : 'Nothing waiting' }}</small></div><div><strong>{{ knowledgeLastUpdated }}</strong><span>Last updated</span><small>Across website and documents</small></div></div>
+              <div class="knowledge-metric-strip"><div><strong>{{ knowledgeWebsiteSources.length }}</strong><span>Website pages</span><small>{{ knowledgeWebsiteCoverage.detail }}</small></div><div><strong>{{ workspaceKnowledge?.chunkCount ?? 0 }}</strong><span>Knowledge sections</span><small>Searchable content for your assistant</small></div><div><strong>{{ knowledgeGapCounts.open }}</strong><span>Open answer gaps</span><small>{{ knowledgeGapCounts.open ? 'Questions to review' : 'Nothing waiting' }}</small></div><div><strong>{{ knowledgeLastSuccessfulRefresh }}</strong><span>Last successful refresh</span><small>Across connected sources</small></div></div>
               <div class="knowledge-overview-actions"><div class="knowledge-refresh-control"><button class="primary-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">{{ sourceActionLoading ? 'Scanning website…' : 'Refresh website knowledge' }}</button><p>Re-scan your website for new or updated pages and refresh what your assistant knows.</p><span v-if="sourceActionLoading" class="knowledge-refresh-progress" role="status" aria-live="polite">Scanning website… <span>Discovering pages</span> → <span>Reading content</span> → <span>Updating knowledge</span></span></div><label class="outline-button document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label><div class="knowledge-more-actions"><button class="outline-button knowledge-more-trigger" type="button" aria-label="More website knowledge actions" :aria-expanded="knowledgeMoreOpen" @click="knowledgeMoreOpen = !knowledgeMoreOpen"><MoreHorizontal :size="18" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="knowledgeMoreOpen" class="knowledge-more-menu" role="menu"><button type="button" role="menuitem" @click="knowledgeTab = 'quality'; knowledgeMoreOpen = false">View crawl details</button><button type="button" role="menuitem" @click="knowledgeTab = 'sources'; knowledgeMoreOpen = false">View website pages</button><button type="button" role="menuitem" :disabled="Boolean(embeddingLoading)" @click="knowledgeMoreOpen = false; void reindexKnowledge()">{{ embeddingLoading ? 'Rebuilding…' : 'Rebuild knowledge index' }}</button></div></div></div>
               <button v-if="knowledgeSourcesNeedAttention" class="knowledge-warning-row" type="button" @click="knowledgeTab = 'sources'"><span class="knowledge-warning-icon">!</span><span><strong>{{ (workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0) }} source{{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? '' : 's' }} {{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? 'needs' : 'need' }} attention</strong><small>Review the source status before your next test.</small></span><span>Review source <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></span></button>
+              <button v-if="knowledgeSourcesNeedAttention" class="knowledge-warning-row" type="button" @click="knowledgeTab = 'sources'"><span class="knowledge-warning-icon">!</span><span><strong>{{ (workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0) }} source{{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? '' : 's' }} {{ ((workspaceKnowledge?.pendingSources ?? 0) + (workspaceKnowledge?.failedSources ?? 0)) === 1 ? 'needs' : 'need' }} attention</strong><small>Review the source status before your next test.</small></span><span>View issues <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></span></button>
               <div class="knowledge-next-step"><div><p class="eyebrow">Next best action</p><strong>{{ knowledgeHasOpenGaps ? 'Answer the questions visitors ask most.' : knowledgeSourcesNeedAttention ? 'Review the source that needs attention.' : 'Test a representative customer question.' }}</strong><small>{{ knowledgeHasOpenGaps ? `${knowledgeGapCounts.open} open answer gap${knowledgeGapCounts.open === 1 ? '' : 's'} are ready for review.` : 'Keep the path from source to answer easy to verify.' }}</small></div><button class="text-button" type="button" @click="knowledgeHasOpenGaps ? reviewKnowledgeGaps() : openAgentTest()">{{ knowledgeHasOpenGaps ? 'Review answer gaps →' : 'Test assistant →' }}</button></div>
             </section>
 
             <section v-else-if="knowledgeTab === 'sources'" class="knowledge-tab-content" aria-labelledby="knowledge-sources-heading">
-              <div class="knowledge-section-heading"><div><p class="eyebrow">Source management</p><h2 id="knowledge-sources-heading">Sources</h2><p>{{ knowledgeWebsiteSources.length }} website page{{ knowledgeWebsiteSources.length === 1 ? '' : 's' }} and {{ organizationDocuments.length }} private document{{ organizationDocuments.length === 1 ? '' : 's' }} connected to this assistant.</p></div><label class="outline-button small document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label></div>
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Source management</p><h2 id="knowledge-sources-heading">Sources</h2><p>Group connected knowledge first, then open the page-level view when you need detail.</p></div><label class="outline-button small document-upload-button">{{ documentsLoading ? 'Working…' : 'Upload document' }}<input type="file" accept=".pdf,.txt,.md,.csv,.json,.rtf,.doc,.docx,.xls,.xlsx,application/pdf,text/plain,text/markdown,text/csv,application/json" :disabled="documentsLoading || !authSnapshot || !selectedBusinessId()" @change="uploadDocument" /></label></div>
               <div v-if="sourceActionMessage" class="saved-message source-action-message">✓ {{ sourceActionMessage }}</div>
-              <div class="knowledge-source-table" role="table" aria-label="Knowledge sources"><div class="knowledge-source-table-head" role="row"><span>Source</span><span>Type</span><span>Status</span><span>Pages / chunks</span><span>Last refreshed</span><span>Actions</span></div><div v-if="!knowledgeSourceRows.length" class="knowledge-empty-row">No sources connected yet.</div><div v-for="row in knowledgeSourceRows" :key="`${row.type}-${row.id}`" class="knowledge-source-table-row" role="row"><div class="knowledge-source-name"><span :class="['knowledge-source-icon', row.type === 'Website' ? 'website' : 'document']"><BookOpen v-if="row.type === 'Website'" :size="15" :stroke-width="1.8" aria-hidden="true" /><FileText v-else :size="15" :stroke-width="1.8" aria-hidden="true" /></span><span><strong>{{ row.title }}</strong><small>{{ row.detail }}</small></span></div><span class="knowledge-source-type">{{ row.type }}</span><span :class="['status-pill', row.status === 'ready' ? 'booked' : row.status === 'attention' ? 'new' : 'qualified']">{{ row.statusLabel }}</span><span class="knowledge-source-meta">{{ row.type === 'Website' ? 'Website page' : '—' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(row.lastRefreshed) }}</span><div class="knowledge-source-actions"><button v-if="row.websiteSource" class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(row.websiteSource)">{{ sourceActionLoading === row.id ? 'Refreshing…' : 'Refresh page' }}</button><button v-if="row.document" class="text-button" type="button" @click="downloadDocument(row.document)">Download</button><button v-if="row.websiteSource" class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(row.websiteSource)">Remove</button><button v-if="row.document" class="text-button danger-text" type="button" :disabled="documentsLoading" @click="deleteDocument(row.document)">Remove</button></div></div></div>
+              <div class="knowledge-source-groups" aria-label="Knowledge source groups">
+                <article v-for="group in knowledgeSourceGroups" :key="group.key" class="knowledge-source-group">
+                  <div class="knowledge-source-group-summary"><span :class="['knowledge-source-icon', group.key === 'website' ? 'website' : group.key === 'documents' ? 'document' : 'system']"><BookOpen v-if="group.key === 'website'" :size="17" :stroke-width="1.8" aria-hidden="true" /><FileText v-else-if="group.key === 'documents'" :size="17" :stroke-width="1.8" aria-hidden="true" /><Database v-else :size="17" :stroke-width="1.8" aria-hidden="true" /></span><div><strong>{{ group.label }}</strong><small>{{ group.detail }}</small></div><span :class="['status-pill', group.status === 'ready' ? 'booked' : group.status === 'attention' ? 'new' : 'qualified']">{{ group.statusLabel }}</span><button v-if="group.expandable" class="outline-button small" type="button" @click="toggleKnowledgeSourceGroup(group.key)">{{ knowledgeSourceGroupOpen === group.key ? 'Hide pages' : group.key === 'website' ? 'View pages' : 'View documents' }}</button><button v-else-if="group.key === 'connected'" class="outline-button small" type="button" @click="view = 'connections'">Manage</button><span v-else class="knowledge-source-group-count">{{ group.count }}</span></div>
+                  <div v-if="knowledgeSourceGroupOpen === group.key" class="knowledge-source-group-detail">
+                    <div class="knowledge-source-filter-bar"><label>Search<input v-model="knowledgeSourceSearch" type="search" placeholder="Page title, URL, or file name…" /></label><label>Type<select v-model="knowledgeSourceTypeFilter"><option value="all">All types</option><option value="website">Website pages</option><option value="document">Documents</option></select></label><label>Status<select v-model="knowledgeSourceStatusFilter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="processing">Processing</option><option value="attention">Needs attention</option></select></label></div>
+                    <div class="knowledge-source-table" role="table" aria-label="Knowledge sources"><div class="knowledge-source-table-head" role="row"><span>Source</span><span>Type</span><span>Status</span><span>Pages / chunks</span><span>Last refreshed</span><span>Actions</span></div><div v-if="!filteredKnowledgeSourceRows.length" class="knowledge-empty-row">No sources match these filters.</div><div v-for="row in visibleKnowledgeSourceRows" :key="`${row.type}-${row.id}`" class="knowledge-source-table-row" role="row"><div class="knowledge-source-name"><span :class="['knowledge-source-icon', row.type === 'Website' ? 'website' : 'document']"><BookOpen v-if="row.type === 'Website'" :size="15" :stroke-width="1.8" aria-hidden="true" /><FileText v-else :size="15" :stroke-width="1.8" aria-hidden="true" /></span><span><strong>{{ row.title }}</strong><small>{{ row.detail }}</small></span></div><span class="knowledge-source-type">{{ row.type }}</span><span :class="['status-pill', row.status === 'ready' ? 'booked' : row.status === 'attention' ? 'new' : 'qualified']">{{ row.statusLabel }}</span><span class="knowledge-source-meta">{{ row.type === 'Website' ? 'Website page' : 'Private file' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(row.lastRefreshed) }}</span><div class="knowledge-source-actions"><button v-if="row.websiteSource" class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(row.websiteSource)">{{ sourceActionLoading === row.id ? 'Refreshing…' : 'Refresh page' }}</button><button v-if="row.document" class="text-button" type="button" @click="downloadDocument(row.document)">Download</button><button v-if="row.websiteSource" class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(row.websiteSource)">Remove</button><button v-if="row.document" class="text-button danger-text" type="button" :disabled="documentsLoading" @click="deleteDocument(row.document)">Remove</button></div></div><div v-if="knowledgeSourceTotal" class="collection-pagination"><span>Showing {{ knowledgeSourceRangeStart }}–{{ knowledgeSourceRangeEnd }} of {{ knowledgeSourceTotal }}</span><div><button class="outline-button small" type="button" :disabled="!knowledgeSourceHasPrevious" @click="knowledgeSourcePage -= 1">Previous</button><button class="outline-button small" type="button" :disabled="!knowledgeSourceHasNext" @click="knowledgeSourcePage += 1">Next</button></div></div></div>
+                  </div>
+                </article>
+              </div>
               <div v-if="!authSnapshot" class="knowledge-auth-note">Sign in to upload private documents or refresh website knowledge.</div>
             </section>
 
             <section v-else-if="knowledgeTab === 'gaps'" class="knowledge-tab-content knowledge-gaps-panel" aria-labelledby="knowledge-gaps-heading">
-              <div class="knowledge-section-heading"><div><p class="eyebrow">Conversation signals</p><h2 id="knowledge-gaps-heading">Answer gaps</h2><p>Turn repeated fallback questions into answers your assistant can use.</p></div><span class="knowledge-count-note">{{ knowledgeGapCounts.open }} open</span></div>
-              <div class="knowledge-filter-bar"><div class="knowledge-filter-group" role="group" aria-label="Answer gap status"><button type="button" :class="{ active: knowledgeGapFilter === 'open' }" @click="knowledgeGapFilter = 'open'">Open <span>{{ knowledgeGapCounts.open }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'resolved' }" @click="knowledgeGapFilter = 'resolved'">Resolved <span>{{ knowledgeGapCounts.resolved }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'ignored' }" @click="knowledgeGapFilter = 'ignored'">Ignored <span>{{ knowledgeGapCounts.ignored }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'all' }" @click="knowledgeGapFilter = 'all'">All <span>{{ knowledgeGapCounts.all }}</span></button></div><label class="knowledge-sort-control"><span>Sort</span><select v-model="knowledgeGapSort"><option value="mostAsked">Most asked</option><option value="newest">Newest</option><option value="highestImpact">Highest impact</option></select></label></div>
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Conversation signals</p><h2 id="knowledge-gaps-heading">Answer gaps</h2><p>Cluster repeated question variants and rank the work by operational impact.</p></div><span class="knowledge-count-note">{{ knowledgeGapCounts.open }} open</span></div>
+              <div class="knowledge-filter-bar knowledge-gap-filters"><div class="knowledge-filter-group" role="group" aria-label="Answer gap status"><button type="button" :class="{ active: knowledgeGapFilter === 'open' }" @click="knowledgeGapFilter = 'open'">Open <span>{{ knowledgeGapCounts.open }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'resolved' }" @click="knowledgeGapFilter = 'resolved'">Resolved <span>{{ knowledgeGapCounts.resolved }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'ignored' }" @click="knowledgeGapFilter = 'ignored'">Ignored <span>{{ knowledgeGapCounts.ignored }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'all' }" @click="knowledgeGapFilter = 'all'">All <span>{{ knowledgeGapCounts.all }}</span></button></div><label class="knowledge-inline-filter">Search<input v-model="knowledgeGapSearch" type="search" placeholder="Question or intent…" /></label><label class="knowledge-inline-filter">Intent<select v-model="knowledgeGapIntentFilter"><option value="all">All intents</option><option v-for="intent in knowledgeGapIntentOptions" :key="intent" :value="intent">{{ intent }}</option></select></label><label class="knowledge-inline-filter">Frequency<select v-model="knowledgeGapFrequencyFilter"><option value="all">Any frequency</option><option value="10+">10+ times</option><option value="3+">3+ times</option><option value="1">Once</option></select></label><label class="knowledge-inline-filter">Date range<select v-model="knowledgeGapRange"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All time</option></select></label><label class="knowledge-sort-control"><span>Sort</span><select v-model="knowledgeGapSort"><option value="highestImpact">Highest impact</option><option value="mostAsked">Most asked</option><option value="newest">Newest</option></select></label></div>
               <div v-if="!visibleKnowledgeGaps.length" class="knowledge-empty-state"><CircleCheck :size="23" :stroke-width="1.8" aria-hidden="true" /><div><strong>{{ knowledgeGapFilter === 'open' ? 'No open answer gaps.' : 'No answer gaps in this view.' }}</strong><small>New low-confidence questions will appear here as visitors ask them.</small></div></div>
-              <div v-else class="knowledge-gap-queue"><article v-for="gap in visibleKnowledgeGaps" :key="gap.question" class="knowledge-gap-row"><div class="knowledge-gap-main"><div class="knowledge-gap-topline"><span :class="['status-pill', gap.status === 'resolved' ? 'booked' : gap.status === 'ignored' ? 'qualified' : 'new']">{{ gap.status === 'resolved' ? 'Resolved' : gap.status === 'ignored' ? 'Ignored' : 'Open' }}</span><span class="knowledge-gap-intent">{{ gap.intent || 'General intent' }}</span></div><h3>{{ gap.question }}</h3><p>{{ formatKnowledgeGapReason(gap.reason) }}</p></div><div class="knowledge-gap-stats"><strong>{{ gap.occurrenceCount }}×</strong><span>asked</span><small>Last seen {{ formatKnowledgeRelativeTime(gap.lastSeenAt) }}</small></div><div class="knowledge-gap-actions"><button class="primary-button small" type="button" @click="openKnowledgeAnswer(gap)">{{ gap.status === 'resolved' ? 'Edit answer' : 'Answer' }}</button><button class="outline-button small" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">Refresh website knowledge</button><button v-if="gap.status === 'open'" class="text-button" type="button" :disabled="knowledgeAnswerSaving" @click="ignoreKnowledgeGap(gap)">Ignore</button></div></article></div>
+              <div v-else class="knowledge-gap-queue"><article v-for="gap in visibleKnowledgeGaps" :key="gap.question" class="knowledge-gap-row"><div class="knowledge-gap-main"><div class="knowledge-gap-topline"><span :class="['status-pill', gap.status === 'resolved' ? 'booked' : gap.status === 'ignored' ? 'qualified' : 'new']">{{ gap.status === 'resolved' ? 'Resolved' : gap.status === 'ignored' ? 'Ignored' : 'Open' }}</span><span class="knowledge-gap-intent">{{ gap.intent || 'General intent' }}</span></div><h3>{{ gap.question }}</h3><p>{{ gap.occurrenceCount }}× asked · {{ gap.variants?.length ?? 1 }} question variant{{ (gap.variants?.length ?? 1) === 1 ? '' : 's' }} · Last seen {{ formatKnowledgeRelativeTime(gap.lastSeenAt) }}</p></div><div class="knowledge-gap-stats"><strong>{{ gap.occurrenceCount }}×</strong><span>asked</span><small>{{ gap.variants?.length ?? 1 }} variant{{ (gap.variants?.length ?? 1) === 1 ? '' : 's' }}</small></div><div class="knowledge-gap-actions"><button class="primary-button small" type="button" @click="openKnowledgeAnswer(gap)">{{ gap.status === 'resolved' ? 'Edit answer' : 'Answer' }}</button><div class="knowledge-gap-menu-wrap"><button class="outline-button small knowledge-gap-menu-trigger" type="button" aria-label="More answer gap actions" :aria-expanded="knowledgeGapMenuOpen === gap.question" @click="toggleKnowledgeGapMenu(gap.question)"><MoreHorizontal :size="16" :stroke-width="1.9" aria-hidden="true" /></button><div v-if="knowledgeGapMenuOpen === gap.question" class="knowledge-gap-menu" role="menu"><button type="button" role="menuitem" :disabled="Boolean(sourceActionLoading)" @click="knowledgeGapMenuOpen = null; refreshWebsiteKnowledge()">Refresh website knowledge</button><button v-if="gap.status === 'open'" type="button" role="menuitem" :disabled="knowledgeAnswerSaving" @click="ignoreKnowledgeGap(gap); knowledgeGapMenuOpen = null">Ignore</button><button type="button" role="menuitem" @click="viewKnowledgeGapConversation">View conversation</button><button type="button" role="menuitem" @click="viewKnowledgeGapRetrieval(gap)">View retrieval details</button></div></div></div></article><div v-if="knowledgeGapTotal" class="collection-pagination"><span>Showing {{ knowledgeGapRangeStart }}–{{ knowledgeGapRangeEnd }} of {{ knowledgeGapTotal }} clusters</span><div><button class="outline-button small" type="button" :disabled="!knowledgeGapHasPrevious" @click="knowledgeGapPage -= 1">Previous</button><button class="outline-button small" type="button" :disabled="!knowledgeGapHasNext" @click="knowledgeGapPage += 1">Next</button></div></div></div>
             </section>
 
             <section v-else class="knowledge-tab-content" aria-labelledby="knowledge-quality-heading">
-              <div class="knowledge-section-heading"><div><p class="eyebrow">Answer quality</p><h2 id="knowledge-quality-heading">Recent answer checks</h2><p>See whether answers were grounded, fell back safely, or need review.</p></div><span class="knowledge-count-note">{{ retrievalDiagnostics.length }} checks</span></div>
-              <div class="knowledge-filter-bar knowledge-quality-filters" role="group" aria-label="Answer quality filters"><button type="button" :class="{ active: knowledgeQualityFilter === 'all' }" @click="knowledgeQualityFilter = 'all'">All</button><button type="button" :class="{ active: knowledgeQualityFilter === 'grounded' }" @click="knowledgeQualityFilter = 'grounded'">Grounded</button><button type="button" :class="{ active: knowledgeQualityFilter === 'fallback' }" @click="knowledgeQualityFilter = 'fallback'">Fallback</button><button type="button" :class="{ active: knowledgeQualityFilter === 'needsReview' }" @click="knowledgeQualityFilter = 'needsReview'">Needs review</button></div>
-              <div class="knowledge-quality-table" role="table" aria-label="Recent answer checks"><div class="knowledge-quality-table-head" role="row"><span>Question</span><span>Confidence</span><span>Outcome</span><span>Sources</span><span>Time</span></div><div v-if="!visibleRetrievalDiagnostics.length" class="knowledge-empty-row">No answer checks match this filter.</div><div v-for="diagnostic in visibleRetrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="knowledge-quality-table-row" role="row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}%</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Fallback' }}</span><span class="knowledge-source-meta">{{ diagnostic.citations?.length ?? 0 }} source{{ (diagnostic.citations?.length ?? 0) === 1 ? '' : 's' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(diagnostic.createdAt) }}</span></div></div>
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Answer quality</p><h2 id="knowledge-quality-heading">Recent answer checks</h2><p>Only real knowledge interactions appear here. Greetings, handoff events, and waiting-for-staff messages stay out.</p></div><span class="knowledge-count-note">{{ knowledgeQualityTotal }} checks · {{ knowledgeQualityRangeLabel }}</span></div>
+              <div class="knowledge-quality-toolbar"><label>Search<input v-model="knowledgeQualitySearch" type="search" placeholder="Question or answer…" @input="queueKnowledgeQualitySearch" /></label><label>Date range<select v-model="knowledgeQualityRange" @change="applyKnowledgeQualityFilters"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All time</option></select></label><div class="knowledge-filter-group knowledge-quality-filters" role="group" aria-label="Answer quality filters"><button type="button" :class="{ active: knowledgeQualityFilter === 'all' }" @click="knowledgeQualityFilter = 'all'; applyKnowledgeQualityFilters()">All</button><button type="button" :class="{ active: knowledgeQualityFilter === 'grounded' }" @click="knowledgeQualityFilter = 'grounded'; applyKnowledgeQualityFilters()">Grounded</button><button type="button" :class="{ active: knowledgeQualityFilter === 'fallback' }" @click="knowledgeQualityFilter = 'fallback'; applyKnowledgeQualityFilters()">Fallback</button><button type="button" :class="{ active: knowledgeQualityFilter === 'needsReview' }" @click="knowledgeQualityFilter = 'needsReview'; applyKnowledgeQualityFilters()">Needs review</button></div></div>
+              <div class="knowledge-quality-table" role="table" aria-label="Recent answer checks"><div class="knowledge-quality-table-head" role="row"><span>Question</span><span>Confidence</span><span>Outcome</span><span>Sources</span><span>Time</span></div><div v-if="knowledgeQualityLoading" class="knowledge-empty-row">Loading answer checks…</div><div v-else-if="!visibleRetrievalDiagnostics.length" class="knowledge-empty-row">No answer checks match this filter.</div><div v-for="diagnostic in visibleRetrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="knowledge-quality-table-row" role="row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}%</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Fallback' }}</span><span class="knowledge-source-meta">{{ diagnostic.citations?.length ?? 0 }} source{{ (diagnostic.citations?.length ?? 0) === 1 ? '' : 's' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(diagnostic.createdAt) }}</span></div><div v-if="knowledgeQualityTotal" class="collection-pagination"><span>Showing {{ knowledgeQualityRangeStart }}–{{ knowledgeQualityRangeEnd }} of {{ knowledgeQualityTotal }}</span><div><button class="outline-button small" type="button" :disabled="knowledgeQualityLoading || !knowledgeQualityHasPrevious" @click="changeKnowledgeQualityPage(knowledgeQualityPage - 1)">Previous</button><button class="outline-button small" type="button" :disabled="knowledgeQualityLoading || !knowledgeQualityHasNext" @click="changeKnowledgeQualityPage(knowledgeQualityPage + 1)">Next</button></div></div></div>
             </section>
           </template>
 
           <div v-if="answerGapDrawerOpen && selectedKnowledgeGap" class="knowledge-drawer-backdrop" role="presentation" @click.self="closeKnowledgeAnswer">
-            <aside class="knowledge-answer-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledge-answer-heading"><div class="knowledge-drawer-header"><div><p class="eyebrow">Answer editor</p><h2 id="knowledge-answer-heading">Answer this question</h2></div><button class="knowledge-close-button" type="button" aria-label="Close answer editor" @click="closeKnowledgeAnswer">×</button></div><div class="knowledge-drawer-question"><span>Question</span><strong>{{ selectedKnowledgeGap.question }}</strong><small>{{ selectedKnowledgeGap.occurrenceCount }}× asked · {{ formatKnowledgeGapReason(selectedKnowledgeGap.reason) }}</small></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="selectedKnowledgeGap.answerMode"><option value="knowledge">Knowledge answer — AI may summarize</option><option value="fixed_response">Fixed response — return controlled wording</option></select></label><label class="knowledge-answer-field"><span>Answer</span><textarea v-model="answerDrafts[selectedKnowledgeGap.question]" rows="9" placeholder="Write the answer the assistant should use…"></textarea><small>Keep it clear and specific. FrontDeskWise updates assistant knowledge automatically after you save.</small></label><p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p><div v-if="knowledgeAnswerSaving || knowledgeAnswerStatus" class="knowledge-answer-progress" role="status" aria-live="polite"><span :class="knowledgeAnswerStatus === 'Ready ✓' ? 'ready' : ''">{{ knowledgeAnswerSaving ? (knowledgeAnswerStatus || 'Saving…') : knowledgeAnswerStatus }}</span><small v-if="knowledgeAnswerStatus === 'Updating assistant knowledge…'">Your answer is saved. We’re making it available to the assistant.</small><small v-else-if="knowledgeAnswerStatus === 'Ready ✓'">The gap moved to Resolved.</small></div><div class="knowledge-drawer-actions"><button class="outline-button" type="button" :disabled="knowledgeAnswerSaving" @click="closeKnowledgeAnswer">Cancel</button><button class="primary-button" type="button" :disabled="!answerDrafts[selectedKnowledgeGap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(selectedKnowledgeGap)">{{ knowledgeAnswerSaving ? 'Saving…' : 'Save answer' }}</button></div></aside>
+            <aside class="knowledge-answer-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledge-answer-heading"><div class="knowledge-drawer-header"><div><p class="eyebrow">Answer editor</p><h2 id="knowledge-answer-heading">Answer this question</h2></div><button class="knowledge-close-button" type="button" aria-label="Close answer editor" @click="closeKnowledgeAnswer">×</button></div><div class="knowledge-drawer-question"><span>Question cluster</span><strong>{{ selectedKnowledgeGap.question }}</strong><small>{{ selectedKnowledgeGap.occurrenceCount }}× asked · {{ selectedKnowledgeGap.variants?.length ?? 1 }} question variant{{ (selectedKnowledgeGap.variants?.length ?? 1) === 1 ? '' : 's' }} · {{ formatKnowledgeGapReason(selectedKnowledgeGap.reason) }}</small><div v-if="(selectedKnowledgeGap.variants?.length ?? 0) > 1" class="knowledge-variant-list"><span>Examples</span><small v-for="variant in selectedKnowledgeGap.variants" :key="variant">“{{ variant }}”</small></div></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="selectedKnowledgeGap.answerMode"><option value="knowledge">Knowledge answer — AI may summarize</option><option value="fixed_response">Fixed response — return controlled wording</option></select></label><label class="knowledge-answer-field"><span>Answer</span><textarea v-model="answerDrafts[selectedKnowledgeGap.question]" rows="9" placeholder="Write the answer the assistant should use…"></textarea><small>Keep it clear and specific. FrontDeskWise updates assistant knowledge automatically after you save.</small></label><p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p><div v-if="knowledgeAnswerSaving || knowledgeAnswerStatus" class="knowledge-answer-progress" role="status" aria-live="polite"><span :class="knowledgeAnswerStatus === 'Ready ✓' ? 'ready' : ''">{{ knowledgeAnswerSaving ? (knowledgeAnswerStatus || 'Saving…') : knowledgeAnswerStatus }}</span><small v-if="knowledgeAnswerStatus === 'Updating assistant knowledge…'">Your answer is saved. We’re making it available to the assistant.</small><small v-else-if="knowledgeAnswerStatus === 'Ready ✓'">The gap moved to Resolved.</small></div><div class="knowledge-drawer-actions"><button class="outline-button" type="button" :disabled="knowledgeAnswerSaving" @click="closeKnowledgeAnswer">Cancel</button><button class="primary-button" type="button" :disabled="!answerDrafts[selectedKnowledgeGap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(selectedKnowledgeGap)">{{ knowledgeAnswerSaving ? 'Saving…' : 'Save answer' }}</button></div></aside>
           </div>
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
           <div class="actions-page-header">
             <div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Define what your AI front desk can help visitors do.</p></div>
-            <button v-if="!actionDraft" class="primary-button" type="button" @click="actionTemplateChooserOpen = true">+ Create action</button>
+            <div v-if="!actionDraft" class="toolbar-actions"><button class="text-button" type="button" @click="openSupportReport('actions')">Report a problem</button><button class="primary-button" type="button" @click="actionTemplateChooserOpen = true">+ Create action</button></div>
             <div v-else class="toolbar-actions"><button class="outline-button small" type="button" @click="selectAction(null)">← All actions</button><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
           </div>
           <p v-if="integrationError" class="form-error">{{ integrationError }}</p>
@@ -5889,7 +6950,7 @@ function startMarketingDemo() {
               <div class="action-section-heading"><div><p class="eyebrow">Your actions</p><h3>Conversion flows</h3><p>Give visitors a clear next step and keep the outcome visible to your team.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
               <article v-for="action in actionFlows" :key="action.id" class="action-summary-card">
                 <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }}</h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
-                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
+                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button class="outline-button small" type="button" @click="runActionTest(action)">Test flow</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
               </article>
             </section>
             <section v-else class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="actionTemplateChooserOpen = true">Create your first action <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
@@ -5950,7 +7011,7 @@ function startMarketingDemo() {
         <div v-else-if="view === 'connections'" class="view-content">
           <div class="section-toolbar">
             <div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect business systems for reliable delivery, then give the assistant only the extra context it needs.</p></div>
-            <div class="toolbar-actions"><span v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</span><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="integrationLoading || mcpLoading" @click="loadIntegrations(); loadMcpConnections()">{{ integrationLoading || mcpLoading ? 'Working…' : 'Refresh' }}</button></div>
+            <div class="toolbar-actions"><span v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</span><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="integrationLoading || mcpLoading" @click="loadIntegrations(); loadMcpConnections()">{{ integrationLoading || mcpLoading ? 'Working…' : 'Refresh' }}</button><button class="text-button" type="button" @click="openSupportReport('integration', hubspotIntegration?.provider ?? '', hubspotIntegration?.id ?? '')">Get help</button></div>
           </div>
           <p v-if="integrationError || mcpError" class="form-error">{{ integrationError || mcpError }}</p>
 
@@ -6054,8 +7115,9 @@ function startMarketingDemo() {
             <div v-if="billingSnapshot.billing.providerCustomerId" class="billing-portal-callout"><div><p class="eyebrow">Subscription management</p><strong>{{ billingSnapshot.billing.status === 'active' ? 'Subscription is active — manage below.' : 'Manage your billing details in the Stripe portal.' }}</strong><p>Update payment methods, view invoices, or manage your subscription securely.</p></div><button class="outline-button small" type="button" :disabled="billingLoading" @click="openBillingPortal">Manage billing →</button></div>
             <div v-if="billingSnapshot.billing.status === 'grace'" class="billing-alert warning">Payment needs attention. Your organization remains available until {{ formatBillingDate(billingSnapshot.billing.graceEndAt) }}.</div>
             <div v-else-if="billingSnapshot.billing.status === 'cancelled' || billingSnapshot.billing.status === 'paused'" class="billing-alert danger">Billing is {{ billingSnapshot.billing.status }}. Existing data remains visible, but new paid actions and businesses are paused until billing is restored.</div>
+            <div v-if="billingSnapshot.billing.pendingPlanKey && billingSnapshot.billing.pendingPlanChangeType === 'downgrade'" class="billing-alert warning"><span><strong>{{ billingSnapshot.billing.plan.displayName }} stays active.</strong> Your change to {{ formatPlanLabel(billingSnapshot.billing.pendingPlanKey) }} begins {{ formatBillingDate(billingSnapshot.billing.pendingPlanChangeAt) }}.</span><button class="outline-button small" type="button" :disabled="billingLoading" @click="resumeBilling">Keep {{ billingSnapshot.billing.plan.displayName }}</button></div><div v-else-if="billingSnapshot.billing.pendingPlanKey && billingSnapshot.billing.pendingPlanChangeType === 'upgrade'" class="billing-alert warning"><span><strong>{{ billingSnapshot.billing.plan.displayName }} remains active.</strong> Your upgrade to {{ formatPlanLabel(billingSnapshot.billing.pendingPlanKey) }} is awaiting successful payment.</span><button class="outline-button small" type="button" :disabled="billingLoading" @click="openBillingPortal">Update payment method</button></div>
             <div class="billing-summary-grid">
-              <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.status === 'active'">Your {{ billingSnapshot.billing.plan.displayName }} subscription is active.</p><p v-else-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.status === 'active' && billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</small><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ billingSnapshot.billing.lastPaymentStatus === 'paid' ? 'Paid' : formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small></article>
+              <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.pendingPlanKey && billingSnapshot.billing.pendingPlanChangeType === 'downgrade'">{{ billingSnapshot.billing.plan.displayName }} remains active until {{ formatBillingDate(billingSnapshot.billing.pendingPlanChangeAt) }}.</p><p v-else-if="billingSnapshot.billing.status === 'active'">Your {{ billingSnapshot.billing.plan.displayName }} subscription is active.</p><p v-else-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.status === 'active' && billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</small><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ billingSnapshot.billing.lastPaymentStatus === 'paid' ? 'Paid' : formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small><button v-if="billingSnapshot.billing.cancelAtPeriodEnd" class="outline-button small" type="button" :disabled="billingLoading" @click="resumeBilling">Keep my plan active</button></article>
               <article class="panel billing-status-card"><p class="eyebrow">Business capacity</p><strong class="billing-big-number">{{ availableBusinesses.length }} <span>/ {{ billingSnapshot.billing.plan.maxBusinesses }}</span></strong><p>Businesses in this organization</p><div class="metric-progress"><span :style="{ width: `${Math.min(100, (availableBusinesses.length / billingSnapshot.billing.plan.maxBusinesses) * 100)}%` }"></span></div></article>
               <article class="panel billing-status-card"><p class="eyebrow">Last 30 days</p><div class="billing-usage-stats"><span><strong>{{ billingSnapshot.usageLast30Days.conversations }}</strong> conversations</span><span><strong>{{ billingSnapshot.usageLast30Days.leads }}</strong> leads</span><span><strong>{{ billingSnapshot.usageLast30Days.bookings }}</strong> bookings</span></div></article>
             </div>
@@ -6072,7 +7134,7 @@ function startMarketingDemo() {
           <p v-if="adminError" class="form-error">{{ adminError }}</p>
           <template v-if="adminSection === 'overview'">
             <div class="ds-stat-grid admin-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Building2 :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizations.length }}</strong><small>Organizations</small><em>{{ adminTrialCount }} on trial</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><UserCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminLeadTotal }}</strong><small>Leads captured</small><em>Across all tenants</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminConversationTotal }}</strong><small>Conversations</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminPausedCount + adminFailedDemoCount }}</strong><small>Needs attention</small><em>{{ adminDisabledUserCount }} disabled users</em></article></div>
-            <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'installation-support'"><span>New installation requests</span><strong>{{ installationSupportSummary.new }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
+            <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'support'"><span>Open support cases</span><strong>{{ adminSupportSummary.open }}</strong></button><button type="button" @click="adminSection = 'installation-support'"><span>New installation requests</span><strong>{{ installationSupportSummary.new }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
           </template>
           <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }} · {{ organization.mrrAmountCents === null ? 'No MRR' : `$${(organization.mrrAmountCents / 100).toFixed(0)} MRR` }}</small><small v-if="organization.lastPaymentStatus || organization.cancelAtPeriodEnd">{{ organization.lastPaymentStatus ? `Payment ${organization.lastPaymentStatus}` : '' }}{{ organization.cancelAtPeriodEnd ? ' · cancellation scheduled' : '' }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
           <template v-if="adminSection === 'business-detail'">
@@ -6093,6 +7155,12 @@ function startMarketingDemo() {
               <article class="panel table-panel admin-timeline-panel"><div class="panel-heading"><div><p class="eyebrow">Subscription event timeline</p><h2>Billing audit</h2><p>Internal Stripe and lifecycle milestones for troubleshooting.</p></div></div><div v-if="!adminOrganizationDetail.billingTimeline.length" class="diagnostics-empty">No billing events recorded yet.</div><div v-for="event in adminOrganizationDetail.billingTimeline" :key="event.eventKey" class="detail-list-row"><span><strong>{{ formatLabel(event.eventName) }}</strong><small>{{ event.occurredAt ? new Date(event.occurredAt).toLocaleString() : 'Unknown time' }}</small></span><span class="status-pill" :class="event.status === 'sent' ? 'booked' : event.status === 'failed' ? 'new' : 'qualified'">{{ event.status }}</span></div></article>
             </template>
           </template>
+          <article v-if="adminSection === 'action-registry'" class="panel action-registry-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Conversion control</p><h2>Action registry review</h2><p>Review what the crawler found, keep unsafe candidates disabled, and choose the primary next step for each business.</p></div><div class="toolbar-actions"><span v-if="adminActionRegistryMessage" class="saved-message">✓ {{ adminActionRegistryMessage }}</span><button class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="loadAdminActionRegistry">{{ adminActionRegistryLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+            <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Zap :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistry.length }}</strong><small>Detected actions</small><em>Across all businesses</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><CircleCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryEnabledCount }}</strong><small>Enabled actions</small><em>Available to visitors</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryReviewCount }}</strong><small>Needs review</small><em>Disabled or below confidence threshold</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><BadgeCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryPrimaryCount }}</strong><small>Primary actions</small><em>Explicit business choices</em></article></div>
+            <p v-if="adminActionRegistryError" class="form-error">{{ adminActionRegistryError }}</p>
+            <div class="action-registry-table-wrap"><div class="action-registry-table-heading"><span>Business / action</span><span>Evidence</span><span>Destination</span><span>Confidence</span><span>Controls</span></div><div v-if="!adminActionRegistry.length" class="diagnostics-empty">No crawled actions found yet.</div><div v-for="action in adminActionRegistry" :key="action.id" class="action-registry-row"><div><strong>{{ action.businessName }}</strong><small>{{ action.name }} · {{ formatLabel(action.actionType) }}</small><small>{{ action.businessSlug }}</small><small>{{ formatLabel(action.origin) }} · {{ formatLabel(action.lifecycleStatus) }}<span v-if="action.reviewReason"> · {{ formatLabel(action.reviewReason) }}</span></small><span v-if="action.isPrimary" class="status-pill qualified action-primary-pill">Primary action</span></div><div><small>{{ action.evidence[0]?.quote || 'No source evidence captured' }}</small><small>{{ formatLabel(action.sourceType || 'unknown') }} · Discovered {{ action.discoveredAt ? new Date(action.discoveredAt).toLocaleString() : '—' }}</small><small v-if="action.sourceLabel">Extracted label: {{ action.sourceLabel }}</small><small v-if="action.classificationReason" :title="action.classificationReason">Why: {{ action.classificationReason }}</small><a v-if="action.sourceUrl" :href="action.sourceUrl" target="_blank" rel="noreferrer">Open source ↗</a></div><div><a v-if="action.destination?.url" :href="action.destination.url" target="_blank" rel="noreferrer">{{ action.destination.label || action.destination.url }}</a><small v-else>No destination</small><small v-if="action.provider">Provider: {{ action.provider }}</small><small>{{ formatLabel(action.safetyPolicy) }}</small></div><div><strong>{{ action.confidence === null ? '—' : `${Math.round(action.confidence * 100)}%` }}</strong><small>Priority {{ action.priority }}</small><small>{{ action.enabled ? 'Enabled' : 'Disabled' }}</small></div><div class="admin-actions action-registry-controls"><button v-if="action.enabled" class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="updateAdminRegistryAction(action, false)">Disable</button><button v-else class="outline-button small" type="button" :disabled="adminActionRegistryLoading || (action.confidence ?? 0) < 0.88 || action.safetyPolicy === 'manual_review' || (action.actionType === 'call_emergency' && !action.destination?.url?.startsWith('tel:'))" :title="(action.confidence ?? 0) < 0.88 ? 'Low-confidence actions need stronger evidence' : action.actionType === 'call_emergency' ? 'Emergency actions also require verified source ownership and evidence' : 'Approve action'" @click="updateAdminRegistryAction(action, true)">{{ action.origin === 'discovered' ? 'Approve' : 'Enable' }}</button><button class="text-button action-primary-button" type="button" :disabled="adminActionRegistryLoading || !action.enabled" @click="setAdminPrimaryAction(action)">{{ action.isPrimary ? 'Clear primary' : 'Set primary' }}</button></div></div></div>
+          </article>
           <article v-if="adminSection === 'users'" class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users & access</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
           <article v-if="adminSection === 'demos'" class="panel admin-demo-operations">
             <div class="panel-heading"><div><p class="eyebrow">Demo operations</p><h2>Requests, test users & access links</h2><p>Every visitor request and operator action is audited. Generated links are copied once and can be reset, extended, revoked, or validated.</p></div><div class="admin-demo-summary"><span>{{ adminDemoSummary.total }} total</span><span>{{ adminDemoSummary.ready }} ready</span><span>{{ adminDemoSummary.converted }} converted</span></div></div>
@@ -6109,6 +7177,20 @@ function startMarketingDemo() {
               <div><span :class="['status-pill', item.status === 'converted' || item.status === 'claimed' ? 'booked' : item.status === 'expired' || item.status === 'revoked' || item.status === 'failed' ? 'new' : 'qualified']">{{ item.status }}</span><small>{{ item.accessCount }} access{{ item.accessCount === 1 ? '' : 'es' }} · {{ item.session?.openCount ?? 0 }} opens</small></div>
               <div><small>Requested {{ item.requestedAt ? new Date(item.requestedAt).toLocaleString() : '—' }}</small><small>Expires {{ item.session?.expiresAt ? new Date(item.session.expiresAt).toLocaleString() : '—' }}</small></div>
               <div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'validate')">Validate</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'extend')">Extend 7d</button><button class="outline-button small" type="button" :disabled="adminLoading || !item.businessSlug" @click="adminDemoAction(item, 'reset')">New link</button><button class="text-button" type="button" :disabled="adminLoading || !item.session" @click="adminDemoAction(item, 'revoke')">Revoke</button></div>
+            </div>
+          </article>
+          <article v-if="adminSection === 'support'" class="panel installation-support-admin-panel support-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Customer operations</p><h2>Support cases</h2><p>Every case is linked to the tenant, affected feature, diagnostics, recent errors, and an auditable status history.</p></div><div class="toolbar-actions"><span v-if="adminSupportMessage" class="saved-message">✓ {{ adminSupportMessage }}</span><button class="outline-button small" type="button" :disabled="adminSupportLoading" @click="loadAdminSupportCases">{{ adminSupportLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+            <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminSupportSummary.open }}</strong><small>Open</small><em>Needs first response</em></article><article class="ds-stat-card"><span class="ds-stat-icon blue"><Activity :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminSupportSummary.inProgress }}</strong><small>In progress</small><em>Assigned or being handled</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><CircleCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminSupportSummary.resolved }}</strong><small>Resolved</small><em>Closed cases</em></article></div>
+            <p v-if="adminSupportError" class="form-error">{{ adminSupportError }}</p>
+            <div class="table-heading support-case-admin-row"><span>Business / requester</span><span>Case</span><span>Diagnostics</span><span>Owner</span><span>Status</span></div>
+            <div v-if="!adminSupportCases.length" class="diagnostics-empty">No support cases yet.</div>
+            <div v-for="item in adminSupportCases" :key="item.id" class="table-row support-case-admin-row">
+              <div><button class="text-button support-business-link" type="button" @click="openAdminSupportBusiness(item)">{{ item.businessName }}</button><small>{{ item.requesterName }} · {{ item.requesterEmail }}</small><small>{{ new Date(item.createdAt).toLocaleString() }}</small></div>
+              <div><strong>{{ item.subject }}</strong><small><span class="status-pill qualified">{{ formatLabel(item.category) }}</span><span v-if="item.provider"> · {{ formatLabel(item.provider) }}</span></small><small>{{ item.description }}</small></div>
+              <div><small>Page: {{ item.sourcePage || 'Support' }}</small><small>Correlation: {{ item.correlationId }}</small><small>Severity: {{ item.severity }}</small><button class="text-button" type="button" :disabled="adminSupportLoading" @click="openAdminSupportView(item)">View as owner ↗</button></div>
+              <select v-model="item.assignedUserId" aria-label="Assign support case" :disabled="adminSupportLoading" @change="updateAdminSupportCase(item)"><option :value="null">Unassigned</option><option v-for="assignee in adminSupportAssignees" :key="assignee.id" :value="assignee.id">{{ assignee.name || assignee.email }}</option></select>
+              <select v-model="item.status" aria-label="Update support case status" :disabled="adminSupportLoading" @change="updateAdminSupportCase(item)"><option value="open">Open</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select>
             </div>
           </article>
           <article v-if="adminSection === 'installation-support'" class="panel installation-support-admin-panel">

@@ -16,7 +16,9 @@ import { generateGroundedAnswer, hasDirectSensitiveEvidence, routeQuestion, veri
 import { shapeCustomerAnswer, type AnswerTone } from "./answer-shaping.js";
 import {
   ACTION_TEMPLATES,
+  BUSINESS_ACTION_TYPES,
   actionTemplate,
+  classifyVisitorRequest,
   createActionState,
   defaultActionFlows,
   detectAction,
@@ -26,6 +28,11 @@ import {
   nextConversationalField,
   validateFieldValue,
   type ActionFlow,
+  type ActionLifecycleStatus,
+  type ActionOrigin,
+  type ActionReviewReason,
+  type ActionSourceType,
+  type BusinessActionType,
   type ConversationActionState,
 } from "./action-flows.js";
 import { generateCompletionLink } from "./completion-links.js";
@@ -129,6 +136,24 @@ import {
 } from "./hubspot-oauth.js";
 import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from "./mcp.js";
 import { credentialHint, decryptSecret, encryptSecret } from "./secrets.js";
+import {
+  activePlanAfterStripeSync,
+  billingPaymentFailureContext,
+  billingPlanChangeType,
+  type BillingPlanChangeType,
+} from "./billing-state.js";
+import {
+  BUSINESS_FACT_KINDS,
+  BUSINESS_FACT_SOURCE_TYPES,
+  businessFactSourceLabel,
+  normalizeBusinessFact,
+  resolveBusinessFacts,
+  type BusinessFact,
+  type BusinessFactAuthority,
+  type BusinessFactInput,
+  type BusinessFactKind,
+  type BusinessFactSourceType,
+} from "./business-knowledge.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
 await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
@@ -227,6 +252,7 @@ type AgentConfig = {
   privacyNoticeUrl: string | null;
   retentionDays: number;
   showAiDisclosure: boolean;
+  fallbackContacts: { phone: string | null; email: string | null; url: string | null };
 };
 
 type AgentPublishingStatus = "NOT_PUBLISHED" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
@@ -252,6 +278,7 @@ type Source = {
   renderAttempted?: boolean;
   renderSuccess?: boolean;
   renderDurationMs?: number | null;
+  renderDiagnostics?: Record<string, unknown> | null;
   crawlDepth?: number | null;
   discoveryParentUrl?: string | null;
   errorMessage?: string | null;
@@ -309,6 +336,9 @@ type DemoAccessOptions = {
   expiresAt?: string;
 };
 
+type SupportCaseCategory = "general" | "installation" | "knowledge" | "actions" | "integration" | "billing" | "verification" | "widget" | "account";
+type SupportCaseStatus = "open" | "in_progress" | "resolved";
+
 type DemoAuditInput = {
   demoRequestId?: string | null;
   sessionId?: string | null;
@@ -321,7 +351,9 @@ type DemoAuditInput = {
   metadata?: Record<string, unknown>;
 };
 
-type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED";
+type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
+type HandoffNotificationStatus = "sent" | "pending" | "failed" | null;
+const CONVERSATION_RESUME_WINDOW_MS = 24 * 60 * 60 * 1_000;
 type TeamRole = "owner" | "admin" | "staff" | "viewer";
 type ConversationEventType =
   | "AI_HANDOFF_REQUESTED"
@@ -331,11 +363,13 @@ type ConversationEventType =
   | "MESSAGE_SENT_BY_HUMAN"
   | "RETURNED_TO_AI"
   | "CONVERSATION_RESOLVED"
+  | "CONVERSATION_EXPIRED"
   | "VISITOR_REPLIED"
   | "INTERNAL_NOTE_ADDED"
   | "AI_RESPONSE_SENT";
 
 type Message = {
+  id?: string;
   role: "user" | "assistant" | "human" | "system";
   kind?: "message" | "system" | "internal_note";
   authorUserId?: string;
@@ -374,6 +408,7 @@ type Conversation = {
   assignedAt: string | null;
   handoffReason: string | null;
   handoffRequestedAt: string | null;
+  handoffNotificationStatus: HandoffNotificationStatus;
   humanJoinedAt: string | null;
   resolvedAt: string | null;
   unreadCount: number;
@@ -491,6 +526,13 @@ const widgetPerformanceEventTypes = new Set([
   "full_response_rendered",
   "response_error",
   "message_backend",
+  "bootstrap_config_failed",
+  "conversation_restore_failed",
+  "message_retry",
+  "network_offline",
+  "network_restored",
+  "connector_delivery_failed",
+  "handoff_notification_failed",
 ]);
 
 type Notification = {
@@ -534,6 +576,20 @@ type Lead = {
   metadata: Record<string, unknown>;
   notes?: string;
   createdAt: string;
+};
+
+type ActionSubmission = {
+  id: string;
+  businessId: string;
+  actionId: string;
+  conversationId: string;
+  idempotencyKey: string;
+  values: Record<string, string>;
+  sourcePage: string | null;
+  status: "received" | "completed" | "failed";
+  leadId: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type KnowledgeGap = {
@@ -607,9 +663,12 @@ type Business = {
   ownershipVerifiedAt: string | null;
   ownershipVerifiedByUserId: string | null;
   agentPublishedAt: string | null;
+  primaryActionId: string | null;
   sources: Source[];
   chunks: KnowledgeChunk[];
+  facts: BusinessFact[];
   actions: ActionFlow[];
+  actionSubmissions: ActionSubmission[];
   actionResources: ActionResource[];
   conversations: Map<string, Conversation>;
   conversationEvents: ConversationEvent[];
@@ -639,6 +698,12 @@ const INTERNAL_DEMO_SLUGS = new Set([
   "munchkin-town",
   "tampa-bay-family-dental",
 ]);
+
+function invalidateBusinessRuntimeCache(businessId: string): void {
+  for (const [slug, business] of businesses) {
+    if (business.id === businessId) businesses.delete(slug);
+  }
+}
 
 function isInternalDemoSlug(slug: string): boolean {
   return INTERNAL_DEMO_SLUGS.has(slug);
@@ -740,6 +805,7 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   privacyNoticeUrl: null,
   retentionDays: 90,
   showAiDisclosure: true,
+  fallbackContacts: { phone: null, email: null, url: null },
 });
 
 function cloneAgentConfig(config: AgentConfig): AgentConfig {
@@ -749,6 +815,7 @@ function cloneAgentConfig(config: AgentConfig): AgentConfig {
 function agentConfigFromValue(value: unknown, businessName: string): AgentConfig {
   const config = asRecord(value);
   const fallback = defaultConfig(businessName);
+  const fallbackContactConfig = asRecord(config.fallbackContacts);
   return {
     assistantName: typeof config.assistantName === "string" && config.assistantName.trim() ? config.assistantName.trim().slice(0, 120) : fallback.assistantName,
     welcomeMessage: typeof config.welcomeMessage === "string" && config.welcomeMessage.trim() ? config.welcomeMessage.trim().slice(0, 1_000) : fallback.welcomeMessage,
@@ -777,6 +844,11 @@ function agentConfigFromValue(value: unknown, businessName: string): AgentConfig
     privacyNoticeUrl: typeof config.privacyNoticeUrl === "string" && config.privacyNoticeUrl.trim() ? config.privacyNoticeUrl.trim() : null,
     retentionDays: normalizedRetentionDays(config.retentionDays),
     showAiDisclosure: config.showAiDisclosure !== false,
+    fallbackContacts: {
+      phone: typeof (config.fallbackPhone ?? fallbackContactConfig.phone) === "string" && String(config.fallbackPhone ?? fallbackContactConfig.phone).trim() ? String(config.fallbackPhone ?? fallbackContactConfig.phone).trim().slice(0, 80) : fallback.fallbackContacts.phone,
+      email: normalizedNotificationEmail(config.fallbackEmail ?? fallbackContactConfig.email) ?? fallback.fallbackContacts.email,
+      url: typeof (config.fallbackContactUrl ?? fallbackContactConfig.url) === "string" && /^https?:\/\//i.test(String(config.fallbackContactUrl ?? fallbackContactConfig.url).trim()) ? String(config.fallbackContactUrl ?? fallbackContactConfig.url).trim().slice(0, 2_000) : fallback.fallbackContacts.url,
+    },
   };
 }
 
@@ -1040,6 +1112,9 @@ function organizationBillingPayload(row: Record<string, unknown>): Record<string
     checkoutSessionId: typeof row.stripe_checkout_session_id === "string" ? row.stripe_checkout_session_id : null,
     pendingPlanKey: typeof row.pending_plan_key === "string" ? row.pending_plan_key : null,
     pendingBillingInterval: typeof row.pending_billing_interval === "string" ? row.pending_billing_interval : null,
+    pendingPlanChangeType: typeof row.pending_plan_change_type === "string" ? row.pending_plan_change_type : null,
+    pendingPlanChangeAt: nullableIso(row.pending_plan_change_at),
+    stripeSubscriptionScheduleId: typeof row.stripe_subscription_schedule_id === "string" ? row.stripe_subscription_schedule_id : null,
     cancelAtPeriodEnd: row.cancel_at_period_end === true,
     lastPaymentStatus: typeof row.last_payment_status === "string" ? row.last_payment_status : null,
     activationEmailQueuedAt: nullableIso(row.subscription_activation_email_queued_at),
@@ -1141,7 +1216,8 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
               o.current_period_end_at, o.grace_end_at, o.billing_provider,
               o.stripe_customer_id, o.stripe_subscription_id, o.stripe_price_id,
               o.stripe_checkout_session_id, o.stripe_checkout_status, o.pending_plan_key,
-              o.pending_billing_interval, o.stripe_subscription_status, o.cancel_at_period_end,
+              o.pending_billing_interval, o.pending_plan_change_type, o.pending_plan_change_at,
+              o.stripe_subscription_schedule_id, o.stripe_subscription_status, o.cancel_at_period_end,
               o.last_payment_status,
               o.billing_amount_cents, o.billing_currency,
               bp.display_name as plan_display_name, bp.description as plan_description,
@@ -1384,6 +1460,27 @@ function leadFromRow(row: Record<string, unknown>): Lead {
   };
 }
 
+function actionSubmissionFromRow(row: Record<string, unknown>): ActionSubmission {
+  const values = Object.fromEntries(
+    Object.entries(asRecord(row.values))
+      .filter(([, value]) => typeof value === "string")
+      .slice(0, 100),
+  ) as Record<string, string>;
+  return {
+    id: String(row.id),
+    businessId: String(row.business_id),
+    actionId: String(row.action_id),
+    conversationId: String(row.conversation_id),
+    idempotencyKey: String(row.idempotency_key),
+    values,
+    sourcePage: typeof row.source_page === "string" ? row.source_page : null,
+    status: row.status === "completed" || row.status === "failed" ? row.status : "received",
+    leadId: typeof row.lead_id === "string" ? row.lead_id : null,
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+  };
+}
+
 function actionConnectorFromValue(value: unknown): ActionConnectorSettings | undefined {
   const source = asRecord(value);
   const provider = source.provider;
@@ -1429,6 +1526,9 @@ function mcpBearerToken(payload: string): string {
 
 function actionFromRow(row: Record<string, unknown>): ActionFlow {
   const completion = asRecord(row.completion);
+  const fields = Array.isArray(row.fields) ? row.fields as ActionFlow["fields"] : [];
+  const persistedRequiredFields = Array.isArray(row.required_fields) ? row.required_fields.filter((item): item is string => typeof item === "string") : [];
+  const persistedOptionalFields = Array.isArray(row.optional_fields) ? row.optional_fields.filter((item): item is string => typeof item === "string") : [];
   const connector = actionConnectorFromValue(completion.connector);
   const completionModes = new Set(["external_provider", "native_form", "booking_connector", "payment_link", "api_webhook", "human_follow_up"]);
   const linkTemplateSource = asRecord(completion.linkTemplate);
@@ -1443,12 +1543,16 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
   return {
     id: String(row.id),
     key: String(row.action_key),
+    actionType: BUSINESS_ACTION_TYPES.includes(String(row.action_type) as BusinessActionType)
+      ? String(row.action_type) as BusinessActionType
+      : "contact_team",
+    businessId: typeof row.business_id === "string" ? row.business_id : undefined,
     name: String(row.name),
     description: String(row.description ?? ""),
     triggerPhrases: Array.isArray(row.trigger_phrases) ? row.trigger_phrases.filter((item): item is string => typeof item === "string") : [],
     triggerIntents: Array.isArray(row.trigger_intents) ? row.trigger_intents.filter((item): item is string => typeof item === "string") : [],
     captureMode: row.capture_mode === "conversational" || row.capture_mode === "form" || row.capture_mode === "hybrid" ? row.capture_mode : "auto",
-    fields: Array.isArray(row.fields) ? row.fields as ActionFlow["fields"] : [],
+    fields,
     ...(Array.isArray(row.steps) ? { steps: row.steps as ActionFlow["steps"] } : {}),
     completion: {
       createLead: completion.createLead !== false,
@@ -1465,6 +1569,31 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
       notifyTargets: Array.isArray(completion.notifyTargets) ? completion.notifyTargets.filter((item): item is "owner" | "business_team" | "assigned_staff" => item === "owner" || item === "business_team" || item === "assigned_staff") : ["business_team"],
       ...(connector ? { connector } : {}),
     },
+    mode: "transactional",
+    destination: row.destination && typeof row.destination === "object" ? row.destination as ActionFlow["destination"] : null,
+    provider: typeof row.provider === "string" ? row.provider : null,
+    priority: Number(row.priority ?? 500),
+    requiredFields: persistedRequiredFields.length ? persistedRequiredFields : fields.filter((field) => field.required && field.visibility !== "hidden").map((field) => field.key),
+    optionalFields: persistedOptionalFields.length ? persistedOptionalFields : fields.filter((field) => !field.required && field.visibility !== "hidden").map((field) => field.key),
+    handoffBehavior: asRecord(row.handoff_behavior).mode === "require_staff" || asRecord(row.handoff_behavior).mode === "notify_staff"
+      ? {
+        mode: asRecord(row.handoff_behavior).mode as "require_staff" | "notify_staff",
+        ...(typeof asRecord(row.handoff_behavior).reason === "string" ? { reason: asRecord(row.handoff_behavior).reason as string } : {}),
+      }
+      : { mode: completion.requiresStaff ? "require_staff" : completion.notifyStaff ? "notify_staff" : "none" },
+    version: Number.isInteger(Number(row.version)) ? Number(row.version) : 1,
+    conditions: Array.isArray(row.conditions) ? row.conditions.filter((item): item is NonNullable<ActionFlow["conditions"]>[number] => Boolean(item && typeof item === "object")) as ActionFlow["conditions"] : [],
+    safetyPolicy: row.safety_policy === "verified_contact" || row.safety_policy === "healthcare_emergency" || row.safety_policy === "manual_review" ? row.safety_policy : "standard",
+    sourceUrl: typeof row.source_url === "string" ? row.source_url : null,
+    sourceType: row.source_type === "website" || row.source_type === "manual" || row.source_type === "document" || row.source_type === "integration" || row.source_type === "system" ? row.source_type as ActionSourceType : null,
+    sourceLabel: typeof row.source_label === "string" ? row.source_label : null,
+    classificationReason: typeof row.classification_reason === "string" ? row.classification_reason : null,
+    discoveredAt: row.discovered_at ? toIso(row.discovered_at) : null,
+    origin: row.origin === "discovered" ? "discovered" as ActionOrigin : "configured" as ActionOrigin,
+    lifecycleStatus: ["discovered", "needs_review", "approved", "active", "disabled"].includes(String(row.lifecycle_status)) ? String(row.lifecycle_status) as ActionLifecycleStatus : (row.enabled === false ? "disabled" : "active"),
+    reviewReason: ["low_confidence", "unsafe_destination", "duplicate_action", "owner_override", "source_removed"].includes(String(row.review_reason)) ? String(row.review_reason) as ActionReviewReason : null,
+    evidence: Array.isArray(row.evidence) ? row.evidence.filter((item): item is NonNullable<ActionFlow["evidence"]>[number] => Boolean(item && typeof item === "object")) as ActionFlow["evidence"] : [],
+    confidence: Number(row.confidence ?? 0.5),
     enabled: row.enabled !== false,
     createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
     updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
@@ -1509,6 +1638,36 @@ function actionResourceFromRow(row: Record<string, unknown>): ActionResource {
     updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
   };
   return normalizeActionResource(input);
+}
+
+function businessFactFromRow(row: Record<string, unknown>): BusinessFact {
+  const kind = (BUSINESS_FACT_KINDS as readonly string[]).includes(String(row.kind))
+    ? String(row.kind) as BusinessFactKind
+    : "custom";
+  const sourceType = (BUSINESS_FACT_SOURCE_TYPES as readonly string[]).includes(String(row.source_type))
+    ? String(row.source_type) as BusinessFactSourceType
+    : "inferred";
+  return normalizeBusinessFact({
+    id: String(row.id),
+    businessId: String(row.business_id),
+    kind,
+    subject: String(row.subject ?? "Business"),
+    predicate: String(row.predicate ?? "fact"),
+    value: row.value === undefined ? null : row.value as BusinessFactInput["value"],
+    valueText: typeof row.value_text === "string" ? row.value_text : undefined,
+    sourceType,
+    authority: typeof row.authority === "string" ? row.authority as BusinessFactAuthority : undefined,
+    sourceId: typeof row.source_id === "string" ? row.source_id : null,
+    sourceLabel: typeof row.source_label === "string" ? row.source_label : null,
+    confidence: row.confidence === null || row.confidence === undefined ? 1 : Number(row.confidence),
+    freshnessPolicy: typeof row.freshness_policy === "string" ? row.freshness_policy as BusinessFactInput["freshnessPolicy"] : undefined,
+    observedAt: row.observed_at ? toIso(row.observed_at) : new Date().toISOString(),
+    expiresAt: row.expires_at ? toIso(row.expires_at) : null,
+    active: row.active !== false,
+    version: Number(row.version ?? 1),
+    createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
+    updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
+  });
 }
 
 function crmLeadPayload(business: Business, lead: Lead, eventId: string): CrmLeadPayload {
@@ -1598,6 +1757,7 @@ function makeBusiness(input: {
     renderAttempted: page.renderAttempted ?? false,
     renderSuccess: page.renderSuccess ?? false,
     renderDurationMs: page.renderDurationMs ?? null,
+    renderDiagnostics: page.renderDiagnostics ? { ...page.renderDiagnostics } : null,
     crawlDepth: page.crawlDepth ?? null,
     discoveryParentUrl: page.discoveryParentUrl ?? null,
   }));
@@ -1609,6 +1769,7 @@ function makeBusiness(input: {
     metadata: chunk.metadata,
   })));
   const websiteContent = chunks.map((chunk) => chunk.content).join(" ");
+  const websiteActions = input.pages.flatMap((page) => page.actionCandidates ?? []);
 
   return {
     id: randomUUID(),
@@ -1624,9 +1785,12 @@ function makeBusiness(input: {
     ownershipVerifiedAt: null,
     ownershipVerifiedByUserId: null,
     agentPublishedAt: null,
+    primaryActionId: null,
     sources,
     chunks,
-    actions: defaultActionFlows(input.name, websiteContent, (key) => randomUUID()),
+    facts: [],
+    actions: defaultActionFlows(input.name, websiteContent, (key) => randomUUID(), websiteActions),
+    actionSubmissions: [],
     actionResources: [],
     conversations: new Map(),
     conversationEvents: [],
@@ -1680,6 +1844,7 @@ function websiteSourcesFromPages(pages: CrawledPage[]): { sources: Source[]; chu
     renderAttempted: page.renderAttempted ?? false,
     renderSuccess: page.renderSuccess ?? false,
     renderDurationMs: page.renderDurationMs ?? null,
+    renderDiagnostics: page.renderDiagnostics ? { ...page.renderDiagnostics } : null,
     crawlDepth: page.crawlDepth ?? null,
     discoveryParentUrl: page.discoveryParentUrl ?? null,
     errorMessage: null,
@@ -1701,6 +1866,99 @@ async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): 
   const website = websiteSourcesFromPages(pages);
   business.sources = business.sources.filter((source) => source.contentType !== "web_page").concat(website.sources);
   business.chunks = business.chunks.filter((chunk) => !previousWebsiteSourceIds.has(chunk.sourceId)).concat(website.chunks);
+  const websiteContent = business.chunks.filter((chunk) => chunk.metadata.sourceType !== "knowledge_answer").map((chunk) => chunk.content).join(" ");
+  const extractedActions = defaultActionFlows(
+    business.name,
+    websiteContent,
+    (key) => randomUUID(),
+    pages.flatMap((page) => page.actionCandidates ?? []),
+  ).filter((action) => action.sourceUrl);
+  const extractedKeys = new Set(extractedActions.map((action) => action.key));
+  for (const extracted of extractedActions) {
+    const existing = business.actions.find((action) => action.key === extracted.key);
+    if (existing) {
+      // A configured action is owner intent. Website recrawls may not mutate it
+      // or silently replace its primary-action meaning.
+      if (existing.origin === "configured") continue;
+      Object.assign(existing, {
+        actionType: extracted.actionType,
+        destination: extracted.destination,
+        provider: extracted.provider,
+        priority: extracted.priority,
+        requiredFields: extracted.requiredFields,
+        conditions: extracted.conditions,
+        safetyPolicy: extracted.safetyPolicy,
+        sourceUrl: extracted.sourceUrl,
+        evidence: extracted.evidence,
+        confidence: extracted.confidence,
+        sourceType: extracted.sourceType,
+        sourceLabel: extracted.sourceLabel,
+        classificationReason: extracted.classificationReason,
+        discoveredAt: extracted.discoveredAt,
+        origin: "discovered" as const,
+        lifecycleStatus: existing.lifecycleStatus ?? "needs_review",
+        reviewReason: existing.reviewReason === "source_removed" ? extracted.reviewReason : existing.reviewReason,
+        // Owner-disabled or previously reviewed actions stay disabled; a
+        // recrawl never promotes a candidate into runtime by itself.
+        enabled: existing.enabled && extracted.enabled,
+        updatedAt: new Date().toISOString(),
+      });
+      await persistAction(business, existing);
+    } else {
+      business.actions.push(extracted);
+      await persistAction(business, extracted);
+      await recordActionRegistryAudit({
+        businessId: business.id,
+        actionId: extracted.id,
+        actorType: "system",
+        eventType: "created",
+        newValue: {
+          origin: extracted.origin,
+          lifecycleStatus: extracted.lifecycleStatus,
+          sourceUrl: extracted.sourceUrl,
+          sourceType: extracted.sourceType,
+          sourceLabel: extracted.sourceLabel,
+          discoveredAt: extracted.discoveredAt,
+          confidence: extracted.confidence,
+        },
+        reason: extracted.reviewReason,
+      });
+    }
+  }
+  for (const existing of business.actions.filter((action) => action.origin === "discovered" && !extractedKeys.has(action.key))) {
+    const wasEnabled = existing.enabled;
+    const wasLifecycleStatus = existing.lifecycleStatus;
+    const wasPrimary = business.primaryActionId === existing.id;
+    Object.assign(existing, {
+      enabled: false,
+      lifecycleStatus: "disabled" as const,
+      reviewReason: "source_removed" as const,
+      updatedAt: new Date().toISOString(),
+    });
+    if (wasPrimary) {
+      business.primaryActionId = null;
+      if (pool) await pool.query("update businesses set primary_action_id = null, updated_at = now() where id = $1 and primary_action_id = $2", [business.id, existing.id]);
+      await recordActionRegistryAudit({
+        businessId: business.id,
+        actionId: existing.id,
+        actorType: "system",
+        eventType: "primary_cleared",
+        previousValue: { primaryActionId: existing.id },
+        newValue: { primaryActionId: null },
+        reason: "source_removed",
+      });
+    }
+    await persistAction(business, existing);
+    await recordActionRegistryAudit({
+      businessId: business.id,
+      actionId: existing.id,
+      actorType: "system",
+      eventType: "source_removed",
+      previousValue: { enabled: wasEnabled, lifecycleStatus: wasLifecycleStatus },
+      newValue: { enabled: false, lifecycleStatus: "disabled", reviewReason: "source_removed" },
+      reason: "source_removed",
+    });
+  }
   if (!pool) return;
   await pool.query(
     `delete from knowledge_chunks
@@ -2115,6 +2373,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
       ],
     );
     business.id = businessResult.rows[0].id;
+    await client.query("update businesses set primary_action_id = $2, updated_at = now() where id = $1", [business.id, business.primaryActionId]);
 
     if (isInternalDemo) {
       const demoUser = await client.query<{ id: string }>(
@@ -2143,8 +2402,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         `insert into business_sources
            (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at,
             http_status, raw_html_bytes, extracted_character_count, discovered_link_count, crawl_mode, render_attempted,
-            render_success, render_duration_ms, crawl_depth, discovery_parent_url, error_message)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            render_success, render_duration_ms, render_diagnostics, crawl_depth, discovery_parent_url, error_message)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
          on conflict (business_id, content_hash) do update set
            source_url = excluded.source_url,
            canonical_url = excluded.canonical_url,
@@ -2160,6 +2419,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            render_attempted = excluded.render_attempted,
            render_success = excluded.render_success,
            render_duration_ms = excluded.render_duration_ms,
+           render_diagnostics = excluded.render_diagnostics,
            crawl_depth = excluded.crawl_depth,
            discovery_parent_url = excluded.discovery_parent_url,
            error_message = excluded.error_message
@@ -2183,6 +2443,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           source.renderAttempted ?? false,
           source.renderSuccess ?? false,
           source.renderDurationMs ?? null,
+          source.renderDiagnostics ? JSON.stringify(source.renderDiagnostics) : null,
           source.crawlDepth ?? null,
           source.discoveryParentUrl ?? null,
           source.errorMessage ?? null,
@@ -2206,9 +2467,10 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     for (const action of business.actions) {
       await client.query(
         `insert into business_actions
-           (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, enabled, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
          on conflict (business_id, action_key) do update set
+           action_type = excluded.action_type,
            name = excluded.name,
            description = excluded.description,
            trigger_phrases = excluded.trigger_phrases,
@@ -2217,12 +2479,33 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            fields = excluded.fields,
            steps = excluded.steps,
            completion = excluded.completion,
+           mode = excluded.mode,
+           destination = excluded.destination,
+           provider = excluded.provider,
+           priority = excluded.priority,
+           required_fields = excluded.required_fields,
+           optional_fields = excluded.optional_fields,
+           handoff_behavior = excluded.handoff_behavior,
+           version = excluded.version,
+           conditions = excluded.conditions,
+           safety_policy = excluded.safety_policy,
+           source_url = excluded.source_url,
+           source_type = excluded.source_type,
+           source_label = excluded.source_label,
+           classification_reason = excluded.classification_reason,
+           discovered_at = excluded.discovered_at,
+           origin = excluded.origin,
+           lifecycle_status = excluded.lifecycle_status,
+           review_reason = excluded.review_reason,
+           evidence = excluded.evidence,
+           confidence = excluded.confidence,
            enabled = excluded.enabled,
            updated_at = excluded.updated_at`,
         [
           action.id,
           business.id,
           action.key,
+          action.actionType,
           action.name,
           action.description,
           JSON.stringify(action.triggerPhrases),
@@ -2231,6 +2514,26 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           JSON.stringify(action.fields),
           JSON.stringify(action.steps ?? []),
           JSON.stringify(action.completion),
+          action.mode,
+          action.destination ? JSON.stringify(action.destination) : null,
+          action.provider,
+          action.priority,
+          JSON.stringify(action.requiredFields),
+          JSON.stringify(action.optionalFields ?? action.fields.filter((field) => !field.required).map((field) => field.key)),
+          JSON.stringify(action.handoffBehavior ?? { mode: "none" }),
+          action.version ?? 1,
+          JSON.stringify(action.conditions),
+          action.safetyPolicy,
+          action.sourceUrl,
+          action.sourceType ?? null,
+          action.sourceLabel ?? null,
+          action.classificationReason ?? null,
+          action.discoveredAt ?? null,
+          action.origin ?? "configured",
+          action.lifecycleStatus ?? (action.enabled ? "active" : "disabled"),
+          action.reviewReason ?? null,
+          JSON.stringify(action.evidence),
+          action.confidence,
           action.enabled,
           action.createdAt,
           action.updatedAt,
@@ -2393,6 +2696,36 @@ async function loadActionResourceRows(businessId: string): Promise<Record<string
   }
 }
 
+async function loadActionSubmissionRows(businessId: string): Promise<Record<string, unknown>[]> {
+  if (!pool) return [];
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      "select * from action_submissions where business_id = $1 order by created_at desc limit 10_000",
+      [businessId],
+    );
+    return result.rows;
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Action submissions table is not available yet");
+    return [];
+  }
+}
+
+async function loadBusinessFactRows(businessId: string): Promise<Record<string, unknown>[]> {
+  if (!pool) return [];
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      "select * from business_facts where business_id = $1 order by updated_at desc, created_at",
+      [businessId],
+    );
+    return result.rows;
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Business facts table is not available yet");
+    return [];
+  }
+}
+
 async function loadBusinessFromDatabase(slug: string): Promise<Business | null> {
   if (!pool) return null;
   const businessResult = await pool.query<Record<string, unknown>>(
@@ -2410,7 +2743,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   if (!businessResult.rowCount) return null;
   const row = businessResult.rows[0];
   const businessId = String(row.id);
-  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult, actionResourceRows] = await Promise.all([
+  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult, actionResourceRows, businessFactRows, actionSubmissionRows] = await Promise.all([
     pool.query<Record<string, unknown>>("select * from business_sources where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from knowledge_chunks where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from conversations where business_id = $1 order by created_at", [businessId]),
@@ -2419,6 +2752,8 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     pool.query<Record<string, unknown>>("select * from business_actions where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from agent_configs where business_id = $1", [businessId]),
     loadActionResourceRows(businessId),
+    loadBusinessFactRows(businessId),
+    loadActionSubmissionRows(businessId),
   ]);
   const conversationIds = conversationResult.rows.map((item) => String(item.id));
   const messageResult = conversationIds.length
@@ -2429,6 +2764,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     const conversationId = String(message.conversation_id);
     const messages = messagesByConversation.get(conversationId) ?? [];
     messages.push({
+      id: typeof message.id === "string" ? message.id : undefined,
       role: message.role === "user" ? "user" : message.role === "human" ? "human" : message.role === "system" ? "system" : "assistant",
       kind: message.kind === "system" || message.kind === "internal_note" ? message.kind : "message",
       authorUserId: typeof message.author_user_id === "string" ? message.author_user_id : undefined,
@@ -2487,6 +2823,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     ownershipVerifiedAt: row.ownership_verified_at ? toIso(row.ownership_verified_at) : null,
     ownershipVerifiedByUserId: typeof row.ownership_verified_by_user_id === "string" ? row.ownership_verified_by_user_id : null,
     agentPublishedAt: row.agent_published_at ? toIso(row.agent_published_at) : null,
+    primaryActionId: typeof row.primary_action_id === "string" ? row.primary_action_id : null,
     sources: sourceResult.rows.map((source) => ({
       id: String(source.id),
       url: String(source.source_url),
@@ -2505,6 +2842,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       renderAttempted: Boolean(source.render_attempted),
       renderSuccess: Boolean(source.render_success),
       renderDurationMs: source.render_duration_ms === null || source.render_duration_ms === undefined ? null : Number(source.render_duration_ms),
+      renderDiagnostics: source.render_diagnostics && typeof source.render_diagnostics === "object" ? asRecord(source.render_diagnostics) : null,
       crawlDepth: source.crawl_depth === null || source.crawl_depth === undefined ? null : Number(source.crawl_depth),
       discoveryParentUrl: typeof source.discovery_parent_url === "string" ? source.discovery_parent_url : null,
       errorMessage: typeof source.error_message === "string" ? source.error_message : null,
@@ -2518,6 +2856,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       embeddingModel: typeof chunk.embedding_model === "string" ? chunk.embedding_model : null,
       embeddingDimensions: chunk.embedding_dimensions === null || chunk.embedding_dimensions === undefined ? null : Number(chunk.embedding_dimensions),
     })),
+    facts: businessFactRows.map(businessFactFromRow),
     actions: actionResult.rows.length
       ? actionResult.rows.map(actionFromRow)
       : defaultActionFlows(
@@ -2525,6 +2864,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         chunkResult.rows.map((chunk) => String(chunk.content ?? "")).join(" "),
         (key) => randomUUID(),
       ),
+    actionSubmissions: actionSubmissionRows.map(actionSubmissionFromRow),
     actionResources: actionResourceRows.map(actionResourceFromRow),
     conversations: new Map(conversationResult.rows.map((conversation) => {
       const id = String(conversation.id);
@@ -2534,12 +2874,15 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         leadCaptured: Boolean(conversation.lead_captured),
         actionTaken: typeof conversation.action_taken === "string" ? conversation.action_taken : null,
         status: conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF"
-          || conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "RESOLVED"
+          || conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "RESOLVED" || conversation.status === "EXPIRED"
           ? conversation.status : "AI_ACTIVE",
         assignedUserId: typeof conversation.assigned_user_id === "string" ? conversation.assigned_user_id : null,
         assignedAt: conversation.assigned_at ? toIso(conversation.assigned_at) : null,
         handoffReason: typeof conversation.handoff_reason === "string" ? conversation.handoff_reason : null,
         handoffRequestedAt: conversation.handoff_requested_at ? toIso(conversation.handoff_requested_at) : null,
+        handoffNotificationStatus: conversation.handoff_notification_status === "sent" || conversation.handoff_notification_status === "pending" || conversation.handoff_notification_status === "failed"
+          ? conversation.handoff_notification_status
+          : null,
         humanJoinedAt: conversation.human_joined_at ? toIso(conversation.human_joined_at) : null,
         resolvedAt: conversation.resolved_at ? toIso(conversation.resolved_at) : null,
         unreadCount: Number(conversation.unread_count ?? 0),
@@ -2608,6 +2951,9 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       privacyNoticeUrl: config.privacy_notice_url,
       retentionDays: config.retention_days,
       showAiDisclosure: config.show_ai_disclosure,
+      fallbackPhone: config.fallback_phone,
+      fallbackEmail: config.fallback_email,
+      fallbackContactUrl: config.fallback_contact_url,
     }, String(row.name)) : defaultConfig(String(row.name)),
     publishedAgentConfig: config?.published_config ? agentConfigFromValue(config.published_config, String(row.name)) : null,
     publishedAgentConfigHash: typeof config?.published_config_hash === "string" ? config.published_config_hash : null,
@@ -2664,6 +3010,7 @@ async function persistConversation(business: Business, conversation: Conversatio
     conversation.assignedAt,
     conversation.handoffReason,
     conversation.handoffRequestedAt,
+    conversation.handoffNotificationStatus,
     conversation.humanJoinedAt,
     conversation.resolvedAt,
     conversation.unreadCount,
@@ -2675,9 +3022,9 @@ async function persistConversation(business: Business, conversation: Conversatio
     await pool.query(
       `insert into conversations
          (id, business_id, session_id, lead_captured, action_taken, action_state, status, assigned_user_id,
-          assigned_at, handoff_reason, handoff_requested_at, human_joined_at, resolved_at, unread_count,
+          assigned_at, handoff_reason, handoff_requested_at, handoff_notification_status, human_joined_at, resolved_at, unread_count,
           last_activity_at, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        on conflict (id) do update set
          lead_captured = excluded.lead_captured,
          action_taken = excluded.action_taken,
@@ -2687,6 +3034,7 @@ async function persistConversation(business: Business, conversation: Conversatio
          assigned_at = excluded.assigned_at,
          handoff_reason = excluded.handoff_reason,
          handoff_requested_at = excluded.handoff_requested_at,
+         handoff_notification_status = excluded.handoff_notification_status,
          human_joined_at = excluded.human_joined_at,
          resolved_at = excluded.resolved_at,
          unread_count = excluded.unread_count,
@@ -2698,8 +3046,8 @@ async function persistConversation(business: Business, conversation: Conversatio
     if (!isMissingDatabaseColumn(error)) throw error;
     app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error", conversationId: conversation.id }, "Action state column is not available yet");
     await pool.query(
-      `insert into conversations (id, business_id, session_id, lead_captured, action_taken, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $16, $17)
+       `insert into conversations (id, business_id, session_id, lead_captured, action_taken, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $17, $18)
        on conflict (id) do update set
          lead_captured = excluded.lead_captured,
          action_taken = excluded.action_taken,
@@ -2753,10 +3101,50 @@ function isMissingDatabaseTable(error: unknown): boolean {
   return (error as { code?: unknown }).code === "42P01";
 }
 
+type ActionRegistryAuditEvent = "created" | "updated" | "approved" | "enabled" | "disabled" | "primary_set" | "primary_cleared" | "source_removed";
+
+async function recordActionRegistryAudit(input: {
+  businessId: string;
+  actionId?: string | null;
+  actorUserId?: string | null;
+  actorType: "super_admin" | "owner" | "system";
+  eventType: ActionRegistryAuditEvent;
+  previousValue?: unknown;
+  newValue?: unknown;
+  reason?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  if (!pool) return;
+  try {
+    await pool.query(
+      `insert into action_registry_audit
+         (business_id, action_id, actor_user_id, actor_type, event_type, previous_value, new_value, reason, metadata)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        input.businessId,
+        input.actionId ?? null,
+        input.actorUserId ?? null,
+        input.actorType,
+        input.eventType,
+        input.previousValue === undefined ? null : JSON.stringify(input.previousValue),
+        input.newValue === undefined ? null : JSON.stringify(input.newValue),
+        input.reason ?? null,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
+  } catch (error) {
+    // Keep a rolling deploy safe if the API starts before migration 054.
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: input.businessId, actionId: input.actionId ?? null }, "Action registry audit table is not available yet");
+  }
+}
+
 async function persistMessage(conversation: Conversation, message: Message): Promise<void> {
   if (!pool) return;
+  message.id ??= randomUUID();
   const retrieval = message.retrieval;
   const params = [
+    message.id,
     conversation.id,
     message.role,
     message.content,
@@ -2780,9 +3168,9 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
   try {
     await pool.query(
       `insert into conversation_messages
-         (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
+         (id, conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
           model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, author_user_id, kind, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
       params,
     );
     return;
@@ -2794,12 +3182,12 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
   // Keep message persistence compatible with a rolling deployment where the
   // API has been updated before migrations 007/018 have reached the database.
   const legacyParams = [...params];
-  legacyParams[1] = message.role === "user" ? "user" : "assistant";
+  legacyParams[2] = message.role === "user" ? "user" : "assistant";
   try {
     await pool.query(
       `insert into conversation_messages
-         (conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $18)`,
+         (id, conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $19)`,
       legacyParams,
     );
     return;
@@ -2809,9 +3197,9 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
   }
 
   await pool.query(
-    `insert into conversation_messages (conversation_id, role, content, created_at)
-     values ($1, $2, $3, $4)`,
-    [conversation.id, message.role === "user" ? "user" : "assistant", message.content, message.createdAt],
+    `insert into conversation_messages (id, conversation_id, role, content, created_at)
+     values ($1, $2, $3, $4, $5)`,
+    [message.id, conversation.id, message.role === "user" ? "user" : "assistant", message.content, message.createdAt],
   );
 }
 
@@ -3142,8 +3530,8 @@ async function ignoreKnowledgeGap(business: Business, question: string): Promise
 async function persistAgentConfig(business: Business): Promise<void> {
   if (!pool) return;
   await pool.query(
-    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions, fallback_phone, fallback_email, fallback_contact_url)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
      on conflict (business_id) do update set
        assistant_name = excluded.assistant_name,
        welcome_message = excluded.welcome_message,
@@ -3172,8 +3560,11 @@ async function persistAgentConfig(business: Business): Promise<void> {
        retention_days = excluded.retention_days,
        show_ai_disclosure = excluded.show_ai_disclosure,
        tone_instructions = excluded.tone_instructions,
+       fallback_phone = excluded.fallback_phone,
+       fallback_email = excluded.fallback_email,
+       fallback_contact_url = excluded.fallback_contact_url,
        updated_at = now()`,
-    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.proactiveBehavior, business.agentConfig.proactiveFrequency, business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions],
+    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.proactiveBehavior, business.agentConfig.proactiveFrequency, business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions, business.agentConfig.fallbackContacts.phone, business.agentConfig.fallbackContacts.email, business.agentConfig.fallbackContacts.url],
   );
 }
 
@@ -3418,7 +3809,7 @@ function bearerToken(request: FastifyRequest): string | null {
   return typeof demoToken === "string" && demoToken.trim() ? demoToken.trim() : null;
 }
 
-async function requireDemoOwner(business: Business, request: FastifyRequest): Promise<void> {
+async function requireDemoOwner(business: Business, request: FastifyRequest): Promise<string | null> {
   const token = bearerToken(request);
   if (!token) throw httpError(401, "A demo owner access token is required");
   const tokenHash = hashAccessToken(token);
@@ -3428,18 +3819,18 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
     if (!session || session.slug !== business.slug || session.businessId !== business.id || Date.parse(session.expiresAt) <= Date.now()) {
       throw httpError(401, "Demo owner access token is invalid or expired");
     }
-    return;
+    return null;
   }
 
   const demoResult = await pool.query(
-    `select 1
+    `select u.id
      from demo_access_sessions s
      join workspace_users u on u.id = s.user_id
      where s.token_hash = $1 and s.business_id = $2 and s.revoked_at is null
        and s.expires_at > now() and u.status = 'active' and u.role in ('owner', 'admin')`,
     [tokenHash, business.id],
   );
-  if (demoResult.rowCount) return;
+  if (demoResult.rowCount) return String(demoResult.rows[0].id);
 
   let authUser: FirebaseAuthUser;
   try {
@@ -3451,7 +3842,7 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
     throw error;
   }
   const result = await pool.query(
-    `select 1
+    `select u.id
      from app_users u
      join business_members bm on bm.user_id = u.id and bm.business_id = $2
      join businesses b on b.id = bm.business_id
@@ -3461,6 +3852,7 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
     [authUser.identitySubject, business.id],
   );
   if (!result.rowCount) throw httpError(403, "Your account does not have owner access to this business");
+  return String(result.rows[0].id);
 }
 
 async function requireAuthenticatedBusinessOwner(business: Business, request: FastifyRequest): Promise<void> {
@@ -3575,12 +3967,30 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     }, {
       id: randomUUID(),
       key,
+      actionType: "contact_team",
       name: key,
       description: "",
       triggerPhrases: [],
       triggerIntents: [],
       captureMode: "auto",
       fields: [],
+      mode: "transactional",
+      destination: null,
+      provider: null,
+      priority: 500,
+      requiredFields: [],
+      conditions: [],
+      safetyPolicy: "standard",
+      sourceUrl: null,
+      sourceType: "manual",
+      sourceLabel: key,
+      classificationReason: null,
+      discoveredAt: null,
+      origin: "configured",
+      lifecycleStatus: "active",
+      reviewReason: null,
+      evidence: [],
+      confidence: 0.5,
       completion: { createLead: true, leadStatus: "new", message: "Thanks — the team has your request.", notifyStaff: true, notifyChannels: ["in_app", "email"], notifyTargets: ["business_team"] },
       enabled: true,
       createdAt: now,
@@ -3589,8 +3999,9 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
   }
 
   const allowedTypes = new Set(["text", "email", "phone", "select", "date", "number"]);
-  const sourceFields = Array.isArray(body.fields) ? body.fields : base.fields;
-  const fields = sourceFields.map((value, index) => {
+  const fieldsProvided = Array.isArray(body.fields);
+  const sourceFields: unknown[] = fieldsProvided && Array.isArray(body.fields) ? body.fields : base.fields;
+  const fields: ActionFlow["fields"] = sourceFields.map((value: unknown, index: number) => {
     const source = asRecord(value);
     const type = typeof source.type === "string" && allowedTypes.has(source.type) ? source.type : "text";
     const key = (optionalString(source.key, 80) ?? ("field_" + (index + 1))).replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -3678,10 +4089,64 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
       ...(Object.keys(asRecord(linkTemplateSource.staticParams)).length ? { staticParams: Object.fromEntries(Object.entries(asRecord(linkTemplateSource.staticParams)).filter(([key, value]) => /^[a-zA-Z0-9_.-]{1,120}$/.test(key) && typeof value === "string").slice(0, 50)) as Record<string, string> } : {}),
     }
     : base.completion.linkTemplate;
+  const actionType = BUSINESS_ACTION_TYPES.includes(String(body.actionType ?? base.actionType) as BusinessActionType)
+    ? String(body.actionType ?? base.actionType) as BusinessActionType
+    : (base.actionType ?? "contact_team");
+  const destinationSource = body.destination === null ? null : asRecord(body.destination ?? base.destination);
+  const destination = destinationSource && typeof destinationSource.url === "string"
+    ? { url: destinationSource.url.slice(0, 2_000), ...(typeof destinationSource.label === "string" ? { label: destinationSource.label.slice(0, 160) } : {}) }
+    : (base.destination ?? null);
+  const conditions = Array.isArray(body.conditions) ? body.conditions.map((item) => {
+    const condition = asRecord(item);
+    const field = optionalString(condition.field, 120);
+    return field ? {
+      field,
+      ...(optionalString(condition.contains, 240) ? { contains: optionalString(condition.contains, 240) as string } : {}),
+      ...(optionalString(condition.equals, 240) ? { equals: optionalString(condition.equals, 240) as string } : {}),
+    } : null;
+  }).filter((item): item is NonNullable<typeof item> => Boolean(item)).slice(0, 30) : (base.conditions ?? []);
+  const evidence = Array.isArray(body.evidence) ? body.evidence.map((item) => {
+    const source = asRecord(item);
+    const sourceUrl = optionalString(source.sourceUrl, 2_000);
+    const quote = optionalString(source.quote, 500);
+    const confidence = Number(source.confidence);
+    return sourceUrl && quote ? { sourceUrl, quote, confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.5 } : null;
+  }).filter((item): item is NonNullable<typeof item> => Boolean(item)).slice(0, 20) : (base.evidence ?? []);
+  const confidenceValue = Number(body.confidence ?? base.confidence ?? 0.5);
   const now = new Date().toISOString();
+  const origin = base.origin ?? "configured";
+  const enabled = typeof body.enabled === "boolean" ? body.enabled : base.enabled;
+  const lifecycleStatus = origin === "discovered"
+    ? (base.lifecycleStatus ?? (enabled ? "needs_review" : "disabled"))
+    : (enabled ? "active" : "disabled");
+  const requiredFields = fieldsProvided
+    ? fields.filter((field) => field.required && field.visibility !== "hidden").map((field) => field.key)
+    : (Array.isArray(body.requiredFields)
+      ? body.requiredFields.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 120)).slice(0, 50)
+      : (base.requiredFields ?? fields.map((field) => field.key)));
+  const optionalFields = fieldsProvided
+    ? fields.filter((field) => !field.required && field.visibility !== "hidden").map((field) => field.key)
+    : (base.optionalFields ?? fields.filter((field) => !field.required && field.visibility !== "hidden").map((field) => field.key));
+  const completion = {
+    createLead: typeof sourceCompletion.createLead === "boolean" ? sourceCompletion.createLead : base.completion.createLead,
+    leadStatus,
+    message: optionalString(sourceCompletion.message, 1_000) ?? base.completion.message,
+    ...(completionMode ? { completionMode } : {}),
+    ...(linkTemplate ? { linkTemplate } : {}),
+    ...(submitLabel ? { submitLabel } : {}),
+    ...(linkUrl ? { linkUrl } : {}),
+    ...(linkLabel ? { linkLabel } : {}),
+    notifyStaff: typeof sourceCompletion.notifyStaff === "boolean" ? sourceCompletion.notifyStaff : base.completion.notifyStaff,
+    requiresStaff: typeof sourceCompletion.requiresStaff === "boolean" ? sourceCompletion.requiresStaff : base.completion.requiresStaff,
+    notifyChannels: Array.isArray(sourceCompletion.notifyChannels) ? sourceCompletion.notifyChannels.filter((item): item is "in_app" | "email" => item === "in_app" || item === "email") : base.completion.notifyChannels,
+    notifyTargets: Array.isArray(sourceCompletion.notifyTargets) ? sourceCompletion.notifyTargets.filter((item): item is "owner" | "business_team" | "assigned_staff" => item === "owner" || item === "business_team" || item === "assigned_staff") : base.completion.notifyTargets,
+    ...(connector ? { connector } : {}),
+  };
   return {
     id: existing?.id ?? base.id,
     key: (optionalString(body.key, 80) ?? base.key).replace(/[^a-zA-Z0-9_-]/g, "_"),
+    actionType,
+    businessId: base.businessId,
     name: optionalString(body.name, 160) ?? base.name,
     description: optionalString(body.description, 1_000) ?? base.description,
     triggerPhrases: (Array.isArray(body.triggerPhrases) ? body.triggerPhrases : base.triggerPhrases)
@@ -3693,22 +4158,30 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
       : base.captureMode,
     fields,
     ...(steps.length ? { steps } : {}),
-    completion: {
-      createLead: typeof sourceCompletion.createLead === "boolean" ? sourceCompletion.createLead : base.completion.createLead,
-      leadStatus,
-      message: optionalString(sourceCompletion.message, 1_000) ?? base.completion.message,
-      ...(completionMode ? { completionMode } : {}),
-      ...(linkTemplate ? { linkTemplate } : {}),
-      ...(submitLabel ? { submitLabel } : {}),
-      ...(linkUrl ? { linkUrl } : {}),
-      ...(linkLabel ? { linkLabel } : {}),
-      notifyStaff: typeof sourceCompletion.notifyStaff === "boolean" ? sourceCompletion.notifyStaff : base.completion.notifyStaff,
-      requiresStaff: typeof sourceCompletion.requiresStaff === "boolean" ? sourceCompletion.requiresStaff : base.completion.requiresStaff,
-      notifyChannels: Array.isArray(sourceCompletion.notifyChannels) ? sourceCompletion.notifyChannels.filter((item): item is "in_app" | "email" => item === "in_app" || item === "email") : base.completion.notifyChannels,
-      notifyTargets: Array.isArray(sourceCompletion.notifyTargets) ? sourceCompletion.notifyTargets.filter((item): item is "owner" | "business_team" | "assigned_staff" => item === "owner" || item === "business_team" || item === "assigned_staff") : base.completion.notifyTargets,
-      ...(connector ? { connector } : {}),
-    },
-    enabled: typeof body.enabled === "boolean" ? body.enabled : base.enabled,
+    completion,
+    mode: "transactional",
+    destination,
+    provider: optionalString(body.provider, 160) ?? (base.provider ?? null),
+    priority: Number.isFinite(Number(body.priority ?? base.priority)) ? Math.max(0, Math.min(10_000, Number(body.priority ?? base.priority))) : (base.priority ?? 500),
+    requiredFields,
+    optionalFields,
+    handoffBehavior: completion.requiresStaff
+      ? { mode: "require_staff", reason: `Action requires staff: ${base.name}` }
+      : completion.notifyStaff ? { mode: "notify_staff" } : { mode: "none" },
+    conditions,
+    safetyPolicy: body.safetyPolicy === "verified_contact" || body.safetyPolicy === "healthcare_emergency" || body.safetyPolicy === "manual_review" ? body.safetyPolicy : (base.safetyPolicy ?? "standard"),
+    sourceUrl: optionalString(body.sourceUrl, 2_000) ?? (base.sourceUrl ?? null),
+    sourceType: body.sourceType === "website" || body.sourceType === "manual" || body.sourceType === "document" || body.sourceType === "integration" || body.sourceType === "system" ? body.sourceType as ActionSourceType : (base.sourceType ?? (origin === "discovered" ? "website" : "manual")),
+    sourceLabel: optionalString(body.sourceLabel, 240) ?? (base.sourceLabel ?? null),
+    classificationReason: optionalString(body.classificationReason, 1_000) ?? (base.classificationReason ?? null),
+    discoveredAt: optionalString(body.discoveredAt, 80) ?? (base.discoveredAt ?? null),
+    origin,
+    lifecycleStatus,
+    reviewReason: body.reviewReason === "low_confidence" || body.reviewReason === "unsafe_destination" || body.reviewReason === "duplicate_action" || body.reviewReason === "owner_override" || body.reviewReason === "source_removed" ? body.reviewReason : (base.reviewReason ?? null),
+    evidence,
+    confidence: Number.isFinite(confidenceValue) ? Math.max(0, Math.min(1, confidenceValue)) : (base.confidence ?? 0.5),
+    enabled,
+    version: existing ? Math.max(1, (existing.version ?? 1) + 1) : Math.max(1, base.version ?? 1),
     createdAt: existing?.createdAt ?? base.createdAt,
     updatedAt: now,
   };
@@ -3740,13 +4213,42 @@ function normalizedActionResource(input: unknown, businessId: string, existing?:
   }
 }
 
+function normalizedBusinessFact(input: unknown, businessId: string, existing?: BusinessFact): BusinessFact {
+  const body = asRecord(input);
+  const source = existing ? { ...existing, ...body } : body;
+  const kind = body.kind ?? existing?.kind;
+  if (typeof kind !== "string" || !(BUSINESS_FACT_KINDS as readonly string[]).includes(kind)) {
+    throw httpError(400, "Unsupported business fact kind");
+  }
+  const sourceType = body.sourceType ?? existing?.sourceType ?? "owner_structured";
+  if (sourceType !== "owner_structured" && sourceType !== "owner_knowledge") {
+    throw httpError(400, "Owner-authored business facts must use owner_structured or owner_knowledge source type");
+  }
+  const authority = sourceType === "owner_structured" ? "owner_verified" : "owner_knowledge";
+  try {
+    return normalizeBusinessFact({
+      ...(source as Partial<BusinessFact>),
+      businessId,
+      kind: kind as BusinessFactKind,
+      sourceType: sourceType as BusinessFactSourceType,
+      authority,
+      id: existing?.id ?? (typeof body.id === "string" ? body.id : randomUUID()),
+      createdAt: existing?.createdAt,
+      updatedAt: new Date().toISOString(),
+    } as BusinessFactInput);
+  } catch (error) {
+    throw httpError(400, error instanceof Error ? error.message : "Invalid business fact");
+  }
+}
+
 async function persistAction(business: Business, action: ActionFlow): Promise<void> {
   if (!pool) return;
   await pool.query(
     `insert into business_actions
-       (id, business_id, action_key, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, enabled, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
      on conflict (business_id, action_key) do update set
+       action_type = excluded.action_type,
        name = excluded.name,
        description = excluded.description,
        trigger_phrases = excluded.trigger_phrases,
@@ -3755,12 +4257,33 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
        fields = excluded.fields,
        steps = excluded.steps,
        completion = excluded.completion,
+       mode = excluded.mode,
+       destination = excluded.destination,
+       provider = excluded.provider,
+       priority = excluded.priority,
+       required_fields = excluded.required_fields,
+       optional_fields = excluded.optional_fields,
+       handoff_behavior = excluded.handoff_behavior,
+       version = excluded.version,
+       conditions = excluded.conditions,
+       safety_policy = excluded.safety_policy,
+       source_url = excluded.source_url,
+       source_type = excluded.source_type,
+       source_label = excluded.source_label,
+       classification_reason = excluded.classification_reason,
+       discovered_at = excluded.discovered_at,
+       origin = excluded.origin,
+       lifecycle_status = excluded.lifecycle_status,
+       review_reason = excluded.review_reason,
+       evidence = excluded.evidence,
+       confidence = excluded.confidence,
        enabled = excluded.enabled,
        updated_at = excluded.updated_at`,
     [
       action.id,
       business.id,
       action.key,
+      action.actionType,
       action.name,
       action.description,
       JSON.stringify(action.triggerPhrases),
@@ -3769,11 +4292,111 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
       JSON.stringify(action.fields),
       JSON.stringify(action.steps ?? []),
       JSON.stringify(action.completion),
+      action.mode,
+      action.destination ? JSON.stringify(action.destination) : null,
+      action.provider,
+      action.priority,
+      JSON.stringify(action.requiredFields),
+      JSON.stringify(action.optionalFields ?? action.fields.filter((field) => !field.required).map((field) => field.key)),
+      JSON.stringify(action.handoffBehavior ?? { mode: "none" }),
+      action.version ?? 1,
+      JSON.stringify(action.conditions),
+      action.safetyPolicy,
+      action.sourceUrl,
+      action.sourceType ?? null,
+      action.sourceLabel ?? null,
+      action.classificationReason ?? null,
+      action.discoveredAt ?? null,
+      action.origin ?? "configured",
+      action.lifecycleStatus ?? (action.enabled ? "active" : "disabled"),
+      action.reviewReason ?? null,
+      JSON.stringify(action.evidence),
+      action.confidence,
       action.enabled,
       action.createdAt,
       action.updatedAt,
     ],
   );
+}
+
+async function persistActionSubmission(
+  business: Business,
+  action: ActionFlow,
+  conversation: Conversation,
+  values: Record<string, string>,
+  sourcePage: string | null,
+): Promise<ActionSubmission> {
+  const idempotencyKey = `action.submission:${conversation.id}:${action.id}`;
+  const existing = business.actionSubmissions.find((item) => item.idempotencyKey === idempotencyKey);
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const submission: ActionSubmission = {
+    id: randomUUID(),
+    businessId: business.id,
+    actionId: action.id,
+    conversationId: conversation.id,
+    idempotencyKey,
+    values: { ...values },
+    sourcePage,
+    status: "received",
+    leadId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  // The in-memory record is intentionally written before any connector or lead
+  // work. It gives retries a stable local submission even during a DB outage.
+  business.actionSubmissions.unshift(submission);
+  if (!pool) return submission;
+  try {
+    const inserted = await pool.query<Record<string, unknown>>(
+      `insert into action_submissions
+         (id, business_id, action_id, conversation_id, idempotency_key, values, source_page, status, lead_id, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       on conflict (business_id, idempotency_key) do nothing
+       returning *`,
+      [submission.id, business.id, action.id, conversation.id, idempotencyKey, JSON.stringify(values), sourcePage, submission.status, null, now, now],
+    );
+    if (!inserted.rowCount) {
+      const existingResult = await pool.query<Record<string, unknown>>(
+        "select * from action_submissions where business_id = $1 and idempotency_key = $2 limit 1",
+        [business.id, idempotencyKey],
+      );
+      if (existingResult.rowCount) {
+        const persisted = actionSubmissionFromRow(existingResult.rows[0]);
+        business.actionSubmissions = business.actionSubmissions.filter((item) => item.idempotencyKey !== idempotencyKey);
+        business.actionSubmissions.unshift(persisted);
+        return persisted;
+      }
+    } else {
+      const persisted = actionSubmissionFromRow(inserted.rows[0]);
+      business.actionSubmissions[0] = persisted;
+      return persisted;
+    }
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: business.id }, "Action submissions table is not available; retained submission in memory");
+  }
+  return submission;
+}
+
+async function updateActionSubmission(
+  business: Business,
+  submission: ActionSubmission,
+  patch: { status?: ActionSubmission["status"]; leadId?: string | null },
+): Promise<void> {
+  Object.assign(submission, patch, { updatedAt: new Date().toISOString() });
+  if (!pool) return;
+  try {
+    await pool.query(
+      `update action_submissions
+       set status = $3, lead_id = $4, updated_at = $5
+       where business_id = $1 and id = $2`,
+      [business.id, submission.id, submission.status, submission.leadId, submission.updatedAt],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: business.id }, "Action submissions table is not available; retained update in memory");
+  }
 }
 
 async function persistActionResource(business: Business, resource: ActionResource): Promise<void> {
@@ -3838,6 +4461,54 @@ async function persistActionResource(business: Business, resource: ActionResourc
       resource.version,
       resource.createdAt,
       resource.updatedAt,
+    ],
+  );
+}
+
+async function persistBusinessFact(business: Business, fact: BusinessFact): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    `insert into business_facts
+       (id, business_id, kind, subject, predicate, value, value_text, source_type, authority, source_id, source_label,
+        confidence, freshness_policy, observed_at, expires_at, active, version, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+     on conflict (id) do update set
+       kind = excluded.kind,
+       subject = excluded.subject,
+       predicate = excluded.predicate,
+       value = excluded.value,
+       value_text = excluded.value_text,
+       source_type = excluded.source_type,
+       authority = excluded.authority,
+       source_id = excluded.source_id,
+       source_label = excluded.source_label,
+       confidence = excluded.confidence,
+       freshness_policy = excluded.freshness_policy,
+       observed_at = excluded.observed_at,
+       expires_at = excluded.expires_at,
+       active = excluded.active,
+       version = excluded.version,
+       updated_at = excluded.updated_at`,
+    [
+      fact.id,
+      business.id,
+      fact.kind,
+      fact.subject,
+      fact.predicate,
+      JSON.stringify(fact.value),
+      fact.valueText,
+      fact.sourceType,
+      fact.authority,
+      fact.sourceId,
+      fact.sourceLabel,
+      fact.confidence,
+      fact.freshnessPolicy,
+      fact.observedAt,
+      fact.expiresAt,
+      fact.active,
+      fact.version,
+      fact.createdAt,
+      fact.updatedAt,
     ],
   );
 }
@@ -4112,6 +4783,83 @@ async function resolveStripePrice(organizationId: string, planKey: string, inter
   };
 }
 
+function billingPlanDisplayName(planKey: string): string {
+  const labels: Record<string, string> = {
+    demo: "Demo",
+    starter: "Starter",
+    growth: "Growth",
+    multi_business: "Multi-Business",
+    portfolio: "Portfolio",
+  };
+  return labels[planKey] ?? planKey.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function stripeUnixTimestamp(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : null;
+}
+
+type StripeSchedulePhase = Stripe.SubscriptionScheduleCreateParams.Phase;
+
+function schedulePhaseItems(phase: Record<string, unknown>, fallbackPriceId: string): StripeSchedulePhase["items"] {
+  const items = Array.isArray(phase.items) ? phase.items : [];
+  return items.map((item) => {
+    const record = asRecord(item);
+    return {
+      price: stripeObjectId(record.price) ?? fallbackPriceId,
+      quantity: typeof record.quantity === "number" && Number.isFinite(record.quantity) ? record.quantity : 1,
+    };
+  });
+}
+
+async function releaseStripeSubscriptionSchedule(client: Stripe, scheduleId: string | null): Promise<void> {
+  if (!scheduleId) return;
+  const schedule = await client.subscriptionSchedules.retrieve(scheduleId);
+  if (["active", "not_started"].includes(schedule.status)) await client.subscriptionSchedules.release(schedule.id);
+}
+
+async function scheduleStripeDowngrade(
+  client: Stripe,
+  subscription: Stripe.Subscription,
+  organizationId: string,
+  targetPriceId: string,
+  targetPlanKey: string,
+): Promise<{ scheduleId: string; effectiveAt: string }> {
+  const subscriptionRecord = subscription as unknown as Record<string, unknown>;
+  const currentItem = subscription.items.data[0];
+  if (!currentItem) throw httpError(409, "The current Stripe subscription has no billable item");
+  const currentPriceId = currentItem.price.id;
+  const existingScheduleId = stripeObjectId(subscription.schedule);
+  const schedule = existingScheduleId
+    ? await client.subscriptionSchedules.retrieve(existingScheduleId)
+    : await client.subscriptionSchedules.create({ from_subscription: subscription.id });
+  const scheduleRecord = schedule as unknown as Record<string, unknown>;
+  const phases = Array.isArray(scheduleRecord.phases) ? scheduleRecord.phases as unknown[] : [];
+  const currentPhase = asRecord(phases[0]);
+  const effectiveAtUnix = stripeUnixTimestamp(currentPhase.end_date) ?? stripeUnixTimestamp(subscriptionRecord.current_period_end);
+  if (!effectiveAtUnix) throw httpError(409, "The current subscription has no billing-period end date");
+  const currentStartAt = stripeUnixTimestamp(currentPhase.start_date)
+    ?? stripeUnixTimestamp(subscriptionRecord.current_period_start)
+    ?? Math.floor(Date.now() / 1_000);
+  const currentItems = schedulePhaseItems(currentPhase, currentPriceId);
+  const items = currentItems.length ? currentItems : [{ price: currentPriceId, quantity: currentItem.quantity ?? 1 }];
+  const targetItems = [{ price: targetPriceId, quantity: currentItem.quantity ?? 1 }];
+  await client.subscriptionSchedules.update(schedule.id, {
+    end_behavior: "release",
+    proration_behavior: "none",
+    phases: [
+      { start_date: currentStartAt, end_date: effectiveAtUnix, items },
+      {
+        start_date: effectiveAtUnix,
+        items: targetItems,
+        proration_behavior: "none",
+        metadata: frontDeskWiseStripeMetadata(organizationId, targetPlanKey),
+      },
+    ],
+    metadata: frontDeskWiseStripeMetadata(organizationId, targetPlanKey, { change_type: "downgrade" }),
+  });
+  return { scheduleId: schedule.id, effectiveAt: new Date(effectiveAtUnix * 1_000).toISOString() };
+}
+
 type StripeSubscriptionSyncResult = {
   previousStatus: BillingStatus;
   status: BillingStatus;
@@ -4130,6 +4878,7 @@ async function updateOrganizationFromStripeSubscription(
   subscription: Record<string, unknown>,
   eventCreatedAt?: number,
   eventId?: string,
+  options: { allowPlanChange?: boolean; paymentConfirmed?: boolean } = {},
 ): Promise<StripeSubscriptionSyncResult | null> {
   if (!pool) return null;
   const price = asRecord(asRecord(subscription.items).data instanceof Array ? (asRecord(subscription.items).data as unknown[])[0] : null);
@@ -4137,6 +4886,9 @@ async function updateOrganizationFromStripeSubscription(
   const metadata = asRecord(subscription.metadata);
   const stripeStatus = String(subscription.status ?? "active");
   const statusResult = stripeBillingStatus(stripeStatus);
+  const hasPendingUpdate = Object.keys(asRecord(subscription.pending_update)).length > 0;
+  const allowPlanChange = options.allowPlanChange === true;
+  const paymentConfirmed = options.paymentConfirmed === true;
   const interval = priceObject.recurring && typeof priceObject.recurring === "object"
     && (priceObject.recurring as { interval?: unknown }).interval === "year" ? "year" : "month";
   const subscriptionId = stripeObjectId(subscription.id);
@@ -4145,7 +4897,8 @@ async function updateOrganizationFromStripeSubscription(
     await client.query("begin");
     const current = await client.query<Record<string, unknown>>(
       `select billing_status, plan_key, stripe_subscription_id, stripe_subscription_event_created_at,
-              stripe_subscription_status, cancel_at_period_end, last_payment_status, grace_end_at
+              stripe_subscription_status, cancel_at_period_end, last_payment_status, grace_end_at,
+              pending_plan_key
        from organizations where id = $1 for update`,
       [organizationId],
     );
@@ -4196,11 +4949,21 @@ async function updateOrganizationFromStripeSubscription(
     if (!planKey) planKey = stripeMetadataString(metadata, "plan_key", "planKey");
     const previousStatus = String(currentRow.billing_status ?? "trial") as BillingStatus;
     const previousPlanKey = String(currentRow.plan_key ?? "starter");
+    const activePlanKey = activePlanAfterStripeSync({
+      currentPlanKey: previousPlanKey,
+      observedPlanKey: planKey || null,
+      allowPlanChange,
+      paymentConfirmed,
+      stripeStatus,
+      hasPendingUpdate,
+    });
     const cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
-    const currentPeriodEndAt = stripeTimestamp(subscription.current_period_end);
+    const scheduleCurrentPhase = asRecord(asRecord(subscription.schedule).current_phase);
+    const currentPeriodEndAt = stripeTimestamp(subscription.current_period_end) ?? stripeTimestamp(scheduleCurrentPhase.end_date);
     const paymentStillFailed = currentRow.last_payment_status === "failed"
       && String(currentRow.stripe_subscription_id ?? "") === String(subscriptionId ?? "")
-      && statusResult.status === "active";
+      && statusResult.status === "active"
+      && !paymentConfirmed;
     const effectiveStatusResult = paymentStillFailed
       ? { status: "grace" as BillingStatus, graceEndAt: currentRow.grace_end_at ? toIso(currentRow.grace_end_at) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString() }
       : statusResult;
@@ -4213,16 +4976,19 @@ async function updateOrganizationFromStripeSubscription(
            stripe_price_id = $12, billing_amount_cents = $13, billing_currency = $14,
            stripe_subscription_status = $15, stripe_subscription_event_created_at = coalesce($16, stripe_subscription_event_created_at),
            stripe_last_event_id = coalesce($17, stripe_last_event_id), cancel_at_period_end = $18,
+           stripe_subscription_schedule_id = $19,
            stripe_checkout_status = case when stripe_checkout_status = 'open' then 'complete' else stripe_checkout_status end,
            subscription_activated_at = case when $2 = 'active' and billing_status <> 'active' then coalesce(subscription_activated_at, now()) else subscription_activated_at end,
-           pending_plan_key = case when nullif($3, '') is null or pending_plan_key = nullif($3, '') then null else pending_plan_key end,
-           pending_billing_interval = case when nullif($3, '') is null or pending_plan_key is null then null else pending_billing_interval end,
+           pending_plan_key = case when nullif($3, '') is not null and pending_plan_key = nullif($3, '') then null else pending_plan_key end,
+           pending_billing_interval = case when nullif($3, '') is not null and pending_plan_key = nullif($3, '') then null else pending_billing_interval end,
+           pending_plan_change_type = case when nullif($3, '') is not null and pending_plan_key = nullif($3, '') then null else pending_plan_change_type end,
+           pending_plan_change_at = case when nullif($3, '') is not null and pending_plan_key = nullif($3, '') then null else pending_plan_change_at end,
            updated_at = now()
        where id = $1`,
       [
         organizationId,
         effectiveStatusResult.status,
-        planKey,
+        activePlanKey,
         interval,
         stripeTimestamp(subscription.trial_start),
         stripeTimestamp(subscription.trial_end),
@@ -4238,6 +5004,7 @@ async function updateOrganizationFromStripeSubscription(
         eventCreatedAt ?? null,
         eventId ?? null,
         cancelAtPeriodEnd,
+        stripeObjectId(subscription.schedule),
       ],
     );
     await syncOrganizationBillingToBusinesses(client, organizationId);
@@ -4246,12 +5013,12 @@ async function updateOrganizationFromStripeSubscription(
       previousStatus,
       status: effectiveStatusResult.status,
       previousPlanKey,
-      planKey: planKey || previousPlanKey,
+      planKey: activePlanKey,
       subscriptionId,
       stripeStatus,
       cancelAtPeriodEnd,
       currentPeriodEndAt,
-      changed: previousStatus !== effectiveStatusResult.status || previousPlanKey !== (planKey || previousPlanKey),
+      changed: previousStatus !== effectiveStatusResult.status || previousPlanKey !== activePlanKey,
       ignoredAsStale: false,
     };
   } catch (error) {
@@ -4849,6 +5616,7 @@ function conversionFunnelPayload(business: Business) {
     submitted: number;
     actionSucceeded: number;
     completed: number;
+    abandoned: number;
     fields: Map<string, { viewed: number; completed: number; abandoned: number }>;
   }>();
   for (const event of business.conversionEvents) {
@@ -4863,6 +5631,7 @@ function conversionFunnelPayload(business: Business) {
       submitted: 0,
       actionSucceeded: 0,
       completed: 0,
+      abandoned: 0,
       fields: new Map(),
     };
     if (event.event === "FLOW_STARTED") flow.started += 1;
@@ -4870,6 +5639,7 @@ function conversionFunnelPayload(business: Business) {
     if (event.event === "FORM_SUBMITTED") flow.submitted += 1;
     if (event.event === "ACTION_SUCCEEDED") flow.actionSucceeded += 1;
     if (event.event === "FLOW_COMPLETED") flow.completed += 1;
+    if (event.event === "CONVERSATION_ABANDONED") flow.abandoned += 1;
     if (event.fieldId && ["FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED"].includes(event.event)) {
       const field = flow.fields.get(event.fieldId) ?? { viewed: 0, completed: 0, abandoned: 0 };
       if (event.event === "FIELD_VIEWED") field.viewed += 1;
@@ -4888,6 +5658,7 @@ function conversionFunnelPayload(business: Business) {
     submitted: flow.submitted,
     actionSucceeded: flow.actionSucceeded,
     completed: flow.completed,
+    abandoned: flow.abandoned,
     completionRate: flow.started ? Math.round((flow.completed / flow.started) * 100) : 0,
     dropOffs: [...flow.fields.entries()]
       .map(([fieldId, field]) => ({
@@ -4984,6 +5755,7 @@ async function workspacePayload(business: Business) {
   const failedSourceCount = business.sources.filter((source) => source.crawlStatus === "failed").length;
   const chunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId)).length;
   const meaningfulChunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId) && !isLowQualityWebChunk(business, chunk)).length;
+  const factConflicts = resolveBusinessFacts(business.facts, {}).conflicts;
   const contentQualityIssue = chunkCount > 0 && meaningfulChunkCount === 0;
   const semantic = await embeddingReadinessForBusiness(business);
   const readinessScore = sourceCount === 0
@@ -5081,6 +5853,8 @@ async function workspacePayload(business: Business) {
       openGaps: gapCount,
       pendingSources: pendingSourceCount,
       failedSources: failedSourceCount,
+      structuredFactCount: business.facts.filter((fact) => fact.active).length,
+      factConflictCount: factConflicts.length,
       status: knowledgeStatus,
       indexed: sourceCount > 0 && meaningfulChunkCount > 0,
       semantic,
@@ -5100,6 +5874,7 @@ async function workspacePayload(business: Business) {
         renderAttempted: source.renderAttempted ?? false,
         renderSuccess: source.renderSuccess ?? false,
         renderDurationMs: source.renderDurationMs ?? null,
+        renderDiagnostics: source.renderDiagnostics ?? null,
         crawlDepth: source.crawlDepth ?? null,
         discoveryParentUrl: source.discoveryParentUrl ?? null,
       })),
@@ -5160,6 +5935,7 @@ async function publicWorkspacePayload(business: Business) {
 
 function inboxMessagePayload(message: Message) {
   return {
+    id: message.id ?? (message.id = randomUUID()),
     role: message.role,
     kind: message.kind ?? "message",
     authorUserId: message.authorUserId ?? null,
@@ -5173,9 +5949,10 @@ function inboxMessagePayload(message: Message) {
 
 function inboxConversationPayload(business: Business, conversation: Conversation) {
   const lead = business.leads.find((item) => item.conversationId === conversation.id) ?? null;
+  const actionState = conversation.actionState;
+  const action = actionState ? business.actions.find((item) => item.id === actionState.actionId) : null;
   const visibleMessages = conversation.messages.filter((message) => message.kind !== "internal_note");
-  const latestVisitorMessage = [...visibleMessages].reverse().find((message) => message.role === "user");
-  const latestMessage = latestVisitorMessage ?? visibleMessages.at(-1);
+  const latestMessage = visibleMessages.at(-1);
   return {
     ...conversationStatusPayload(conversation),
     sessionId: conversation.sessionId,
@@ -5184,6 +5961,18 @@ function inboxConversationPayload(business: Business, conversation: Conversation
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     lead,
+    action: actionState && action ? {
+      id: action.id,
+      type: action.actionType,
+      key: action.key,
+      name: action.name,
+      status: actionState.status,
+      startedAt: actionState.startedAt,
+      completedAt: actionState.completedAt ?? null,
+      values: Object.fromEntries(Object.entries(actionState.values).filter(([, value]) => typeof value === "string").slice(0, 50)),
+      handoffRequired: action.completion.requiresStaff,
+      handoffState: conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
+    } : null,
     lastMessage: latestMessage ? inboxMessagePayload(latestMessage) : null,
   };
 }
@@ -5282,11 +6071,11 @@ function retrievalContext(
   if (intent === "getting_started") {
     parts.push(`${business.name} onboarding`, "start using the product", "first steps", "create a first task", "try signup free trial");
   }
-  const recentVisitorContext = conversation?.messages
-    .filter((message) => message.role === "user" && message.content.trim() && message.content.trim() !== question.trim())
-    .slice(-2)
-    .map((message) => message.content.trim().slice(0, 240));
-  if (recentVisitorContext?.length) parts.push(`conversation context ${recentVisitorContext.join(" ")}`);
+  const recentConversationContext = conversation?.messages
+    .filter((message) => ["user", "assistant", "human"].includes(message.role) && message.content.trim() && message.content.trim() !== question.trim())
+    .slice(-10)
+    .map((message) => `${message.role}: ${message.content.trim().slice(0, 240)}`);
+  if (recentConversationContext?.length) parts.push(`conversation context ${recentConversationContext.join(" ")}`);
   if (currentPage) {
     try {
       parts.push(`current page ${new URL(currentPage).pathname}`);
@@ -5593,6 +6382,63 @@ function resolvedKnowledgeAnswer(business: Business, question: string, intent: R
     .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))[0] ?? null;
 }
 
+function structuredFactAnswer(business: Business, question: string, intent: RetrievalIntent): {
+  answer: string;
+  fact: BusinessFact;
+  confidenceScore: number;
+  citations: Array<{ title: string; url: string; sourceId?: string; pageType: string }>;
+  conflicts: number;
+} | null {
+  const kindByIntent: Partial<Record<RetrievalIntent, BusinessFact["kind"]>> = {
+    hours: "hours",
+    location: "location",
+    contact: "contact",
+    pricing: "pricing",
+    policy: "policy",
+    services: "service",
+  };
+  const kind = kindByIntent[intent];
+  if (!kind || !business.facts.length) return null;
+  const queryAliases: Record<string, string[]> = {
+    hours: ["hour", "hours", "open", "opening", "close", "closing"],
+    location: ["location", "located", "address", "direction"],
+    contact: ["contact", "phone", "email", "call"],
+    pricing: ["price", "pricing", "cost", "fee", "rate"],
+    policy: ["policy", "policies", "cancel", "refund"],
+    services: ["service", "services", "offer", "offers"],
+  };
+  const resolution = resolveBusinessFacts(business.facts, {
+    kind,
+    terms: [...tokenise(question), ...(queryAliases[intent] ?? [])],
+  });
+  const match = resolution.matches[0];
+  if (!match || !match.matchedTerms.length || match.score <= 0) return null;
+  const hasSpecificSubject = resolution.matches.some((candidate) => {
+    const subjectTerms = tokenise(candidate.fact.subject);
+    return subjectTerms.some((term) => match.matchedTerms.includes(term));
+  });
+  if (resolution.matches.length > 1 && !hasSpecificSubject) return null;
+  const fact = match.fact;
+  const value = fact.valueText;
+  const answer = fact.kind === "hours"
+    ? `${business.name}'s hours for ${fact.subject} are ${value}.`
+    : fact.kind === "pricing"
+      ? `${fact.subject} costs ${value}.`
+      : fact.kind === "contact"
+        ? `${fact.subject}: ${value}.`
+        : fact.kind === "location"
+          ? `${fact.subject} is located at ${value}.`
+          : `${fact.subject}: ${value}.`;
+  const source = fact.sourceId ? business.sources.find((item) => item.id === fact.sourceId) : null;
+  return {
+    answer,
+    fact,
+    confidenceScore: Math.min(0.99, 0.72 + fact.confidence * 0.2 + (match.authorityRank >= 400 ? 0.06 : 0)),
+    citations: source ? [{ title: source.title, url: source.url, sourceId: source.id, pageType: source.pageType }] : [],
+    conflicts: resolution.conflicts.length,
+  };
+}
+
 async function answerQuestion(
   business: Business,
   question: string,
@@ -5649,6 +6495,39 @@ async function answerQuestion(
       confidenceScore: 0.99,
       confidenceBand: "high" as const,
       retrieval: { mode: "approved_answer", candidateCount: 0, topScore: 1, ...modelUsage },
+      modelUsage,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+    };
+  }
+  const structured = structuredFactAnswer(business, question, initialIntent);
+  if (structured) {
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "structured_business_fact",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
+    return {
+      answer: structured.answer,
+      grounded: true,
+      citations: structured.citations,
+      knowledgeGap: null,
+      confidenceScore: structured.confidenceScore,
+      confidenceBand: structured.confidenceScore >= 0.78 ? "high" as const : "medium" as const,
+      retrieval: {
+        mode: "business_fact_resolver",
+        intent: initialIntent,
+        candidateCount: business.facts.length,
+        topScore: structured.confidenceScore,
+        sourceType: structured.fact.sourceType,
+        sourceLabel: businessFactSourceLabel(structured.fact),
+        factId: structured.fact.id,
+        conflictCount: structured.conflicts,
+        ...modelUsage,
+      },
       modelUsage,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
@@ -5769,6 +6648,33 @@ async function answerQuestion(
     ...modelUsage,
   };
 
+  const citations = citationMatches(retrieval.matches, business.sources, intent, 2).map(({ chunk }) => {
+    const source = business.sources.find((item) => item.id === chunk.sourceId);
+    return source ? {
+      title: source.title,
+      url: source.url,
+      sourceId: source.id,
+      chunkId: chunk.id,
+      pageType: source.pageType,
+    } : null;
+  }).filter((citation): citation is NonNullable<typeof citation> => Boolean(citation)).filter((citation, index, list) => list.findIndex((item) => item.sourceId === citation.sourceId) === index);
+
+  if (modelGenerationFailed && materiallyRelevant && match) {
+    return {
+      answer: "I found information about this, but I’m having trouble formatting the answer right now. Please try again in a moment.",
+      grounded: false,
+      citations,
+      knowledgeGap: null,
+      quickActions: [{ label: "Try again", question }, knowledgeGapContactAction],
+      confidenceScore,
+      confidenceBand,
+      retrieval: enrichedRetrieval,
+      modelUsage,
+      failure: { kind: "temporary_ai" as const, retryable: true, retrievedEvidence: true },
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+    };
+  }
+
   if (!materiallyRelevant || !match || confidenceBand === "low" || modelGenerationFailed) {
     const gapReason = knowledgeGapReason({
       answerable: materiallyRelevant,
@@ -5791,16 +6697,6 @@ async function answerQuestion(
     };
   }
 
-  const citations = citationMatches(retrieval.matches, business.sources, intent, 2).map(({ chunk }) => {
-    const source = business.sources.find((item) => item.id === chunk.sourceId);
-    return source ? {
-      title: source.title,
-      url: source.url,
-      sourceId: source.id,
-      chunkId: chunk.id,
-      pageType: source.pageType,
-    } : null;
-  }).filter((citation): citation is NonNullable<typeof citation> => Boolean(citation)).filter((citation, index, list) => list.findIndex((item) => item.sourceId === citation.sourceId) === index);
   if (generated) {
     return {
       answer: answerWithGettingStartedCta(business, question, generated.answer),
@@ -5844,12 +6740,23 @@ type ActionFormSchema = {
   fields: Array<ActionFlow["fields"][number] & { value?: string }>;
 };
 
-type ConversationAnswerResult = AnswerResult & {
+type ConversationAnswerResult = Omit<AnswerResult, "failure"> & {
   quickActions?: Array<{ label: string; question: string }>;
+  failure?: {
+    kind: "temporary_ai" | "retrieval" | "backend";
+    retryable: boolean;
+    retrievedEvidence?: boolean;
+  };
+  actionDelivery?: {
+    status: "saved" | "queued" | "failed";
+    provider?: string;
+  };
   handoff?: {
     status: ConversationStatus;
     reason: string;
+    notificationStatus?: Exclude<HandoffNotificationStatus, null>;
   };
+  silent?: boolean;
   action?: {
     id: string;
     key: string;
@@ -5862,6 +6769,37 @@ type ConversationAnswerResult = AnswerResult & {
     form?: ActionFormSchema;
   };
 };
+
+function temporaryConversationAnswer(
+  question: string,
+  kind: "temporary_ai" | "retrieval" | "backend" = "backend",
+  citations: ConversationAnswerResult["citations"] = [],
+  retrievedEvidence = false,
+): ConversationAnswerResult {
+  const modelUsage: ModelUsage = {
+    route: "tier0",
+    model: null,
+    reason: kind === "temporary_ai" ? "temporary_ai_failure" : kind === "retrieval" ? "retrieval_failure" : "temporary_backend_failure",
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+    latencyMs: 0,
+  };
+  return {
+    answer: retrievedEvidence
+      ? "I found information about this, but I’m having trouble formatting the answer right now. Please try again in a moment."
+      : "I’m having trouble responding right now. Please try again in a moment.",
+    grounded: false,
+    citations,
+    knowledgeGap: null,
+    confidenceScore: 0,
+    confidenceBand: "low",
+    retrieval: { mode: kind === "retrieval" ? "retrieval_failure" : "temporary_failure", intent: classifyQuestionIntent(question), candidateCount: 0, topScore: 0, ...modelUsage },
+    modelUsage,
+    quickActions: [{ label: "Try again", question }, knowledgeGapContactAction],
+    failure: { kind, retryable: true, retrievedEvidence },
+  };
+}
 
 function actionFormSchema(action: ActionFlow, state: ConversationActionState): ActionFormSchema {
   return {
@@ -6102,6 +7040,18 @@ async function continueWorkflowActionConversation(
   const repeatable = repeatableWorkflowConfig(action);
   if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
 
+  const requestClassification = classifyVisitorRequest(question);
+  if (requestClassification.mode === "informational") {
+    const current = currentWorkflowStep(action, state);
+    pushWorkflowInterruption(state, {
+      intent: classifyQuestionIntent(question),
+      question,
+      returnStepId: current?.id ?? state.currentStepId ?? null,
+    });
+    const knowledge = await answerQuestion(business, question);
+    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current) : "The workflow is ready to continue.");
+  }
+
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
     return actionAnswer(action, state, `Absolutely — let’s add another ${repeatable.entityLabel}. ${workflowPrompt(action, state, currentWorkflowStep(action, state) ?? action.steps![0])}`);
   }
@@ -6191,15 +7141,17 @@ async function continueActionConversation(
   business: Business,
   conversation: Conversation,
   question: string,
+  options: { sourcePage?: string | null } = {},
 ): Promise<ConversationAnswerResult | null> {
   let action = conversation.actionState
     ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
     : null;
 
   if (!action || conversation.actionState?.status === "completed") {
-    action = detectAction(business.actions, question);
+    action = detectAction(business.actions, question, business.primaryActionId);
     if (!action) return null;
     const state = createActionState(action);
+    state.sourcePage = options.sourcePage ?? null;
     conversation.actionState = state;
     await recordConversionEvent(business, {
       event: "FLOW_STARTED",
@@ -6240,10 +7192,16 @@ async function continueActionConversation(
 
   const state = conversation.actionState ?? createActionState(action);
   conversation.actionState = state;
+  if (options.sourcePage) state.sourcePage = options.sourcePage;
   if (!state.captureMode || !Array.isArray(state.conversationalKeys)) {
     const defaults = createActionState(action, state.startedAt);
     state.captureMode = defaults.captureMode;
     state.conversationalKeys = defaults.conversationalKeys;
+  }
+  if (classifyVisitorRequest(question).mode === "informational") {
+    const knowledge = await answerQuestion(business, question);
+    const current = nextConversationalField(action, state);
+    return actionAnswerWithKnowledge(knowledge, action, state, state.formShown ? "The form is ready below." : current ? fieldPrompt(current) : "The form is ready below.");
   }
   if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
     const knowledge = await answerQuestion(business, question);
@@ -6306,6 +7264,12 @@ async function completeActionConversation(
   action: ActionFlow,
   state: ConversationActionState,
 ): Promise<ConversationAnswerResult> {
+  const submission = await persistActionSubmission(business, action, conversation, state.values, state.sourcePage ?? null);
+  if (submission.status === "completed") {
+    state.status = "completed";
+    state.formShown = false;
+    return actionAnswer(action, state, action.completion.message);
+  }
   state.status = "completed";
   state.completedAt = new Date().toISOString();
   state.formShown = false;
@@ -6324,6 +7288,7 @@ async function completeActionConversation(
     }
   }
   let persistedLead: Lead | null = null;
+  let actionDelivery: ConversationAnswerResult["actionDelivery"];
   if (action.completion.createLead) {
     const values = state.values;
     const email = values.email ?? null;
@@ -6338,7 +7303,7 @@ async function completeActionConversation(
         intent: action.name,
         status: action.completion.leadStatus,
         source: "action_flow",
-        pageUrl: null,
+        pageUrl: state.sourcePage ?? null,
         referrer: null,
         consentAt: null,
         idempotencyKey: "action:" + conversation.id + ":" + action.id,
@@ -6364,6 +7329,7 @@ async function completeActionConversation(
     answer += "\n\n" + (action.completion.linkLabel ?? "Continue") + ": " + completionUrl;
   }
   if (action.completion.notifyStaff || action.completion.requiresStaff) {
+    let staffNotificationFailed = false;
     const now = new Date().toISOString();
     if (action.completion.requiresStaff) {
       conversation.status = "WAITING_FOR_STAFF";
@@ -6378,15 +7344,24 @@ async function completeActionConversation(
       });
       await recordConversationEvent(business, conversation, "AI_HANDOFF_REQUESTED", "ai", null, { actionId: action.id, actionKey: action.key });
     }
-    await notifyStaff(business, conversation, {
-      type: action.completion.requiresStaff ? "action_staff_required" : "lead_created",
-      title: action.completion.requiresStaff ? `${action.name} needs staff` : `New ${action.name} request`,
-      body: `${business.name} received a completed ${action.name.toLowerCase()} flow.`,
-      leadId: business.leads.find((lead) => lead.conversationId === conversation.id)?.id ?? null,
-      channels: action.completion.notifyChannels,
-      targets: action.completion.notifyTargets,
-    });
-    await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { actionId: action.id, actionKey: action.key });
+    try {
+      const notificationStatus = await notifyStaff(business, conversation, {
+        type: action.completion.requiresStaff ? "action_staff_required" : "lead_created",
+        title: action.completion.requiresStaff ? `${action.name} needs staff` : `New ${action.name} request`,
+        body: `${business.name} received a completed ${action.name.toLowerCase()} flow.`,
+        leadId: business.leads.find((lead) => lead.conversationId === conversation.id)?.id ?? null,
+        channels: action.completion.notifyChannels,
+        targets: action.completion.notifyTargets,
+      });
+      conversation.handoffNotificationStatus = notificationStatus;
+      if (notificationStatus !== "failed") await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { actionId: action.id, actionKey: action.key, delivery: notificationStatus });
+      else staffNotificationFailed = true;
+    } catch (error) {
+      staffNotificationFailed = true;
+      conversation.handoffNotificationStatus = "failed";
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown action notification failure", businessId: business.id, conversationId: conversation.id }, "Action saved but staff notification failed");
+    }
+    if (staffNotificationFailed) answer = "We saved your request. The team can follow up, but the automatic notification is temporarily unavailable.";
   }
   await recordConversionEvent(business, {
     event: "FLOW_COMPLETED",
@@ -6403,6 +7378,7 @@ async function completeActionConversation(
     });
     try {
       await enqueueActionExecution(business, action, conversation, state, persistedLead);
+      actionDelivery = { status: "queued", provider: action.completion.connector.provider };
     } catch (error) {
       const message = integrationErrorMessage(error);
       await recordConversionEvent(business, {
@@ -6412,6 +7388,7 @@ async function completeActionConversation(
         metadata: { provider: action.completion.connector.provider, error: message, queued: false },
       });
       app.log.warn({ businessId: business.id, actionId: action.id, error: message }, "Action connector could not be queued; lead remains persisted");
+      actionDelivery = { status: "failed", provider: action.completion.connector.provider };
     }
   } else {
     await recordConversionEvent(business, {
@@ -6428,7 +7405,13 @@ async function completeActionConversation(
     });
   }
   if (action.completion.leadStatus === "booked") await recordOrganizationUsage(business, "bookings");
-  return actionAnswer(action, state, answer);
+  await updateActionSubmission(business, submission, { status: "completed", leadId: persistedLead?.id ?? null });
+  if (actionDelivery?.status === "failed") {
+    answer = "We saved your request. We couldn’t complete it automatically, but the team has your details and can follow up.";
+  } else if (actionDelivery?.status === "queued") {
+    answer = "We saved your request and are sending it to the team now. If the connected service is unavailable, the team can still follow up.";
+  }
+  return { ...actionAnswer(action, state, answer), ...(actionDelivery ? { actionDelivery } : {}) };
 }
 
 async function submitActionForm(
@@ -6439,8 +7422,14 @@ async function submitActionForm(
 ): Promise<ConversationAnswerResult> {
   const state = conversation.actionState;
   const action = business.actions.find((candidate) => candidate.id === actionId);
-  if (!action || !state || state.actionId !== actionId || state.status === "completed") {
+  if (!action || !state || state.actionId !== actionId) {
     throw httpError(400, "This action form is no longer active");
+  }
+  if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
+  if (state.status === "completed") {
+    const submission = business.actionSubmissions.find((item) => item.conversationId === conversation.id && item.actionId === action.id);
+    if (submission?.status === "completed") return actionAnswer(action, state, action.completion.message);
+    return completeActionConversation(business, conversation, action, state);
   }
   await recordConversionEvent(business, {
     event: "FORM_SUBMITTED",
@@ -6497,6 +7486,8 @@ function customerAnswerPayload(result: ConversationAnswerResult) {
     citations: result.citations,
     ...(result.quickActions?.length ? { quickActions: result.quickActions } : {}),
     ...(result.handoff ? { handoff: result.handoff } : {}),
+    ...(result.failure ? { failure: result.failure } : {}),
+    ...(result.actionDelivery ? { actionDelivery: result.actionDelivery } : {}),
     ...(result.action ? { action: result.action } : {}),
   };
 }
@@ -6781,6 +7772,7 @@ function conversationStatusPayload(conversation: Conversation) {
     leadCaptured: conversation.leadCaptured,
     assignedUserId: conversation.assignedUserId,
     handoffReason: conversation.handoffReason,
+    handoffNotificationStatus: conversation.handoffNotificationStatus,
     unreadCount: conversation.unreadCount,
     lastActivityAt: conversation.lastActivityAt,
   };
@@ -6968,7 +7960,7 @@ async function notifyStaff(
   business: Business,
   conversation: Conversation,
   input: { type: string; title: string; body: string; leadId?: string | null; intent?: string | null; channels?: Array<"in_app" | "email">; targets?: Array<"owner" | "business_team" | "assigned_staff">; handoffTrigger?: "explicit_human_request" | "knowledge_gap" | "high_value_lead"; lastMessage?: string },
-): Promise<void> {
+): Promise<Exclude<HandoffNotificationStatus, null>> {
   const recipients = await staffRecipients(business);
   const channels = input.channels?.length ? input.channels : ["in_app", "email"];
   const targets = input.targets?.length ? input.targets : ["business_team"];
@@ -6978,6 +7970,8 @@ async function notifyStaff(
     if (targets.includes("assigned_staff") && conversation.assignedUserId === recipient.id) return true;
     return false;
   });
+  let configuredEmails: string[] = [];
+  let emailDeliveryQueued = false;
   const organizationId = await businessOrganizationId(business);
   const createdAt = new Date().toISOString();
   for (const recipient of filteredRecipients) {
@@ -7023,7 +8017,7 @@ async function notifyStaff(
       || (handoffSettings.enabled && (trigger === "explicit_human_request"
         ? handoffSettings.notifyExplicitHumanRequest
         : trigger === "knowledge_gap" ? handoffSettings.notifyKnowledgeGap : handoffSettings.notifyHighValueLead));
-    const configuredEmails = handoffSettings && handoffTriggerEnabled
+    configuredEmails = handoffSettings && handoffTriggerEnabled
       ? [handoffSettings.defaultRecipientEmail, ...handoffSettings.additionalRecipientEmails].filter((email): email is string => Boolean(email))
       : [];
     const hasRecipients = filteredRecipients.length > 0 || configuredEmails.length > 0;
@@ -7060,6 +8054,7 @@ async function notifyStaff(
         payload: notificationPayload,
       } satisfies Parameters<typeof queueLifecycleEvent>[0];
       await queueLifecycleEvent(lifecycleEvent);
+      emailDeliveryQueued = true;
       if (eventType === "HUMAN_HANDOFF" && handoffSettings?.repeatEnabled) {
         await queueLifecycleEvent({
           ...lifecycleEvent,
@@ -7070,9 +8065,12 @@ async function notifyStaff(
       }
     }
   }
+  if (!filteredRecipients.length && !configuredEmails.length) return "failed";
+  if (emailDeliveryQueued) return "pending";
+  return filteredRecipients.length ? "sent" : "failed";
 }
 
-function handoffAnswer(business: Business, reason: string): ConversationAnswerResult {
+function handoffAnswer(business: Business, reason: string, notificationStatus: Exclude<HandoffNotificationStatus, null> = "sent"): ConversationAnswerResult {
   const modelUsage: ModelUsage = {
     route: "tier0",
     model: null,
@@ -7083,7 +8081,9 @@ function handoffAnswer(business: Business, reason: string): ConversationAnswerRe
     latencyMs: 0,
   };
   return {
-    answer: "Absolutely — I’ve notified the team. Someone will join this conversation as soon as possible.",
+    answer: notificationStatus === "sent"
+      ? "Your message has been sent to the team. A team member will reply here shortly."
+      : "Your message has been saved for the team. A team member will reply here shortly.",
     grounded: false,
     citations: [],
     knowledgeGap: null,
@@ -7091,7 +8091,7 @@ function handoffAnswer(business: Business, reason: string): ConversationAnswerRe
     confidenceBand: "high",
     retrieval: { mode: "handoff", candidateCount: 0, topScore: 1, ...modelUsage },
     modelUsage,
-    handoff: { status: "WAITING_FOR_STAFF", reason },
+    handoff: { status: "WAITING_FOR_STAFF", reason, notificationStatus },
   };
 }
 
@@ -7108,28 +8108,59 @@ async function requestHandoff(business: Business, conversation: Conversation, re
   });
   await recordConversationEvent(business, conversation, "AI_HANDOFF_REQUESTED", "visitor", null, { reason });
   await persistConversation(business, conversation);
-  await notifyStaff(business, conversation, {
-    type: "handoff_requested",
-    title: "Human help requested",
-    body: `${business.name} has a visitor waiting for a team member. Reason: ${reason}`,
-    handoffTrigger: "explicit_human_request",
-    lastMessage,
-  });
-  await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { reason });
+  let notificationStatus: Exclude<HandoffNotificationStatus, null> = "sent";
+  try {
+    notificationStatus = await notifyStaff(business, conversation, {
+      type: "handoff_requested",
+      title: "Human help requested",
+      body: `${business.name} has a visitor waiting for a team member. Reason: ${reason}`,
+      handoffTrigger: "explicit_human_request",
+      lastMessage,
+    });
+    if (notificationStatus !== "failed") await recordConversationEvent(business, conversation, "STAFF_NOTIFIED", "system", null, { reason, delivery: notificationStatus });
+  } catch (error) {
+    notificationStatus = "failed";
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown handoff notification failure", businessId: business.id, conversationId: conversation.id }, "Handoff saved but staff notification failed");
+  }
+  conversation.handoffNotificationStatus = notificationStatus;
   conversation.status = "WAITING_FOR_STAFF";
   conversation.lastActivityAt = new Date().toISOString();
   await persistConversation(business, conversation);
-  return handoffAnswer(business, reason);
+  return handoffAnswer(business, reason, notificationStatus);
 }
 
-async function startConversation(business: Business, sessionId: string | null): Promise<Conversation> {
+function conversationIsTerminal(conversation: Conversation): boolean {
+  return conversation.status === "RESOLVED" || conversation.status === "EXPIRED";
+}
+
+function conversationIsWithinResumeWindow(conversation: Conversation, now = Date.now()): boolean {
+  const lastActivity = Date.parse(conversation.lastActivityAt);
+  return Number.isFinite(lastActivity) && lastActivity >= now - CONVERSATION_RESUME_WINDOW_MS;
+}
+
+async function expireConversation(business: Business, conversation: Conversation): Promise<void> {
+  if (conversationIsTerminal(conversation)) return;
+  const now = new Date().toISOString();
+  conversation.status = "EXPIRED";
+  conversation.unreadCount = 0;
+  conversation.lastActivityAt = now;
+  conversation.updatedAt = now;
+  await cancelPendingHandoffReminders(conversation.id);
+  await persistConversation(business, conversation);
+  await recordConversationEvent(business, conversation, "CONVERSATION_EXPIRED", "system", null, { resumeWindowMs: CONVERSATION_RESUME_WINDOW_MS });
+}
+
+async function startConversation(business: Business, sessionId: string | null, options: { forceNew?: boolean } = {}): Promise<Conversation> {
   const now = new Date().toISOString();
   const normalizedSessionId = sessionId?.trim() ? sessionId.trim().slice(0, 160) : null;
-  if (normalizedSessionId) {
-    const recentConversation = [...business.conversations.values()]
-      .filter((conversation) => conversation.sessionId === normalizedSessionId && conversation.status !== "RESOLVED")
-      .filter((conversation) => Date.parse(conversation.lastActivityAt) >= Date.now() - 24 * 60 * 60 * 1_000)
-      .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))[0];
+  if (normalizedSessionId && !options.forceNew) {
+    const sessionConversations = [...business.conversations.values()]
+      .filter((conversation) => conversation.sessionId === normalizedSessionId && !conversationIsTerminal(conversation))
+      .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
+    for (const conversation of sessionConversations) {
+      if (!conversationIsWithinResumeWindow(conversation)) await expireConversation(business, conversation);
+    }
+    const recentConversation = sessionConversations.find((conversation) => conversation.status !== "EXPIRED" && conversationIsWithinResumeWindow(conversation));
     if (recentConversation) return recentConversation;
   }
   const conversation: Conversation = {
@@ -7142,6 +8173,7 @@ async function startConversation(business: Business, sessionId: string | null): 
     assignedAt: null,
     handoffReason: null,
     handoffRequestedAt: null,
+    handoffNotificationStatus: null,
     humanJoinedAt: null,
     resolvedAt: null,
     unreadCount: 0,
@@ -7153,6 +8185,21 @@ async function startConversation(business: Business, sessionId: string | null): 
   business.conversations.set(conversation.id, conversation);
   await persistConversation(business, conversation);
   await recordOrganizationUsage(business, "conversations");
+  return conversation;
+}
+
+async function conversationForIncomingMessage(
+  business: Business,
+  conversation: Conversation,
+  sessionId?: string | null,
+): Promise<Conversation> {
+  if (conversationIsTerminal(conversation)) {
+    return startConversation(business, sessionId?.trim() ? sessionId : conversation.sessionId, { forceNew: true });
+  }
+  if (!conversationIsWithinResumeWindow(conversation)) {
+    await expireConversation(business, conversation);
+    return startConversation(business, sessionId?.trim() ? sessionId : conversation.sessionId, { forceNew: true });
+  }
   return conversation;
 }
 
@@ -7179,12 +8226,13 @@ async function persistConversationExchange(
   conversation: Conversation,
   userContent: string,
   result: ConversationAnswerResult,
+  clientMessageId?: string,
 ): Promise<ConversationAnswerResult> {
   recordAnswer(result.modelUsage.latencyMs);
   if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer") recordLowConfidenceFallback();
   const now = new Date().toISOString();
-  const userMessage: Message = { role: "user", content: userContent, createdAt: now };
-  const assistantMessage: Message = {
+  const userMessage: Message = { id: clientMessageId, role: "user", content: userContent, createdAt: now };
+  const assistantMessage: Message | null = result.silent ? null : {
     role: "assistant",
     content: result.answer,
     grounded: result.grounded,
@@ -7195,7 +8243,8 @@ async function persistConversationExchange(
     retrieval: result.retrieval,
     createdAt: now,
   };
-  conversation.messages.push(userMessage, assistantMessage);
+  conversation.messages.push(userMessage);
+  if (assistantMessage) conversation.messages.push(assistantMessage);
   conversation.updatedAt = now;
   conversation.lastActivityAt = now;
   if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "WAITING_FOR_STAFF") {
@@ -7210,7 +8259,7 @@ async function persistConversationExchange(
     }
   }
   await persistMessage(conversation, userMessage);
-  await persistMessage(conversation, assistantMessage);
+  if (assistantMessage) await persistMessage(conversation, assistantMessage);
   await persistConversation(business, conversation);
   if (!result.handoff && conversation.status === "AI_ACTIVE") {
     await recordConversationEvent(business, conversation, "AI_RESPONSE_SENT", "ai", null, { grounded: result.grounded });
@@ -7241,33 +8290,53 @@ async function persistConversationExchange(
   return result;
 }
 
-async function recordConversationQuestion(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null } = {}) {
-  if (conversation.status === "RESOLVED") {
-    conversation.status = "AI_ACTIVE";
-    conversation.resolvedAt = null;
-  }
+async function recordConversationQuestion(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null; clientMessageId?: string } = {}) {
+  if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
   if (isExplicitHumanRequest(question) && !["HUMAN_ACTIVE", "WAITING_FOR_STAFF", "HANDOFF_REQUESTED"].includes(conversation.status)) {
     const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member", question);
-    return persistConversationExchange(business, conversation, question, result);
+    return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
   }
   if (conversation.status === "HUMAN_ACTIVE") {
+    // The initial handoff response is emitted by requestHandoff. Follow-up
+    // visitor messages stay in the same thread without another acknowledgement.
     const result = {
       ...handoffAnswer(business, "Human takeover is active"),
-      answer: "Your message has been sent to the team. A team member will reply here shortly.",
+      answer: "",
+      silent: true,
       handoff: { status: "HUMAN_ACTIVE" as const, reason: "Human takeover is active" },
     };
-    return persistConversationExchange(business, conversation, question, result);
+    return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
   }
   if (conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED") {
-    const result = {
-      ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
-      answer: "Your message has been sent to the team. A team member will reply here shortly.",
-    };
-    return persistConversationExchange(business, conversation, question, result);
+    const requestedAction = detectAction(business.actions, question, business.primaryActionId);
+    const currentActionId = conversation.actionState?.actionId;
+    if (requestedAction && requestedAction.id !== currentActionId) {
+      conversation.status = "AI_ACTIVE";
+      conversation.handoffReason = null;
+      conversation.handoffRequestedAt = null;
+      conversation.assignedUserId = null;
+      conversation.assignedAt = null;
+      conversation.actionState = undefined;
+      conversation.actionTaken = null;
+      await persistConversation(business, conversation);
+    } else {
+      const result = {
+        ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
+        answer: "",
+        silent: true,
+      };
+      return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
+    }
   }
-  const result: ConversationAnswerResult = await continueActionConversation(business, conversation, question)
-    ?? await answerQuestion(business, question, { conversation, currentPage: options.currentPage });
-  return persistConversationExchange(business, conversation, question, result);
+  let result: ConversationAnswerResult;
+  try {
+    result = await continueActionConversation(business, conversation, question, { sourcePage: options.currentPage })
+      ?? await answerQuestion(business, question, { conversation, currentPage: options.currentPage });
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown widget answer failure", businessId: business.id, conversationId: conversation.id }, "Widget answer degraded after backend failure");
+    result = temporaryConversationAnswer(question, "backend");
+  }
+  return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
 }
 
 async function recordActionFormSubmission(
@@ -7275,7 +8344,9 @@ async function recordActionFormSubmission(
   conversation: Conversation,
   actionId: string,
   values: Record<string, unknown>,
+  sourcePage: string | null = null,
 ) {
+  if (conversation.actionState?.actionId === actionId && sourcePage) conversation.actionState.sourcePage = sourcePage;
   const result = await submitActionForm(business, conversation, actionId, values);
   const action = business.actions.find((candidate) => candidate.id === actionId);
   return persistConversationExchange(
@@ -7382,7 +8453,9 @@ async function authoritativeStripeSubscription(object: Record<string, unknown>):
   const subscriptionId = stripeObjectId(object.id) ?? stripeObjectId(object.subscription);
   if (!subscriptionId || !stripe) return object;
   try {
-    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ["schedule.current_phase"],
+    });
     return subscription as unknown as Record<string, unknown>;
   } catch (error) {
     // A deleted subscription may no longer be retrievable. The signed event
@@ -7448,10 +8521,12 @@ async function queueOrganizationLifecycleEvent(input: {
     customer_name: String(organizationRow.owner_name ?? "there"),
     billing_email: String(organizationRow.owner_email ?? "your billing email"),
     plan_name: String(organizationRow.plan_display_name ?? input.payload.plan_name ?? "FrontDeskWise"),
+    current_plan_name: String(organizationRow.plan_display_name ?? input.payload.current_plan_name ?? "FrontDeskWise"),
     price_display: input.payload.price_display ?? (amount === null ? "Contact support" : `$${(amount / 100).toFixed(0)}/${interval}`),
     businesses_included: input.payload.businesses_included ?? String(organizationRow.effective_max_businesses ?? organizationRow.max_businesses ?? 1),
     next_renewal_date: nextRenewalDate,
     status: input.payload.status ?? "Active",
+    effective_date: input.payload.effective_date ?? nextRenewalDate,
     dashboard_url: lifecycleAppUrl("/app"),
     billing_url: lifecycleAppUrl("/app/settings/billing"),
     support_url: process.env.FRONTDESKWISE_SUPPORT_URL?.trim() || "mailto:support@frontdeskwise.com",
@@ -7571,7 +8646,6 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
            set billing_provider = 'stripe', stripe_customer_id = coalesce($2, stripe_customer_id),
                stripe_subscription_id = coalesce($3, stripe_subscription_id),
                stripe_checkout_session_id = $4, stripe_checkout_status = 'complete',
-               pending_plan_key = null, pending_billing_interval = null, pending_plan_change_at = null,
                updated_at = now()
            where id = $1`,
           [resolvedOrganizationId, customerId, subscriptionId, stripeObjectId(object.id)],
@@ -7586,7 +8660,12 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       }
       if (subscriptionId && resolvedOrganizationId) {
         const subscription = await authoritativeStripeSubscription({ id: subscriptionId, customer: customerId });
-        const sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id);
+        const checkoutPaymentStatus = String(object.payment_status ?? "");
+        const paymentConfirmed = checkoutPaymentStatus === "paid" || checkoutPaymentStatus === "no_payment_required";
+        const sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id, {
+          allowPlanChange: paymentConfirmed,
+          paymentConfirmed,
+        });
         if (sync?.status === "active" && sync.previousStatus !== "active") {
           const activationKey = `stripe.subscription_activated:${sync.subscriptionId ?? subscriptionId}`;
           await queueOrganizationLifecycleEvent({ organizationId: resolvedOrganizationId, eventType: "SUBSCRIPTION_ACTIVATED", eventKey: activationKey, payload: { status: "Active" } });
@@ -7624,7 +8703,10 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         if (resolvedOrganizationId) {
           let sync: StripeSubscriptionSyncResult | null = null;
           if (Array.isArray(asRecord(subscription.items).data)) {
-            sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id);
+            sync = await updateOrganizationFromStripeSubscription(resolvedOrganizationId, subscription, event.created, event.id, {
+              allowPlanChange: true,
+              paymentConfirmed: true,
+            });
           }
           await pool.query(
             "update organizations set billing_status = 'active', last_payment_status = 'paid', grace_end_at = null, updated_at = now() where id = $1",
@@ -7632,7 +8714,17 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
           );
           if (sync && sync.previousStatus === "active" && sync.status === "active" && sync.previousPlanKey !== sync.planKey) {
             const updateKey = `stripe.subscription_updated:${sync.subscriptionId ?? subscriptionId}:${sync.planKey}`;
-            await queueOrganizationLifecycleEvent({ organizationId: resolvedOrganizationId, eventType: "SUBSCRIPTION_UPDATED", eventKey: updateKey, payload: { status: "Active" } });
+            await queueOrganizationLifecycleEvent({
+              organizationId: resolvedOrganizationId,
+              eventType: "SUBSCRIPTION_UPDATED",
+              eventKey: updateKey,
+              payload: {
+                status: "Active",
+                current_plan_name: billingPlanDisplayName(sync.previousPlanKey),
+                plan_name: billingPlanDisplayName(sync.planKey),
+                effective_date: new Date().toISOString(),
+              },
+            });
             await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: updateKey, eventName: "subscription_updated", providerEventId: event.id, status: "queued", metadata: { fromPlanKey: sync.previousPlanKey, planKey: sync.planKey } });
           }
           await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `invoice.paid:${stripeObjectId(object.id) ?? event.id}`, eventName: "invoice_paid", providerEventId: event.id, metadata: { subscriptionId } });
@@ -7647,28 +8739,66 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         }
       }
     } else if (event.type === "invoice.payment_failed" && resolvedOrganizationId) {
-      const graceEndAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
-      await pool.query(
-        `update organizations
-         set billing_status = case when billing_status in ('cancelled', 'paused') then billing_status else 'grace' end,
-             grace_end_at = case when billing_status in ('cancelled', 'paused') then grace_end_at else $2 end,
-             billing_provider = 'stripe', last_payment_status = 'failed', updated_at = now()
-         where id = $1`,
-        [resolvedOrganizationId, graceEndAt],
+      const billingState = await pool.query<{ billing_status: string; pending_plan_change_type: string | null; plan_key: string; pending_plan_key: string | null }>(
+        `select billing_status, pending_plan_change_type, plan_key, pending_plan_key
+         from organizations where id = $1`,
+        [resolvedOrganizationId],
       );
-      const client = await pool.connect();
-      try {
-        await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
-      } finally {
-        client.release();
-      }
-      await queueOrganizationLifecycleEvent({
-        organizationId: resolvedOrganizationId,
-        eventType: "PAYMENT_FAILED",
-        eventKey: `stripe.payment_failed:${stripeObjectId(object.id) ?? event.id}`,
-        payload: { grace_end_at: graceEndAt },
+      const billingRow = billingState.rows[0];
+      const failureContext = billingPaymentFailureContext({
+        billingReason: typeof object.billing_reason === "string" ? object.billing_reason : null,
+        pendingPlanChangeType: billingRow?.pending_plan_change_type ?? null,
       });
-      await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `invoice.failed:${stripeObjectId(object.id) ?? event.id}`, eventName: "invoice_failed", providerEventId: event.id, metadata: { graceEndAt } });
+      const invoiceId = stripeObjectId(object.id) ?? event.id;
+      if (failureContext === "upgrade") {
+        await pool.query(
+          `update organizations
+           set billing_status = case when billing_status in ('cancelled', 'paused', 'grace', 'trial') then billing_status else 'active' end,
+               billing_provider = 'stripe', last_payment_status = 'failed', updated_at = now()
+           where id = $1`,
+          [resolvedOrganizationId],
+        );
+        const client = await pool.connect();
+        try {
+          await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
+        } finally {
+          client.release();
+        }
+        await queueOrganizationLifecycleEvent({
+          organizationId: resolvedOrganizationId,
+          eventType: "SUBSCRIPTION_UPGRADE_PAYMENT_FAILED",
+          eventKey: `stripe.upgrade_payment_failed:${invoiceId}`,
+          payload: {
+            current_plan_name: billingPlanDisplayName(billingRow?.plan_key ?? "starter"),
+            plan_name: billingPlanDisplayName(billingRow?.pending_plan_key ?? "requested plan"),
+            status: "Payment action required",
+          },
+        });
+        await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `invoice.upgrade_failed:${invoiceId}`, eventName: "subscription_upgrade_payment_failed", providerEventId: event.id, metadata: { pendingPlanKey: billingRow?.pending_plan_key ?? null } });
+      } else {
+        const graceEndAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+        await pool.query(
+          `update organizations
+           set billing_status = case when billing_status in ('cancelled', 'paused') then billing_status else 'grace' end,
+               grace_end_at = case when billing_status in ('cancelled', 'paused') then grace_end_at else $2 end,
+               billing_provider = 'stripe', last_payment_status = 'failed', updated_at = now()
+           where id = $1`,
+          [resolvedOrganizationId, graceEndAt],
+        );
+        const client = await pool.connect();
+        try {
+          await syncOrganizationBillingToBusinesses(client, resolvedOrganizationId);
+        } finally {
+          client.release();
+        }
+        await queueOrganizationLifecycleEvent({
+          organizationId: resolvedOrganizationId,
+          eventType: "PAYMENT_FAILED",
+          eventKey: `stripe.payment_failed:${invoiceId}`,
+          payload: { grace_end_at: graceEndAt },
+        });
+        await recordBillingTimeline({ organizationId: resolvedOrganizationId, eventKey: `invoice.failed:${invoiceId}`, eventName: "invoice_failed", providerEventId: event.id, metadata: { graceEndAt } });
+      }
     }
 
     await pool.query(
@@ -8114,30 +9244,108 @@ app.post("/api/v1/billing/checkout-session", async (request) => {
   if (existingSubscription && existingSubscriptionId) {
     const item = existingSubscription.items.data[0];
     if (!item) throw httpError(409, "The current Stripe subscription has no billable item");
-    if (item.price.id === price.priceId && existingSubscription.cancel_at_period_end !== true) {
+    const currentPlanKey = String(organization.plan_key ?? "starter");
+    const changeType: BillingPlanChangeType = billingPlanChangeType(currentPlanKey, planKey);
+    const pendingPlanKey = typeof organization.pending_plan_key === "string" ? organization.pending_plan_key : null;
+    if (pendingPlanKey === planKey && changeType !== "none") {
+      throw httpError(409, `A ${billingPlanDisplayName(planKey)} change is already pending`);
+    }
+    if (item.price.id === price.priceId && existingSubscription.cancel_at_period_end !== true && !pendingPlanKey) {
       throw httpError(409, "This organization is already on that plan");
     }
-    await client.subscriptions.update(existingSubscriptionId, {
-      items: [{ id: item.id, price: price.priceId }],
-      proration_behavior: "create_prorations",
-      cancel_at_period_end: false,
-      metadata: frontDeskWiseStripeMetadata(String(organization.id), planKey),
-    });
-    await pool?.query(
-      `update organizations
-       set stripe_customer_id = $2, stripe_subscription_id = $3, billing_provider = 'stripe',
-           pending_plan_key = $4, pending_billing_interval = $5, pending_plan_change_at = now(),
-           updated_at = now()
-       where id = $1`,
-      [organization.id, customerId, existingSubscriptionId, planKey, interval],
-    );
+    if (existingSubscription.status !== "active" && changeType !== "none") {
+      throw httpError(409, "Resolve the current subscription payment before changing plans");
+    }
+
+    let effectiveAt: string | null = null;
+    let scheduleId: string | null = null;
+    if (changeType === "downgrade") {
+      if (existingSubscription.cancel_at_period_end === true) {
+        existingSubscription = await client.subscriptions.update(existingSubscriptionId, {
+          cancel_at_period_end: false,
+          metadata: frontDeskWiseStripeMetadata(String(organization.id), currentPlanKey),
+        });
+      }
+      const scheduled = await scheduleStripeDowngrade(client, existingSubscription, String(organization.id), price.priceId, planKey);
+      effectiveAt = scheduled.effectiveAt;
+      scheduleId = scheduled.scheduleId;
+      await pool?.query(
+        `update organizations
+         set stripe_customer_id = $2, stripe_subscription_id = $3, billing_provider = 'stripe',
+             stripe_subscription_schedule_id = $4, pending_plan_key = $5, pending_billing_interval = $6,
+             pending_plan_change_type = 'downgrade', pending_plan_change_at = $7,
+             updated_at = now()
+         where id = $1`,
+        [organization.id, customerId, existingSubscriptionId, scheduleId, planKey, interval, effectiveAt],
+      );
+    } else if (changeType === "upgrade") {
+      await releaseStripeSubscriptionSchedule(client, stripeObjectId(existingSubscription.schedule) ?? (typeof organization.stripe_subscription_schedule_id === "string" ? organization.stripe_subscription_schedule_id : null));
+      await client.subscriptions.update(existingSubscriptionId, {
+        items: [{ id: item.id, price: price.priceId }],
+        proration_behavior: "always_invoice",
+        payment_behavior: "pending_if_incomplete",
+        cancel_at_period_end: false,
+        metadata: frontDeskWiseStripeMetadata(String(organization.id), planKey),
+      });
+      await pool?.query(
+        `update organizations
+         set stripe_customer_id = $2, stripe_subscription_id = $3, billing_provider = 'stripe',
+             stripe_subscription_schedule_id = null, pending_plan_key = $4, pending_billing_interval = $5,
+             pending_plan_change_type = 'upgrade', pending_plan_change_at = now(),
+             updated_at = now()
+         where id = $1`,
+        [organization.id, customerId, existingSubscriptionId, planKey, interval],
+      );
+    } else {
+      await releaseStripeSubscriptionSchedule(client, stripeObjectId(existingSubscription.schedule) ?? (typeof organization.stripe_subscription_schedule_id === "string" ? organization.stripe_subscription_schedule_id : null));
+      if (existingSubscription.cancel_at_period_end === true) {
+        await client.subscriptions.update(existingSubscriptionId, {
+          cancel_at_period_end: false,
+          metadata: frontDeskWiseStripeMetadata(String(organization.id), currentPlanKey),
+        });
+      }
+      await pool?.query(
+        `update organizations
+         set stripe_customer_id = $2, stripe_subscription_id = $3, billing_provider = 'stripe',
+             stripe_subscription_schedule_id = null, pending_plan_key = null, pending_billing_interval = null,
+             pending_plan_change_type = null, pending_plan_change_at = null, updated_at = now()
+         where id = $1`,
+        [organization.id, customerId, existingSubscriptionId],
+      );
+    }
     await recordBillingTimeline({
       organizationId: String(organization.id),
       eventKey: `subscription.change_requested:${existingSubscriptionId}:${planKey}`,
-      eventName: planKey === String(organization.plan_key ?? "") ? "subscription_reactivation_requested" : "subscription_update_requested",
-      metadata: { planKey, interval, priceId: price.priceId },
+      eventName: changeType === "none" ? "subscription_reactivation_requested" : changeType === "downgrade" ? "subscription_downgrade_scheduled" : "subscription_upgrade_requested",
+      metadata: { planKey, interval, priceId: price.priceId, changeType, effectiveAt, scheduleId },
     });
-    return { sessionId: null, url: null, subscriptionUpdated: true, subscriptionId: existingSubscriptionId, planKey, interval, amountCents: price.amountCents, currency: price.currency };
+    if (changeType === "downgrade") {
+      await queueOrganizationLifecycleEvent({
+        organizationId: String(organization.id),
+        eventType: "SUBSCRIPTION_CHANGE_SCHEDULED",
+        eventKey: `subscription.change_scheduled:${existingSubscriptionId}:${planKey}:${effectiveAt}`,
+        payload: {
+          current_plan_name: billingPlanDisplayName(currentPlanKey),
+          plan_name: billingPlanDisplayName(planKey),
+          effective_date: effectiveAt,
+          status: "Scheduled",
+          price_display: price.amountCents === null ? "Contact support" : `$${(price.amountCents / 100).toFixed(0)}/${interval}`,
+          businesses_included: planKey === "portfolio" ? "5" : planKey === "multi_business" ? "2" : "1",
+        },
+      });
+    }
+    return {
+      sessionId: null,
+      url: null,
+      subscriptionUpdated: true,
+      subscriptionId: existingSubscriptionId,
+      planKey,
+      changeType,
+      effectiveAt,
+      interval,
+      amountCents: price.amountCents,
+      currency: price.currency,
+    };
   }
 
   const checkoutMetadata = frontDeskWiseStripeMetadata(String(organization.id), planKey, { appUserId: appUser.id });
@@ -8156,7 +9364,8 @@ app.post("/api/v1/billing/checkout-session", async (request) => {
     `update organizations
      set stripe_customer_id = $2, billing_provider = 'stripe',
          stripe_checkout_session_id = $3, stripe_checkout_status = 'open', stripe_checkout_created_at = now(),
-         pending_plan_key = $4, pending_billing_interval = $5, pending_plan_change_at = now(), updated_at = now()
+         pending_plan_key = $4, pending_billing_interval = $5, pending_plan_change_type = 'upgrade',
+         pending_plan_change_at = now(), updated_at = now()
      where id = $1`,
     [organization.id, customerId, session.id, planKey, interval],
   );
@@ -8183,6 +9392,37 @@ app.post("/api/v1/billing/portal-session", async (request) => {
   });
   await recordBillingTimeline({ organizationId: String(organization.id), eventKey: `portal.opened:${session.id}`, eventName: "portal_opened", metadata: { customerId: organization.stripe_customer_id } });
   return { url: session.url };
+});
+
+app.post("/api/v1/billing/resume", async (request) => {
+  const client = requireStripe();
+  const { appUser } = await authenticatedAppUser(request);
+  const body = asRecord(request.body);
+  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80));
+  const subscriptionId = typeof organization.stripe_subscription_id === "string" ? organization.stripe_subscription_id : null;
+  if (!subscriptionId) throw httpError(409, "This organization does not have an active Stripe subscription");
+  const subscription = await client.subscriptions.retrieve(subscriptionId);
+  await releaseStripeSubscriptionSchedule(client, stripeObjectId(subscription.schedule) ?? (typeof organization.stripe_subscription_schedule_id === "string" ? organization.stripe_subscription_schedule_id : null));
+  if (subscription.cancel_at_period_end === true) {
+    await client.subscriptions.update(subscriptionId, {
+      cancel_at_period_end: false,
+      metadata: frontDeskWiseStripeMetadata(String(organization.id), String(organization.plan_key ?? "starter")),
+    });
+  }
+  await pool?.query(
+    `update organizations
+     set stripe_subscription_schedule_id = null, pending_plan_key = null, pending_billing_interval = null,
+         pending_plan_change_type = null, pending_plan_change_at = null, cancel_at_period_end = false, updated_at = now()
+     where id = $1`,
+    [organization.id],
+  );
+  await recordBillingTimeline({
+    organizationId: String(organization.id),
+    eventKey: `subscription.resume_requested:${subscriptionId}:${Date.now()}`,
+    eventName: "subscription_resume_requested",
+    metadata: { planKey: organization.plan_key },
+  });
+  return { ok: true, subscriptionId, planKey: organization.plan_key };
 });
 
 app.post("/api/v1/stripe/webhook", { config: { rawBody: true } }, async (request, reply) => {
@@ -8649,6 +9889,158 @@ app.patch("/api/v1/admin/installation-support/:requestId", async (request) => {
   return { request: installationSupportRequestPayload(enriched.rows[0]) };
 });
 
+app.get("/api/v1/admin/support-cases", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Support administration requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const requestedStatus = typeof query.status === "string" ? query.status : null;
+  const status = requestedStatus && ["open", "in_progress", "resolved"].includes(requestedStatus) ? requestedStatus : null;
+  const requestedLimit = Number(query.limit ?? 200);
+  const limit = Math.min(500, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 200));
+  const result = await pool.query<Record<string, unknown>>(
+    `select c.*, b.name as business_name, b.website_url, o.name as organization_name,
+            u.name as assigned_user_name, u.email as assigned_user_email
+     from support_cases c
+     join businesses b on b.id = c.business_id
+     left join organizations o on o.id = c.organization_id
+     left join app_users u on u.id = c.assigned_user_id
+     where ($1::text is null or c.status = $1)
+     order by case when c.status = 'open' then 0 when c.status = 'in_progress' then 1 else 2 end, c.created_at desc
+     limit $2`,
+    [status, limit],
+  );
+  const eventsByCase = await loadSupportCaseEvents(result.rows.map((row) => String(row.id)));
+  const summary = await pool.query<{ open_count: string; in_progress_count: string; resolved_count: string }>(
+    `select count(*) filter (where status = 'open')::text as open_count,
+            count(*) filter (where status = 'in_progress')::text as in_progress_count,
+            count(*) filter (where status = 'resolved')::text as resolved_count
+     from support_cases`,
+  );
+  const assignees = await pool.query<{ id: string; name: string; email: string }>(
+    `select u.id, u.name, u.email
+     from app_users u
+     where u.status = 'active'
+       and (exists (select 1 from super_admin_users sa where sa.user_id = u.id and sa.status = 'active')
+         or exists (select 1 from organization_members om where om.user_id = u.id and om.role in ('owner', 'admin')))
+     order by u.name, u.email`,
+  );
+  return {
+    cases: result.rows.map((row) => supportCasePayload(row, eventsByCase.get(String(row.id)) ?? [])),
+    summary: {
+      open: Number(summary.rows[0]?.open_count ?? 0),
+      inProgress: Number(summary.rows[0]?.in_progress_count ?? 0),
+      resolved: Number(summary.rows[0]?.resolved_count ?? 0),
+    },
+    assignees: assignees.rows,
+  };
+});
+
+app.patch("/api/v1/admin/support-cases/:caseId", async (request) => {
+  const actor = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Support administration requires PostgreSQL storage");
+  const params = request.params as { caseId?: string };
+  const caseId = requiredString(params.caseId, "caseId", 80);
+  const body = asRecord(request.body);
+  const status = body.status === "open" || body.status === "in_progress" || body.status === "resolved" ? body.status as SupportCaseStatus : null;
+  const assignedUserId = body.assignedUserId === null || body.assignedUserId === "" ? null : optionalString(body.assignedUserId, 80);
+  const note = optionalString(body.note, 4_000);
+  if (!status && body.assignedUserId === undefined && !note) throw httpError(400, "Provide a valid status, assignee, or note");
+  if (assignedUserId) {
+    const assignee = await pool.query("select 1 from app_users where id = $1 and status = 'active'", [assignedUserId]);
+    if (!assignee.rowCount) throw httpError(400, "That assignee is not an active application user");
+  }
+  const previous = await pool.query<{ status: SupportCaseStatus; assigned_user_id: string | null }>(
+    "select status, assigned_user_id from support_cases where id = $1",
+    [caseId],
+  );
+  if (!previous.rowCount) throw httpError(404, "Support case not found");
+  const current = previous.rows[0];
+  const result = await pool.query<Record<string, unknown>>(
+    `update support_cases
+     set status = coalesce($2, status),
+         assigned_user_id = case when $3::boolean then $4 else assigned_user_id end,
+         resolved_at = case when coalesce($2, status) = 'resolved' then coalesce(resolved_at, now()) else null end,
+         updated_at = now()
+     where id = $1
+     returning *`,
+    [caseId, status, body.assignedUserId !== undefined, assignedUserId],
+  );
+  const changedStatus = status && status !== current.status;
+  const changedAssignment = body.assignedUserId !== undefined && assignedUserId !== current.assigned_user_id;
+  if (changedStatus) {
+    await pool.query(
+      `insert into support_case_events (case_id, event_type, actor_user_id, body, metadata)
+       values ($1, 'status_changed', $2, $3, $4)`,
+      [caseId, actor.id, `Status changed to ${status}`, JSON.stringify({ from: current.status, to: status })],
+    );
+  }
+  if (changedAssignment) {
+    await pool.query(
+      `insert into support_case_events (case_id, event_type, actor_user_id, body, metadata)
+       values ($1, 'assignment_changed', $2, $3, $4)`,
+      [caseId, actor.id, assignedUserId ? "Support case assigned" : "Support case unassigned", JSON.stringify({ assignedUserId })],
+    );
+  }
+  if (note) {
+    await pool.query(
+      `insert into support_case_events (case_id, event_type, actor_user_id, body)
+       values ($1, 'note', $2, $3)`,
+      [caseId, actor.id, note],
+    );
+  }
+  const enriched = await pool.query<Record<string, unknown>>(
+    `select c.*, b.name as business_name, b.website_url, o.name as organization_name,
+            u.name as assigned_user_name, u.email as assigned_user_email
+     from support_cases c
+     join businesses b on b.id = c.business_id
+     left join organizations o on o.id = c.organization_id
+     left join app_users u on u.id = c.assigned_user_id
+     where c.id = $1`,
+    [caseId],
+  );
+  const events = await loadSupportCaseEvents([caseId]);
+  return { case: supportCasePayload(enriched.rows[0], events.get(caseId) ?? []) };
+});
+
+app.post("/api/v1/admin/support-cases/:caseId/view", async (request, reply) => {
+  const admin = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Support viewing requires PostgreSQL storage");
+  const params = request.params as { caseId?: string };
+  const caseId = requiredString(params.caseId, "caseId", 80);
+  const result = await pool.query<{ business_id: string; business_slug: string; business_name: string }>(
+    `select c.business_id, b.slug as business_slug, b.name as business_name
+     from support_cases c
+     join businesses b on b.id = c.business_id
+     where c.id = $1`,
+    [caseId],
+  );
+  if (!result.rowCount) throw httpError(404, "Support case not found");
+  const row = result.rows[0];
+  const business = await getBusiness(row.business_slug);
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
+  const access = await createDemoAccess(business, {
+    createdByUserId: admin.id,
+    accessType: "admin",
+    accessLabel: `Support view · case ${caseId}`,
+    email: admin.email,
+    name: `${business.name} support view`,
+    expiresAt,
+  });
+  await pool.query(
+    `insert into support_case_events (case_id, event_type, actor_user_id, body, metadata)
+     values ($1, 'note', $2, $3, $4)`,
+    [caseId, admin.id, "Support view opened", JSON.stringify({ accessType: "support_view", sessionId: access.sessionId, expiresAt })],
+  );
+  const { sessionId, ...publicAccess } = access;
+  return reply.send({
+    ...publicAccess,
+    sessionId,
+    businessId: row.business_id,
+    businessSlug: row.business_slug,
+    viewUrl: `${demoAccessLink(access.accessToken)}&support_view=1&support_case=${encodeURIComponent(caseId)}`,
+  });
+});
+
 app.get("/api/v1/admin/users", async (request) => {
   await requireSuperAdmin(request);
   if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
@@ -8816,6 +10208,233 @@ app.get("/api/v1/admin/businesses/:businessId", async (request) => {
     },
     owners: owners.rows,
   };
+});
+
+app.get("/api/v1/admin/action-registry", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const businessId = optionalString(query.businessId, 80) ?? null;
+  if (businessId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(businessId)) {
+    throw httpError(400, "businessId must be a UUID");
+  }
+  const result = await pool.query<Record<string, unknown>>(
+    `select a.*, b.name as business_name, b.slug as business_slug, b.website_url,
+            b.primary_action_id
+     from business_actions a
+     join businesses b on b.id = a.business_id
+     where ($1::uuid is null or b.id = $1::uuid)
+     order by b.name, a.priority desc, a.confidence desc nulls last, a.updated_at desc
+     limit 500`,
+    [businessId],
+  );
+  return {
+    actions: result.rows.map((row) => ({
+      id: String(row.id),
+      businessId: String(row.business_id),
+      businessName: String(row.business_name),
+      businessSlug: String(row.business_slug),
+      websiteUrl: String(row.website_url ?? ""),
+      actionKey: String(row.action_key),
+      actionType: String(row.action_type ?? "contact_team"),
+      name: String(row.name),
+      description: String(row.description ?? ""),
+      mode: String(row.mode ?? "transactional"),
+      destination: row.destination && typeof row.destination === "object" ? asRecord(row.destination) : null,
+      provider: typeof row.provider === "string" ? row.provider : null,
+      priority: Number(row.priority ?? 0),
+      requiredFields: Array.isArray(row.required_fields) ? row.required_fields : [],
+      conditions: Array.isArray(row.conditions) ? row.conditions : [],
+      safetyPolicy: String(row.safety_policy ?? "standard"),
+      sourceUrl: typeof row.source_url === "string" ? row.source_url : null,
+      sourceType: typeof row.source_type === "string" ? row.source_type : null,
+      sourceLabel: typeof row.source_label === "string" ? row.source_label : null,
+      classificationReason: typeof row.classification_reason === "string" ? row.classification_reason : null,
+      discoveredAt: row.discovered_at ? toIso(row.discovered_at) : null,
+      origin: row.origin === "discovered" ? "discovered" : "configured",
+      lifecycleStatus: ["discovered", "needs_review", "approved", "active", "disabled"].includes(String(row.lifecycle_status)) ? String(row.lifecycle_status) : (row.enabled === true ? "active" : "disabled"),
+      reviewReason: ["low_confidence", "unsafe_destination", "duplicate_action", "owner_override", "source_removed"].includes(String(row.review_reason)) ? String(row.review_reason) : null,
+      evidence: Array.isArray(row.evidence) ? row.evidence : [],
+      confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
+      enabled: row.enabled === true,
+      isPrimary: String(row.id) === String(row.primary_action_id ?? ""),
+      updatedAt: toIso(row.updated_at),
+    })),
+  };
+});
+
+app.patch("/api/v1/admin/action-registry/:actionId", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const params = request.params as { actionId?: string };
+  const actionId = requiredString(params.actionId, "actionId", 80);
+  const body = asRecord(request.body);
+  const lifecycleStatuses: ActionLifecycleStatus[] = ["discovered", "needs_review", "approved", "active", "disabled"];
+  const requestedStatus = body.status === undefined ? null : String(body.status) as ActionLifecycleStatus;
+  if (requestedStatus && !lifecycleStatuses.includes(requestedStatus)) throw httpError(400, "Unsupported action lifecycle status");
+  if (typeof body.enabled !== "boolean" && !requestedStatus) throw httpError(400, "enabled or status is required");
+  const actionResult = await pool.query<Record<string, unknown>>(
+    `select a.id, a.business_id, a.action_type, a.destination, a.safety_policy, a.confidence,
+            a.origin, a.enabled, a.lifecycle_status, a.review_reason, a.source_type, a.source_url, a.evidence,
+            b.ownership_status, b.primary_action_id
+     from business_actions a
+     join businesses b on b.id = a.business_id
+     where a.id = $1`,
+    [actionId],
+  );
+  if (!actionResult.rowCount) throw httpError(404, "Action not found");
+  const action = actionResult.rows[0];
+  const origin = action.origin === "discovered" ? "discovered" : "configured";
+  const enabled = requestedStatus
+    ? requestedStatus === "approved" || requestedStatus === "active"
+    : body.enabled as boolean;
+  const lifecycleStatus: ActionLifecycleStatus = requestedStatus
+    ?? (enabled ? (origin === "discovered" ? "approved" : "active") : "disabled");
+  if (enabled) {
+    const confidence = action.confidence === null || action.confidence === undefined ? 0 : Number(action.confidence);
+    const destination = action.destination && typeof action.destination === "object" ? asRecord(action.destination) : null;
+    const destinationUrl = typeof destination?.url === "string" ? destination.url : "";
+    if (confidence < 0.88) throw httpError(400, "Low-confidence actions require stronger website evidence before they can be enabled");
+    if (String(action.safety_policy ?? "standard") === "manual_review") throw httpError(400, "This action requires manual safety review");
+    if (String(action.action_type) === "call_emergency") {
+      const evidence = Array.isArray(action.evidence) ? action.evidence : [];
+      if (String(action.ownership_status) !== "verified" || String(action.source_type) !== "website" || !action.source_url || !evidence.length || !destinationUrl.startsWith("tel:")) {
+        throw httpError(400, "Emergency actions require a verified source, source evidence, and a verified telephone destination");
+      }
+    }
+  }
+  const validReasons = ["low_confidence", "unsafe_destination", "duplicate_action", "owner_override", "source_removed"];
+  const suppliedReason: ActionReviewReason = typeof body.reason === "string" && validReasons.includes(body.reason)
+    ? body.reason as ActionReviewReason
+    : null;
+  const existingReviewReason: ActionReviewReason = typeof action.review_reason === "string" && validReasons.includes(action.review_reason)
+    ? action.review_reason as ActionReviewReason
+    : null;
+  const reviewReason = enabled || lifecycleStatus === "approved" || lifecycleStatus === "active"
+    ? null
+    : suppliedReason ?? (lifecycleStatus === "disabled" ? "owner_override" : existingReviewReason);
+  const previousValue = {
+    enabled: action.enabled === true,
+    lifecycleStatus: action.lifecycle_status,
+    reviewReason: action.review_reason ?? null,
+    primaryActionId: action.primary_action_id ?? null,
+  };
+  await pool.query(
+    `update business_actions
+     set enabled = $2, lifecycle_status = $3, review_reason = $4, updated_at = now()
+     where id = $1`,
+    [actionId, enabled, lifecycleStatus, reviewReason],
+  );
+  if (!enabled && String(action.primary_action_id ?? "") === actionId) {
+    await pool.query("update businesses set primary_action_id = null, updated_at = now() where id = $1 and primary_action_id = $2", [action.business_id, actionId]);
+    await recordActionRegistryAudit({
+      businessId: String(action.business_id),
+      actionId,
+      actorUserId: admin.id,
+      actorType: "super_admin",
+      eventType: "primary_cleared",
+      previousValue: { primaryActionId: actionId },
+      newValue: { primaryActionId: null },
+      reason: reviewReason,
+    });
+  }
+  const eventType: ActionRegistryAuditEvent = lifecycleStatus === "approved" ? "approved" : enabled ? "enabled" : lifecycleStatus === "disabled" ? "disabled" : "updated";
+  await recordActionRegistryAudit({
+    businessId: String(action.business_id),
+    actionId,
+    actorUserId: admin.id,
+    actorType: "super_admin",
+    eventType,
+    previousValue,
+    newValue: { enabled, lifecycleStatus, reviewReason },
+    reason: reviewReason,
+  });
+  invalidateBusinessRuntimeCache(String(action.business_id));
+  return { actionId, businessId: String(action.business_id), enabled, lifecycleStatus, reviewReason };
+});
+
+app.patch("/api/v1/admin/businesses/:businessId/primary-action", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const params = request.params as { businessId?: string };
+  const businessId = requiredString(params.businessId, "businessId", 80);
+  const body = asRecord(request.body);
+  const actionId = body.actionId === null ? null : requiredString(body.actionId, "actionId", 80);
+  const businessResult = await pool.query<{ id: string; primary_action_id: string | null }>("select id, primary_action_id from businesses where id = $1", [businessId]);
+  if (!businessResult.rowCount) throw httpError(404, "Business not found");
+  const previousActionId = businessResult.rows[0].primary_action_id;
+  if (actionId) {
+    const actionResult = await pool.query<{ id: string }>(
+      "select id from business_actions where id = $1 and business_id = $2 and enabled = true and lifecycle_status in ('approved', 'active')",
+      [actionId, businessId],
+    );
+    if (!actionResult.rowCount) throw httpError(400, "Primary action must be an approved, enabled action belonging to this business");
+  }
+  await pool.query("update businesses set primary_action_id = $2, updated_at = now() where id = $1", [businessId, actionId]);
+  if (actionId) {
+    await recordActionRegistryAudit({
+      businessId,
+      actionId,
+      actorUserId: admin.id,
+      actorType: "super_admin",
+      eventType: "primary_set",
+      previousValue: { primaryActionId: previousActionId },
+      newValue: { primaryActionId: actionId },
+      reason: "owner_override",
+    });
+  } else if (previousActionId) {
+    await recordActionRegistryAudit({
+      businessId,
+      actionId: previousActionId,
+      actorUserId: admin.id,
+      actorType: "super_admin",
+      eventType: "primary_cleared",
+      previousValue: { primaryActionId: previousActionId },
+      newValue: { primaryActionId: null },
+      reason: "owner_override",
+    });
+  }
+  invalidateBusinessRuntimeCache(businessId);
+  return { businessId, primaryActionId: actionId };
+});
+
+app.get("/api/v1/admin/action-registry/:actionId/audit", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const params = request.params as { actionId?: string };
+  const actionId = requiredString(params.actionId, "actionId", 80);
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      `select ara.id, ara.business_id, ara.action_id, ara.actor_type, ara.event_type,
+              ara.previous_value, ara.new_value, ara.reason, ara.metadata, ara.created_at,
+              u.email as actor_email, u.name as actor_name
+       from action_registry_audit ara
+       left join app_users u on u.id = ara.actor_user_id
+       where ara.action_id = $1
+       order by ara.created_at desc
+       limit 100`,
+      [actionId],
+    );
+    return {
+      audit: result.rows.map((row) => ({
+        id: String(row.id),
+        businessId: String(row.business_id),
+        actionId: row.action_id ? String(row.action_id) : null,
+        actorType: String(row.actor_type),
+        actorEmail: typeof row.actor_email === "string" ? row.actor_email : null,
+        actorName: typeof row.actor_name === "string" ? row.actor_name : null,
+        eventType: String(row.event_type),
+        previousValue: asRecord(row.previous_value),
+        newValue: asRecord(row.new_value),
+        reason: typeof row.reason === "string" ? row.reason : null,
+        metadata: asRecord(row.metadata),
+        createdAt: toIso(row.created_at),
+      })),
+    };
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    return { audit: [] };
+  }
 });
 
 app.post("/api/v1/admin/businesses/:businessId/verification/approve", async (request) => {
@@ -9687,6 +11306,176 @@ function installationSupportRequestPayload(row: Record<string, unknown>): Record
   };
 }
 
+function supportCasePayload(row: Record<string, unknown>, events: Array<Record<string, unknown>> = []): Record<string, unknown> {
+  const category = String(row.category ?? "general");
+  const status = String(row.status ?? "open");
+  return {
+    id: String(row.id),
+    businessId: String(row.business_id),
+    businessName: String(row.business_name ?? ""),
+    websiteUrl: String(row.website_url ?? ""),
+    organizationName: row.organization_name ? String(row.organization_name) : null,
+    requesterName: String(row.requester_name ?? ""),
+    requesterEmail: String(row.requester_email ?? ""),
+    subject: String(row.subject ?? ""),
+    category: ["general", "installation", "knowledge", "actions", "integration", "billing", "verification", "widget", "account"].includes(category) ? category : "general",
+    provider: typeof row.provider === "string" ? row.provider : null,
+    connectionId: typeof row.connection_id === "string" ? row.connection_id : null,
+    sourcePage: typeof row.source_page === "string" ? row.source_page : null,
+    sourceUrl: typeof row.source_url === "string" ? row.source_url : null,
+    severity: row.severity === "urgent" ? "urgent" : "normal",
+    description: String(row.description ?? ""),
+    diagnostics: row.diagnostics && typeof row.diagnostics === "object" ? asRecord(row.diagnostics) : {},
+    correlationId: String(row.correlation_id ?? ""),
+    assignedUserId: typeof row.assigned_user_id === "string" ? row.assigned_user_id : null,
+    assignedUserName: typeof row.assigned_user_name === "string" ? row.assigned_user_name : null,
+    assignedUserEmail: typeof row.assigned_user_email === "string" ? row.assigned_user_email : null,
+    status: status === "in_progress" || status === "resolved" ? status : "open",
+    resolvedAt: nullableIso(row.resolved_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+    events: events.map((event) => ({
+      id: String(event.id),
+      eventType: String(event.event_type),
+      actorName: typeof event.actor_name === "string" ? event.actor_name : null,
+      body: typeof event.body === "string" ? event.body : null,
+      createdAt: toIso(event.created_at),
+    })),
+  };
+}
+
+function supportDiagnosticsForBusiness(business: Business, sourcePage: string | null = null): Record<string, unknown> {
+  const failedSources = business.sources.filter((source) => source.crawlStatus === "failed");
+  const pendingSources = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling");
+  const lastRefresh = business.sources
+    .map((source) => Date.parse(source.lastCrawledAt))
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => right - left)[0];
+  return {
+    business: business.name,
+    businessId: business.id,
+    page: sourcePage ?? "Support",
+    source: business.websiteUrl,
+    lastRefresh: lastRefresh ? new Date(lastRefresh).toISOString() : null,
+    crawlerStatus: failedSources.length ? "render_failed" : pendingSources.length ? "refreshing" : "ready",
+    failedSources: failedSources.slice(0, 5).map((source) => ({ url: source.url, error: source.errorMessage ?? null })),
+    pendingSourceCount: pendingSources.length,
+    integrationErrors: [],
+    widget: {
+      detected: business.widget.loadCount > 0,
+      lastLoadedAt: business.widget.lastLoadedAt,
+      loadCount: business.widget.loadCount,
+    },
+  };
+}
+
+async function loadSupportCaseEvents(caseIds: string[]): Promise<Map<string, Record<string, unknown>[]>> {
+  const eventsByCase = new Map<string, Record<string, unknown>[]>();
+  if (!pool || !caseIds.length) return eventsByCase;
+  const result = await pool.query<Record<string, unknown>>(
+    `select e.id, e.case_id, e.event_type, e.body, e.created_at, u.name as actor_name
+     from support_case_events e
+     left join app_users u on u.id = e.actor_user_id
+     where e.case_id = any($1::uuid[])
+     order by e.created_at desc`,
+    [caseIds],
+  );
+  for (const row of result.rows) {
+    const caseId = String(row.case_id);
+    const events = eventsByCase.get(caseId) ?? [];
+    events.push(row);
+    eventsByCase.set(caseId, events);
+  }
+  return eventsByCase;
+}
+
+app.get("/api/v1/demo/:slug/support", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const access = await requireBusinessTeamAccess(business, request, "viewer");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const sourcePage = optionalString(query.page, 180);
+  if (!pool) {
+    return { context: { diagnostics: supportDiagnosticsForBusiness(business, sourcePage), systemStatus: { api: "operational" } }, cases: [] };
+  }
+  const result = await pool.query<Record<string, unknown>>(
+    `select c.*, b.name as business_name, b.website_url, o.name as organization_name,
+            u.name as assigned_user_name, u.email as assigned_user_email
+     from support_cases c
+     join businesses b on b.id = c.business_id
+     left join organizations o on o.id = c.organization_id
+     left join app_users u on u.id = c.assigned_user_id
+     where c.business_id = $1
+     order by c.created_at desc
+     limit 100`,
+    [business.id],
+  );
+  const eventsByCase = await loadSupportCaseEvents(result.rows.map((row) => String(row.id)));
+  return {
+    context: {
+      diagnostics: supportDiagnosticsForBusiness(business, sourcePage),
+      systemStatus: {
+        api: "operational",
+        knowledge: business.sources.some((source) => source.crawlStatus === "failed") ? "needs_attention" : "healthy",
+        widget: business.widget.loadCount > 0 ? "detected" : "not_detected",
+        integrations: "available_on_request",
+      },
+    },
+    cases: result.rows.map((row) => supportCasePayload(row, eventsByCase.get(String(row.id)) ?? [])),
+    viewer: { id: access.id, name: access.name, email: access.email },
+  };
+});
+
+app.post("/api/v1/demo/:slug/support/cases", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const access = await requireBusinessTeamAccess(business, request, "viewer");
+  if (!pool) throw httpError(503, "Support cases require PostgreSQL storage");
+  const body = asRecord(request.body);
+  const category = typeof body.category === "string" && ["general", "installation", "knowledge", "actions", "integration", "billing", "verification", "widget", "account"].includes(body.category)
+    ? body.category as SupportCaseCategory : "general";
+  const subject = requiredString(body.subject, "subject", 180);
+  const description = requiredString(body.description, "description", 8_000);
+  const sourcePage = optionalString(body.sourcePage, 180);
+  const sourceUrl = optionalString(body.sourceUrl, 1_000);
+  const provider = optionalString(body.provider, 120);
+  const connectionId = optionalString(body.connectionId, 160);
+  const severity = body.severity === "urgent" ? "urgent" : "normal";
+  const diagnostics = asRecord(body.diagnostics);
+  const correlationId = optionalString(body.correlationId, 160) ?? `fdw-${request.id}`;
+  const organizationId = access.organizationId ?? await businessOrganizationId(business);
+  if (!organizationId) throw httpError(409, "This business is not connected to an organization yet");
+  const requesterUserId = access.legacyDemo || access.id === "demo-owner" ? null : access.id;
+  const inserted = await pool.query<Record<string, unknown>>(
+    `insert into support_cases
+       (organization_id, business_id, requester_user_id, requester_name, requester_email, subject, category,
+        provider, connection_id, source_page, source_url, severity, description, diagnostics, correlation_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     returning *`,
+    [organizationId, business.id, requesterUserId, access.name, access.email, subject, category, provider, connectionId, sourcePage, sourceUrl, severity, description, JSON.stringify(diagnostics), correlationId],
+  );
+  const row = inserted.rows[0];
+  await pool.query(
+    `insert into support_case_events (case_id, event_type, actor_user_id, body, metadata)
+     values ($1, 'case_created', $2, $3, $4)`,
+    [row.id, requesterUserId, "Support case created", JSON.stringify({ category, sourcePage, correlationId })],
+  );
+  const supportCase = { ...row, business_name: business.name, website_url: business.websiteUrl, organization_name: null };
+  void notifySuperAdmins({
+    subject: `Support case · ${business.name} · ${subject}`,
+    text: [
+      `A ${severity} support case was opened for ${business.name}.`,
+      `Category: ${category}${provider ? ` · ${provider}` : ""}`,
+      `Requester: ${access.name} <${access.email}>`,
+      `Page: ${sourcePage ?? "Support"}`,
+      `Correlation ID: ${correlationId}`,
+      `Description: ${description}`,
+      `Open the support queue: ${lifecycleAppUrl("/platform/support")}`,
+    ].join("\n"),
+  }).catch((error) => app.log.warn({ error: error instanceof Error ? error.message : "unknown notification error", businessId: business.id }, "Could not notify super-admins about support case"));
+  return reply.code(201).send({ case: supportCasePayload(supportCase, [{ id: randomUUID(), event_type: "case_created", actor_name: access.name, body: "Support case created", created_at: new Date().toISOString() }]) });
+});
+
 app.post("/api/v1/demo/:slug/installation-support", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -10469,17 +12258,36 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   const actor = await requireBusinessTeamAccess(business, request, "viewer");
   const query = (request.query as Record<string, unknown> | undefined) ?? {};
   const status = optionalString(query.status, 40) as ConversationStatus | null;
-  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED"]);
+  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED", "EXPIRED"]);
   if (status && !allowedStatuses.has(status)) throw httpError(400, "Unsupported conversation status filter");
   const assignedTo = optionalString(query.assignedTo, 80);
   const search = optionalString(query.q, 160)?.toLowerCase();
-  const conversations = [...business.conversations.values()]
+  const requestedPage = Number(query.page ?? 1);
+  const requestedLimit = Number(query.limit ?? 50);
+  const requestedPageNumber = Math.max(1, Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1);
+  const limit = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50));
+  const filteredConversations = [...business.conversations.values()]
     .filter((conversation) => !status || conversation.status === status)
     .filter((conversation) => !assignedTo || (assignedTo === "unassigned" ? !conversation.assignedUserId : conversation.assignedUserId === assignedTo))
     .filter((conversation) => !search || conversation.messages.some((message) => message.content.toLowerCase().includes(search)) || business.leads.some((lead) => lead.conversationId === conversation.id && [lead.name, lead.email, lead.intent].some((value) => value?.toLowerCase().includes(search))))
-    .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))
-    .slice(0, 200);
-  return { actor: { id: actor.id, name: actor.name, role: actor.role }, conversations: conversations.map((conversation) => inboxConversationPayload(business, conversation)) };
+    .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
+  const total = filteredConversations.length;
+  const page = Math.min(requestedPageNumber, Math.max(1, Math.ceil(total / limit)));
+  const start = (page - 1) * limit;
+  const conversations = filteredConversations.slice(start, start + limit);
+  const summary = filteredConversations.reduce((result, conversation) => {
+    if (conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF") result.needsResponse += 1;
+    if (conversation.status === "AI_ACTIVE" || conversation.status === "AI_ASSISTED") result.ai += 1;
+    if (conversation.status === "RESOLVED") result.resolved += 1;
+    result.unread += conversation.unreadCount ?? 0;
+    return result;
+  }, { needsResponse: 0, unread: 0, ai: 0, resolved: 0 });
+  return {
+    actor: { id: actor.id, name: actor.name, role: actor.role },
+    conversations: conversations.map((conversation) => inboxConversationPayload(business, conversation)),
+    summary,
+    pagination: { page, pageSize: limit, total, hasNext: start + conversations.length < total, hasPrevious: page > 1 },
+  };
 });
 
 app.get("/api/v1/demo/:slug/conversations/:conversationId", async (request) => {
@@ -10546,6 +12354,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
   const now = new Date().toISOString();
   const persistedActorId = actor.legacyDemo ? null : actor.id;
   if ((!pool || actor.legacyDemo)
@@ -10619,6 +12428,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/assign", async (reque
   const actor = await requireBusinessTeamAccess(business, request, "admin");
   if (!pool || actor.legacyDemo) throw httpError(503, "Assignment requires a signed-in team account");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
   const body = asRecord(request.body);
   const assigneeId = requiredString(body.userId, "userId", 80);
   const member = await pool.query("select 1 from business_members where business_id = $1 and user_id = $2 and role in ('admin', 'staff')", [business.id, assigneeId]);
@@ -10639,6 +12449,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/return-to-ai", async 
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
   if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can return this conversation to AI");
   conversation.status = "AI_ASSISTED";
   conversation.assignedUserId = null;
@@ -10659,6 +12470,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/resolve", async (requ
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is already closed");
   conversation.status = "RESOLVED";
   conversation.assignedUserId = null;
   conversation.assignedAt = null;
@@ -10678,11 +12490,18 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", asyn
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
   if (conversation.status !== "HUMAN_ACTIVE") throw httpError(409, "Take over this conversation before replying");
   if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can reply here");
-  const content = requiredString(asRecord(request.body).content, "content", 4_000);
+  const body = asRecord(request.body);
+  const content = requiredString(body.content, "content", 4_000);
+  const clientMessageId = typeof body.clientMessageId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.clientMessageId.trim()) ? body.clientMessageId.trim() : undefined;
+  if (clientMessageId) {
+    const existing = conversation.messages.find((message) => message.id === clientMessageId && message.role === "human");
+    if (existing) return { message: inboxMessagePayload(existing), conversation: conversationStatusPayload(conversation) };
+  }
   const now = new Date().toISOString();
-  const message: Message = { role: "human", kind: "message", authorUserId: actor.legacyDemo ? undefined : actor.id, authorName: actor.name, content, createdAt: now };
+  const message: Message = { id: clientMessageId ?? randomUUID(), role: "human", kind: "message", authorUserId: actor.legacyDemo ? undefined : actor.id, authorName: actor.name, content, createdAt: now };
   conversation.messages.push(message);
   conversation.status = "HUMAN_ACTIVE";
   conversation.unreadCount = 0;
@@ -10699,6 +12518,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/ai-assist", async (re
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
   if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can request an AI suggestion");
   const latestVisitorMessage = [...conversation.messages].reverse().find((message) => message.role === "user");
   if (!latestVisitorMessage) throw httpError(400, "There is no visitor question to assist with yet");
@@ -10825,7 +12645,11 @@ app.post("/api/v1/widget/:siteKey/conversations", async (request, reply) => {
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const body = asRecord(request.body);
-  const conversation = await startConversation(business, typeof body.sessionId === "string" ? body.sessionId : null);
+  const conversation = await startConversation(
+    business,
+    typeof body.sessionId === "string" ? body.sessionId : null,
+    { forceNew: body.newConversation === true },
+  );
   return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId, resumed: conversation.messages.length > 0 });
 });
 
@@ -10835,13 +12659,31 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
-  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   const body = asRecord(request.body);
+  let conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  conversation = await conversationForIncomingMessage(business, conversation, optionalString(body.sessionId, 160));
   const question = requiredString(body.question, "question", 1_000);
+  const clientMessageId = typeof body.clientMessageId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.clientMessageId.trim())
+    ? body.clientMessageId.trim()
+    : undefined;
+  if (clientMessageId) {
+    const existingIndex = conversation.messages.findIndex((message) => message.id === clientMessageId && message.role === "user");
+    if (existingIndex >= 0) {
+      const existingAnswer = conversation.messages.slice(existingIndex + 1).find((message) => message.role === "assistant");
+      return {
+        conversationId: conversation.id,
+        messageId: clientMessageId,
+        conversation: conversationStatusPayload(conversation),
+        answer: existingAnswer?.content ?? "",
+        grounded: existingAnswer?.grounded ?? false,
+        citations: existingAnswer?.citations ?? [],
+      };
+    }
+  }
   const currentPage = optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000);
   const requestReceivedAt = new Date().toISOString();
   const requestStartedAt = performance.now();
-  const result = await recordConversationQuestion(business, conversation, question, { currentPage });
+  const result = await recordConversationQuestion(business, conversation, question, { currentPage, clientMessageId });
   void recordWidgetPerformance(business, {
     event: "message_backend",
     conversationId: conversation.id,
@@ -10858,7 +12700,7 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
       request_received_at: requestReceivedAt,
     },
   }).catch((error) => app.log.warn({ error: error instanceof Error ? error.message : "unknown performance telemetry error", requestId: request.id }, "Widget performance telemetry failed"));
-  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
+  return { conversationId: conversation.id, messageId: clientMessageId, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
 });
 
 app.get("/api/v1/widget/:siteKey/conversations/:conversationId", async (request) => {
@@ -10888,6 +12730,7 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionI
     conversation,
     requiredString(params.actionId, "actionId", 120),
     asRecord(body.values),
+    optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000),
   );
   return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
 });
@@ -10927,7 +12770,54 @@ app.get("/api/v1/demo/:slug/knowledge-gaps", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
-  return { gaps: [...business.knowledgeGaps.values()].sort((left, right) => right.occurrenceCount - left.occurrenceCount) };
+  const gaps = [...business.knowledgeGaps.values()].sort((left, right) => right.occurrenceCount - left.occurrenceCount);
+  // Keep the first clustering pass deterministic and cheap. Intent-aware
+  // normalization collapses common wording variants without requiring an
+  // embedding request for every row in the owner workspace.
+  const synonymMap: Record<string, string> = {
+    cost: "pricing",
+    costs: "pricing",
+    fee: "pricing",
+    fees: "pricing",
+    price: "pricing",
+    prices: "pricing",
+    pricing: "pricing",
+    amount: "pricing",
+    charge: "pricing",
+    charges: "pricing",
+    much: "pricing",
+    appointment: "booking",
+    appointments: "booking",
+    reserve: "booking",
+    reservation: "booking",
+    reservations: "booking",
+  };
+  const clusterKey = (gap: KnowledgeGap): string => {
+    const intent = gap.intent ?? classifyQuestionIntent(gap.question);
+    const terms = tokenise(gap.question).map((term) => synonymMap[term] ?? term);
+    const intentTerms = new Set([intent, "pricing", "booking", "hours", "contact", "location", "services"]);
+    const specificTerms = terms.filter((term) => !intentTerms.has(term)).sort();
+    // Generic questions in the same intent are usually wording variants
+    // ("price?", "what's pricing", "how much does it cost?").
+    return `${intent}:${specificTerms.length <= 1 ? "generic" : specificTerms.slice(0, 3).join("|")}`;
+  };
+  const clusters = new Map<string, KnowledgeGap & { variants: string[] }>();
+  for (const gap of gaps) {
+    const key = clusterKey(gap);
+    const existing = clusters.get(key);
+    if (!existing) {
+      clusters.set(key, { ...gap, variants: [gap.question] });
+      continue;
+    }
+    existing.occurrenceCount += gap.occurrenceCount;
+    existing.lastSeenAt = existing.lastSeenAt > gap.lastSeenAt ? existing.lastSeenAt : gap.lastSeenAt;
+    existing.variants.push(gap.question);
+    // An unresolved variant keeps the cluster actionable. Resolved and
+    // ignored variants only make the cluster complete when every variant is
+    // in that same state.
+    if (gap.status === "open") existing.status = "open";
+  }
+  return { gaps: [...clusters.values()].sort((left, right) => right.occurrenceCount - left.occurrenceCount) };
 });
 
 app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
@@ -10939,7 +12829,15 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
   const question = requiredString(body.question, "question", 1_000);
   const approvedAnswer = requiredString(body.approvedAnswer, "approvedAnswer", 4_000);
   const answerMode = body.answerMode === "fixed_response" ? "fixed_response" : "knowledge";
-  return await resolveKnowledgeGap(business, question, approvedAnswer, answerMode);
+  const questions = Array.isArray(body.questions)
+    ? body.questions.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 25)
+    : [];
+  const targetQuestions = [...new Set([question, ...questions])];
+  let result: Awaited<ReturnType<typeof resolveKnowledgeGap>> | null = null;
+  for (const targetQuestion of targetQuestions) {
+    result = await resolveKnowledgeGap(business, targetQuestion, approvedAnswer, answerMode);
+  }
+  return result;
 });
 
 app.post("/api/v1/demo/:slug/knowledge-gaps/ignore", async (request) => {
@@ -10949,18 +12847,49 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/ignore", async (request) => {
   requireWritableBusiness(business);
   const body = asRecord(request.body);
   const question = requiredString(body.question, "question", 1_000);
-  return { gap: await ignoreKnowledgeGap(business, question) };
+  const questions = Array.isArray(body.questions)
+    ? body.questions.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 25)
+    : [];
+  const targetQuestions = [...new Set([question, ...questions])];
+  let gap: KnowledgeGap | null = null;
+  for (const targetQuestion of targetQuestions) gap = await ignoreKnowledgeGap(business, targetQuestion);
+  return { gap };
 });
+
+function isKnowledgeEvaluationMessage(message: Message): boolean {
+  if (message.role !== "assistant" || !message.retrieval) return false;
+  // These are conversation/system events, not evidence about knowledge
+  // quality. They intentionally carry deterministic retrieval metadata for
+  // observability, but must never enter the owner-facing Quality queue.
+  if (["tier0_greeting", "handoff", "action_flow"].includes(message.retrieval.mode)) return false;
+  if (["deterministic_greeting", "deterministic_handoff", "deterministic_action_flow"].includes(message.retrieval.reason ?? "")) return false;
+  return true;
+}
 
 app.get("/api/v1/demo/:slug/retrieval-diagnostics", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const requestedPage = Number(query.page ?? 1);
+  const requestedLimit = Number(query.limit ?? 25);
+  const pageSize = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 25));
+  const requestedPageNumber = Math.max(1, Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1);
+  const windowValue = optionalString(query.window, 10) ?? "30";
+  const windowDays = windowValue === "7" || windowValue === "30" ? Number(windowValue) : null;
+  const cutoff = windowDays === null ? null : Date.now() - windowDays * 24 * 60 * 60 * 1_000;
+  const search = optionalString(query.q, 200)?.toLowerCase();
+  const status = optionalString(query.status, 40);
   const diagnostics = [...business.conversations.values()]
     .flatMap((conversation) => conversation.messages.map((message, index) => ({ conversation, message, question: conversation.messages[index - 1]?.content })))
-    .filter((item) => item.message.role === "assistant" && item.message.retrieval)
+    .filter((item) => isKnowledgeEvaluationMessage(item.message) && Boolean(item.question?.trim()))
+    .filter((item) => cutoff === null || Date.parse(item.message.createdAt) >= cutoff)
+    .filter((item) => !search || item.question?.toLowerCase().includes(search) || item.message.content.toLowerCase().includes(search))
+    .filter((item) => status === "grounded" ? item.message.grounded === true
+      : status === "fallback" ? item.message.grounded !== true
+        : status === "needs_review" ? item.message.grounded !== true || item.message.confidenceBand === "low"
+          : true)
     .sort((left, right) => right.message.createdAt.localeCompare(left.message.createdAt))
-    .slice(0, 100)
     .map((item) => ({
       conversationId: item.conversation.id,
       question: item.question ?? "",
@@ -10972,7 +12901,14 @@ app.get("/api/v1/demo/:slug/retrieval-diagnostics", async (request) => {
       retrieval: item.message.retrieval,
       createdAt: item.message.createdAt,
     }));
-  return { diagnostics };
+  const total = diagnostics.length;
+  const page = Math.min(requestedPageNumber, Math.max(1, Math.ceil(total / pageSize)));
+  const start = (page - 1) * pageSize;
+  return {
+    diagnostics: diagnostics.slice(start, start + pageSize),
+    pagination: { page, pageSize, total, hasNext: start + pageSize < total, hasPrevious: page > 1 },
+    windowDays,
+  };
 });
 
 app.get("/api/v1/demo/:slug/leads", async (request) => {
@@ -11042,7 +12978,10 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
-  if (!pool) return { actions: business.actions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
+  // Keep disabled/archived definitions visible to owners so they can restore
+  // them; detectAction and the widget runtime still exclude them.
+  const configuredActions = business.actions;
+  if (!pool) return { actions: configuredActions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
   let deliveries: Array<Record<string, unknown>> = [];
   try {
     const result = await pool.query<Record<string, unknown>>(
@@ -11059,7 +12998,7 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
     if (!isMissingDatabaseTable(error)) throw error;
   }
   return {
-    actions: business.actions,
+    actions: configuredActions,
     resources: business.actionResources,
     templates: ACTION_TEMPLATES,
     deliveries: deliveries.map((row) => ({
@@ -11096,19 +13035,27 @@ app.post("/api/v1/demo/:slug/action-deliveries/:deliveryId/retry", async (reques
 app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const actorUserId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
   const action = normalizedAction(request.body);
   if (business.actions.some((item) => item.key === action.key)) throw httpError(409, "An action with this key already exists");
   business.actions.push(action);
   await persistAction(business, action);
+  await recordActionRegistryAudit({
+    businessId: business.id,
+    actionId: action.id,
+    actorUserId,
+    actorType: "owner",
+    eventType: "created",
+    newValue: { origin: action.origin, lifecycleStatus: action.lifecycleStatus, enabled: action.enabled },
+  });
   return reply.code(201).send({ action });
 });
 
 app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   const params = request.params as { slug?: string; actionId?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const actorUserId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
   const actionIndex = business.actions.findIndex((item) => item.id === requiredString(params.actionId, "actionId", 120));
   if (actionIndex < 0) throw httpError(404, "Action not found");
@@ -11121,20 +13068,63 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   if (pool && previousAction.key !== action.key) {
     await pool.query("delete from business_actions where business_id = $1 and action_key = $2", [business.id, previousAction.key]);
   }
+  await recordActionRegistryAudit({
+    businessId: business.id,
+    actionId: action.id,
+    actorUserId,
+    actorType: "owner",
+    eventType: "updated",
+    previousValue: { enabled: previousAction.enabled, lifecycleStatus: previousAction.lifecycleStatus, primaryActionId: business.primaryActionId },
+    newValue: { enabled: action.enabled, lifecycleStatus: action.lifecycleStatus, primaryActionId: business.primaryActionId },
+    reason: action.reviewReason,
+  });
   return { action };
 });
 
 app.delete("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   const params = request.params as { slug?: string; actionId?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const actorUserId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
   const actionId = requiredString(params.actionId, "actionId", 120);
   const actionIndex = business.actions.findIndex((item) => item.id === actionId);
   if (actionIndex < 0) throw httpError(404, "Action not found");
-  const [action] = business.actions.splice(actionIndex, 1);
-  if (pool) await pool.query("delete from business_actions where business_id = $1 and id = $2", [business.id, action.id]);
-  return { ok: true, actionId };
+  const action = business.actions[actionIndex];
+  const archived: ActionFlow = {
+    ...action,
+    enabled: false,
+    lifecycleStatus: "disabled",
+    reviewReason: "owner_override",
+    version: Math.max(1, (action.version ?? 1) + 1),
+    updatedAt: new Date().toISOString(),
+  };
+  business.actions[actionIndex] = archived;
+  if (business.primaryActionId === action.id) {
+    business.primaryActionId = null;
+    if (pool) await pool.query("update businesses set primary_action_id = null, updated_at = now() where id = $1", [business.id]);
+    await recordActionRegistryAudit({
+      businessId: business.id,
+      actionId: action.id,
+      actorUserId,
+      actorType: "owner",
+      eventType: "primary_cleared",
+      previousValue: { primaryActionId: action.id },
+      newValue: { primaryActionId: null },
+      reason: "owner_override",
+    });
+  }
+  await persistAction(business, archived);
+  await recordActionRegistryAudit({
+    businessId: business.id,
+    actionId: action.id,
+    actorUserId,
+    actorType: "owner",
+    eventType: "disabled",
+    previousValue: { enabled: action.enabled, lifecycleStatus: action.lifecycleStatus },
+    newValue: { enabled: false, lifecycleStatus: "disabled", reviewReason: "owner_override" },
+    reason: "owner_override",
+  });
+  return { ok: true, actionId, archived: true };
 });
 
 app.get("/api/v1/demo/:slug/action-resources", async (request) => {
@@ -11208,6 +13198,67 @@ app.delete("/api/v1/demo/:slug/action-resources/:resourceId", async (request) =>
   return { ok: true, resourceId };
 });
 
+app.get("/api/v1/demo/:slug/business-facts", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  return {
+    facts: business.facts,
+    conflicts: resolveBusinessFacts(business.facts, {}).conflicts,
+  };
+});
+
+app.post("/api/v1/demo/:slug/business-facts", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const fact = normalizedBusinessFact(request.body, business.id);
+  const duplicate = business.facts.find((candidate) => candidate.kind === fact.kind
+    && candidate.subject.toLowerCase() === fact.subject.toLowerCase()
+    && candidate.predicate.toLowerCase() === fact.predicate.toLowerCase()
+    && candidate.sourceType === fact.sourceType
+    && candidate.sourceId === fact.sourceId);
+  if (duplicate) throw httpError(409, "A business fact with this source already exists; update it instead");
+  business.facts.push(fact);
+  await persistBusinessFact(business, fact);
+  return reply.code(201).send({ fact, conflicts: resolveBusinessFacts(business.facts, {}).conflicts });
+});
+
+app.put("/api/v1/demo/:slug/business-facts/:factId", async (request) => {
+  const params = request.params as { slug?: string; factId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const factId = requiredString(params.factId, "factId", 120);
+  const index = business.facts.findIndex((candidate) => candidate.id === factId);
+  if (index < 0) throw httpError(404, "Business fact not found");
+  const fact = normalizedBusinessFact(request.body, business.id, business.facts[index]);
+  const duplicate = business.facts.find((candidate, candidateIndex) => candidateIndex !== index
+    && candidate.kind === fact.kind
+    && candidate.subject.toLowerCase() === fact.subject.toLowerCase()
+    && candidate.predicate.toLowerCase() === fact.predicate.toLowerCase()
+    && candidate.sourceType === fact.sourceType
+    && candidate.sourceId === fact.sourceId);
+  if (duplicate) throw httpError(409, "A business fact with this source already exists");
+  business.facts[index] = fact;
+  await persistBusinessFact(business, fact);
+  return { fact, conflicts: resolveBusinessFacts(business.facts, {}).conflicts };
+});
+
+app.delete("/api/v1/demo/:slug/business-facts/:factId", async (request) => {
+  const params = request.params as { slug?: string; factId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const factId = requiredString(params.factId, "factId", 120);
+  const index = business.facts.findIndex((candidate) => candidate.id === factId);
+  if (index < 0) throw httpError(404, "Business fact not found");
+  business.facts.splice(index, 1);
+  if (pool) await pool.query("delete from business_facts where business_id = $1 and id = $2", [business.id, factId]);
+  return { ok: true, factId };
+});
+
 app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -11273,7 +13324,11 @@ app.post("/api/v1/demo/:slug/conversations", async (request, reply) => {
   await requireDemoOwner(business, request);
   requireWritableBusiness(business);
   const body = asRecord(request.body);
-  const conversation = await startConversation(business, typeof body.sessionId === "string" ? body.sessionId : null);
+  const conversation = await startConversation(
+    business,
+    typeof body.sessionId === "string" ? body.sessionId : null,
+    { forceNew: body.newConversation === true },
+  );
   return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId });
 });
 
@@ -11282,8 +13337,10 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages", async (req
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
   requireWritableBusiness(business);
-  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
-  const question = requiredString(asRecord(request.body).question, "question", 1_000);
+  const body = asRecord(request.body);
+  let conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  conversation = await conversationForIncomingMessage(business, conversation, optionalString(body.sessionId, 160));
+  const question = requiredString(body.question, "question", 1_000);
   const result = await recordConversationQuestion(business, conversation, question);
   return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...result };
 });
@@ -11300,6 +13357,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/actions/:actionId/sub
     conversation,
     requiredString(params.actionId, "actionId", 120),
     asRecord(body.values),
+    optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000),
   );
   return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...result };
 });

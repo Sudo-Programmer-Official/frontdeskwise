@@ -9,6 +9,7 @@ Every record is tenant-scoped through `business_id`.
 | Area | Tables | Purpose |
 | --- | --- | --- |
 | Tenant and access | `businesses`, `workspace_users`, `demo_access_sessions` | Business identity, owner role, and hashed demo/session access |
+| Business model | `business_facts`, `business_actions`, `business_action_resources`, `action_registry_audit` | Structured facts and safe action destinations with source, authority, freshness, provider identity, action review lifecycle, and immutable operator changes |
 | Website knowledge | `business_sources`, `knowledge_chunks`, `embedding_jobs` | Crawled pages, content hashes, chunks, optional vectors, and embedding job state |
 | Conversations | `conversations`, `conversation_messages` | Visitor sessions, questions, answers, citations, confidence, retrieval mode, and actions |
 | Lead capture | `leads`, `lead_events` | Contact details, intent, provenance, consent timestamp, bounded campaign metadata, and immutable lead events |
@@ -17,6 +18,30 @@ Every record is tenant-scoped through `business_id`.
 | CRM delivery | `crm_integrations`, `integration_outbox`, `crm_sync_records` | Encrypted connection material, queued events, attempts, remote IDs, and delivery status |
 | Action delivery and telemetry | `action_outbox`, `conversion_events` | Completion connector jobs, retries, funnel events, field drop-offs, and device/source context |
 | MCP assistant connections | `mcp_connections` | Encrypted server credentials, discovered tools, read-only defaults, explicit allowlists, and connection health |
+
+## Fact provenance and conflict resolution
+
+`business_facts` is the normalized read model for facts that should not depend on the nearest semantic chunk. A fact records its subject and predicate (for example, `Turtle 2 / price`), JSON value, display value, source type, source identifier, explicit authority, observation time, freshness policy, confidence, and optional expiry.
+
+The resolver applies this authority order:
+
+```text
+live_system → owner_structured → owner_knowledge → document → website → inferred
+```
+
+Stale or expired realtime facts are excluded from answers. When two usable sources disagree, the highest-authority fact wins for the visitor response and the alternatives remain available as an internal conflict for review. A provider sync should replace or version only the fields it owns; it should not rebuild unrelated website chunks or manual facts.
+
+For writes, the local model is updated after the external provider confirms success. Deterministic commands use `business_actions`, `action_outbox`, and the explicit connector allowlist. MCP-discovered tools remain policy-gated and are not a shortcut around the command boundary.
+
+## Action registry lifecycle
+
+Website CTA extraction creates disabled, provenance-backed discoveries. Owner-created actions remain configured and are never overwritten by a recrawl.
+
+```text
+discovered → needs_review → approved → active → disabled
+```
+
+The registry records the source URL/type, extracted label, destination, discovery time, evidence, confidence, and classification reason. Review reasons include `low_confidence`, `unsafe_destination`, `duplicate_action`, `owner_override`, and `source_removed`. Primary-action changes and lifecycle changes record actor, previous value, new value, reason, and timestamp in `action_registry_audit`; the runtime cache is invalidated after each admin change. Emergency actions cannot be enabled from an inferred number: ownership, website source, evidence, explicit action type, and `tel:` destination must all be present.
 
 ## Lead record
 
