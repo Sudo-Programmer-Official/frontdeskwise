@@ -9,6 +9,7 @@ import {
   nextActionField,
   resolveCaptureMode,
   validateFieldValue,
+  actionTemplate,
 } from "../src/action-flows.js";
 
 const ids = (key: string) => key + "-id";
@@ -85,4 +86,13 @@ test("action templates expose one canonical versioned field contract", () => {
   assert.equal(booking.version, 1);
   assert.deepEqual(booking.optionalFields, booking.fields.filter((field) => !field.required).map((field) => field.key));
   assert.equal(booking.handoffBehavior?.mode, "notify_staff");
+});
+
+test("link actions provide a direct-link template without form fields", () => {
+  const template = actionTemplate("open_link");
+  assert.equal(template?.actionType, "open_link");
+  assert.equal(template?.executionMode, "DIRECT_LINK");
+  assert.equal(template?.attachmentPolicy, "sales_intent");
+  assert.deepEqual(template?.fields, []);
+  assert.equal(template?.completion.linkLabel, "Open link");
 });

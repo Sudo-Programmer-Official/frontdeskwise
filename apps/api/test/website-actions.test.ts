@@ -3,6 +3,8 @@ import test from "node:test";
 import { classifyVisitorRequest, defaultActionFlows, detectAction } from "../src/action-flows.js";
 import { classifyPage, crawlPriority } from "../src/page-classification.js";
 import { extractWebsiteActions } from "../src/website-actions.js";
+import { primaryCtaForQuestion, shouldAttachPrimaryCta } from "../src/conversion-goals.js";
+import type { ActionFlow } from "../src/action-flows.js";
 
 test("page classification prioritizes conversion routes over blogs and carts", () => {
   assert.equal(classifyPage("https://example.test/request-a-demo", "Request a demo"), "demo");
@@ -48,6 +50,8 @@ test("demo actions are created from evidence and do not trigger on explanatory q
   assert.equal(demo?.destination?.url, "https://example.test/start");
   assert.equal(demo?.executionMode, "DIRECT_LINK");
   assert.equal(demo?.attachmentPolicy, "sales_intent");
+  assert.deepEqual(demo?.triggerIntents, []);
+  assert.ok(demo?.triggerPhrases.includes("try the demo"));
   assert.equal(demo?.origin, "discovered");
   assert.equal(demo?.lifecycleStatus, "needs_review");
   assert.equal(demo?.enabled, false);
@@ -55,7 +59,8 @@ test("demo actions are created from evidence and do not trigger on explanatory q
   assert.equal(detectAction(actions, "I want a demo"), null);
   demo!.enabled = true;
   demo!.lifecycleStatus = "approved";
-  assert.equal(detectAction(actions, "I want a demo")?.actionType, "request_demo");
+  assert.equal(detectAction(actions, "Try the demo")?.actionType, "request_demo");
+  assert.equal(detectAction(actions, "Book a demo"), null);
 });
 
 test("action registry lifecycle controls runtime availability and primary precedence", () => {
@@ -86,4 +91,45 @@ test("action registry lifecycle controls runtime availability and primary preced
   discovered.enabled = false;
   discovered.lifecycleStatus = "disabled";
   assert.equal(detectAction(actions, "I want a demo"), null);
+});
+
+test("sales-intent CTA policy excludes privacy, support, and anti-sales questions", () => {
+  const action = {
+    id: "try-demo",
+    key: "request_demo",
+    name: "Try the Demo",
+    actionType: "request_demo",
+    description: "Try SalonFlow.",
+    triggerPhrases: ["try the demo"],
+    triggerIntents: ["demo"],
+    captureMode: "hybrid",
+    fields: [],
+    completion: { createLead: true, leadStatus: "qualified", message: "", notifyStaff: true, linkUrl: "https://www.salonflow.studio/start", linkLabel: "Try the Demo" },
+    mode: "transactional",
+    executionMode: "DIRECT_LINK",
+    attachmentPolicy: "sales_intent",
+    trackingKey: "salonflow_try_demo",
+    destination: { url: "https://www.salonflow.studio/start", label: "Try the Demo" },
+    provider: null,
+    priority: 880,
+    requiredFields: [],
+    enabled: true,
+    lifecycleStatus: "active",
+  } as ActionFlow;
+  assert.equal(shouldAttachPrimaryCta(action, "What does SalonFlow do?", "services"), true);
+  assert.equal(shouldAttachPrimaryCta(action, "What's pricing?", "pricing"), true);
+  assert.equal(shouldAttachPrimaryCta(action, "How do I get started?", "getting_started"), true);
+  assert.equal(shouldAttachPrimaryCta(action, "Do you sell my data?", "privacy"), false);
+  assert.equal(shouldAttachPrimaryCta(action, "I need account help", "support"), false);
+  assert.equal(shouldAttachPrimaryCta(action, "I hate sales calls", "general"), false);
+  assert.equal(shouldAttachPrimaryCta(action, "Book a demo", "booking"), false);
+  assert.deepEqual(primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "What's pricing?", "pricing"), {
+    actionId: "try-demo",
+    key: "request_demo",
+    label: "Try the Demo",
+    executionMode: "DIRECT_LINK",
+    trackingKey: "salonflow_try_demo",
+    url: "https://www.salonflow.studio/start",
+  });
+  assert.equal(primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "Book a demo", "booking"), null);
 });

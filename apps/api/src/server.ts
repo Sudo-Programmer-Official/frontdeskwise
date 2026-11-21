@@ -137,6 +137,7 @@ import {
   type HubSpotOAuthTokenSet,
 } from "./hubspot-oauth.js";
 import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from "./mcp.js";
+import { primaryActionForBusiness, primaryCtaForAction, primaryCtaForQuestion, type PrimaryCta } from "./conversion-goals.js";
 import { credentialHint, decryptSecret, encryptSecret } from "./secrets.js";
 import {
   activePlanAfterStripeSync,
@@ -6389,58 +6390,6 @@ function answerWithGettingStartedCta(business: Business, question: string, answe
   return answer;
 }
 
-type PrimaryCta = {
-  actionId: string;
-  key: string;
-  label: string;
-  executionMode: ActionFlow["executionMode"];
-  trackingKey: string;
-  url?: string;
-  question?: string;
-};
-
-function primaryActionForBusiness(business: Business): ActionFlow | null {
-  if (!business.primaryActionId) return null;
-  const action = business.actions.find((candidate) => candidate.id === business.primaryActionId) ?? null;
-  if (!action || !action.enabled || !["approved", "active"].includes(action.lifecycleStatus ?? "active")) return null;
-  return action;
-}
-
-function shouldAttachPrimaryCta(
-  action: ActionFlow,
-  question: string,
-  intent: RetrievalIntent,
-): boolean {
-  const policy = action.attachmentPolicy ?? "explicit_request_only";
-  if (policy === "never_auto") return false;
-  if (policy === "always") return true;
-  const visitor = classifyVisitorRequest(question);
-  if (policy === "explicit_request_only") return visitor.mode === "transactional";
-  if (policy === "high_intent_only") {
-    return visitor.mode === "transactional"
-      || ["booking", "getting_started"].includes(intent) && /\b(book|schedule|enroll|register|join|sign|start|begin|try|demo)\b/i.test(question);
-  }
-  return ["services", "pricing", "booking", "getting_started", "general"].includes(intent)
-    && !["privacy", "policy", "support", "contact", "permissions"].includes(intent);
-}
-
-function primaryCtaForQuestion(business: Business, question: string, intent: RetrievalIntent): PrimaryCta | null {
-  const action = primaryActionForBusiness(business);
-  if (!action || !shouldAttachPrimaryCta(action, question, intent)) return null;
-  const url = action.completion.linkUrl ?? action.destination?.url ?? undefined;
-  const executionMode = action.executionMode ?? (url ? "DIRECT_LINK" : "FORM_FLOW");
-  if (executionMode === "DIRECT_LINK" && !url) return null;
-  return {
-    actionId: action.id,
-    key: action.key,
-    label: action.completion.linkLabel ?? action.destination?.label ?? action.name,
-    executionMode,
-    trackingKey: action.trackingKey ?? action.key,
-    ...(url ? { url } : {}),
-    ...(!url && action.triggerPhrases[0] ? { question: action.triggerPhrases[0] } : {}),
-  };
-}
-
 const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|feature|features|capabilit|automation|development|application|integration|tool|tools|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team|build|software)\b/i;
 
 function resolvedKnowledgeAnswer(business: Business, question: string, intent: RetrievalIntent): KnowledgeGap | null {
@@ -7243,6 +7192,21 @@ async function continueActionConversation(
       flowId: action.id,
       metadata: { flowKey: action.key },
     });
+    const directCta = primaryCtaForAction(action);
+    if (action.executionMode === "DIRECT_LINK" && directCta?.url) {
+      state.status = "completed";
+      state.completedAt = new Date().toISOString();
+      conversation.actionTaken = action.key;
+      await recordConversionEvent(business, {
+        event: "FLOW_COMPLETED",
+        conversationId: conversation.id,
+        flowId: action.id,
+        metadata: { executionMode: action.executionMode, destination: directCta.url },
+      });
+      const directAnswer = actionAnswer(action, state, `Here’s the ${action.name.toLowerCase()}. Use the button below to continue.`);
+      const { action: _action, ...answerWithoutAction } = directAnswer;
+      return { ...answerWithoutAction, primaryCta: directCta };
+    }
     if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, true);
     const next = nextConversationalField(action, state);
     if (state.captureMode === "form" || !next) {
@@ -13220,6 +13184,9 @@ app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
   const actionId = requiredString(params.actionId, "actionId", 120);
   const action = business.actions.find((candidate) => candidate.id === actionId);
   if (!action) throw httpError(404, "Action not found");
+  if (action.executionMode === "DIRECT_LINK" && !(action.completion.linkUrl ?? action.destination?.url)) {
+    throw httpError(400, "Direct-link actions need a destination URL before they can be the primary conversion goal");
+  }
   if (!action.enabled || !["approved", "active"].includes(action.lifecycleStatus ?? "active")) {
     if (action.origin !== "discovered" || action.confidence < 0.88 || action.safetyPolicy === "manual_review") {
       throw httpError(400, "Only an enabled, approved action can be the primary conversion goal");

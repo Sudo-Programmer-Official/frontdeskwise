@@ -2,6 +2,7 @@ import type { ActionConnectorSettings } from "./action-connectors.js";
 import type { WebsiteActionCandidate, WebsiteActionType } from "./website-actions.js";
 
 export const BUSINESS_ACTION_TYPES = [
+  "open_link",
   "request_demo",
   "book_appointment",
   "enroll",
@@ -252,6 +253,29 @@ const completion = (message: string, leadStatus: ActionCompletion["leadStatus"] 
 });
 
 export const ACTION_TEMPLATES: ActionTemplate[] = [
+  {
+    key: "open_link",
+    name: "Send visitors to a link",
+    description: "Open a verified page such as a demo, registration, booking, pricing, or checkout page.",
+    actionType: "open_link",
+    triggerPhrases: ["open the link", "visit the link", "try the demo", "see the demo"],
+    triggerIntents: ["general"],
+    captureMode: "form",
+    fields: [],
+    executionMode: "DIRECT_LINK",
+    attachmentPolicy: "sales_intent",
+    completion: {
+      createLead: false,
+      leadStatus: "new",
+      message: "The verified link is ready.",
+      submitLabel: "Open link",
+      linkLabel: "Open link",
+      notifyStaff: false,
+      notifyChannels: [],
+      notifyTargets: [],
+    },
+    enabled: true,
+  },
   {
     key: "capture_lead",
     name: "Capture a lead",
@@ -560,12 +584,20 @@ export function defaultActionFlows(
     const action = cloneTemplate(template, idFactory(key), now);
     const candidate = candidateByKey.get(key);
     if (!candidate) return action;
+    const tryDemoCandidate = candidate.actionType === "request_demo"
+      && /\b(try|start|see|view|explore)\b/i.test(candidate.label);
     return {
       ...action,
       actionType: candidate.actionType,
       ...(candidate.destination?.url ? { executionMode: "DIRECT_LINK" as const } : {}),
-      ...(candidate.actionType === "request_demo" && /\b(try|start|see|view|explore)\b/i.test(candidate.label)
+      ...(tryDemoCandidate
         ? { attachmentPolicy: "sales_intent" as const }
+        : {}),
+      ...(tryDemoCandidate
+        ? {
+          triggerPhrases: ["try the demo", "start the demo", "see the demo", "view the demo", "explore the demo"],
+          triggerIntents: [],
+        }
         : {}),
       name: candidate.label || action.name,
       description: candidate.description || action.description,
@@ -649,6 +681,10 @@ export function detectAction(actions: ActionFlow[], question: string, primaryAct
       intentScore: action.triggerIntents.some((item) => normalize(item) === intent) ? 4 : 0,
       primaryScore: primaryActionId && action.id === primaryActionId ? 100_000 : 0,
     }))
+    .filter((item) => !(item.action.executionMode === "DIRECT_LINK"
+      && (item.action.actionType === "request_demo" || item.action.key === "open_link")
+      && /\b(demo|trial)\b/i.test(`${item.action.name} ${item.action.completion.linkLabel ?? ""}`)
+      && /\b(book|schedule)\b.{0,24}\b(demo|trial)\b/i.test(question)))
     .filter((item) => item.phraseScore > 0 || item.intentScore > 0)
     .sort((left, right) => right.primaryScore + right.phraseScore + right.intentScore - left.primaryScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
 }

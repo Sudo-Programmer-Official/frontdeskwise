@@ -416,6 +416,11 @@ test("Actions uses a progressive conversion-flow builder", () => {
   for (const marker of [
     "Quick-start templates",
     "Create an action",
+    "Primary conversion goal",
+    "Choose a primary goal",
+    "Change goal",
+    "Destination URL",
+    "Current primary",
     "action-flow-stepper",
     "AI intent detection",
     "Live customer preview",
