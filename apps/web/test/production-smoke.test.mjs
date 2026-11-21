@@ -20,6 +20,7 @@ const marketing = JSON.parse(await readFile(resolve(here, "../src/marketing-page
 const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vue"), "utf8");
 const metadataScript = await readFile(resolve(here, "../scripts/generate-site-metadata.mjs"), "utf8");
 const index = await readFile(resolve(here, "../index.html"), "utf8");
+const apiServer = await readFile(resolve(here, "../../api/src/server.ts"), "utf8");
 
 test("owner production controls remain present", () => {
   const ownerSurface = `${app}\n${agent}`;
@@ -123,6 +124,29 @@ test("embedded widget uses the responsive conversation shell", () => {
   assert.match(widgetRenderer, /fdw-preview-root/);
 });
 
+test("production proactive engagement carries bootstrap settings into the live widget path", () => {
+  const embed = `${widget}\n${widgetEmbed}`;
+  for (const marker of [
+    "proactiveEnabled: agent.proactiveEnabled === true",
+    "proactiveDelaySeconds: Number(agent.proactiveDelaySeconds || 20)",
+    "proactiveTriggers: Array.isArray(agent.proactiveTriggers)",
+    "proactiveBehavior: agent.proactiveBehavior === \"open\" ? \"open\" : \"teaser\"",
+    "proactiveFrequency: agent.proactiveFrequency === \"24h\"",
+    "cache: \"no-store\"",
+    "window.pageYOffset || 0",
+    "documentElement?.scrollTop || 0",
+    "body?.scrollTop || 0",
+    "event.relatedTarget",
+    "hasActiveHandoff()",
+  ]) {
+    assert.ok(embed.includes(marker), `missing proactive runtime contract: ${marker}`);
+  }
+  assert.match(apiServer, /proactive_behavior = excluded\.proactive_behavior/);
+  assert.match(apiServer, /proactive_frequency = excluded\.proactive_frequency/);
+  assert.match(apiServer, /Cache-Control", "no-store, max-age=0/);
+  assert.match(apiServer, /Pragma", "no-cache/);
+});
+
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
   assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
@@ -182,13 +206,17 @@ test("responsive shell and auth recovery contracts are present", () => {
     "inbox-detail-open",
     "env(safe-area-inset-top)",
     "env(safe-area-inset-bottom)",
-    "overflow-x: clip",
     "@media (max-width: 1023px)",
     "@media (max-width: 640px)",
+    "width: min(86vw, 360px)",
+    "grid-template-columns: 1fr",
   ]) {
     assert.ok(styles.includes(marker), `missing responsive contract: ${marker}`);
   }
   assert.match(app, /<Menu/);
+  assert.match(app, /aria-controls="mobile-navigation-drawer"/);
+  assert.match(app, /handleMobileNavKeydown/);
+  assert.match(app, /document\.body\.style\.overflow = "hidden"/);
   assert.match(app, /Back to Inbox/);
   assert.match(app, /confirmFrontDeskWisePasswordReset/);
   assert.match(app, /auth-success/);

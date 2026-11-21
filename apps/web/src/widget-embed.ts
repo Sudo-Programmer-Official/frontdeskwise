@@ -49,6 +49,7 @@ import {
   let proactiveTimers: number[] = [];
   let proactiveCleanups: Array<() => void> = [];
   let proactiveShown = false;
+  let proactiveArmed = false;
   const renderedRemoteMessages: Record<string, boolean> = {};
   const HANDOFF_NOTICE_TIMEOUT_MS = 6000;
 
@@ -133,6 +134,11 @@ import {
   function renderConversationStatus(status: string | undefined): void {
     const waitingForStaff = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
     const normalizedStatus = (status || "AI_ACTIVE") as WidgetHandoffStatus;
+    rememberHandoffStatus(normalizedStatus);
+    if (normalizedStatus === "HUMAN_ACTIVE" || waitingForStaff) {
+      clearProactiveEngagement();
+      proactiveShown = true;
+    }
     if (waitingForStaff) {
       updateState({ handoffStatus: normalizedStatus });
       if (!handoffWaiting) {
@@ -184,7 +190,7 @@ import {
   }
 
   async function loadConfig(): Promise<void> {
-    const payload = await api<WidgetConfigResponse>(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`);
+    const payload = await api<WidgetConfigResponse>(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`, { cache: "no-store" });
     const agent: Partial<AgentConfig> = payload.agent || {};
     config = {
       assistantName: agent.assistantName || "AI front desk",
@@ -205,6 +211,12 @@ import {
       fallbackBehavior: agent.fallbackBehavior,
       humanHandoffEnabled: agent.humanHandoffEnabled,
       tone: agent.tone,
+      proactiveEnabled: agent.proactiveEnabled === true,
+      proactiveDelaySeconds: Number(agent.proactiveDelaySeconds || 20),
+      proactiveMessage: agent.proactiveMessage || "Looking for the right service? I can help.",
+      proactiveTriggers: Array.isArray(agent.proactiveTriggers) ? agent.proactiveTriggers : [],
+      proactiveBehavior: agent.proactiveBehavior === "open" ? "open" : "teaser",
+      proactiveFrequency: agent.proactiveFrequency === "24h" || agent.proactiveFrequency === "visit" ? agent.proactiveFrequency : "session",
     };
     renderer.update({ config, state: { quickActions: state.quickActions.length ? state.quickActions : config.widgetQuickActions } });
     if (!state.messages.length) addMessage(config.welcomeMessage, "assistant");
@@ -212,14 +224,19 @@ import {
   }
 
   function proactiveStorageKey(suffix: string): string {
-    return `frontdeskwise:proactive:${siteKey}:${suffix}`;
+    const host = window.location.hostname || "unknown-host";
+    return `frontdeskwise:${siteKey}:${host}:proactive:${suffix}`;
   }
 
   function proactiveSuppressed(frequency: string): boolean {
     try {
-      if (window.sessionStorage.getItem(proactiveStorageKey("session")) || window.sessionStorage.getItem(`frontdeskwise:proactive:${siteKey}`)) return true;
+      if (frequency === "session" && ["shown", "dismissed", "opened"].some((suffix) => window.sessionStorage.getItem(proactiveStorageKey(suffix)) === "1")) return true;
       if (frequency === "24h") {
-        const timestamp = Number(window.localStorage.getItem(proactiveStorageKey("24h")) || 0);
+        const timestamp = Math.max(
+          Number(window.localStorage.getItem(proactiveStorageKey("shownAt")) || 0),
+          Number(window.localStorage.getItem(proactiveStorageKey("dismissedAt")) || 0),
+          Number(window.localStorage.getItem(proactiveStorageKey("openedAt")) || 0),
+        );
         return timestamp > 0 && Date.now() - timestamp < 24 * 60 * 60 * 1000;
       }
     } catch {
@@ -228,10 +245,35 @@ import {
     return false;
   }
 
-  function suppressProactive(frequency: string): void {
+  function suppressProactive(frequency: string, reason: "shown" | "dismissed" | "opened" = "shown"): void {
     try {
-      if (frequency === "session") window.sessionStorage.setItem(proactiveStorageKey("session"), "1");
-      if (frequency === "24h") window.localStorage.setItem(proactiveStorageKey("24h"), String(Date.now()));
+      if (frequency === "session") window.sessionStorage.setItem(proactiveStorageKey(reason), "1");
+      if (frequency === "24h") window.localStorage.setItem(proactiveStorageKey(`${reason}At`), String(Date.now()));
+    } catch {
+      // Best effort.
+    }
+  }
+
+  function handoffStatusStorageKey(): string {
+    return `frontdeskwise:${siteKey}:handoff:${visitorId}`;
+  }
+
+  function hasActiveHandoff(): boolean {
+    try {
+      const status = window.localStorage.getItem(handoffStatusStorageKey());
+      return status === "HUMAN_ACTIVE" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberHandoffStatus(status: string | undefined): void {
+    try {
+      if (status === "HUMAN_ACTIVE" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") {
+        window.localStorage.setItem(handoffStatusStorageKey(), status);
+      } else {
+        window.localStorage.removeItem(handoffStatusStorageKey());
+      }
     } catch {
       // Best effort.
     }
@@ -245,10 +287,14 @@ import {
   }
 
   function showProactivePrompt(): void {
-    if (proactiveShown || !config || !config.proactiveEnabled || state.isOpen) return;
+    const activeHandoff = hasActiveHandoff();
+    if (proactiveShown || !config || !config.proactiveEnabled || state.isOpen || activeHandoff) {
+      if (activeHandoff) clearProactiveEngagement();
+      return;
+    }
     proactiveShown = true;
     clearProactiveEngagement();
-    suppressProactive(config.proactiveFrequency || "session");
+    suppressProactive(config.proactiveFrequency || "session", "shown");
     telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "shown", behavior: config.proactiveBehavior || "teaser" } });
     if ((config.proactiveBehavior || "teaser") === "open") {
       renderer.open("proactive");
@@ -259,28 +305,53 @@ import {
   }
 
   function armProactiveEngagement(agent: Partial<AgentConfig>): void {
-    if (!agent.proactiveEnabled || proactiveShown || proactiveSuppressed(agent.proactiveFrequency || "session")) return;
+    if (proactiveArmed || !agent.proactiveEnabled || proactiveShown || hasActiveHandoff() || proactiveSuppressed(agent.proactiveFrequency || "session")) return;
+    proactiveArmed = true;
     const triggers = Array.isArray(agent.proactiveTriggers) ? agent.proactiveTriggers : [];
     const oneShot = (): void => showProactivePrompt();
-    if (triggers.includes("delay")) proactiveTimers.push(window.setTimeout(oneShot, Number(agent.proactiveDelaySeconds || 20) * 1000));
+    if (triggers.includes("delay")) {
+      const delaySeconds = Number(agent.proactiveDelaySeconds);
+      proactiveTimers.push(window.setTimeout(oneShot, (Number.isFinite(delaySeconds) ? Math.max(10, delaySeconds) : 20) * 1000));
+    }
     if (triggers.includes("returning")) {
       try {
-        if (window.localStorage.getItem(`frontdeskwise:visited:${siteKey}`)) proactiveTimers.push(window.setTimeout(oneShot, 900));
-        window.localStorage.setItem(`frontdeskwise:visited:${siteKey}`, "1");
+        if (window.localStorage.getItem(proactiveStorageKey("visited"))) proactiveTimers.push(window.setTimeout(oneShot, 900));
+        window.localStorage.setItem(proactiveStorageKey("visited"), "1");
       } catch {
         // Best effort.
       }
     }
     if (triggers.includes("scroll")) {
+      // The embed listens to the host document's normal scroll position. Custom
+      // overflow containers must forward their scroll state to the page to use
+      // this trigger; PlanCraftAI uses normal document scrolling.
+      const scrollProgress = (): number => {
+        const documentElement = document.documentElement;
+        const body = document.body;
+        const scrollTop = Math.max(
+          window.pageYOffset || 0,
+          window.scrollY || 0,
+          documentElement?.scrollTop || 0,
+          body?.scrollTop || 0,
+        );
+        const documentHeight = Math.max(documentElement?.scrollHeight || 0, body?.scrollHeight || 0);
+        const viewportHeight = window.innerHeight || documentElement?.clientHeight || 0;
+        const maxScroll = documentHeight - viewportHeight;
+        return maxScroll > 0 ? scrollTop / maxScroll : 0;
+      };
       const onScroll = (): void => {
-        const max = document.documentElement.scrollHeight - window.innerHeight;
-        if (max > 0 && window.scrollY / max >= 0.7) oneShot();
+        if (scrollProgress() >= 0.7) oneShot();
       };
       window.addEventListener("scroll", onScroll, { passive: true });
       proactiveCleanups.push(() => window.removeEventListener("scroll", onScroll));
+      onScroll();
     }
     if (triggers.includes("exit") && deviceType() === "desktop") {
-      const onExit = (event: MouseEvent): void => { if (event.clientY <= 0) oneShot(); };
+      const onExit = (event: MouseEvent): void => {
+        if (event.clientY > 0 || event.relatedTarget) return;
+        if (event.target instanceof Node && host.contains(event.target)) return;
+        oneShot();
+      };
       document.addEventListener("mouseout", onExit);
       proactiveCleanups.push(() => document.removeEventListener("mouseout", onExit));
     }
@@ -368,13 +439,13 @@ import {
     onOpen: (source) => {
       clearProactiveEngagement();
       proactiveShown = true;
-      if (config) suppressProactive(config.proactiveFrequency || "session");
+      if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
       telemetry("CTA_CLICKED", { metadata: { source } });
     },
     onClose: () => {
       clearProactiveEngagement();
       proactiveShown = true;
-      if (config) suppressProactive(config.proactiveFrequency || "session");
+      if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
     },
     onAsk: (question) => { void ask(question); },
     onActionSubmit: (values, action) => { void submitAction(values, action); },
@@ -387,7 +458,7 @@ import {
     onProactiveDismiss: () => {
       clearProactiveEngagement();
       proactiveShown = true;
-      if (config) suppressProactive(config.proactiveFrequency || "session");
+      if (config) suppressProactive(config.proactiveFrequency || "session", "dismissed");
       telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "dismissed" } });
     },
   });

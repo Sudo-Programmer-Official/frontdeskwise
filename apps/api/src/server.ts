@@ -2820,8 +2820,8 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
 async function persistAgentConfig(business: Business): Promise<void> {
   if (!pool) return;
   await pool.query(
-    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
      on conflict (business_id) do update set
        assistant_name = excluded.assistant_name,
        welcome_message = excluded.welcome_message,
@@ -2843,13 +2843,15 @@ async function persistAgentConfig(business: Business): Promise<void> {
        proactive_delay_seconds = excluded.proactive_delay_seconds,
        proactive_message = excluded.proactive_message,
        proactive_triggers = excluded.proactive_triggers,
+       proactive_behavior = excluded.proactive_behavior,
+       proactive_frequency = excluded.proactive_frequency,
        require_lead_consent = excluded.require_lead_consent,
        privacy_notice_url = excluded.privacy_notice_url,
        retention_days = excluded.retention_days,
        show_ai_disclosure = excluded.show_ai_disclosure,
        tone_instructions = excluded.tone_instructions,
        updated_at = now()`,
-    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions],
+    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.proactiveBehavior, business.agentConfig.proactiveFrequency, business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions],
   );
 }
 
@@ -9948,19 +9950,21 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/notes", async (reques
   return { note };
 });
 
-app.get("/api/v1/widget/:siteKey/config", async (request) => {
+app.get("/api/v1/widget/:siteKey/config", async (request, reply) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   await recordWidgetLoad(business);
-  return {
+  reply.header("Cache-Control", "no-store, max-age=0");
+  reply.header("Pragma", "no-cache");
+  return reply.send({
     siteKey: business.widget.siteKey,
     slug: business.slug,
     business: { name: business.name, location: business.location, websiteUrl: business.websiteUrl },
     agent: business.agentConfig,
-  };
+  });
 });
 
 app.post("/api/v1/widget/:siteKey/telemetry", async (request) => {

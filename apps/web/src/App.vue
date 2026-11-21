@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Activity,
   ArrowLeft,
@@ -908,6 +908,9 @@ const resetComplete = ref(false);
 const resetError = ref("");
 const resetLoading = ref(false);
 const mobileNavOpen = ref(false);
+const mobileMenuButton = ref<HTMLButtonElement | null>(null);
+const mobileDrawer = ref<HTMLElement | null>(null);
+let previousBodyOverflow = "";
 let sessionRedirecting = false;
 const businessName = ref("");
 const businessLocation = ref("");
@@ -1402,6 +1405,7 @@ function routeForView(nextView: View): AppRoute {
 }
 
 function commitRoute(nextRoute: AppRoute, replace = false, apply = true) {
+  if (mobileNavOpen.value) closeMobileNav();
   const nextPath = routePath(nextRoute);
   if (typeof window !== "undefined") {
     const currentPath = `${window.location.pathname}${window.location.search}`;
@@ -1875,6 +1879,48 @@ function closeMobileNav() {
   profileMenuOpen.value = false;
   sidebarAccountMenuOpen.value = false;
 }
+
+function handleMobileNavKeydown(event: KeyboardEvent) {
+  if (!mobileNavOpen.value || !mobileDrawer.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeMobileNav();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(mobileDrawer.value.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => element.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !mobileDrawer.value.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !mobileDrawer.value.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function handleViewportChange() {
+  if (typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches) closeMobileNav();
+}
+
+watch(mobileNavOpen, async (open) => {
+  if (typeof document === "undefined") return;
+  if (open) {
+    previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    await nextTick();
+    mobileDrawer.value?.querySelector<HTMLElement>(".mobile-drawer-close")?.focus();
+    return;
+  }
+  document.body.style.overflow = previousBodyOverflow;
+  previousBodyOverflow = "";
+  await nextTick();
+  mobileMenuButton.value?.focus();
+});
 
 function closeInboxConversation() {
   selectedInboxConversation.value = null;
@@ -3982,6 +4028,7 @@ function navigateToAdmin() {
 }
 
 function handleRouteChange() {
+  closeMobileNav();
   const nextRoute = parseRoute();
   route.value = nextRoute;
   void runWithGlobalLoading(() => applyRouteState(nextRoute));
@@ -4850,6 +4897,9 @@ onMounted(() => {
   void consumeDemoLink();
   if (typeof window !== "undefined") {
     window.addEventListener("popstate", handleRouteChange);
+    window.addEventListener("keydown", handleMobileNavKeydown);
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("orientationchange", handleViewportChange);
     if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       landingHeroTimer = window.setInterval(() => {
         if (view.value === "home") heroDemoStep.value = (heroDemoStep.value + 1) % landingDemoSteps.length;
@@ -4870,7 +4920,13 @@ onBeforeUnmount(() => {
   stopFirebaseObserver?.();
   stopGenerationProgress();
   if (landingHeroTimer !== null) window.clearInterval(landingHeroTimer);
-  if (typeof window !== "undefined") window.removeEventListener("popstate", handleRouteChange);
+  if (typeof document !== "undefined") document.body.style.overflow = previousBodyOverflow;
+  if (typeof window !== "undefined") {
+    window.removeEventListener("popstate", handleRouteChange);
+    window.removeEventListener("keydown", handleMobileNavKeydown);
+    window.removeEventListener("resize", handleViewportChange);
+    window.removeEventListener("orientationchange", handleViewportChange);
+  }
 });
 
 function openHome() {
@@ -5082,8 +5138,11 @@ function startMarketingDemo() {
 
     <section v-else :class="['product-shell', { 'admin-only-mode': adminSurfaceMode, 'mobile-nav-open': mobileNavOpen }]">
       <div v-if="mobileNavOpen" class="mobile-nav-backdrop" aria-hidden="true" @click="closeMobileNav"></div>
-      <aside class="sidebar">
-        <button class="sidebar-brand" type="button" @click="openHome"><img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
+      <aside id="mobile-navigation-drawer" ref="mobileDrawer" class="sidebar" aria-label="Workspace navigation">
+        <div class="sidebar-brand-row">
+          <button class="sidebar-brand" type="button" @click="openHome"><img class="brand-logo" src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
+          <button class="mobile-drawer-close" type="button" aria-label="Close navigation" @click="closeMobileNav"><X :size="20" :stroke-width="1.9" aria-hidden="true" /></button>
+        </div>
         <div v-if="adminSurfaceMode" class="admin-identity-card"><span class="admin-identity-mark">SP</span><span><strong>Operations</strong><small>Super-admin access</small></span><span class="admin-identity-check"><BadgeCheck :size="16" :stroke-width="1.8" aria-hidden="true" /></span></div>
         <div v-else class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" title="Add business" @click="openAddBusiness"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" /></button><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div>
         <nav v-if="adminSurfaceMode" class="sidebar-nav admin-sidebar-nav" aria-label="Super-admin navigation">
@@ -5102,16 +5161,15 @@ function startMarketingDemo() {
 
       <section class="content-area">
         <header class="mobile-header">
-          <button class="mobile-header-icon" type="button" aria-label="Open navigation" :aria-expanded="mobileNavOpen" @click="mobileNavOpen = true"><Menu :size="21" :stroke-width="1.9" aria-hidden="true" /></button>
-          <button class="mobile-header-brand" type="button" @click="openHome"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></button>
-          <button class="mobile-workspace-trigger" type="button" aria-label="Open workspace switcher" @click="mobileNavOpen = true"><span><strong>{{ businessName || (authSnapshot ? 'Workspace' : 'Demo workspace') }}</strong><small>{{ activeOrganization?.name ?? 'Business' }}</small></span><ChevronDown :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
+          <button ref="mobileMenuButton" class="mobile-header-icon" type="button" aria-label="Open navigation" aria-controls="mobile-navigation-drawer" :aria-expanded="mobileNavOpen" @click="mobileNavOpen = true"><Menu :size="21" :stroke-width="1.9" aria-hidden="true" /></button>
+          <button class="mobile-header-context" type="button" aria-label="Open business switcher" @click="mobileNavOpen = true"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span><strong>{{ businessName || (authSnapshot ? 'Workspace' : 'FrontDeskWise') }}</strong><small>{{ activeOrganization?.name ?? 'Business' }}</small></span></button>
           <div class="mobile-header-actions">
             <button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button>
             <button class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" @click="mobileNavOpen = true; sidebarAccountMenuOpen = true">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : 'SP' }}</button>
           </div>
         </header>
         <div v-if="notificationMenuOpen && authSnapshot" class="notification-menu mobile-notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div>
-        <header class="content-header"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
+        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
         <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger compact"><span><strong>Your workspace is read-only</strong><small>· Restore billing to resume publishing</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Restore billing →</button></div>

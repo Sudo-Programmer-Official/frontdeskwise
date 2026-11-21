@@ -1523,7 +1523,7 @@ button > .lucide, a > .lucide, .saved-message > .lucide, .status-text > .lucide 
 /* Production responsive shell. The desktop sidebar stays persistent at 1024px and up;
    smaller viewports use the same labelled navigation in a drawer instead of shrinking it
    into an icon grid. */
-html, body, #app, .app-shell { max-width: 100%; overflow-x: clip; }
+html, body, #app, .app-shell { max-width: 100%; }
 html { scroll-behavior: smooth; }
 .mobile-header, .mobile-nav-backdrop, .mobile-notification-menu, .mobile-inbox-back { display: none; }
 .auth-reset-shell { display: grid; min-height: 100svh; place-items: center; padding: 28px 18px; background: radial-gradient(circle at 50% 0, #e8f4ff 0, transparent 46%), #f7f9fc; }
@@ -1652,4 +1652,141 @@ html { scroll-behavior: smooth; }
 
 @media (prefers-reduced-motion: reduce) {
   .product-shell .sidebar { transition: none; }
+}
+
+/* Authenticated shell: mobile is a drawer and app bar, not a compressed desktop sidebar. */
+.sidebar-brand-row { min-width: 0; }
+.mobile-drawer-close { display: none; }
+
+@media (max-width: 1023px) {
+  .product-shell { min-height: 100dvh; }
+  .product-shell .sidebar {
+    display: flex;
+    width: min(86vw, 360px);
+    max-width: calc(100vw - 8px);
+    height: 100dvh;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: max(16px, env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  .product-shell .sidebar-brand-row { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+  .product-shell .sidebar-brand-row .sidebar-brand { min-width: 0; flex: 1 1 auto; }
+  .product-shell .mobile-drawer-close {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+    place-items: center;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,.18);
+    border-radius: 11px;
+    color: #dbe8fb;
+    background: rgba(255,255,255,.08);
+  }
+  .product-shell .mobile-drawer-close:hover { color: #fff; background: rgba(255,255,255,.14); }
+  .product-shell .workspace-switcher { min-height: 58px; margin-bottom: 12px; padding: 9px 10px; }
+  .product-shell .sidebar-nav {
+    display: grid;
+    flex: 1 1 auto;
+    grid-template-columns: 1fr;
+    gap: 4px;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .product-shell .nav-section { display: grid; gap: 4px; min-width: 0; }
+  .product-shell .nav-section + .nav-section { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.1); }
+  .product-shell .nav-section-label { display: block; margin: 0 11px 3px; }
+  .product-shell .nav-item {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    min-height: 48px;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 11px 12px;
+  }
+  .product-shell .nav-item > span:not(.nav-icon) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .product-shell .nav-icon { flex: 0 0 20px; }
+  .product-shell .sidebar-bottom { flex: 0 0 auto; min-width: 0; margin-top: 12px; }
+  .product-shell .content-area { width: 100%; min-width: 0; min-height: 100dvh; margin-left: 0; overflow: visible; }
+  .product-shell .mobile-header {
+    display: grid;
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    min-height: 64px;
+    padding: max(8px, env(safe-area-inset-top)) 12px 8px;
+  }
+  .mobile-header-context {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border: 0;
+    color: var(--ds-color-ink-700);
+    background: transparent;
+    text-align: left;
+  }
+  .mobile-header-context img { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; }
+  .mobile-header-context > span { display: grid; min-width: 0; gap: 1px; }
+  .mobile-header-context strong, .mobile-header-context small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-header-context strong { color: var(--ds-color-ink-700); font-size: 12px; font-weight: 750; }
+  .mobile-header-context small { color: var(--ds-color-ink-400); font-size: 9px; }
+  .mobile-header-icon, .mobile-header-actions .notification-trigger, .mobile-header-actions .profile-avatar { width: 44px; height: 44px; }
+  .mobile-header-icon { border-radius: 11px; }
+  .mobile-header-actions { gap: 2px; }
+  .mobile-nav-backdrop { display: block; }
+  .product-shell .content-header {
+    display: flex;
+    position: static;
+    min-height: 0;
+    height: auto;
+    padding: 16px 20px 8px;
+    border-bottom: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+  .product-shell .content-header > div:first-child { min-width: 0; }
+  .product-shell .content-header .breadcrumb { max-width: 100%; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .product-shell .content-header h1 { font-size: 22px; }
+  .product-shell .content-header .header-actions,
+  .product-shell .content-header > .notification-menu,
+  .product-shell .content-header > .profile-menu { display: none !important; }
+  .product-shell .settings-tabs, .product-shell .agent-tabs { top: calc(64px + env(safe-area-inset-top)); max-width: 100%; }
+  .product-shell .view-content { width: 100%; min-width: 0; max-width: none; padding: 22px 20px calc(44px + env(safe-area-inset-bottom)); }
+  .product-shell .view-content > *, .product-shell .panel, .product-shell .metric-card, .product-shell .section-toolbar { min-width: 0; max-width: 100%; }
+  .product-shell .section-toolbar > div, .product-shell .panel-heading > div { min-width: 0; }
+  .product-shell .section-toolbar p:not(.eyebrow), .product-shell .panel p { overflow-wrap: anywhere; }
+  .product-shell .table-heading, .product-shell .table-row { min-width: 0; }
+  .product-shell .table-heading > *, .product-shell .table-row > * { min-width: 0; overflow-wrap: anywhere; }
+  .product-shell .table-row strong, .product-shell .table-row small { max-width: 100%; }
+  .product-shell .trial-banner.compact, .product-shell .trial-banner.info { padding-right: 20px; padding-left: 20px; }
+}
+
+@media (max-width: 640px) {
+  .product-shell .content-header { padding-right: 16px; padding-left: 16px; }
+  .product-shell .view-content { padding-right: 16px; padding-left: 16px; }
+  .product-shell .settings-tabs, .product-shell .agent-tabs { padding-right: 16px; padding-left: 16px; }
+  .product-shell .trial-banner.compact, .product-shell .trial-banner.info { padding-right: 16px; padding-left: 16px; }
+}
+
+@media (max-width: 430px) {
+  .mobile-header-context small { display: none; }
+  .mobile-header-context strong { font-size: 11px; }
+}
+
+@media (max-width: 375px) {
+  .mobile-header-context strong { max-width: 132px; }
+  .product-shell .content-header { padding-right: 12px; padding-left: 12px; }
+  .product-shell .view-content { padding-right: 12px; padding-left: 12px; }
+  .product-shell .settings-tabs, .product-shell .agent-tabs { padding-right: 12px; padding-left: 12px; }
+}
+
+@media (min-width: 1024px) {
+  .mobile-nav-backdrop, .mobile-header { display: none !important; }
 }
