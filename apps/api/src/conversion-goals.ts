@@ -41,6 +41,16 @@ export function primaryCtaForAction(action: ActionFlow): PrimaryCta | null {
   };
 }
 
+export function primaryCtaIntroduction(cta: PrimaryCta | null, intent: RetrievalIntent): string | null {
+  if (!cta || cta.executionMode !== "DIRECT_LINK") return null;
+  const isDemoDestination = /\b(demo|trial)\b/i.test(`${cta.key} ${cta.label}`);
+  if (!isDemoDestination) return null;
+  if (intent === "pricing") return "Want to see how it works in practice?";
+  if (intent === "services") return "You can explore these features in the live demo.";
+  if (intent === "getting_started") return "The fastest way to get started is to try the demo.";
+  return null;
+}
+
 export function shouldAttachPrimaryCta(
   action: ActionFlow,
   question: string,

@@ -3,7 +3,7 @@ import test from "node:test";
 import { classifyVisitorRequest, defaultActionFlows, detectAction } from "../src/action-flows.js";
 import { classifyPage, crawlPriority } from "../src/page-classification.js";
 import { extractWebsiteActions } from "../src/website-actions.js";
-import { primaryCtaForQuestion, shouldAttachPrimaryCta } from "../src/conversion-goals.js";
+import { primaryCtaForQuestion, primaryCtaIntroduction, shouldAttachPrimaryCta } from "../src/conversion-goals.js";
 import type { ActionFlow } from "../src/action-flows.js";
 
 test("page classification prioritizes conversion routes over blogs and carts", () => {
@@ -131,5 +131,10 @@ test("sales-intent CTA policy excludes privacy, support, and anti-sales question
     trackingKey: "salonflow_try_demo",
     url: "https://www.salonflow.studio/start",
   });
+  const cta = primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "What's pricing?", "pricing");
+  assert.equal(primaryCtaIntroduction(cta, "pricing"), "Want to see how it works in practice?");
+  assert.equal(primaryCtaIntroduction(cta, "services"), "You can explore these features in the live demo.");
+  assert.equal(primaryCtaIntroduction(cta, "getting_started"), "The fastest way to get started is to try the demo.");
+  assert.equal(primaryCtaIntroduction(cta, "privacy"), null);
   assert.equal(primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "Book a demo", "booking"), null);
 });

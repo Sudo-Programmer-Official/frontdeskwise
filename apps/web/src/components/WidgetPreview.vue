@@ -144,9 +144,12 @@ function markWebsitePreviewError(): void {
 }
 
 function sampleMessages(nextScenario: WidgetScenario): WidgetMessage[] {
-  const assistantName = props.assistantName || "PlanCraftAI assistant";
+  const assistantName = (props.assistantName || "PlanCraftAI assistant")
+    .replace(/\s+AI Assistant$/i, "")
+    .replace(/\s+Assistant$/i, "")
+    .trim() || "PlanCraftAI";
   const businessName = props.businessName || "PlanCraftAI";
-  const welcome: WidgetMessage = { id: "preview-welcome", role: "assistant", content: props.welcomeMessage || `Hi! I'm the ${assistantName}. I can answer questions, help you choose a service, or get you started.` };
+  const welcome: WidgetMessage = { id: "preview-welcome", role: "assistant", content: props.welcomeMessage || `Hi! I'm the ${assistantName} assistant. I can answer questions, help you explore features, or get you started.` };
   const question: WidgetMessage = { id: "preview-question", role: "user", content: "What services does PlanCraftAI offer?" };
   const answer: WidgetMessage = { id: "preview-answer", role: "assistant", content: `${businessName} helps with voice planning, scheduling, reminders, and task intelligence.` };
   const fallback: WidgetMessage = { id: "preview-fallback", role: "assistant", content: "I don’t have enough verified information to answer that confidently. I can help you contact the team if you’d like." };

@@ -138,7 +138,7 @@ import {
   type HubSpotOAuthTokenSet,
 } from "./hubspot-oauth.js";
 import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from "./mcp.js";
-import { primaryActionForBusiness, primaryCtaForAction, primaryCtaForQuestion, type PrimaryCta } from "./conversion-goals.js";
+import { primaryActionForBusiness, primaryCtaForAction, primaryCtaForQuestion, primaryCtaIntroduction, type PrimaryCta } from "./conversion-goals.js";
 import { credentialHint, decryptSecret, encryptSecret } from "./secrets.js";
 import {
   activePlanAfterStripeSync,
@@ -6401,10 +6401,12 @@ function extractiveAnswer(
   return excerpt;
 }
 
-function answerWithGettingStartedCta(business: Business, question: string, answer: string): string {
+function answerWithGettingStartedCta(answer: string, intent: RetrievalIntent, primaryCta: PrimaryCta | null): string {
   // Conversion destinations are now returned as structured primaryCta data.
   // Never turn the business homepage into an unverified sales link in answer copy.
-  return answer;
+  const introduction = primaryCtaIntroduction(primaryCta, intent);
+  if (!introduction || answer.includes(introduction)) return answer;
+  return `${answer}\n\n${introduction}`;
 }
 
 const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|feature|features|capabilit|automation|development|application|integration|tool|tools|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team|build|software)\b/i;
@@ -6555,8 +6557,9 @@ async function answerQuestion(
       estimatedCostUsd: 0,
       latencyMs: 0,
     };
+    const primaryCta = primaryCtaForQuestion(business, question, initialIntent);
     return {
-      answer: structured.answer,
+      answer: answerWithGettingStartedCta(structured.answer, initialIntent, primaryCta),
       grounded: true,
       citations: structured.citations,
       knowledgeGap: null,
@@ -6574,7 +6577,7 @@ async function answerQuestion(
         ...modelUsage,
       },
       modelUsage,
-      primaryCta: primaryCtaForQuestion(business, question, initialIntent) ?? undefined,
+      primaryCta: primaryCta ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
@@ -6746,8 +6749,9 @@ async function answerQuestion(
   }
 
   if (generated) {
+    const primaryCta = primaryCtaForQuestion(business, question, intent);
     return {
-      answer: answerWithGettingStartedCta(business, question, generated.answer),
+      answer: answerWithGettingStartedCta(generated.answer, intent, primaryCta),
       grounded: true,
       citations,
       knowledgeGap: null,
@@ -6755,13 +6759,14 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
+      primaryCta: primaryCta ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
+  const primaryCta = primaryCtaForQuestion(business, question, intent);
   return {
-    answer: answerWithGettingStartedCta(business, question, extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone)),
+    answer: answerWithGettingStartedCta(extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone), intent, primaryCta),
     grounded: true,
     citations,
     knowledgeGap: null,
@@ -6769,7 +6774,7 @@ async function answerQuestion(
     confidenceBand,
     retrieval: enrichedRetrieval,
     modelUsage,
-    primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
+    primaryCta: primaryCta ?? undefined,
     performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
   };
 }
