@@ -254,6 +254,7 @@ type Source = {
   renderDurationMs?: number | null;
   crawlDepth?: number | null;
   discoveryParentUrl?: string | null;
+  errorMessage?: string | null;
 };
 
 type KnowledgeChunk = {
@@ -1671,6 +1672,17 @@ function websiteSourcesFromPages(pages: CrawledPage[]): { sources: Source[]; chu
     crawlStatus: "ready",
     contentHash: page.contentHash,
     lastCrawledAt: page.lastCrawledAt,
+    httpStatus: page.httpStatus ?? null,
+    rawHtmlBytes: page.rawHtmlBytes ?? null,
+    extractedCharacterCount: page.extractedCharacterCount ?? null,
+    discoveredLinkCount: page.discoveredLinkCount ?? null,
+    crawlMode: page.crawlMode ?? "static",
+    renderAttempted: page.renderAttempted ?? false,
+    renderSuccess: page.renderSuccess ?? false,
+    renderDurationMs: page.renderDurationMs ?? null,
+    crawlDepth: page.crawlDepth ?? null,
+    discoveryParentUrl: page.discoveryParentUrl ?? null,
+    errorMessage: null,
   }));
   const chunks = pages.flatMap((page, index) => page.chunks.map((chunk) => ({
     id: randomUUID(),
@@ -2131,8 +2143,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         `insert into business_sources
            (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at,
             http_status, raw_html_bytes, extracted_character_count, discovered_link_count, crawl_mode, render_attempted,
-            render_success, render_duration_ms, crawl_depth, discovery_parent_url)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            render_success, render_duration_ms, crawl_depth, discovery_parent_url, error_message)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
          on conflict (business_id, content_hash) do update set
            source_url = excluded.source_url,
            canonical_url = excluded.canonical_url,
@@ -2150,7 +2162,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            render_duration_ms = excluded.render_duration_ms,
            crawl_depth = excluded.crawl_depth,
            discovery_parent_url = excluded.discovery_parent_url,
-           error_message = null
+           error_message = excluded.error_message
          returning id`,
         [
           source.id,
@@ -2173,6 +2185,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           source.renderDurationMs ?? null,
           source.crawlDepth ?? null,
           source.discoveryParentUrl ?? null,
+          source.errorMessage ?? null,
         ],
       );
       source.id = sourceResult.rows[0].id;
@@ -2494,6 +2507,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       renderDurationMs: source.render_duration_ms === null || source.render_duration_ms === undefined ? null : Number(source.render_duration_ms),
       crawlDepth: source.crawl_depth === null || source.crawl_depth === undefined ? null : Number(source.crawl_depth),
       discoveryParentUrl: typeof source.discovery_parent_url === "string" ? source.discovery_parent_url : null,
+      errorMessage: typeof source.error_message === "string" ? source.error_message : null,
     })),
     chunks: chunkResult.rows.map((chunk) => ({
       id: String(chunk.id),
@@ -9505,6 +9519,18 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
     const current = business.sources.find((item) => item.id === sourceId);
     if (current) {
       current.crawlStatus = "failed";
+      current.errorMessage = error instanceof Error ? error.message.slice(0, 1_000) : "Website recrawl failed";
+      if (error instanceof CrawlError && error.audit) {
+        const route = error.audit.routes[0];
+        current.httpStatus = route?.status ?? error.audit.responseStatus;
+        current.rawHtmlBytes = error.audit.rawHtmlBytes || null;
+        current.extractedCharacterCount = route?.extractedCharacters ?? error.audit.extractedVisibleTextSize;
+        current.discoveredLinkCount = route?.discoveredLinks.length ?? error.audit.discoveredInternalLinks.length;
+        current.crawlMode = route?.crawlMode ?? (error.audit.renderedCrawl.attempted ? "rendered" : "static");
+        current.renderAttempted = route?.renderAttempted ?? error.audit.renderedCrawl.attempted;
+        current.renderSuccess = route?.renderSuccess ?? false;
+        current.renderDurationMs = route?.renderDurationMs ?? null;
+      }
       await persistBusiness(business);
     }
     throw error instanceof CrawlError ? error : httpError(422, "The website could not be re-crawled yet");

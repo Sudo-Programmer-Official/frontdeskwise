@@ -808,8 +808,11 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
   }
 
   if (!pages.length) {
+    const renderFailure = audit.renderedCrawl.reason;
     const error = new CrawlError(isClientRenderedShell(audit.spaIndicators)
-      ? "The website requires client-side rendering, but no rendered crawl adapter is configured"
+      ? options.renderPage && renderFailure
+        ? `The website requires client-side rendering, but the rendered crawl failed (${renderFailure})`
+        : "The website requires client-side rendering, but no rendered crawl adapter is configured"
       : "The website did not contain readable pages for a demo");
     error.audit = audit;
     throw error;

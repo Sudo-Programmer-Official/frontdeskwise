@@ -60,15 +60,19 @@ async function renderPage(url: string): Promise<RenderedPage> {
   const startedAt = Date.now();
   const root = new URL(url);
   let context: Awaited<ReturnType<Browser["newContext"]>> | null = null;
+  let stage = "browser_launch";
   try {
     const browser = await browserInstance();
+    stage = "context_create";
     context = await browser.newContext({
       javaScriptEnabled: true,
       serviceWorkers: "block",
       viewport: { width: 1440, height: 1200 },
       userAgent: "FrontDeskWise-RenderedCrawler/1.0",
     });
+    stage = "page_create";
     const page = await context.newPage();
+    stage = "route_setup";
     await page.route("**/*", async (route) => {
       const requestUrl = route.request().url();
       if (/^(data:|blob:|about:)/i.test(requestUrl)) return route.abort();
@@ -77,6 +81,7 @@ async function renderPage(url: string): Promise<RenderedPage> {
     });
     page.on("dialog", (dialog) => void dialog.dismiss());
 
+    stage = "navigation";
     const response = await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: RENDER_NAVIGATION_TIMEOUT_MS,
@@ -95,6 +100,7 @@ async function renderPage(url: string): Promise<RenderedPage> {
       };
     }
 
+    stage = "settling";
     await page.waitForLoadState("networkidle", { timeout: RENDER_NETWORK_IDLE_TIMEOUT_MS }).catch(() => undefined);
     await page.waitForFunction(
       (minimumChars) => {
@@ -105,6 +111,7 @@ async function renderPage(url: string): Promise<RenderedPage> {
       { timeout: RENDER_SETTLE_TIMEOUT_MS },
     );
     await page.waitForTimeout(250);
+    stage = "content_extraction";
     await removeNonContentNoise(page);
     const html = await page.content();
     const bytes = new TextEncoder().encode(html).byteLength;
@@ -133,13 +140,18 @@ async function renderPage(url: string): Promise<RenderedPage> {
       },
     };
   } catch (error) {
+    const detail = error instanceof Error
+      ? error.message.replace(/https?:\/\/\S+/gi, "[url]").replace(/\s+/g, " ").trim().slice(0, 240)
+      : "unknown error";
     return {
       html: "",
       renderDiagnostics: {
         attempted: true,
         success: false,
         durationMs: Date.now() - startedAt,
-        failureReason: error instanceof Error && /timeout/i.test(error.message) ? "render_timeout" : "render_error",
+        failureReason: error instanceof Error && /timeout/i.test(error.message)
+          ? `render_timeout:${stage}`
+          : `render_error:${stage}:${detail}`,
       },
     };
   } finally {
