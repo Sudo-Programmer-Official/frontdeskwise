@@ -1,4 +1,4 @@
-import { classifyVisitorRequest, type ActionFlow } from "./action-flows.js";
+import { actionDestinationUrl, actionReadiness, classifyVisitorRequest, type ActionFlow } from "./action-flows.js";
 import type { RetrievalIntent } from "./retrieval.js";
 
 export type PrimaryCta = {
@@ -21,12 +21,13 @@ const blockedIntents = new Set<RetrievalIntent>(["privacy", "policy", "support",
 export function primaryActionForBusiness(business: PrimaryActionBusiness): ActionFlow | null {
   if (!business.primaryActionId) return null;
   const action = business.actions.find((candidate) => candidate.id === business.primaryActionId) ?? null;
-  if (!action || !action.enabled || !["approved", "active"].includes(action.lifecycleStatus ?? "active")) return null;
+  if (!action || !actionReadiness(action).ready) return null;
   return action;
 }
 
 export function primaryCtaForAction(action: ActionFlow): PrimaryCta | null {
-  const url = action.completion.linkUrl ?? action.destination?.url ?? undefined;
+  if (!actionReadiness(action).ready) return null;
+  const url = actionDestinationUrl(action) ?? undefined;
   const executionMode = action.executionMode ?? (url ? "DIRECT_LINK" : "FORM_FLOW");
   if (executionMode === "DIRECT_LINK" && !url) return null;
   return {

@@ -22,6 +22,11 @@ export type ActionAttachmentPolicy = "always" | "sales_intent" | "high_intent_on
 export type ActionSafetyPolicy = "standard" | "verified_contact" | "healthcare_emergency" | "manual_review";
 export type ActionOrigin = "discovered" | "configured";
 export type ActionLifecycleStatus = "discovered" | "needs_review" | "approved" | "active" | "disabled";
+export type ActionReadinessReason = "ready" | "disabled" | "needs_review" | "missing_tracking_key" | "missing_destination" | "invalid_destination" | "missing_configuration";
+export type ActionReadiness = {
+  ready: boolean;
+  reason: ActionReadinessReason;
+};
 export type ActionHandoffBehavior = {
   mode: "none" | "notify_staff" | "require_staff";
   reason?: string;
@@ -167,6 +172,7 @@ export type ActionFlow = {
   evidence: ActionEvidence[];
   confidence: number;
   enabled: boolean;
+  readiness?: ActionReadiness;
   optionalFields?: string[];
   handoffBehavior?: ActionHandoffBehavior;
   version?: number;
@@ -267,7 +273,7 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
     completion: {
       createLead: false,
       leadStatus: "new",
-      message: "The verified link is ready.",
+      message: "You can try the demo here.",
       submitLabel: "Open link",
       linkLabel: "Open link",
       notifyStaff: false,
@@ -531,6 +537,48 @@ function defaultAttachmentPolicy(template: Pick<ActionFlow, "key"> & { actionTyp
   return "sales_intent";
 }
 
+export function actionDestinationUrl(action: Pick<ActionFlow, "completion" | "destination">): string | null {
+  const value = action.completion.linkUrl?.trim() || action.destination?.url?.trim() || "";
+  return value || null;
+}
+
+export function validActionDestinationUrl(value: string | null | undefined): boolean {
+  if (!value?.trim()) return false;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The single readiness contract for owner UI, primary-goal selection, and runtime.
+ * Keep this stricter than the lifecycle flag: a link action is not ready until
+ * it has a real web destination and an analytics key.
+ */
+export function actionReadiness(action: ActionFlow): ActionReadiness {
+  if (!action.enabled) return { ready: false, reason: "disabled" };
+  if (action.lifecycleStatus && !["approved", "active"].includes(action.lifecycleStatus)) {
+    return { ready: false, reason: "needs_review" };
+  }
+  if (!action.trackingKey?.trim()) return { ready: false, reason: "missing_tracking_key" };
+  if (action.executionMode === "DIRECT_LINK") {
+    const destination = actionDestinationUrl(action);
+    if (!destination) return { ready: false, reason: "missing_destination" };
+    if (!validActionDestinationUrl(destination)) return { ready: false, reason: "invalid_destination" };
+    return { ready: true, reason: "ready" };
+  }
+  if (!action.fields.length && !action.completion.createLead && !action.completion.linkUrl) {
+    return { ready: false, reason: "missing_configuration" };
+  }
+  return { ready: true, reason: "ready" };
+}
+
+export function isActionReady(action: ActionFlow): boolean {
+  return actionReadiness(action).ready;
+}
+
 export function actionTemplate(key: string): ActionTemplate | null {
   return ACTION_TEMPLATES.find((template) => template.key === key) ?? null;
 }
@@ -674,7 +722,7 @@ export function detectAction(actions: ActionFlow[], question: string, primaryAct
   const value = normalize(question);
   const intent = request.actionIntent;
   return actions
-    .filter((action) => action.enabled && (!action.lifecycleStatus || action.lifecycleStatus === "active" || action.lifecycleStatus === "approved"))
+    .filter((action) => isActionReady(action))
     .map((action) => ({
       action,
       phraseScore: action.triggerPhrases.reduce((score, phrase) => value.includes(normalize(phrase)) ? score + normalize(phrase).length + 10 : score, 0),

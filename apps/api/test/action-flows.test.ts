@@ -10,6 +10,7 @@ import {
   resolveCaptureMode,
   validateFieldValue,
   actionTemplate,
+  actionReadiness,
 } from "../src/action-flows.js";
 
 const ids = (key: string) => key + "-id";
@@ -88,11 +89,36 @@ test("action templates expose one canonical versioned field contract", () => {
   assert.equal(booking.handoffBehavior?.mode, "notify_staff");
 });
 
+test("direct-link readiness is the canonical primary-action gate", () => {
+  const action = {
+    ...defaultActionFlows("Example Business", "appointments", ids)[0],
+    key: "open_link",
+    name: "Try the demo",
+    triggerPhrases: ["try the demo"],
+    fields: [],
+    executionMode: "DIRECT_LINK" as const,
+    trackingKey: "try_demo",
+    completion: {
+      ...defaultActionFlows("Example Business", "appointments", ids)[0].completion,
+      createLead: false,
+      linkUrl: "https://example.test/start",
+      linkLabel: "Try the demo",
+    },
+  };
+  assert.deepEqual(actionReadiness(action), { ready: true, reason: "ready" });
+  assert.deepEqual(actionReadiness({ ...action, completion: { ...action.completion, linkUrl: "" } }), { ready: false, reason: "missing_destination" });
+  assert.deepEqual(actionReadiness({ ...action, completion: { ...action.completion, linkUrl: "not-a-url" } }), { ready: false, reason: "invalid_destination" });
+  assert.deepEqual(actionReadiness({ ...action, trackingKey: "" }), { ready: false, reason: "missing_tracking_key" });
+  assert.deepEqual(actionReadiness({ ...action, enabled: false }), { ready: false, reason: "disabled" });
+  assert.equal(actionTemplate("open_link")?.name, "Send visitors to a link");
+});
+
 test("link actions provide a direct-link template without form fields", () => {
   const template = actionTemplate("open_link");
   assert.equal(template?.actionType, "open_link");
   assert.equal(template?.executionMode, "DIRECT_LINK");
   assert.equal(template?.attachmentPolicy, "sales_intent");
   assert.deepEqual(template?.fields, []);
+  assert.equal(template?.completion.message, "You can try the demo here.");
   assert.equal(template?.completion.linkLabel, "Open link");
 });

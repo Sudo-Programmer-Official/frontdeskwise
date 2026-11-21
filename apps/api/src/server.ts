@@ -17,6 +17,7 @@ import { shapeCustomerAnswer, type AnswerTone } from "./answer-shaping.js";
 import {
   ACTION_TEMPLATES,
   BUSINESS_ACTION_TYPES,
+  actionReadiness,
   actionTemplate,
   classifyVisitorRequest,
   createActionState,
@@ -784,7 +785,7 @@ function normalizedRetentionDays(value: unknown): number {
 
 const defaultConfig = (businessName: string): AgentConfig => ({
   assistantName: `${businessName} Assistant`,
-  welcomeMessage: `Hi! I’m the ${businessName} assistant. I can answer questions, help you choose a service, or get you started.`,
+  welcomeMessage: `Hi! I’m the ${businessName} assistant. I can answer questions, help you explore features, or get you started.`,
   tone: "friendly",
   customToneInstructions: "",
   primaryLanguage: "English",
@@ -819,11 +820,15 @@ function cloneAgentConfig(config: AgentConfig): AgentConfig {
 
 function agentConfigFromValue(value: unknown, businessName: string): AgentConfig {
   const config = asRecord(value);
-  const fallback = defaultConfig(businessName);
+  const configuredAssistantName = typeof config.assistantName === "string" ? config.assistantName.trim() : "";
+  const assistantBrand = configuredAssistantName.replace(/\s+AI Assistant$/i, "").replace(/\s+Assistant$/i, "").trim() || businessName;
+  const fallback = defaultConfig(assistantBrand);
   const fallbackContactConfig = asRecord(config.fallbackContacts);
+  const configuredWelcome = typeof config.welcomeMessage === "string" ? config.welcomeMessage.trim() : "";
+  const legacyWelcome = /^Hi! I['’]m the .+ assistant\. I can answer questions, help you choose a service, or get you started\.$/i.test(configuredWelcome);
   return {
-    assistantName: typeof config.assistantName === "string" && config.assistantName.trim() ? config.assistantName.trim().slice(0, 120) : fallback.assistantName,
-    welcomeMessage: typeof config.welcomeMessage === "string" && config.welcomeMessage.trim() ? config.welcomeMessage.trim().slice(0, 1_000) : fallback.welcomeMessage,
+    assistantName: configuredAssistantName ? configuredAssistantName.slice(0, 120) : fallback.assistantName,
+    welcomeMessage: configuredWelcome && !legacyWelcome ? configuredWelcome.slice(0, 1_000) : fallback.welcomeMessage,
     tone: ["friendly", "professional", "concise", "custom"].includes(String(config.tone)) ? config.tone as AgentConfig["tone"] : fallback.tone,
     customToneInstructions: typeof config.customToneInstructions === "string" ? config.customToneInstructions.slice(0, 600) : fallback.customToneInstructions,
     primaryLanguage: typeof config.primaryLanguage === "string" && config.primaryLanguage.trim() ? config.primaryLanguage.trim().slice(0, 80) : fallback.primaryLanguage,
@@ -1545,14 +1550,18 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
       ...(Object.keys(asRecord(linkTemplateSource.staticParams)).length ? { staticParams: Object.fromEntries(Object.entries(asRecord(linkTemplateSource.staticParams)).filter(([, value]) => typeof value === "string")) as Record<string, string> } : {}),
     }
     : undefined;
-  return {
+  const actionKey = String(row.action_key);
+  const storedName = String(row.name);
+  const legacyDemoName = actionKey === "open_link" && storedName === "Send visitors to a link";
+  const legacyDemoCopy = actionKey === "open_link" && (legacyDemoName || completion.linkLabel === "Open link");
+  const action: ActionFlow = {
     id: String(row.id),
-    key: String(row.action_key),
+    key: actionKey,
     actionType: BUSINESS_ACTION_TYPES.includes(String(row.action_type) as BusinessActionType)
       ? String(row.action_type) as BusinessActionType
       : "contact_team",
     businessId: typeof row.business_id === "string" ? row.business_id : undefined,
-    name: String(row.name),
+    name: legacyDemoName ? "Try the demo" : storedName,
     description: String(row.description ?? ""),
     triggerPhrases: Array.isArray(row.trigger_phrases) ? row.trigger_phrases.filter((item): item is string => typeof item === "string") : [],
     triggerIntents: Array.isArray(row.trigger_intents) ? row.trigger_intents.filter((item): item is string => typeof item === "string") : [],
@@ -1562,12 +1571,14 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
     completion: {
       createLead: completion.createLead !== false,
       leadStatus: completion.leadStatus === "qualified" || completion.leadStatus === "booked" ? completion.leadStatus : "new",
-      message: typeof completion.message === "string" ? completion.message : "Thanks — the team has your request.",
+      message: legacyDemoCopy && completion.message === "The verified link is ready."
+        ? "You can try the demo here."
+        : typeof completion.message === "string" ? completion.message : "Thanks — the team has your request.",
       ...(typeof completion.completionMode === "string" && completionModes.has(completion.completionMode) ? { completionMode: completion.completionMode as ActionFlow["completion"]["completionMode"] } : {}),
       ...(linkTemplate ? { linkTemplate } : {}),
-      submitLabel: typeof completion.submitLabel === "string" ? completion.submitLabel : undefined,
+      submitLabel: legacyDemoCopy ? "Try the demo" : typeof completion.submitLabel === "string" ? completion.submitLabel : undefined,
       linkUrl: typeof completion.linkUrl === "string" ? completion.linkUrl : undefined,
-      linkLabel: typeof completion.linkLabel === "string" ? completion.linkLabel : undefined,
+      linkLabel: legacyDemoCopy ? "Try the demo" : typeof completion.linkLabel === "string" ? completion.linkLabel : undefined,
       notifyStaff: completion.notifyStaff !== false,
       requiresStaff: completion.requiresStaff === true,
       notifyChannels: Array.isArray(completion.notifyChannels) ? completion.notifyChannels.filter((item): item is "in_app" | "email" => item === "in_app" || item === "email") : ["in_app", "email"],
@@ -1610,6 +1621,7 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
     createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
     updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
   };
+  return { ...action, readiness: actionReadiness(action) };
 }
 
 function actionResourceFromRow(row: Record<string, unknown>): ActionResource {
@@ -3967,8 +3979,13 @@ function requireWritableBusiness(business: Business): void {
 function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
   const body = asRecord(input);
   const template = typeof body.templateKey === "string" ? actionTemplate(body.templateKey.trim()) : null;
+  const isNewOpenLinkAction = !existing && template?.key === "open_link";
   const base = existing ?? (template ? {
     ...template,
+    ...(isNewOpenLinkAction ? {
+      name: "Try the demo",
+      completion: { ...template.completion, submitLabel: "Try the demo", linkLabel: "Try the demo" },
+    } : {}),
     id: randomUUID(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -6903,6 +6920,25 @@ function actionAnswerWithKnowledge(
   };
 }
 
+function assistantBrandName(business: Business): string {
+  const configured = business.agentConfig.assistantName.trim();
+  return configured.replace(/\s+AI Assistant$/i, "").replace(/\s+Assistant$/i, "").trim() || business.name;
+}
+
+function directLinkCustomerMessage(business: Business, action: ActionFlow): string {
+  const configured = action.completion.message?.trim() ?? "";
+  const genericMessages = new Set([
+    "The verified link is ready.",
+    "You can try the demo here.",
+    "Here's the verified link.",
+    "Here’s the verified link.",
+  ]);
+  if (configured && !genericMessages.has(configured)) return configured;
+  const label = action.completion.linkLabel ?? action.name;
+  if (/\bdemo\b/i.test(`${action.name} ${label}`)) return `Absolutely — you can try ${assistantBrandName(business)} here.`;
+  return `Absolutely — ${label.toLowerCase()} is ready here.`;
+}
+
 const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
 
 function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): string {
@@ -7203,7 +7239,7 @@ async function continueActionConversation(
         flowId: action.id,
         metadata: { executionMode: action.executionMode, destination: directCta.url },
       });
-      const directAnswer = actionAnswer(action, state, `Here’s the ${action.name.toLowerCase()}. Use the button below to continue.`);
+      const directAnswer = actionAnswer(action, state, directLinkCustomerMessage(business, action));
       const { action: _action, ...answerWithoutAction } = directAnswer;
       return { ...answerWithoutAction, primaryCta: directCta };
     }
@@ -10279,7 +10315,10 @@ app.get("/api/v1/admin/action-registry", async (request) => {
     [businessId],
   );
   return {
-    actions: result.rows.map((row) => ({
+    actions: result.rows.map((row) => {
+      const parsedAction = actionFromRow(row);
+      const readiness = actionReadiness(parsedAction);
+      return {
       id: String(row.id),
       businessId: String(row.business_id),
       businessName: String(row.business_name),
@@ -10287,7 +10326,7 @@ app.get("/api/v1/admin/action-registry", async (request) => {
       websiteUrl: String(row.website_url ?? ""),
       actionKey: String(row.action_key),
       actionType: String(row.action_type ?? "contact_team"),
-      name: String(row.name),
+      name: parsedAction.name,
       description: String(row.description ?? ""),
       mode: String(row.mode ?? "transactional"),
       destination: row.destination && typeof row.destination === "object" ? asRecord(row.destination) : null,
@@ -10307,9 +10346,11 @@ app.get("/api/v1/admin/action-registry", async (request) => {
       evidence: Array.isArray(row.evidence) ? row.evidence : [],
       confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
       enabled: row.enabled === true,
-      isPrimary: String(row.id) === String(row.primary_action_id ?? ""),
+      readiness,
+      isPrimary: String(row.id) === String(row.primary_action_id ?? "") && readiness.ready,
       updatedAt: toIso(row.updated_at),
-    })),
+      };
+    }),
   };
 });
 
@@ -10414,11 +10455,13 @@ app.patch("/api/v1/admin/businesses/:businessId/primary-action", async (request)
   if (!businessResult.rowCount) throw httpError(404, "Business not found");
   const previousActionId = businessResult.rows[0].primary_action_id;
   if (actionId) {
-    const actionResult = await pool.query<{ id: string }>(
-      "select id from business_actions where id = $1 and business_id = $2 and enabled = true and lifecycle_status in ('approved', 'active')",
+    const actionResult = await pool.query<Record<string, unknown>>(
+      "select * from business_actions where id = $1 and business_id = $2",
       [actionId, businessId],
     );
     if (!actionResult.rowCount) throw httpError(400, "Primary action must be an approved, enabled action belonging to this business");
+    const readiness = actionReadiness(actionFromRow(actionResult.rows[0]));
+    if (!readiness.ready) throw httpError(400, "Primary action must be an enabled, approved, ready action with complete conversion settings");
   }
   await pool.query("update businesses set primary_action_id = $2, updated_at = now() where id = $1", [businessId, actionId]);
   if (actionId) {
@@ -13069,7 +13112,11 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   // Keep disabled/archived definitions visible to owners so they can restore
   // them; detectAction and the widget runtime still exclude them.
   const configuredActions = business.actions;
-  const actions = configuredActions.map((action) => ({ ...action, isPrimary: business.primaryActionId === action.id }));
+  const actions = configuredActions.map((action) => ({
+    ...action,
+    readiness: actionReadiness(action),
+    isPrimary: business.primaryActionId === action.id && actionReadiness(action).ready,
+  }));
   if (!pool) return { actions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
   let deliveries: Array<Record<string, unknown>> = [];
   try {
@@ -13159,6 +13206,23 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   const duplicate = business.actions.find((item, index) => index !== actionIndex && item.key === action.key);
   if (duplicate) throw httpError(409, "An action with this key already exists");
   business.actions[actionIndex] = action;
+  const primaryActionCleared = business.primaryActionId === action.id && !actionReadiness(action).ready;
+  if (primaryActionCleared) {
+    business.primaryActionId = null;
+    if (pool) {
+      await pool.query("update businesses set primary_action_id = null, updated_at = now() where id = $1 and primary_action_id = $2", [business.id, action.id]);
+    }
+    await recordActionRegistryAudit({
+      businessId: business.id,
+      actionId: action.id,
+      actorUserId,
+      actorType: "owner",
+      eventType: "primary_cleared",
+      previousValue: { primaryActionId: action.id },
+      newValue: { primaryActionId: null, readiness: actionReadiness(action) },
+      reason: "owner_override",
+    });
+  }
   await persistAction(business, action);
   if (pool && previousAction.key !== action.key) {
     await pool.query("delete from business_actions where business_id = $1 and action_key = $2", [business.id, previousAction.key]);
@@ -13173,7 +13237,7 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
     newValue: { enabled: action.enabled, lifecycleStatus: action.lifecycleStatus, primaryActionId: business.primaryActionId },
     reason: action.reviewReason,
   });
-  return { action };
+  return { action, primaryActionCleared };
 });
 
 app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
@@ -13184,17 +13248,16 @@ app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
   const actionId = requiredString(params.actionId, "actionId", 120);
   const action = business.actions.find((candidate) => candidate.id === actionId);
   if (!action) throw httpError(404, "Action not found");
-  if (action.executionMode === "DIRECT_LINK" && !(action.completion.linkUrl ?? action.destination?.url)) {
-    throw httpError(400, "Direct-link actions need a destination URL before they can be the primary conversion goal");
-  }
-  if (!action.enabled || !["approved", "active"].includes(action.lifecycleStatus ?? "active")) {
-    if (action.origin !== "discovered" || action.confidence < 0.88 || action.safetyPolicy === "manual_review") {
-      throw httpError(400, "Only an enabled, approved action can be the primary conversion goal");
-    }
-    action.enabled = true;
-    action.lifecycleStatus = "active";
-    action.reviewReason = null;
-    await persistAction(business, action);
+  const readiness = actionReadiness(action);
+  if (!readiness.ready) {
+    const message = readiness.reason === "missing_destination"
+      ? "Direct-link actions need a destination URL before they can be the primary conversion goal"
+      : readiness.reason === "invalid_destination"
+        ? "Direct-link actions need a valid http(s) destination URL before they can be the primary conversion goal"
+        : readiness.reason === "missing_tracking_key"
+          ? "Actions need a tracking key before they can be the primary conversion goal"
+          : "Only an enabled, approved, ready action can be the primary conversion goal";
+    throw httpError(400, message);
   }
   const previousActionId = business.primaryActionId;
   business.primaryActionId = action.id;

@@ -311,6 +311,7 @@ interface ActionFlow {
     };
   };
   enabled: boolean;
+  readiness?: { ready: boolean; reason: "ready" | "disabled" | "needs_review" | "missing_tracking_key" | "missing_destination" | "invalid_destination" | "missing_configuration" };
   origin?: "discovered" | "configured";
   confidence?: number;
   safetyPolicy?: string;
@@ -742,6 +743,7 @@ interface AdminActionRegistryItem {
   evidence: Array<{ sourceUrl?: string; quote?: string; confidence?: number }>;
   confidence: number | null;
   enabled: boolean;
+  readiness?: { ready: boolean; reason: string };
   isPrimary: boolean;
   updatedAt: string;
 }
@@ -2106,13 +2108,35 @@ function openAgentTest(question?: string) {
   commitRoute(nextRoute);
 }
 
+function customerBrandLabel(): string {
+  const configured = assistantName.value.trim();
+  return configured.replace(/\s+AI Assistant$/i, "").replace(/\s+Assistant$/i, "").trim() || businessName.value || "your business";
+}
+
+function actionCustomerMessage(action: ActionFlow): string {
+  const configured = action.completion.message?.trim() ?? "";
+  const genericMessages = new Set(["The verified link is ready.", "You can try the demo here.", "Here's the verified link.", "Here’s the verified link."]);
+  if (configured && !genericMessages.has(configured)) return configured;
+  const label = action.completion.linkLabel?.trim() || action.name.trim();
+  if (/\bdemo\b/i.test(`${action.name} ${label}`)) return `Absolutely — you can try ${customerBrandLabel()} here.`;
+  return configured || `Absolutely — ${label.toLowerCase()} is ready here.`;
+}
+
+function actionTestQuestion(action: ActionFlow): string {
+  if (action.executionMode === "DIRECT_LINK") {
+    const label = action.completion.linkLabel?.trim() || action.name.trim();
+    return `I'd like to ${label.toLowerCase()}`;
+  }
+  return action.triggerPhrases.find((phrase) => phrase.trim()) || action.name;
+}
+
 function runActionTest(action: ActionFlow) {
   if (!action.enabled) {
     actionsMessage.value = "Enable this action before testing it.";
     return;
   }
   resetAgentConversation();
-  openAgentTest(action.triggerPhrases.find((phrase) => phrase.trim()) || action.name);
+  openAgentTest(actionTestQuestion(action));
 }
 
 function reviewKnowledgeGaps() {
@@ -4501,16 +4525,18 @@ function actionDeliveriesFor(action: ActionFlow): ActionDelivery[] {
   return actionDeliveries.value.filter((delivery) => delivery.actionId === action.id);
 }
 
-function actionStatusLabel(action: ActionFlow): "Active" | "Draft" | "Paused" | "Needs setup" | "Integration error" {
+function actionStatusLabel(action: ActionFlow): "Ready" | "Draft" | "Paused" | "Needs setup" | "Integration error" {
   const delivery = actionDeliveries.value.find((item) => item.actionId === action.id && item.status === "failed");
   if (delivery) return "Integration error";
   if (!action.enabled) return "Paused";
+  if (action.readiness) return action.readiness.ready ? "Ready" : "Needs setup";
+  if (action.executionMode === "DIRECT_LINK" && !(action.completion.linkUrl || action.destination?.url)) return "Needs setup";
   if (!action.fields.length || !action.completion.createLead) return "Needs setup";
-  return action.updatedAt === action.createdAt ? "Draft" : "Active";
+  return action.updatedAt === action.createdAt ? "Draft" : "Ready";
 }
 
 function actionStatusTone(status: ReturnType<typeof actionStatusLabel>): "active" | "draft" | "paused" | "attention" {
-  if (status === "Active") return "active";
+  if (status === "Ready") return "active";
   if (status === "Paused") return "paused";
   if (status === "Integration error" || status === "Needs setup") return "attention";
   return "draft";
@@ -4675,11 +4701,7 @@ function openPrimaryGoalChooser() {
 }
 
 function canSetPrimaryAction(action: ActionFlow) {
-  if (action.executionMode === "DIRECT_LINK" && !(action.completion.linkUrl || action.destination?.url)) return false;
-  if (action.enabled && ["approved", "active", undefined].includes(action.lifecycleStatus)) return true;
-  return action.origin === "discovered"
-    && (action.confidence ?? 0) >= 0.88
-    && action.safetyPolicy !== "manual_review";
+  return action.readiness?.ready === true;
 }
 
 async function clearPrimaryAction(action: ActionFlow) {
@@ -4779,9 +4801,11 @@ async function saveAction() {
         triggerPhrases: actionTriggerText.value.split("\n").map((item) => item.trim()).filter(Boolean),
       }),
     });
-    const payload = await response.json() as { error?: string };
+    const payload = await response.json() as { error?: string; primaryActionCleared?: boolean };
     if (!response.ok) throw new Error(payload.error ?? "Could not save this flow.");
-    actionsMessage.value = "Saved · the assistant will use the updated flow";
+    actionsMessage.value = payload.primaryActionCleared
+      ? "Saved · primary goal cleared because this action needs setup"
+      : "Saved · the assistant will use the updated flow";
     await loadActions();
   } catch (error) {
     actionsError.value = error instanceof Error ? error.message : "Could not save this flow.";
@@ -7064,7 +7088,7 @@ function startMarketingDemo() {
                   <template v-else-if="actionEditorStage === 'complete'">
                     <div class="action-stage-heading"><span class="action-stage-number">4</span><div><p class="eyebrow">Complete</p><h3>What happens when the action is completed?</h3><p>Keep the success moment clear, then decide what should be saved or sent.</p></div></div>
                     <div class="completion-checklist"><label class="action-option-card"><span><strong>Save lead in FrontDeskWise</strong><small>Keep the captured contact and outcome in your Leads workspace.</small></span><input v-model="actionDraft.completion.createLead" type="checkbox" /></label><label class="action-option-card"><span><strong>Notify staff</strong><small>Send the completed request to the selected team channels.</small></span><input v-model="actionDraft.completion.notifyStaff" type="checkbox" /></label><label class="action-option-card"><span><strong>Send an email notification</strong><small>Use email alongside the in-app notification.</small></span><input v-model="actionDraft.completion.notifyChannels" type="checkbox" value="email" /></label></div>
-                    <div class="action-two-column"><label>Success message<textarea v-model="actionDraft.completion.message" rows="3"></textarea></label><label>Lead status<select v-model="actionDraft.completion.leadStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label></div>
+                    <div class="action-two-column"><label v-if="actionDraft.executionMode !== 'DIRECT_LINK'">Success message<textarea v-model="actionDraft.completion.message" rows="3"></textarea></label><label>Lead status<select v-model="actionDraft.completion.leadStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="booked">Booked</option></select></label></div>
                   </template>
 
                   <template v-else>
@@ -7076,6 +7100,7 @@ function startMarketingDemo() {
 
                   <section class="action-semantics-card">
                     <div><p class="eyebrow">Conversion semantics</p><h3>How should this action behave?</h3><p>These settings control the primary CTA and when it appears after an answer.</p></div>
+                    <div v-if="actionDraft.executionMode === 'DIRECT_LINK'" class="action-customer-copy"><div><p class="eyebrow">Customer-facing copy</p><p>These words are shown to visitors. The internal template name stays out of the conversation.</p></div><div class="action-two-column action-copy-grid"><label>Action name<input v-model="actionDraft.name" type="text" placeholder="Try the demo" /></label><label>Button label<input v-model="actionDraft.completion.linkLabel" type="text" placeholder="Try the demo" /></label></div><label>Message before button<textarea v-model="actionDraft.completion.message" rows="2" placeholder="You can try SalonFlow here."></textarea></label></div>
                     <div class="action-two-column action-semantics-fields"><label>Execution mode<select v-model="actionDraft.executionMode"><option value="DIRECT_LINK">Direct link</option><option value="FORM_FLOW">Form flow</option><option value="PROVIDER_FLOW">Provider flow</option><option value="PHONE">Phone</option><option value="EMAIL">Email</option><option value="HANDOFF">Internal handoff</option><option value="API_ACTION">API action</option></select></label><label>When should this appear<select v-model="actionDraft.attachmentPolicy"><option value="sales_intent">When relevant to sales intent</option><option value="high_intent_only">Only for high intent</option><option value="explicit_request_only">Only when explicitly requested</option><option value="always">Frequently</option><option value="never_auto">Never automatically</option></select></label></div>
                     <label v-if="actionDraft.executionMode === 'DIRECT_LINK'">Destination URL<input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://yourbusiness.com/demo" /><small class="form-help">Use the verified page visitors should open. Direct-link actions need a destination before they can be primary.</small></label>
                     <label>Tracking key<input v-model="actionDraft.trackingKey" type="text" placeholder="try_demo" /><small class="form-help">Used for CTA and conversion analytics.</small></label>
@@ -7085,7 +7110,7 @@ function startMarketingDemo() {
                 </div>
                 <div class="action-editor-footer"><button class="text-button danger-text" type="button" :disabled="actionsLoading" @click="removeAction">Delete action</button><span v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</span><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
               </article>
-              <aside class="panel action-live-preview"><div class="action-preview-heading"><div><p class="eyebrow">Live customer preview</p><h3>What visitors will see</h3></div><span class="preview-live-dot">Live</span></div><div class="action-preview-window"><div class="action-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>{{ assistantName }}</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div class="action-preview-thread"><div class="action-preview-bubble">{{ actionDraft.completion.message || 'Absolutely. I just need a few details.' }}</div><div class="action-preview-bubble visitor">I’d like to {{ actionDraft.name.toLowerCase() }}.</div><div v-if="actionDraft.executionMode === 'DIRECT_LINK' && (actionDraft.completion.linkUrl || actionDraft.destination?.url)" class="action-preview-link"><strong>{{ actionDraft.completion.linkLabel || 'Open link' }}</strong><small>{{ actionDraft.completion.linkUrl || actionDraft.destination?.url }}</small><button class="primary-button small" type="button">{{ actionDraft.completion.linkLabel || 'Open link' }}</button></div><div v-else class="action-preview-form"><div class="action-preview-bubble">Absolutely. I just need a few details.</div><label v-for="field in actionDraft.fields.filter((item) => item.visibility !== 'hidden').slice(0, 4)" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><input :type="field.type === 'phone' ? 'tel' : field.type" disabled :placeholder="field.label" /></label><span v-if="!actionDraft.fields.length" class="action-inline-empty">Add questions to see the form preview.</span><button class="primary-button small" type="button">{{ actionDraft.completion.submitLabel || 'Send request' }}</button></div></div><div class="action-preview-input">Ask a question… <Send :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">Updates appear here as you change questions, capture style, or completion behavior.</p></aside>
+              <aside class="panel action-live-preview"><div class="action-preview-heading"><div><p class="eyebrow">Live customer preview</p><h3>What visitors will see</h3></div><span class="preview-live-dot">Live</span></div><div class="action-preview-window"><div class="action-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>{{ assistantName }}</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div class="action-preview-thread"><div class="action-preview-bubble">{{ actionDraft.executionMode === 'DIRECT_LINK' ? actionCustomerMessage(actionDraft) : actionDraft.completion.message || 'Absolutely. I just need a few details.' }}</div><div class="action-preview-bubble visitor">{{ actionDraft.executionMode === 'DIRECT_LINK' ? actionTestQuestion(actionDraft) : `I’d like to ${actionDraft.name.toLowerCase()}.` }}</div><div v-if="actionDraft.executionMode === 'DIRECT_LINK' && (actionDraft.completion.linkUrl || actionDraft.destination?.url)" class="action-preview-link"><strong>{{ actionDraft.completion.linkLabel || actionDraft.name || 'Continue' }}</strong><small>{{ actionDraft.completion.linkUrl || actionDraft.destination?.url }}</small><button class="primary-button small" type="button">{{ actionDraft.completion.linkLabel || actionDraft.name || 'Continue' }}</button></div><div v-else class="action-preview-form"><div class="action-preview-bubble">Absolutely. I just need a few details.</div><label v-for="field in actionDraft.fields.filter((item) => item.visibility !== 'hidden').slice(0, 4)" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><input :type="field.type === 'phone' ? 'tel' : field.type" disabled :placeholder="field.label" /></label><span v-if="!actionDraft.fields.length" class="action-inline-empty">Add questions to see the form preview.</span><button class="primary-button small" type="button">{{ actionDraft.completion.submitLabel || 'Send request' }}</button></div></div><div class="action-preview-input">Ask a question… <Send :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">Updates appear here as you change questions, capture style, or completion behavior.</p></aside>
             </section>
           </div>
 
@@ -7245,7 +7270,7 @@ function startMarketingDemo() {
             <div class="section-toolbar"><div><p class="eyebrow">Conversion control</p><h2>Action registry review</h2><p>Review what the crawler found, keep unsafe candidates disabled, and choose the primary next step for each business.</p></div><div class="toolbar-actions"><span v-if="adminActionRegistryMessage" class="saved-message">✓ {{ adminActionRegistryMessage }}</span><button class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="loadAdminActionRegistry">{{ adminActionRegistryLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
             <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Zap :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistry.length }}</strong><small>Detected actions</small><em>Across all businesses</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><CircleCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryEnabledCount }}</strong><small>Enabled actions</small><em>Available to visitors</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryReviewCount }}</strong><small>Needs review</small><em>Disabled or below confidence threshold</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><BadgeCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminActionRegistryPrimaryCount }}</strong><small>Primary actions</small><em>Explicit business choices</em></article></div>
             <p v-if="adminActionRegistryError" class="form-error">{{ adminActionRegistryError }}</p>
-            <div class="action-registry-table-wrap"><div class="action-registry-table-heading"><span>Business / action</span><span>Evidence</span><span>Destination</span><span>Confidence</span><span>Controls</span></div><div v-if="!adminActionRegistry.length" class="diagnostics-empty">No crawled actions found yet.</div><div v-for="action in adminActionRegistry" :key="action.id" class="action-registry-row"><div><strong>{{ action.businessName }}</strong><small>{{ action.name }} · {{ formatLabel(action.actionType) }}</small><small>{{ action.businessSlug }}</small><small>{{ formatLabel(action.origin) }} · {{ formatLabel(action.lifecycleStatus) }}<span v-if="action.reviewReason"> · {{ formatLabel(action.reviewReason) }}</span></small><span v-if="action.isPrimary" class="status-pill qualified action-primary-pill">Primary action</span></div><div><small>{{ action.evidence[0]?.quote || 'No source evidence captured' }}</small><small>{{ formatLabel(action.sourceType || 'unknown') }} · Discovered {{ action.discoveredAt ? new Date(action.discoveredAt).toLocaleString() : '—' }}</small><small v-if="action.sourceLabel">Extracted label: {{ action.sourceLabel }}</small><small v-if="action.classificationReason" :title="action.classificationReason">Why: {{ action.classificationReason }}</small><a v-if="action.sourceUrl" :href="action.sourceUrl" target="_blank" rel="noreferrer">Open source ↗</a></div><div><a v-if="action.destination?.url" :href="action.destination.url" target="_blank" rel="noreferrer">{{ action.destination.label || action.destination.url }}</a><small v-else>No destination</small><small v-if="action.provider">Provider: {{ action.provider }}</small><small>{{ formatLabel(action.safetyPolicy) }}</small></div><div><strong>{{ action.confidence === null ? '—' : `${Math.round(action.confidence * 100)}%` }}</strong><small>Priority {{ action.priority }}</small><small>{{ action.enabled ? 'Enabled' : 'Disabled' }}</small></div><div class="admin-actions action-registry-controls"><button v-if="action.enabled" class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="updateAdminRegistryAction(action, false)">Disable</button><button v-else class="outline-button small" type="button" :disabled="adminActionRegistryLoading || (action.confidence ?? 0) < 0.88 || action.safetyPolicy === 'manual_review' || (action.actionType === 'call_emergency' && !action.destination?.url?.startsWith('tel:'))" :title="(action.confidence ?? 0) < 0.88 ? 'Low-confidence actions need stronger evidence' : action.actionType === 'call_emergency' ? 'Emergency actions also require verified source ownership and evidence' : 'Approve action'" @click="updateAdminRegistryAction(action, true)">{{ action.origin === 'discovered' ? 'Approve' : 'Enable' }}</button><button class="text-button action-primary-button" type="button" :disabled="adminActionRegistryLoading || !action.enabled" @click="setAdminPrimaryAction(action)">{{ action.isPrimary ? 'Clear primary' : 'Set primary' }}</button></div></div></div>
+              <div class="action-registry-table-wrap"><div class="action-registry-table-heading"><span>Business / action</span><span>Evidence</span><span>Destination</span><span>Confidence</span><span>Controls</span></div><div v-if="!adminActionRegistry.length" class="diagnostics-empty">No crawled actions found yet.</div><div v-for="action in adminActionRegistry" :key="action.id" class="action-registry-row"><div><strong>{{ action.businessName }}</strong><small>{{ action.name }} · {{ formatLabel(action.actionType) }}</small><small>{{ action.businessSlug }}</small><small>{{ formatLabel(action.origin) }} · {{ formatLabel(action.lifecycleStatus) }}<span v-if="action.reviewReason"> · {{ formatLabel(action.reviewReason) }}</span></small><small :class="action.readiness?.ready ? 'action-readiness-ready' : 'action-readiness-attention'">{{ action.readiness?.ready ? 'Ready' : `Needs setup · ${formatLabel(action.readiness?.reason || 'incomplete')}` }}</small><span v-if="action.isPrimary" class="status-pill qualified action-primary-pill">Primary action</span></div><div><small>{{ action.evidence[0]?.quote || 'No source evidence captured' }}</small><small>{{ formatLabel(action.sourceType || 'unknown') }} · Discovered {{ action.discoveredAt ? new Date(action.discoveredAt).toLocaleString() : '—' }}</small><small v-if="action.sourceLabel">Extracted label: {{ action.sourceLabel }}</small><small v-if="action.classificationReason" :title="action.classificationReason">Why: {{ action.classificationReason }}</small><a v-if="action.sourceUrl" :href="action.sourceUrl" target="_blank" rel="noreferrer">Open source ↗</a></div><div><a v-if="action.destination?.url" :href="action.destination.url" target="_blank" rel="noreferrer">{{ action.destination.label || action.destination.url }}</a><small v-else>No destination</small><small v-if="action.provider">Provider: {{ action.provider }}</small><small>{{ formatLabel(action.safetyPolicy) }}</small></div><div><strong>{{ action.confidence === null ? '—' : `${Math.round(action.confidence * 100)}%` }}</strong><small>Priority {{ action.priority }}</small><small>{{ action.enabled ? 'Enabled' : 'Disabled' }}</small></div><div class="admin-actions action-registry-controls"><button v-if="action.enabled" class="outline-button small" type="button" :disabled="adminActionRegistryLoading" @click="updateAdminRegistryAction(action, false)">Disable</button><button v-else class="outline-button small" type="button" :disabled="adminActionRegistryLoading || (action.confidence ?? 0) < 0.88 || action.safetyPolicy === 'manual_review' || (action.actionType === 'call_emergency' && !action.destination?.url?.startsWith('tel:'))" :title="(action.confidence ?? 0) < 0.88 ? 'Low-confidence actions need stronger evidence' : action.actionType === 'call_emergency' ? 'Emergency actions also require verified source ownership and evidence' : 'Approve action'" @click="updateAdminRegistryAction(action, true)">{{ action.origin === 'discovered' ? 'Approve' : 'Enable' }}</button><button class="text-button action-primary-button" type="button" :disabled="adminActionRegistryLoading || !action.enabled || !action.readiness?.ready" :title="!action.readiness?.ready ? 'Complete the action setup before making it primary' : undefined" @click="setAdminPrimaryAction(action)">{{ action.isPrimary ? 'Clear primary' : 'Set primary' }}</button></div></div></div>
           </article>
           <article v-if="adminSection === 'users'" class="panel table-panel admin-table-panel admin-users-panel"><div class="panel-heading"><div><p class="eyebrow">Account control</p><h2>Users & access</h2><p>Review who has access to each organization and disable accounts without touching their stored data.</p></div><button class="outline-button small" type="button" :disabled="adminLoading" @click="loadAdminUsers">Refresh users</button></div><div class="table-heading admin-user-row"><span>User</span><span>Organizations</span><span>Status</span><span>Action</span></div><div v-if="!adminUsers.length" class="diagnostics-empty">No application users found.</div><div v-for="user in adminUsers" :key="user.id" class="table-row admin-user-row"><div><strong>{{ user.name || 'Unnamed user' }}</strong><small>{{ user.email }}<span v-if="user.isSuperAdmin"> · super-admin</span></small></div><span>{{ user.organizationSummary }}</span><span :class="['status-pill', user.status === 'active' ? 'booked' : 'new']">{{ user.status }}</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || user.isSuperAdmin" @click="adminUserAction(user, user.status === 'active' ? 'disabled' : 'active')">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></div></div></article>
           <article v-if="adminSection === 'demos'" class="panel admin-demo-operations">
