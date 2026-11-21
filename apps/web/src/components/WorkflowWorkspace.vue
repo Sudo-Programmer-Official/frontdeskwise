@@ -125,10 +125,9 @@ const readiness = computed(() => {
   ];
 });
 const readinessPercent = computed(() => Math.round((readiness.value.filter((item) => item.complete).length / readiness.value.length) * 100));
-const readinessComplete = computed(() => readiness.value.filter((item) => item.complete));
-const readinessRemaining = computed(() => readiness.value.filter((item) => !item.complete).slice(0, 3));
+const readinessRemaining = computed(() => readiness.value.filter((item) => !item.complete));
 const configurationComplete = computed(() => readinessRemaining.value.length === 0);
-const configurationLabel = computed(() => configurationComplete.value ? "Configuration complete" : `${readinessPercent.value}% configured`);
+const configurationLabel = computed(() => configurationComplete.value ? "Configuration complete" : "Needs setup");
 const providerStep = computed(() => draftSteps.value.find((step) => step.type === "lookup" || step.type === "generate_link") ?? null);
 const providerFailureBehavior = computed(() => providerStep.value ? stepConfigValue(providerStep.value, "failureBehavior") : "capture_lead");
 
@@ -173,6 +172,15 @@ function markDirty() {
 
 function formatLabel(value: string): string {
   return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function readinessLabel(label: string): string {
+  if (label === "Workflow goal is defined") return "Goal defined";
+  if (label === "Questions and capture fields are defined") return "Add at least one step";
+  if (label === "Completion path is defined") return "Add completion behavior";
+  if (label === "Failure and handoff path is defined") return "Decide what happens if unavailable";
+  if (label.endsWith(" is connected")) return label;
+  return label;
 }
 
 function stepTypeLabel(type?: string): string {
@@ -320,7 +328,7 @@ async function saveWorkflow() {
     if (!response.ok) throw new Error(payload.error ?? "Could not save this workflow.");
     if (payload.action) workflowDraft.value = clone(payload.action);
     draftIsDirty.value = false;
-    workflowSaveMessage.value = "Workflow saved. Runtime will use the updated steps.";
+    workflowSaveMessage.value = "Saved. Runtime will use the updated steps.";
     emit("refresh");
   } catch (error) {
     workflowSaveError.value = error instanceof Error ? error.message : "Could not save this workflow.";
@@ -379,9 +387,9 @@ onMounted(() => {
         <h2>Workflows</h2>
         <p>Define how FrontDeskWise moves a visitor from intent to a reliable outcome.</p>
       </div>
-      <div class="toolbar-actions">
-        <button class="outline-button small" type="button" @click="emit('refresh')">Refresh</button>
-        <button class="primary-button small" type="button" :disabled="!workflowDraft || workflowSaveLoading || !draftIsDirty" @click="saveWorkflow"><Save :size="14" :stroke-width="1.8" aria-hidden="true" />{{ workflowSaveLoading ? 'Saving…' : 'Save workflow' }}</button>
+      <div class="toolbar-actions workflow-page-actions">
+        <button class="text-button" type="button" @click="emit('refresh')">Refresh</button>
+        <button :class="['primary-button small', { 'save-clean': !draftIsDirty }]" type="button" :disabled="!workflowDraft || workflowSaveLoading || !draftIsDirty" @click="saveWorkflow"><Save :size="14" :stroke-width="1.8" aria-hidden="true" />{{ workflowSaveLoading ? 'Saving…' : draftIsDirty ? 'Save workflow' : 'Saved ✓' }}</button>
       </div>
     </div>
 
@@ -393,42 +401,42 @@ onMounted(() => {
 
     <div class="workflow-layout">
       <aside class="workflow-library panel">
-        <div class="panel-heading"><div><p class="eyebrow">Your workflows</p><h3>{{ workflowActions.length }} configured</h3></div><button class="outline-button small" type="button" @click="emit('open-action', '')"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Create</button></div>
+        <div class="panel-heading"><div><p class="eyebrow">Your workflows</p><h3>{{ workflowActions.length }} configured</h3></div><button class="outline-button small" type="button" @click="emit('open-action', '')"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Create workflow</button></div>
+        <label class="workflow-library-select">Choose a workflow<select v-model="selectedWorkflowId"><option v-for="action in workflowActions" :key="action.id" :value="action.id">{{ action.name }}</option></select></label>
         <div v-if="!workflowActions.length" class="workflow-empty"><span class="workflow-empty-icon"><GitBranch :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No multi-step workflows yet.</strong><p>Create an action first, then open it here to turn the path into explicit steps.</p><button class="primary-button small" type="button" @click="emit('open-action', '')">Open Actions <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
         <button v-for="action in workflowActions" :key="action.id" type="button" :class="['workflow-library-item', { active: action.id === selectedWorkflowId }]" @click="selectedWorkflowId = action.id"><span class="workflow-library-item-icon"><GitBranch :size="16" :stroke-width="1.8" aria-hidden="true" /></span><span><strong>{{ action.name }}</strong><small>{{ action.steps?.length ?? 0 }} steps · {{ formatLabel(action.executionMode || 'FORM_FLOW') }}</small></span><ChevronDown :size="15" :stroke-width="1.8" aria-hidden="true" /></button>
-        <div v-if="workflowDraft" class="workflow-template-section"><button class="text-button workflow-template-trigger" type="button" @click="showTemplatePicker = !showTemplatePicker">Start from a template <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="showTemplatePicker" class="workflow-template-picker"><p>Choose a starting point</p><button v-for="template in workflowTemplates" :key="template.key" type="button" @click="applyTemplate(template.key)"><strong>{{ template.label }}</strong><small>{{ template.description }}</small></button></div></div>
       </aside>
 
       <main v-if="workflowDraft" class="workflow-builder">
-        <div class="workflow-builder-heading"><div><p class="eyebrow">Action: {{ workflowDraft.name }} · Workflow</p><h2>{{ workflowDraft.name }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><span :class="['status-pill', configurationComplete ? 'booked' : 'qualified']">{{ configurationLabel }}</span><span class="status-pill new">Needs testing</span></div></div>
+        <div class="workflow-builder-heading"><div><p class="eyebrow">Workflow</p><h2>{{ workflowDraft.name }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><div class="workflow-status-group"><span class="workflow-mode-label">{{ formatLabel(workflowDraft.executionMode || 'FORM_FLOW') }}</span><span class="status-pill new">Needs testing</span></div></div></div>
 
-        <div class="workflow-assist-card"><div class="workflow-assist-icon"><Sparkles :size="18" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-assist-copy"><p class="eyebrow">What should this workflow accomplish?</p><h3>Describe it in plain English</h3><p>FrontDeskWise will suggest the steps. You’ll review everything before it can run.</p></div><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="2" placeholder="Example: We ask the child’s age, swimming ability, location, and preferred days, then show available classes." @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><button class="primary-button small" type="button" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="14" :stroke-width="1.8" aria-hidden="true" />Generate steps</button></div>
+        <section class="workflow-assist-card" aria-labelledby="workflow-assist-heading"><div class="workflow-assist-heading"><div class="workflow-assist-icon"><Sparkles :size="18" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-assist-copy"><p class="eyebrow">Start here</p><h3 id="workflow-assist-heading">What should this workflow accomplish?</h3><p>Describe the customer outcome in plain English. FrontDeskWise will suggest the steps for you to review.</p></div></div><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="4" placeholder="Example: Ask the child’s age, swimming ability, location, and preferred days, then show available classes." @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><div class="workflow-assist-footer"><span>Tip: include what the customer needs and what should happen next.</span><button class="primary-button" type="button" aria-label="Generate steps" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="15" :stroke-width="1.8" aria-hidden="true" />Generate workflow</button></div><div class="workflow-template-flow"><button class="text-button workflow-template-trigger" type="button" @click="showTemplatePicker = !showTemplatePicker">Start with a template <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="showTemplatePicker" class="workflow-template-picker"><p>Choose a starting point</p><button v-for="template in workflowTemplates" :key="template.key" type="button" @click="applyTemplate(template.key)"><strong>{{ template.label }}</strong><small>{{ template.description }}</small></button></div></div></section>
 
-        <div class="workflow-readiness-card"><div><p class="eyebrow">Workflow setup</p><h3>{{ readinessRemaining.length ? 'Finish these next' : 'Setup complete' }}</h3></div><div class="workflow-readiness-list"><span v-if="configurationComplete" class="complete"><Check :size="14" :stroke-width="2" aria-hidden="true" />Configuration complete</span><span class="workflow-test-status"><i aria-hidden="true">○</i>Needs testing before publishing</span><span v-for="item in readinessRemaining" :key="item.label"><i aria-hidden="true">○</i>{{ item.label.replace('Questions and capture fields are defined', 'Add at least one step').replace('Completion path is defined', 'Add completion behavior').replace('Failure and handoff path is defined', 'Choose what happens if unavailable') }}</span></div><button v-if="readinessRemaining.length" class="text-button" type="button" @click="continueSetup">Continue setup <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
-
-        <div class="workflow-provider-summary"><div class="workflow-provider-summary-heading"><div><p class="eyebrow">Provider</p><h3>{{ providerStep ? formatLabel(stepConfigValue(providerStep, 'provider') || workflowProvider || 'Provider') : 'No provider configured' }}</h3></div><span :class="['status-pill', providerStep && providerConnected ? 'booked' : 'new']">{{ providerStep ? (providerConnected ? 'Connected' : 'Needs connection') : 'Optional' }}</span></div><div v-if="providerStep" class="workflow-provider-summary-detail"><span>If unavailable</span><select :value="providerFailureBehavior" @change="setStepConfigFromEvent(providerStep, 'failureBehavior', $event)"><option value="capture_lead">Capture the request and notify the team</option><option value="handoff">Hand off to staff</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></div><div v-else class="workflow-provider-summary-detail"><span>Use a provider when this workflow needs availability, booking, or CRM actions.</span><button class="outline-button small" type="button" @click="configureProvider">Add provider step</button></div></div>
+        <section class="workflow-readiness-card" aria-labelledby="workflow-setup-heading"><span class="workflow-sr-only">Choose what happens if unavailable</span><div class="workflow-readiness-heading"><p class="eyebrow">Setup status</p><h3 id="workflow-setup-heading">Workflow setup</h3><span :class="['workflow-configuration-label', { complete: configurationComplete }]">{{ configurationLabel }}</span></div><div class="workflow-readiness-list"><span v-for="item in readiness" :key="item.label" :class="{ complete: item.complete, incomplete: !item.complete }"><Check v-if="item.complete" :size="14" :stroke-width="2" aria-hidden="true" /><i v-else aria-hidden="true">○</i>{{ readinessLabel(item.label) }}</span><span class="workflow-test-status"><i aria-hidden="true">○</i>Test workflow before publishing</span></div><button v-if="readinessRemaining.length" class="text-button" type="button" @click="continueSetup">Continue setup <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></section>
 
         <div ref="workflowStepList" class="workflow-step-list">
-          <div class="workflow-section-heading"><div><p class="eyebrow">Workflow</p><h3>Your customer journey</h3><p>Keep the path simple. Select a step to edit its details or add advanced logic.</p></div><button class="primary-button small" type="button" @click="addWorkflowStep()"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Add step</button></div>
+          <div class="workflow-section-heading"><div><p class="eyebrow">Next, review the path</p><h3>Customer journey</h3><p>These are the steps your customer will experience. Select one to edit it.</p></div><button class="outline-button small" type="button" @click="addWorkflowStep()"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Add step</button></div>
           <article v-for="(step, index) in draftSteps" :key="step.id || index" :class="['workflow-step-card', { selected: selectedStepIndex === index }]" @click="selectedStepIndex = index">
             <div class="workflow-step-rail"><span>{{ index + 1 }}</span><i v-if="index < draftSteps.length - 1"></i></div>
             <div class="workflow-step-body">
-              <div class="workflow-step-toolbar"><div class="workflow-step-title"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-if="selectedStepIndex === index" v-model="step.label" type="text" aria-label="Workflow step label" @input="markDirty" /><strong v-else>{{ step.label || stepTypeLabel(step.type) }}</strong><span class="status-pill qualified">{{ stepTypeLabel(step.type) }}</span></div><div class="workflow-step-actions"><button class="workflow-edit-button" type="button" @click.stop="selectedStepIndex = selectedStepIndex === index ? -1 : index">{{ selectedStepIndex === index ? 'Done' : 'Edit' }}</button><button type="button" aria-label="Move step up" :disabled="index === 0" @click.stop="moveWorkflowStep(index, -1)">↑</button><button type="button" aria-label="Move step down" :disabled="index === draftSteps.length - 1" @click.stop="moveWorkflowStep(index, 1)">↓</button><button type="button" aria-label="Delete step" @click.stop="removeWorkflowStep(index)"><Trash2 :size="15" :stroke-width="1.8" aria-hidden="true" /></button></div></div>
+              <div class="workflow-step-toolbar"><div class="workflow-step-title"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-if="selectedStepIndex === index" v-model="step.label" type="text" aria-label="Workflow step label" @input="markDirty" /><strong v-else>{{ step.label || stepTypeLabel(step.type) }}</strong><span class="status-pill qualified">{{ stepTypeLabel(step.type) }}</span></div><div class="workflow-step-actions"><button class="workflow-edit-button" type="button" @click.stop="selectedStepIndex = selectedStepIndex === index ? -1 : index">{{ selectedStepIndex === index ? 'Done' : 'Edit' }}</button></div></div>
               <div v-if="selectedStepIndex !== index" class="workflow-step-summary"><span>{{ step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
               <div v-else>
                 <div class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="markDirty"><option v-for="type in stepTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
                 <div v-if="step.type === 'condition'" class="workflow-condition-box"><span class="workflow-condition-icon"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" /></span><label>Condition in plain English<textarea v-model="step.condition" rows="2" placeholder="If the visitor is ready to register, continue to the provider lookup." @input="markDirty"></textarea></label></div>
                 <div v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-provider-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Provider</p><strong>{{ step.type === 'lookup' ? 'Find availability' : 'Complete with provider' }}</strong></div><span :class="['status-pill', providerConnected ? 'booked' : 'new']">{{ providerConnected ? 'Connected' : 'Needs connection' }}</span></div><div class="workflow-step-grid"><label>Provider<select :value="stepConfigValue(step, 'provider')" @change="setStepConfigFromEvent(step, 'provider', $event)"><option value="">Select provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking provider</option><option value="crm">CRM / automation</option></select></label><label v-if="step.type === 'lookup'">Operation<select :value="stepConfigValue(step, 'operation')" @change="setStepConfigFromEvent(step, 'operation', $event)"><option value="find_locations">Find locations</option><option value="find_classes">Find classes</option><option value="get_availability">Get availability</option><option value="get_class_price">Get class price</option></select></label><label v-if="step.type === 'lookup'">Search fields<input :value="stepConfigValue(step, 'searchFields')" type="text" placeholder="location, schedule, age" @input="setStepConfigFromEvent(step, 'searchFields', $event)" /></label></div><small class="form-help">We’ll use the provider for this step and explain what happens if it is unavailable.</small></div>
-                <details class="workflow-advanced-settings" :open="advancedOpen"><summary @click.prevent="advancedOpen = !advancedOpen">Advanced settings <span>{{ advancedOpen ? 'Hide' : 'Show' }}</span></summary><div class="workflow-step-footer"><label>If this step fails<select :value="stepConfigValue(step, 'failureBehavior')" @change="setStepConfigFromEvent(step, 'failureBehavior', $event)"><option value="handoff">Hand off to staff</option><option value="capture_lead">Save details and follow up</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></label><label>Next step<select v-model="step.nextStepId" @change="markDirty"><option value="">Continue in order</option><option v-for="nextStep in draftSteps.filter((candidate) => candidate.id !== step.id)" :key="nextStep.id" :value="nextStep.id">{{ nextStep.label || nextStep.id }}</option></select></label></div><details class="workflow-technical-details"><summary>Technical details <span>Show</span></summary><div><code>{{ step.id || 'generated-step' }}</code><code>type: {{ step.type }}</code><pre>{{ JSON.stringify(step.config || {}, null, 2) }}</pre></div></details></details>
+                <details class="workflow-advanced-settings" :open="advancedOpen"><summary @click.prevent="advancedOpen = !advancedOpen">Advanced <span>{{ advancedOpen ? 'Hide' : 'Show' }}</span></summary><div class="workflow-step-footer"><label>If this step fails<select :value="stepConfigValue(step, 'failureBehavior')" @change="setStepConfigFromEvent(step, 'failureBehavior', $event)"><option value="handoff">Hand off to staff</option><option value="capture_lead">Save details and follow up</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></label><label>Next step<select v-model="step.nextStepId" @change="markDirty"><option value="">Continue in order</option><option v-for="nextStep in draftSteps.filter((candidate) => candidate.id !== step.id)" :key="nextStep.id" :value="nextStep.id">{{ nextStep.label || nextStep.id }}</option></select></label></div><div class="workflow-step-management"><button type="button" :disabled="index === 0" @click.stop="moveWorkflowStep(index, -1)">Move up</button><button type="button" :disabled="index === draftSteps.length - 1" @click.stop="moveWorkflowStep(index, 1)">Move down</button><button class="danger-text" type="button" @click.stop="removeWorkflowStep(index)">Delete step</button></div><details class="workflow-technical-details"><summary>Technical details <span>Show</span></summary><div><code>{{ step.id || 'generated-step' }}</code><code>type: {{ step.type }}</code><pre>{{ JSON.stringify(step.config || {}, null, 2) }}</pre></div></details></details>
               </div>
             </div>
           </article>
-          <div v-if="!draftSteps.length" class="workflow-empty workflow-empty-builder"><strong>Start with a conversation, not a blank canvas.</strong><p>Describe the workflow above and generate the first draft, or add a step yourself.</p><button class="primary-button small" type="button" @click="addWorkflowStep()">Add first step <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
+          <div v-if="!draftSteps.length" class="workflow-empty workflow-empty-builder"><strong>No steps yet.</strong><p>Describe the workflow above and generate steps, or add one manually.</p><div class="workflow-empty-actions"><button class="primary-button small" type="button" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="14" :stroke-width="1.8" aria-hidden="true" />Generate workflow</button><button class="outline-button small" type="button" @click="addWorkflowStep()"><Plus :size="14" :stroke-width="1.8" aria-hidden="true" />Add step</button></div></div>
         </div>
+
+        <div class="workflow-provider-summary"><div class="workflow-provider-summary-heading"><div><p class="eyebrow">Provider</p><h3>{{ providerStep ? formatLabel(stepConfigValue(providerStep, 'provider') || workflowProvider || 'Provider') : 'No provider connected' }}</h3></div><span :class="['status-pill', providerStep && providerConnected ? 'booked' : 'new']">{{ providerStep ? (providerConnected ? 'Connected' : 'Needs connection') : 'Optional' }}</span></div><div v-if="providerStep" class="workflow-provider-summary-detail"><span>If unavailable</span><select :value="providerFailureBehavior" @change="setStepConfigFromEvent(providerStep, 'failureBehavior', $event)"><option value="capture_lead">Capture the request and notify the team</option><option value="handoff">Hand off to staff</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></div><div v-else class="workflow-provider-summary-detail"><span>Use a provider when this workflow needs live availability, booking, or external systems.</span><button class="outline-button small" type="button" @click="configureProvider">Add provider</button></div></div>
       </main>
 
-      <aside v-if="workflowDraft" class="workflow-preview-panel panel"><div class="workflow-preview-heading"><div><p class="eyebrow">Workflow preview</p><h3>{{ previewStep ? 'What customers will see' : 'Preview the experience' }}</h3></div><span class="preview-live-dot">Live</span></div><div class="workflow-preview-window"><div class="workflow-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>AI front desk</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div v-if="previewStep" class="workflow-preview-thread"><div class="workflow-preview-bubble">Hi! I can help you take the next step.</div><div class="workflow-preview-bubble visitor">I’m ready to get started.</div><div class="workflow-preview-bubble">{{ previewStep.question || `Next: ${previewStep.label || stepTypeLabel(previewStep.type)}` }}</div><div v-if="previewStep.options?.length" class="workflow-preview-options"><button v-for="option in previewStep.options" :key="option" type="button">{{ option }}</button></div><div v-if="previewStep.type === 'lookup'" class="workflow-preview-lookup"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" />Searching {{ formatLabel(stepConfigValue(previewStep, 'provider') || 'provider') }} for the best matches…</div><div v-if="previewStep.type === 'redirect'" class="workflow-preview-cta"><button class="primary-button small" type="button">{{ stepConfigValue(previewStep, 'buttonLabel') || previewStep.label || 'Continue' }}</button></div></div><div v-else class="workflow-preview-empty"><Sparkles :size="20" :stroke-width="1.8" aria-hidden="true" /><strong>Add or select a step</strong><p>Choose a step to see what the customer experiences.</p></div><div v-if="previewStep" class="workflow-preview-input">Reply to the assistant… <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">{{ previewStep ? `Previewing step ${selectedStepIndex + 1} of ${draftSteps.length}.` : 'Add or select a step to see the customer experience.' }}</p><div class="workflow-preview-meta"><span>{{ draftSteps.length }} steps</span><span>{{ workflowProvider ? formatLabel(workflowProvider) : 'No provider' }}</span><span>{{ configurationLabel }}</span><span>Needs testing</span></div></aside>
+      <aside v-if="workflowDraft" class="workflow-preview-panel panel"><div class="workflow-preview-heading"><div><p class="eyebrow">Customer preview</p><h3>What customers will see</h3></div><span class="preview-live-dot">Live</span></div><div class="workflow-preview-window"><div class="workflow-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>AI front desk</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div v-if="previewStep" class="workflow-preview-thread"><div class="workflow-preview-bubble">Hi! I can help you take the next step.</div><div class="workflow-preview-bubble visitor">I’m ready to get started.</div><div class="workflow-preview-bubble">{{ previewStep.question || `Next: ${previewStep.label || stepTypeLabel(previewStep.type)}` }}</div><div v-if="previewStep.options?.length" class="workflow-preview-options"><button v-for="option in previewStep.options" :key="option" type="button">{{ option }}</button></div><div v-if="previewStep.type === 'lookup'" class="workflow-preview-lookup"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" />Searching {{ formatLabel(stepConfigValue(previewStep, 'provider') || 'provider') }} for the best matches…</div><div v-if="previewStep.type === 'redirect'" class="workflow-preview-cta"><button class="primary-button small" type="button">{{ stepConfigValue(previewStep, 'buttonLabel') || previewStep.label || 'Continue' }}</button></div></div><div v-else class="workflow-preview-empty"><Sparkles :size="20" :stroke-width="1.8" aria-hidden="true" /><strong>Add or select a step to preview</strong><p>Add or select a step to preview what visitors will experience.</p></div><div v-if="previewStep" class="workflow-preview-input">Reply to the assistant… <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">{{ previewStep ? `Previewing step ${selectedStepIndex + 1} of ${draftSteps.length}.` : 'Add or select a step to preview what visitors will experience.' }}</p><div class="workflow-preview-meta"><span>{{ draftSteps.length }} steps</span><span>{{ workflowProvider ? formatLabel(workflowProvider) : 'No provider' }}</span><span>{{ configurationLabel }}</span><span>Needs testing</span></div></aside>
     </div>
 
     <p v-if="workflowSaveError" class="form-error">{{ workflowSaveError }}</p><p v-if="workflowSaveMessage" class="saved-message">✓ {{ workflowSaveMessage }}</p><div v-if="workflowDraft && workflowDraft.readiness?.ready === false" class="workflow-save-note"><X :size="15" :stroke-width="1.8" aria-hidden="true" /> This workflow is still in setup. Review the readiness checklist before making the action primary.</div>
@@ -573,4 +581,167 @@ onMounted(() => {
 @media (max-width: 1260px) { .workflow-layout { grid-template-columns: 215px minmax(0, 1fr) 270px; } .workflow-assist-card { grid-template-columns: auto minmax(150px, 1fr) minmax(180px, 1.2fr) auto; } }
 @media (max-width: 1180px) { .workflow-layout { grid-template-columns: 215px minmax(0, 1fr); } .workflow-preview-panel { position: static; grid-column: 2; } }
 @media (max-width: 820px) { .workflow-layout { display: block; } .workflow-library, .workflow-builder, .workflow-preview-panel { margin-bottom: 15px; } .workflow-preview-panel { position: static; } .workflow-model-banner, .workflow-assist-card { align-items: flex-start; flex-wrap: wrap; } .workflow-assist-card { display: flex; } .workflow-assist-card textarea { flex-basis: 100%; } .workflow-readiness-card { display: block; } .workflow-readiness-card > .text-button { margin-top: 12px; } .workflow-provider-summary-detail { align-items: flex-start; flex-direction: column; } .workflow-provider-summary-detail select { max-width: none; width: 100%; } .workflow-page-header, .workflow-builder-heading { flex-direction: column; } }
+/* Workflow preview stays aligned with the selected step. */
+/* Calm owner-facing hierarchy */
+.workflow-workspace { display: grid; gap: 30px; padding-top: 32px; }
+.workflow-page-header { align-items: flex-end; }
+.workflow-page-header h2 { font-size: 28px; letter-spacing: -.045em; }
+.workflow-page-header p:not(.eyebrow) { margin-top: 8px; font-size: 13px; line-height: 1.55; }
+.workflow-page-actions { align-items: center; gap: 12px; }
+.workflow-page-actions .text-button { padding: 8px 2px; color: #6f7f93; font-size: 12px; font-weight: 650; }
+.workflow-page-actions .text-button:hover { color: #315ba9; }
+.workflow-page-actions .save-clean { color: #297459; border-color: #cce7db; background: #f3fbf7; box-shadow: none; }
+.workflow-page-actions .save-clean:disabled { opacity: 1; cursor: default; }
+.workflow-model-banner { min-height: 0; padding: 14px 18px; border: 1px solid #e4ebf4; border-radius: 13px; background: #f7faff; box-shadow: none; }
+.workflow-model-banner h3 { font-size: 14px; }
+.workflow-model-banner p:not(.eyebrow) { font-size: 12px; line-height: 1.45; }
+.workflow-model-banner .workflow-model-icon { width: 34px; height: 34px; border-radius: 10px; color: #5576b3; background: #eaf1fc; }
+.workflow-model-banner > .text-button { top: 13px; right: 16px; color: #65758a; font-size: 11px; font-weight: 650; }
+.workflow-layout { grid-template-columns: 220px minmax(480px, 1fr) 320px; gap: 26px; }
+.workflow-library { padding: 4px 0; border: 0; background: transparent; box-shadow: none; }
+.workflow-library .panel-heading { padding: 0 2px 12px; border-bottom: 1px solid #e8edf3; }
+.workflow-library .panel-heading h3 { margin: 3px 0 0; color: #304563; font-size: 14px; }
+.workflow-library .panel-heading .outline-button { font-size: 11px; }
+.workflow-library-item { min-height: 54px; padding: 10px 8px; border-color: transparent; border-radius: 9px; }
+.workflow-library-item:hover { border-color: transparent; background: #f5f8fc; }
+.workflow-library-item.active { border-color: #dce7f7; background: #eef5ff; }
+.workflow-library-item-icon { width: 26px; height: 26px; color: #5573ac; background: #e8f0ff; }
+.workflow-library-item.active .workflow-library-item-icon { color: #2f66c6; background: #dceaff; }
+.workflow-library-item small { font-size: 10px; }
+.workflow-library-select { display: none; }
+.workflow-builder { display: grid; gap: 24px; }
+.workflow-builder-heading { padding: 0 2px; align-items: center; }
+.workflow-builder-heading h2 { margin: 4px 0 6px; font-size: 24px; letter-spacing: -.04em; }
+.workflow-builder-heading p:not(.eyebrow) { font-size: 13px; line-height: 1.5; }
+.workflow-builder-actions { align-items: center; }
+.workflow-status-group { display: inline-flex; align-items: center; gap: 8px; padding-left: 4px; }
+.workflow-mode-label { color: #8290a1; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.workflow-workspace .workflow-builder-actions .status-pill,
+.workflow-workspace .workflow-step-title .status-pill,
+.workflow-workspace .workflow-provider-summary .status-pill { border: 0; background: #f1f4f8; color: #77869a; font-size: 10px; font-weight: 700; }
+.workflow-workspace .workflow-builder-actions .status-pill.new { background: #fff5df; color: #9a6b1e; }
+.workflow-workspace .workflow-provider-summary .status-pill.booked { background: #e8f7f1; color: #2c805f; }
+.workflow-assist-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 24px; margin: 0; border: 1px solid #ded4ff; border-radius: 16px; background: linear-gradient(135deg, #fbf9ff 0%, #f8fbff 100%); box-shadow: 0 10px 28px rgba(95, 73, 166, .07); }
+.workflow-assist-heading { display: flex; align-items: flex-start; gap: 13px; }
+.workflow-assist-icon { width: 42px; height: 42px; border-radius: 12px; color: #6b52c5; background: #eee8ff; }
+.workflow-assist-copy { min-width: 0; }
+.workflow-assist-copy h3 { margin: 2px 0 5px; color: #243758; font-size: 18px; letter-spacing: -.025em; }
+.workflow-assist-copy p:not(.eyebrow) { color: #717d91; font-size: 12px; line-height: 1.5; }
+.workflow-assist-card textarea { min-height: 112px; padding: 13px 14px; border-color: #cec5ed; border-radius: 10px; color: #263950; font-size: 13px; line-height: 1.5; resize: vertical; }
+.workflow-assist-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.workflow-assist-footer > span { color: #7f8aa0; font-size: 11px; line-height: 1.4; }
+.workflow-assist-footer .primary-button { min-height: 40px; white-space: nowrap; }
+.workflow-template-flow { padding-top: 14px; border-top: 1px solid rgba(131, 109, 198, .16); }
+.workflow-template-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 0; color: #5e4bb0; font-size: 11px; }
+.workflow-template-picker { max-width: 560px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 12px; }
+.workflow-template-picker p { grid-column: 1 / -1; }
+.workflow-template-picker button { padding: 10px; border-color: #e0dafa; background: rgba(255,255,255,.72); }
+.workflow-template-picker button:hover { border-color: #b7aaf0; background: #fff; }
+.workflow-readiness-card { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; align-items: center; gap: 18px; padding: 18px 2px; margin: 0; border: 0; border-top: 1px solid #e4eaf1; border-bottom: 1px solid #e4eaf1; border-radius: 0; background: transparent; }
+.workflow-readiness-heading { display: grid; gap: 4px; }
+.workflow-readiness-heading .eyebrow { margin: 0; }
+.workflow-readiness-heading h3 { margin: 0; color: #304563; font-size: 15px; }
+.workflow-configuration-label { color: #9a6b1e; font-size: 11px; font-weight: 750; }
+.workflow-configuration-label.complete { color: #2c805f; }
+.workflow-readiness-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 0; }
+.workflow-readiness-list span { min-width: 0; color: #9aa6b5; font-size: 11px; line-height: 1.35; }
+.workflow-readiness-list span.complete { color: #8a98a9; }
+.workflow-readiness-list span.incomplete { color: #5f6f84; }
+.workflow-readiness-list span i { width: 14px; color: #c4ccd6; }
+.workflow-readiness-list span.complete svg { color: #54a37e; }
+.workflow-readiness-list .workflow-test-status { color: #9a6b1e !important; }
+.workflow-readiness-card > .text-button { display: inline-flex; align-items: center; gap: 4px; padding: 6px 0; white-space: nowrap; }
+.workflow-step-list { display: grid; gap: 12px; }
+.workflow-section-heading { align-items: center; margin: 4px 0 4px; }
+.workflow-section-heading h3 { margin: 3px 0 5px; color: #243758; font-size: 18px; letter-spacing: -.025em; }
+.workflow-section-heading p:not(.eyebrow) { font-size: 12px; line-height: 1.45; }
+.workflow-step-card { gap: 12px; padding: 13px 16px 13px 0; margin: 0; border-color: #e1e8f0; border-radius: 12px; box-shadow: none; }
+.workflow-step-card.selected { border-color: #aec6ef; box-shadow: 0 7px 22px rgba(42, 78, 140, .08); }
+.workflow-step-rail { width: 40px; }
+.workflow-step-rail span { width: 27px; height: 27px; color: #456dab; background: #edf3ff; }
+.workflow-step-title { gap: 8px; color: #a0adbc; }
+.workflow-step-title strong { color: #2e415d; font-size: 13px; }
+.workflow-step-summary { min-height: 25px; color: #75859a; font-size: 12px; }
+.workflow-step-actions button { border-color: transparent; background: transparent; }
+.workflow-step-actions button:hover:not(:disabled) { border-color: #dce6f3; background: #f5f8fc; }
+.workflow-edit-button { color: #315ba9 !important; }
+.workflow-condition-box, .workflow-provider-box { border-color: #e4ebf3; background: #f8fafc; }
+.workflow-advanced-settings { margin-top: 14px; padding-top: 12px; }
+.workflow-advanced-settings > summary { color: #64758a; font-size: 11px; }
+.workflow-step-management { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px solid #edf1f5; }
+.workflow-step-management button { padding: 0; border: 0; color: #65758a; background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; }
+.workflow-step-management button:hover:not(:disabled) { color: #315ba9; }
+.workflow-step-management button:disabled { color: #b7c0cb; cursor: not-allowed; }
+.workflow-step-management .danger-text { margin-left: auto; color: #b34135; }
+.workflow-empty-builder { gap: 7px; padding: 24px 16px; border-color: #d4deeb; border-radius: 12px; }
+.workflow-empty-builder strong { color: #304563; font-size: 13px; }
+.workflow-empty-builder p { font-size: 12px; }
+.workflow-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 5px; }
+.workflow-provider-summary { padding: 18px 2px 2px; margin: 4px 0 0; border: 0; border-top: 1px solid #e4eaf1; border-radius: 0; background: transparent; }
+.workflow-provider-summary-heading h3 { color: #304563; }
+.workflow-provider-summary-detail { padding-top: 10px; margin-top: 10px; border-top-color: #edf1f5; }
+.workflow-provider-summary-detail span { color: #7c8b9e; line-height: 1.45; }
+.workflow-preview-panel { top: calc(var(--workspace-header-height, 72px) + 20px); padding: 18px; border-color: #dbe5f0; box-shadow: 0 10px 28px rgba(31, 60, 100, .06); }
+.workflow-preview-heading h3 { margin-top: 3px; color: #304563; font-size: 15px; }
+.workflow-preview-window { margin-top: 14px; box-shadow: none; }
+.workflow-preview-thread { min-height: 225px; padding: 13px 10px; }
+.workflow-preview-empty { min-height: 180px; padding: 18px; }
+.workflow-preview-empty strong { font-size: 12px; }
+.workflow-preview-empty p { max-width: 205px; }
+.workflow-preview-meta { align-items: center; gap: 4px 12px; padding-top: 11px; margin-top: 12px; border-top: 1px solid #edf1f5; }
+.workflow-preview-meta span { padding: 0; background: transparent; color: #8290a1; font-size: 10px; }
+.workflow-preview-meta span + span::before { content: "·"; margin-right: 12px; color: #c0c9d4; }
+.workflow-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 1260px) {
+  .workflow-layout { grid-template-columns: 200px minmax(430px, 1fr) 280px; gap: 20px; }
+  .workflow-assist-card { padding: 20px; }
+}
+@media (max-width: 1100px) {
+  .workflow-layout { grid-template-columns: 210px minmax(0, 1fr); }
+  .workflow-preview-panel { position: static; grid-column: 2; }
+  .workflow-preview-window { max-width: 440px; }
+}
+@media (max-width: 820px) {
+  .workflow-workspace { gap: 24px; padding-top: 24px; }
+  .workflow-page-header, .workflow-builder-heading { align-items: flex-start; flex-direction: column; }
+  .workflow-page-actions { width: 100%; justify-content: flex-end; }
+  .workflow-model-banner { align-items: flex-start; padding: 14px; }
+  .workflow-layout { display: block; }
+  .workflow-library, .workflow-builder, .workflow-preview-panel { margin-bottom: 24px; }
+  .workflow-library { padding: 0; }
+  .workflow-library .panel-heading { border-bottom: 0; }
+  .workflow-library-select { display: grid; gap: 6px; margin: 0 0 12px; color: #708096; font-size: 11px; font-weight: 700; }
+  .workflow-library-select select { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid #d5dfeb; border-radius: 9px; background: #fff; color: #304563; font: inherit; }
+  .workflow-library-item { display: none; }
+  .workflow-builder { gap: 20px; }
+  .workflow-assist-card { padding: 18px; }
+  .workflow-assist-footer { align-items: flex-start; flex-direction: column; }
+  .workflow-assist-footer .primary-button { width: 100%; }
+  .workflow-readiness-card { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 16px 0; }
+  .workflow-readiness-list { grid-template-columns: 1fr; }
+  .workflow-readiness-card > .text-button { justify-self: start; }
+  .workflow-section-heading { align-items: flex-start; flex-direction: column; }
+  .workflow-section-heading .outline-button { align-self: flex-start; }
+  .workflow-step-card { padding-right: 11px; }
+  .workflow-step-title .status-pill { display: none; }
+  .workflow-step-grid { grid-template-columns: 1fr; }
+  .workflow-step-grid label:last-child:nth-child(3) { grid-column: auto; }
+  .workflow-step-footer { grid-template-columns: 1fr; }
+  .workflow-preview-panel { padding: 16px; }
+  .workflow-preview-window { max-width: none; }
+}
+@media (max-width: 520px) {
+  .workflow-page-actions { justify-content: space-between; }
+  .workflow-page-actions .primary-button { flex: 1; }
+  .workflow-model-banner { padding-right: 52px; }
+  .workflow-model-banner > .text-button { top: 10px; right: 12px; }
+  .workflow-assist-heading { gap: 10px; }
+  .workflow-assist-copy h3 { font-size: 16px; }
+  .workflow-assist-card textarea { min-height: 128px; }
+  .workflow-template-picker { grid-template-columns: 1fr; }
+  .workflow-step-toolbar { gap: 8px; }
+  .workflow-step-title svg { display: none; }
+  .workflow-step-management .danger-text { margin-left: 0; }
+}
 </style>

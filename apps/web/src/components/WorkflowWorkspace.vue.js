@@ -1,5 +1,5 @@
 import { computed, onMounted, ref, watch } from "vue";
-import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, Trash2, X } from "@lucide/vue";
+import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, X } from "@lucide/vue";
 import { generateWorkflow, templateSteps } from "../workflow-generator.js";
 const { defineProps, defineEmits, } = {};
 const props = defineProps();
@@ -90,10 +90,9 @@ const readiness = computed(() => {
     ];
 });
 const readinessPercent = computed(() => Math.round((readiness.value.filter((item) => item.complete).length / readiness.value.length) * 100));
-const readinessComplete = computed(() => readiness.value.filter((item) => item.complete));
-const readinessRemaining = computed(() => readiness.value.filter((item) => !item.complete).slice(0, 3));
+const readinessRemaining = computed(() => readiness.value.filter((item) => !item.complete));
 const configurationComplete = computed(() => readinessRemaining.value.length === 0);
-const configurationLabel = computed(() => configurationComplete.value ? "Configuration complete" : `${readinessPercent.value}% configured`);
+const configurationLabel = computed(() => configurationComplete.value ? "Configuration complete" : "Needs setup");
 const providerStep = computed(() => draftSteps.value.find((step) => step.type === "lookup" || step.type === "generate_link") ?? null);
 const providerFailureBehavior = computed(() => providerStep.value ? stepConfigValue(providerStep.value, "failureBehavior") : "capture_lead");
 function clone(value) {
@@ -133,6 +132,19 @@ function markDirty() {
 }
 function formatLabel(value) {
     return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+function readinessLabel(label) {
+    if (label === "Workflow goal is defined")
+        return "Goal defined";
+    if (label === "Questions and capture fields are defined")
+        return "Add at least one step";
+    if (label === "Completion path is defined")
+        return "Add completion behavior";
+    if (label === "Failure and handoff path is defined")
+        return "Decide what happens if unavailable";
+    if (label.endsWith(" is connected"))
+        return label;
+    return label;
 }
 function stepTypeLabel(type) {
     return stepTypes.find((item) => item.value === type)?.label ?? formatLabel(type || "Step");
@@ -278,7 +290,7 @@ async function saveWorkflow() {
         if (payload.action)
             workflowDraft.value = clone(payload.action);
         draftIsDirty.value = false;
-        workflowSaveMessage.value = "Workflow saved. Runtime will use the updated steps.";
+        workflowSaveMessage.value = "Saved. Runtime will use the updated steps.";
         emit("refresh");
     }
     catch (error) {
@@ -339,22 +351,21 @@ let __VLS_intrinsics;
 let __VLS_directives;
 void __VLS_ctx, __VLS_components, __VLS_intrinsics, __VLS_directives;
 const __VLS_template = () => {
+    __VLS_withDotValue(draftIsDirty, {});
     __VLS_withDotValue(workflowDraft, {});
     __VLS_withDotValue(workflowSaveLoading, {});
-    __VLS_withDotValue(draftIsDirty, {});
     __VLS_withDotValue(showModelBanner, {});
     __VLS_withDotValue(workflowActions, {});
     __VLS_withDotValue(selectedWorkflowId, {});
-    __VLS_withDotValue(showTemplatePicker, {});
-    __VLS_withDotValue(configurationComplete, {});
     __VLS_withDotValue(workflowDescription, {});
+    __VLS_withDotValue(showTemplatePicker, {});
     __VLS_withDotValue(readinessRemaining, {});
-    __VLS_withDotValue(providerStep, {});
-    __VLS_withDotValue(workflowProvider, {});
-    __VLS_withDotValue(providerConnected, {});
     __VLS_withDotValue(selectedStepIndex, {});
     __VLS_withDotValue(draftSteps, {});
+    __VLS_withDotValue(providerConnected, {});
     __VLS_withDotValue(advancedOpen, {});
+    __VLS_withDotValue(providerStep, {});
+    __VLS_withDotValue(workflowProvider, {});
     __VLS_withDotValue(previewStep, {});
     __VLS_withDotValue(workflowSaveError, {});
     __VLS_withDotValue(workflowSaveMessage, {});
@@ -486,6 +497,191 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['save-clean']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-icon']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['active']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item-icon']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['active']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item-icon']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-icon']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-copy']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-copy']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-copy']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-footer']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-footer']} */ ;
+    /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-template-trigger']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-template-picker']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-template-picker']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-template-picker']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-template-picker']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-configuration-label']} */ ;
+    /** @type {__VLS_StyleScopedClasses['complete']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['complete']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['complete']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-test-status']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-rail']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-rail']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-edit-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-condition-box']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-box']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-advanced-settings']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-advanced-settings']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-management']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-management']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-management']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-management']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty-builder']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty-builder']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty-builder']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-thread']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-footer']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-footer']} */ ;
+    /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-readiness-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-grid']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-grid']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-footer']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-copy']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-template-picker']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-toolbar']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-management']} */ ;
+    /** @type {__VLS_StyleScopedClasses['danger-text']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "view-content workflow-workspace" },
     });
@@ -503,9 +699,10 @@ const __VLS_template = () => {
     __VLS_asFunctionalElement1(__VLS_intrinsics.h2, __VLS_intrinsics.h2)({});
     __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-        ...{ class: "toolbar-actions" },
+        ...{ class: "toolbar-actions workflow-page-actions" },
     });
     /** @type {__VLS_StyleScopedClasses['toolbar-actions']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
         ...{ onClick: (...[$event]) => {
                 void $event;
@@ -513,19 +710,19 @@ const __VLS_template = () => {
                 // @ts-ignore
                 [emit,];
             } },
-        ...{ class: "outline-button small" },
+        ...{ class: "text-button" },
         type: "button",
     });
-    /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
-    /** @type {__VLS_StyleScopedClasses['small']} */ ;
+    /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
         ...{ onClick: (saveWorkflow) },
-        ...{ class: "primary-button small" },
+        ...{ class: (['primary-button small', { 'save-clean': !draftIsDirty.value }]) },
         type: "button",
         disabled: (!workflowDraft.value || workflowSaveLoading.value || !draftIsDirty.value),
     });
     /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
     /** @type {__VLS_StyleScopedClasses['small']} */ ;
+    /** @type {__VLS_StyleScopedClasses['save-clean']} */ ;
     let __VLS_0;
     /** @ts-ignore @type { | typeof Save} */
     Save;
@@ -539,7 +736,7 @@ const __VLS_template = () => {
         strokeWidth: (1.8),
         'aria-hidden': "true",
     }, ...__VLS_functionalComponentArgsRest(__VLS_1));
-    (workflowSaveLoading.value ? 'Saving…' : 'Save workflow');
+    (workflowSaveLoading.value ? 'Saving…' : draftIsDirty.value ? 'Save workflow' : 'Saved ✓');
     if (showModelBanner.value) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ...{ class: "workflow-model-banner" },
@@ -601,7 +798,7 @@ const __VLS_template = () => {
                 void $event;
                 return (__VLS_unwrap(emit, {})('open-action', ''));
                 // @ts-ignore
-                [emit, workflowDraft, workflowSaveLoading, workflowSaveLoading, draftIsDirty, showModelBanner, workflowActions,];
+                [emit, draftIsDirty, draftIsDirty, draftIsDirty, workflowDraft, workflowSaveLoading, workflowSaveLoading, showModelBanner, workflowActions,];
             } },
         ...{ class: "outline-button small" },
         type: "button",
@@ -621,6 +818,23 @@ const __VLS_template = () => {
         strokeWidth: (1.9),
         'aria-hidden': "true",
     }, ...__VLS_functionalComponentArgsRest(__VLS_11));
+    __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({
+        ...{ class: "workflow-library-select" },
+    });
+    /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
+    __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
+        value: (selectedWorkflowId.value),
+    });
+    const __VLS_15 = __VLS_tryAsConstant((workflowActions.value));
+    for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_15))) {
+        __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+            key: (action.id),
+            value: (action.id),
+        });
+        (action.name);
+        // @ts-ignore
+        [workflowActions, selectedWorkflowId,];
+    }
     if (!workflowActions.value.length) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ...{ class: "workflow-empty" },
@@ -630,19 +844,19 @@ const __VLS_template = () => {
             ...{ class: "workflow-empty-icon" },
         });
         /** @type {__VLS_StyleScopedClasses['workflow-empty-icon']} */ ;
-        let __VLS_15;
+        let __VLS_16;
         /** @ts-ignore @type { | typeof GitBranch} */
         GitBranch;
         // @ts-ignore
-        const __VLS_16 = __VLS_asFunctionalComponent1(__VLS_15, new __VLS_15({
+        const __VLS_17 = __VLS_asFunctionalComponent1(__VLS_16, new __VLS_16({
             // @ts-ignore
             size: (22), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_17 = __VLS_16({
+        const __VLS_18 = __VLS_17({
             size: (22),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_16));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_17));
         __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
@@ -659,22 +873,22 @@ const __VLS_template = () => {
         });
         /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
         /** @type {__VLS_StyleScopedClasses['small']} */ ;
-        let __VLS_20;
+        let __VLS_21;
         /** @ts-ignore @type { | typeof ArrowRight} */
         ArrowRight;
         // @ts-ignore
-        const __VLS_21 = __VLS_asFunctionalComponent1(__VLS_20, new __VLS_20({
+        const __VLS_22 = __VLS_asFunctionalComponent1(__VLS_21, new __VLS_21({
             // @ts-ignore
             size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_22 = __VLS_21({
+        const __VLS_23 = __VLS_22({
             size: (14),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_21));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_22));
     }
-    const __VLS_25 = __VLS_tryAsConstant((workflowActions.value));
-    for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_25))) {
+    const __VLS_26 = __VLS_tryAsConstant((workflowActions.value));
+    for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_26))) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
             ...{ onClick: (...[$event]) => {
                     void $event;
@@ -692,46 +906,160 @@ const __VLS_template = () => {
             ...{ class: "workflow-library-item-icon" },
         });
         /** @type {__VLS_StyleScopedClasses['workflow-library-item-icon']} */ ;
-        let __VLS_26;
+        let __VLS_27;
         /** @ts-ignore @type { | typeof GitBranch} */
         GitBranch;
         // @ts-ignore
-        const __VLS_27 = __VLS_asFunctionalComponent1(__VLS_26, new __VLS_26({
+        const __VLS_28 = __VLS_asFunctionalComponent1(__VLS_27, new __VLS_27({
             // @ts-ignore
             size: (16), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_28 = __VLS_27({
+        const __VLS_29 = __VLS_28({
             size: (16),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_27));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_28));
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
         (action.name);
         __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
         (action.steps?.length ?? 0);
         (formatLabel(action.executionMode || 'FORM_FLOW'));
-        let __VLS_31;
+        let __VLS_32;
         /** @ts-ignore @type { | typeof ChevronDown} */
         ChevronDown;
         // @ts-ignore
-        const __VLS_32 = __VLS_asFunctionalComponent1(__VLS_31, new __VLS_31({
+        const __VLS_33 = __VLS_asFunctionalComponent1(__VLS_32, new __VLS_32({
             // @ts-ignore
             size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_33 = __VLS_32({
+        const __VLS_34 = __VLS_33({
             size: (15),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_32));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_33));
         // @ts-ignore
         [selectedWorkflowId,];
     }
     if (workflowDraft.value) {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-template-section" },
+        __VLS_asFunctionalElement1(__VLS_intrinsics.main, __VLS_intrinsics.main)({
+            ...{ class: "workflow-builder" },
         });
-        /** @type {__VLS_StyleScopedClasses['workflow-template-section']} */ ;
+        /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-builder-heading" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+            ...{ class: "eyebrow" },
+        });
+        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.h2, __VLS_intrinsics.h2)({});
+        (workflowDraft.value.name);
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
+        (workflowDraft.value.description || 'Describe the customer outcome this workflow owns.');
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-builder-actions" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-builder-actions']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (openAction) },
+            ...{ class: "outline-button small" },
+            type: "button",
+        });
+        /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
+        /** @type {__VLS_StyleScopedClasses['small']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-status-group" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-status-group']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: "workflow-mode-label" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-mode-label']} */ ;
+        (formatLabel(workflowDraft.value.executionMode || 'FORM_FLOW'));
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: "status-pill new" },
+        });
+        /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+        /** @type {__VLS_StyleScopedClasses['new']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.section, __VLS_intrinsics.section)({
+            ...{ class: "workflow-assist-card" },
+            'aria-labelledby': "workflow-assist-heading",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-assist-heading" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-assist-heading']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-assist-icon" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-assist-icon']} */ ;
+        let __VLS_37;
+        /** @ts-ignore @type { | typeof Sparkles} */
+        Sparkles;
+        // @ts-ignore
+        const __VLS_38 = __VLS_asFunctionalComponent1(__VLS_37, new __VLS_37({
+            // @ts-ignore
+            size: (18), strokeWidth: (1.8), 'aria-hidden': "true",
+        }));
+        const __VLS_39 = __VLS_38({
+            size: (18),
+            strokeWidth: (1.8),
+            'aria-hidden': "true",
+        }, ...__VLS_functionalComponentArgsRest(__VLS_38));
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-assist-copy" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-assist-copy']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+            ...{ class: "eyebrow" },
+        });
+        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({
+            id: "workflow-assist-heading",
+        });
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.textarea, __VLS_intrinsics.textarea)({
+            ...{ onKeydown: (generateStarter) },
+            ...{ onKeydown: (generateStarter) },
+            ref: "workflowAssistInput",
+            value: (workflowDescription.value),
+            rows: "4",
+            placeholder: "Example: Ask the child’s age, swimming ability, location, and preferred days, then show available classes.",
+        });
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-assist-footer" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-assist-footer']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (generateStarter) },
+            ...{ class: "primary-button" },
+            type: "button",
+            'aria-label': "Generate steps",
+            disabled: (!workflowDescription.value.trim()),
+        });
+        /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+        let __VLS_42;
+        /** @ts-ignore @type { | typeof Sparkles} */
+        Sparkles;
+        // @ts-ignore
+        const __VLS_43 = __VLS_asFunctionalComponent1(__VLS_42, new __VLS_42({
+            // @ts-ignore
+            size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
+        }));
+        const __VLS_44 = __VLS_43({
+            size: (15),
+            strokeWidth: (1.8),
+            'aria-hidden': "true",
+        }, ...__VLS_functionalComponentArgsRest(__VLS_43));
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-template-flow" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-template-flow']} */ ;
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
             ...{ onClick: (...[$event]) => {
                     void $event;
@@ -739,34 +1067,34 @@ const __VLS_template = () => {
                         throw 0;
                     return (showTemplatePicker.value = !showTemplatePicker.value);
                     // @ts-ignore
-                    [workflowDraft, showTemplatePicker, showTemplatePicker,];
+                    [workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDescription, workflowDescription, showTemplatePicker, showTemplatePicker,];
                 } },
             ...{ class: "text-button workflow-template-trigger" },
             type: "button",
         });
         /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
         /** @type {__VLS_StyleScopedClasses['workflow-template-trigger']} */ ;
-        let __VLS_36;
+        let __VLS_47;
         /** @ts-ignore @type { | typeof ChevronDown} */
         ChevronDown;
         // @ts-ignore
-        const __VLS_37 = __VLS_asFunctionalComponent1(__VLS_36, new __VLS_36({
+        const __VLS_48 = __VLS_asFunctionalComponent1(__VLS_47, new __VLS_47({
             // @ts-ignore
             size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_38 = __VLS_37({
+        const __VLS_49 = __VLS_48({
             size: (14),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_37));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_48));
         if (showTemplatePicker.value) {
             __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
                 ...{ class: "workflow-template-picker" },
             });
             /** @type {__VLS_StyleScopedClasses['workflow-template-picker']} */ ;
             __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
-            const __VLS_41 = __VLS_tryAsConstant((__VLS_unwrap(workflowTemplates, {})));
-            for (const [template] of __VLS_vFor(__VLS_nonNull(__VLS_41))) {
+            const __VLS_52 = __VLS_tryAsConstant((__VLS_unwrap(workflowTemplates, {})));
+            for (const [template] of __VLS_vFor(__VLS_nonNull(__VLS_52))) {
                 __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
                     ...{ onClick: (...[$event]) => {
                             void $event;
@@ -789,140 +1117,67 @@ const __VLS_template = () => {
                 [];
             }
         }
-    }
-    if (workflowDraft.value) {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.main, __VLS_intrinsics.main)({
-            ...{ class: "workflow-builder" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-builder-heading" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "eyebrow" },
-        });
-        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
-        (workflowDraft.value.name);
-        __VLS_asFunctionalElement1(__VLS_intrinsics.h2, __VLS_intrinsics.h2)({});
-        (workflowDraft.value.name);
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
-        (workflowDraft.value.description || 'Describe the customer outcome this workflow owns.');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-builder-actions" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-builder-actions']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-            ...{ onClick: (openAction) },
-            ...{ class: "outline-button small" },
-            type: "button",
-        });
-        /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
-        /** @type {__VLS_StyleScopedClasses['small']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: (['status-pill', configurationComplete.value ? 'booked' : 'qualified']) },
-        });
-        /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
-        (__VLS_unwrap(configurationLabel, {}));
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "status-pill new" },
-        });
-        /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
-        /** @type {__VLS_StyleScopedClasses['new']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-assist-card" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-assist-icon" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-assist-icon']} */ ;
-        let __VLS_42;
-        /** @ts-ignore @type { | typeof Sparkles} */
-        Sparkles;
-        // @ts-ignore
-        const __VLS_43 = __VLS_asFunctionalComponent1(__VLS_42, new __VLS_42({
-            // @ts-ignore
-            size: (18), strokeWidth: (1.8), 'aria-hidden': "true",
-        }));
-        const __VLS_44 = __VLS_43({
-            size: (18),
-            strokeWidth: (1.8),
-            'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_43));
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-assist-copy" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-assist-copy']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "eyebrow" },
-        });
-        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.textarea, __VLS_intrinsics.textarea)({
-            ...{ onKeydown: (generateStarter) },
-            ...{ onKeydown: (generateStarter) },
-            ref: "workflowAssistInput",
-            value: (workflowDescription.value),
-            rows: "2",
-            placeholder: "Example: We ask the child’s age, swimming ability, location, and preferred days, then show available classes.",
-        });
-        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-            ...{ onClick: (generateStarter) },
-            ...{ class: "primary-button small" },
-            type: "button",
-            disabled: (!workflowDescription.value.trim()),
-        });
-        /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
-        /** @type {__VLS_StyleScopedClasses['small']} */ ;
-        let __VLS_47;
-        /** @ts-ignore @type { | typeof Sparkles} */
-        Sparkles;
-        // @ts-ignore
-        const __VLS_48 = __VLS_asFunctionalComponent1(__VLS_47, new __VLS_47({
-            // @ts-ignore
-            size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
-        }));
-        const __VLS_49 = __VLS_48({
-            size: (14),
-            strokeWidth: (1.8),
-            'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_48));
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        __VLS_asFunctionalElement1(__VLS_intrinsics.section, __VLS_intrinsics.section)({
             ...{ class: "workflow-readiness-card" },
+            'aria-labelledby': "workflow-setup-heading",
         });
         /** @type {__VLS_StyleScopedClasses['workflow-readiness-card']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: "workflow-sr-only" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-sr-only']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-readiness-heading" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-readiness-heading']} */ ;
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
             ...{ class: "eyebrow" },
         });
         /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
-        (readinessRemaining.value.length ? 'Finish these next' : 'Setup complete');
+        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({
+            id: "workflow-setup-heading",
+        });
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: (['workflow-configuration-label', { complete: __VLS_unwrap(configurationComplete, {}) }]) },
+        });
+        /** @type {__VLS_StyleScopedClasses['complete']} */ ;
+        /** @type {__VLS_StyleScopedClasses['workflow-configuration-label']} */ ;
+        (__VLS_unwrap(configurationLabel, {}));
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ...{ class: "workflow-readiness-list" },
         });
         /** @type {__VLS_StyleScopedClasses['workflow-readiness-list']} */ ;
-        if (configurationComplete.value) {
+        const __VLS_53 = __VLS_tryAsConstant((__VLS_unwrap(readiness, {})));
+        for (const [item] of __VLS_vFor(__VLS_nonNull(__VLS_53))) {
             __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-                ...{ class: "complete" },
+                key: (item.label),
+                ...{ class: ({ complete: item.complete, incomplete: !item.complete }) },
             });
             /** @type {__VLS_StyleScopedClasses['complete']} */ ;
-            let __VLS_52;
-            /** @ts-ignore @type { | typeof Check} */
-            Check;
-            // @ts-ignore
-            const __VLS_53 = __VLS_asFunctionalComponent1(__VLS_52, new __VLS_52({
+            /** @type {__VLS_StyleScopedClasses['incomplete']} */ ;
+            if (item.complete) {
+                let __VLS_54;
+                /** @ts-ignore @type { | typeof Check} */
+                Check;
                 // @ts-ignore
-                size: (14), strokeWidth: (2), 'aria-hidden': "true",
-            }));
-            const __VLS_54 = __VLS_53({
-                size: (14),
-                strokeWidth: (2),
-                'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_53));
+                const __VLS_55 = __VLS_asFunctionalComponent1(__VLS_54, new __VLS_54({
+                    // @ts-ignore
+                    size: (14), strokeWidth: (2), 'aria-hidden': "true",
+                }));
+                const __VLS_56 = __VLS_55({
+                    size: (14),
+                    strokeWidth: (2),
+                    'aria-hidden': "true",
+                }, ...__VLS_functionalComponentArgsRest(__VLS_55));
+            }
+            else {
+                __VLS_asFunctionalElement1(__VLS_intrinsics.i, __VLS_intrinsics.i)({
+                    'aria-hidden': "true",
+                });
+            }
+            (readinessLabel(item.label));
+            // @ts-ignore
+            [configurationComplete, configurationLabel, readiness,];
         }
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
             ...{ class: "workflow-test-status" },
@@ -931,18 +1186,6 @@ const __VLS_template = () => {
         __VLS_asFunctionalElement1(__VLS_intrinsics.i, __VLS_intrinsics.i)({
             'aria-hidden': "true",
         });
-        const __VLS_57 = __VLS_tryAsConstant((readinessRemaining.value));
-        for (const [item] of __VLS_vFor(__VLS_nonNull(__VLS_57))) {
-            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-                key: (item.label),
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.i, __VLS_intrinsics.i)({
-                'aria-hidden': "true",
-            });
-            (item.label.replace('Questions and capture fields are defined', 'Add at least one step').replace('Completion path is defined', 'Add completion behavior').replace('Failure and handoff path is defined', 'Choose what happens if unavailable'));
-            // @ts-ignore
-            [workflowDraft, workflowDraft, workflowDraft, workflowDraft, configurationComplete, configurationComplete, configurationLabel, workflowDescription, workflowDescription, readinessRemaining, readinessRemaining,];
-        }
         if (readinessRemaining.value.length) {
             __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
                 ...{ onClick: (continueSetup) },
@@ -950,85 +1193,19 @@ const __VLS_template = () => {
                 type: "button",
             });
             /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
-            let __VLS_58;
+            let __VLS_59;
             /** @ts-ignore @type { | typeof ArrowRight} */
             ArrowRight;
             // @ts-ignore
-            const __VLS_59 = __VLS_asFunctionalComponent1(__VLS_58, new __VLS_58({
+            const __VLS_60 = __VLS_asFunctionalComponent1(__VLS_59, new __VLS_59({
                 // @ts-ignore
                 size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
             }));
-            const __VLS_60 = __VLS_59({
+            const __VLS_61 = __VLS_60({
                 size: (14),
                 strokeWidth: (1.8),
                 'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_59));
-        }
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-provider-summary" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-provider-summary-heading" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-heading']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "eyebrow" },
-        });
-        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
-        (providerStep.value ? formatLabel(stepConfigValue(providerStep.value, 'provider') || workflowProvider.value || 'Provider') : 'No provider configured');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: (['status-pill', providerStep.value && providerConnected.value ? 'booked' : 'new']) },
-        });
-        /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
-        (providerStep.value ? (providerConnected.value ? 'Connected' : 'Needs connection') : 'Optional');
-        if (providerStep.value) {
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-provider-summary-detail" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
-            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-            __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
-                ...{ onChange: (...[$event]) => {
-                        void $event;
-                        if (!(workflowDraft.value))
-                            throw 0;
-                        if (!(providerStep.value))
-                            throw 0;
-                        return (setStepConfigFromEvent(providerStep.value, 'failureBehavior', $event));
-                        // @ts-ignore
-                        [readinessRemaining, providerStep, providerStep, providerStep, providerStep, providerStep, providerStep, workflowProvider, providerConnected, providerConnected,];
-                    } },
-                value: (__VLS_unwrap(providerFailureBehavior, {})),
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
-                value: "capture_lead",
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
-                value: "handoff",
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
-                value: "retry",
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
-                value: "stop",
-            });
-        }
-        else {
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-provider-summary-detail" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
-            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-                ...{ onClick: (configureProvider) },
-                ...{ class: "outline-button small" },
-                type: "button",
-            });
-            /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
-            /** @type {__VLS_StyleScopedClasses['small']} */ ;
+            }, ...__VLS_functionalComponentArgsRest(__VLS_60));
         }
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ref: "workflowStepList",
@@ -1053,28 +1230,28 @@ const __VLS_template = () => {
                         throw 0;
                     return (addWorkflowStep());
                     // @ts-ignore
-                    [providerFailureBehavior,];
+                    [readinessRemaining,];
                 } },
-            ...{ class: "primary-button small" },
+            ...{ class: "outline-button small" },
             type: "button",
         });
-        /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+        /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
         /** @type {__VLS_StyleScopedClasses['small']} */ ;
-        let __VLS_63;
+        let __VLS_64;
         /** @ts-ignore @type { | typeof Plus} */
         Plus;
         // @ts-ignore
-        const __VLS_64 = __VLS_asFunctionalComponent1(__VLS_63, new __VLS_63({
+        const __VLS_65 = __VLS_asFunctionalComponent1(__VLS_64, new __VLS_64({
             // @ts-ignore
             size: (14), strokeWidth: (1.9), 'aria-hidden': "true",
         }));
-        const __VLS_65 = __VLS_64({
+        const __VLS_66 = __VLS_65({
             size: (14),
             strokeWidth: (1.9),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_64));
-        const __VLS_68 = __VLS_tryAsConstant((draftSteps.value));
-        for (const [step, index] of __VLS_vFor(__VLS_nonNull(__VLS_68))) {
+        }, ...__VLS_functionalComponentArgsRest(__VLS_65));
+        const __VLS_69 = __VLS_tryAsConstant((draftSteps.value));
+        for (const [step, index] of __VLS_vFor(__VLS_nonNull(__VLS_69))) {
             __VLS_asFunctionalElement1(__VLS_intrinsics.article, __VLS_intrinsics.article)({
                 ...{ onClick: (...[$event]) => {
                         void $event;
@@ -1110,19 +1287,19 @@ const __VLS_template = () => {
                 ...{ class: "workflow-step-title" },
             });
             /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
-            let __VLS_69;
+            let __VLS_70;
             /** @ts-ignore @type { | typeof GripVertical} */
             GripVertical;
             // @ts-ignore
-            const __VLS_70 = __VLS_asFunctionalComponent1(__VLS_69, new __VLS_69({
+            const __VLS_71 = __VLS_asFunctionalComponent1(__VLS_70, new __VLS_70({
                 // @ts-ignore
                 size: (16), strokeWidth: (1.8), 'aria-hidden': "true",
             }));
-            const __VLS_71 = __VLS_70({
+            const __VLS_72 = __VLS_71({
                 size: (16),
                 strokeWidth: (1.8),
                 'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_70));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_71));
             if (selectedStepIndex.value === index) {
                 __VLS_asFunctionalElement1(__VLS_intrinsics.input)({
                     ...{ onInput: (markDirty) },
@@ -1159,57 +1336,6 @@ const __VLS_template = () => {
             });
             /** @type {__VLS_StyleScopedClasses['workflow-edit-button']} */ ;
             (selectedStepIndex.value === index ? 'Done' : 'Edit');
-            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-                ...{ onClick: (...[$event]) => {
-                        void $event;
-                        if (!(workflowDraft.value))
-                            throw 0;
-                        return (moveWorkflowStep(index, -1));
-                        // @ts-ignore
-                        [selectedStepIndex,];
-                    } },
-                type: "button",
-                'aria-label': "Move step up",
-                disabled: (index === 0),
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-                ...{ onClick: (...[$event]) => {
-                        void $event;
-                        if (!(workflowDraft.value))
-                            throw 0;
-                        return (moveWorkflowStep(index, 1));
-                        // @ts-ignore
-                        [];
-                    } },
-                type: "button",
-                'aria-label': "Move step down",
-                disabled: (index === draftSteps.value.length - 1),
-            });
-            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-                ...{ onClick: (...[$event]) => {
-                        void $event;
-                        if (!(workflowDraft.value))
-                            throw 0;
-                        return (removeWorkflowStep(index));
-                        // @ts-ignore
-                        [draftSteps,];
-                    } },
-                type: "button",
-                'aria-label': "Delete step",
-            });
-            let __VLS_74;
-            /** @ts-ignore @type { | typeof Trash2} */
-            Trash2;
-            // @ts-ignore
-            const __VLS_75 = __VLS_asFunctionalComponent1(__VLS_74, new __VLS_74({
-                // @ts-ignore
-                size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
-            }));
-            const __VLS_76 = __VLS_75({
-                size: (15),
-                strokeWidth: (1.8),
-                'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_75));
             if (selectedStepIndex.value !== index) {
                 __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
                     ...{ class: "workflow-step-summary" },
@@ -1249,15 +1375,15 @@ const __VLS_template = () => {
                     ...{ onChange: (markDirty) },
                     value: (step.type),
                 });
-                const __VLS_79 = __VLS_tryAsConstant((__VLS_unwrap(stepTypes, {})));
-                for (const [type] of __VLS_vFor(__VLS_nonNull(__VLS_79))) {
+                const __VLS_75 = __VLS_tryAsConstant((__VLS_unwrap(stepTypes, {})));
+                for (const [type] of __VLS_vFor(__VLS_nonNull(__VLS_75))) {
                     __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                         key: (type.value),
                         value: (type.value),
                     });
                     (type.label);
                     // @ts-ignore
-                    [selectedStepIndex, stepTypes,];
+                    [selectedStepIndex, selectedStepIndex, stepTypes,];
                 }
                 if (step.type === 'capture' || step.type === 'ask' || step.type === 'form') {
                     __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
@@ -1268,8 +1394,8 @@ const __VLS_template = () => {
                     __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                         value: "",
                     });
-                    const __VLS_80 = __VLS_tryAsConstant((workflowDraft.value.fields ?? []));
-                    for (const [field] of __VLS_vFor(__VLS_nonNull(__VLS_80))) {
+                    const __VLS_76 = __VLS_tryAsConstant((workflowDraft.value.fields ?? []));
+                    for (const [field] of __VLS_vFor(__VLS_nonNull(__VLS_76))) {
                         __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                             key: (field.key),
                             value: (field.key),
@@ -1333,19 +1459,19 @@ const __VLS_template = () => {
                         ...{ class: "workflow-condition-icon" },
                     });
                     /** @type {__VLS_StyleScopedClasses['workflow-condition-icon']} */ ;
-                    let __VLS_81;
+                    let __VLS_77;
                     /** @ts-ignore @type { | typeof GitBranch} */
                     GitBranch;
                     // @ts-ignore
-                    const __VLS_82 = __VLS_asFunctionalComponent1(__VLS_81, new __VLS_81({
+                    const __VLS_78 = __VLS_asFunctionalComponent1(__VLS_77, new __VLS_77({
                         // @ts-ignore
                         size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
                     }));
-                    const __VLS_83 = __VLS_82({
+                    const __VLS_79 = __VLS_78({
                         size: (15),
                         strokeWidth: (1.8),
                         'aria-hidden': "true",
-                    }, ...__VLS_functionalComponentArgsRest(__VLS_82));
+                    }, ...__VLS_functionalComponentArgsRest(__VLS_78));
                     __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
                     __VLS_asFunctionalElement1(__VLS_intrinsics.textarea, __VLS_intrinsics.textarea)({
                         ...{ onInput: (markDirty) },
@@ -1523,8 +1649,8 @@ const __VLS_template = () => {
                 __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                     value: "",
                 });
-                const __VLS_86 = __VLS_tryAsConstant((draftSteps.value.filter((candidate) => candidate.id !== step.id)));
-                for (const [nextStep] of __VLS_vFor(__VLS_nonNull(__VLS_86))) {
+                const __VLS_82 = __VLS_tryAsConstant((draftSteps.value.filter((candidate) => candidate.id !== step.id)));
+                for (const [nextStep] of __VLS_vFor(__VLS_nonNull(__VLS_82))) {
                     __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                         key: (nextStep.id),
                         value: (nextStep.id),
@@ -1533,6 +1659,53 @@ const __VLS_template = () => {
                     // @ts-ignore
                     [draftSteps,];
                 }
+                __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                    ...{ class: "workflow-step-management" },
+                });
+                /** @type {__VLS_StyleScopedClasses['workflow-step-management']} */ ;
+                __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                    ...{ onClick: (...[$event]) => {
+                            void $event;
+                            if (!(workflowDraft.value))
+                                throw 0;
+                            if (!!(selectedStepIndex.value !== index))
+                                throw 0;
+                            return (moveWorkflowStep(index, -1));
+                            // @ts-ignore
+                            [];
+                        } },
+                    type: "button",
+                    disabled: (index === 0),
+                });
+                __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                    ...{ onClick: (...[$event]) => {
+                            void $event;
+                            if (!(workflowDraft.value))
+                                throw 0;
+                            if (!!(selectedStepIndex.value !== index))
+                                throw 0;
+                            return (moveWorkflowStep(index, 1));
+                            // @ts-ignore
+                            [];
+                        } },
+                    type: "button",
+                    disabled: (index === draftSteps.value.length - 1),
+                });
+                __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                    ...{ onClick: (...[$event]) => {
+                            void $event;
+                            if (!(workflowDraft.value))
+                                throw 0;
+                            if (!!(selectedStepIndex.value !== index))
+                                throw 0;
+                            return (removeWorkflowStep(index));
+                            // @ts-ignore
+                            [draftSteps,];
+                        } },
+                    ...{ class: "danger-text" },
+                    type: "button",
+                });
+                /** @type {__VLS_StyleScopedClasses['danger-text']} */ ;
                 __VLS_asFunctionalElement1(__VLS_intrinsics.details, __VLS_intrinsics.details)({
                     ...{ class: "workflow-technical-details" },
                 });
@@ -1558,6 +1731,31 @@ const __VLS_template = () => {
             /** @type {__VLS_StyleScopedClasses['workflow-empty-builder']} */ ;
             __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
             __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-empty-actions" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-empty-actions']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (generateStarter) },
+                ...{ class: "primary-button small" },
+                type: "button",
+                disabled: (!workflowDescription.value.trim()),
+            });
+            /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['small']} */ ;
+            let __VLS_83;
+            /** @ts-ignore @type { | typeof Sparkles} */
+            Sparkles;
+            // @ts-ignore
+            const __VLS_84 = __VLS_asFunctionalComponent1(__VLS_83, new __VLS_83({
+                // @ts-ignore
+                size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
+            }));
+            const __VLS_85 = __VLS_84({
+                size: (14),
+                strokeWidth: (1.8),
+                'aria-hidden': "true",
+            }, ...__VLS_functionalComponentArgsRest(__VLS_84));
             __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
                 ...{ onClick: (...[$event]) => {
                         void $event;
@@ -1567,26 +1765,92 @@ const __VLS_template = () => {
                             throw 0;
                         return (addWorkflowStep());
                         // @ts-ignore
-                        [draftSteps,];
+                        [workflowDescription, draftSteps,];
                     } },
-                ...{ class: "primary-button small" },
+                ...{ class: "outline-button small" },
                 type: "button",
             });
-            /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
             /** @type {__VLS_StyleScopedClasses['small']} */ ;
-            let __VLS_87;
-            /** @ts-ignore @type { | typeof ArrowRight} */
-            ArrowRight;
+            let __VLS_88;
+            /** @ts-ignore @type { | typeof Plus} */
+            Plus;
             // @ts-ignore
-            const __VLS_88 = __VLS_asFunctionalComponent1(__VLS_87, new __VLS_87({
+            const __VLS_89 = __VLS_asFunctionalComponent1(__VLS_88, new __VLS_88({
                 // @ts-ignore
                 size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
             }));
-            const __VLS_89 = __VLS_88({
+            const __VLS_90 = __VLS_89({
                 size: (14),
                 strokeWidth: (1.8),
                 'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_88));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_89));
+        }
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-provider-summary" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-provider-summary-heading" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-heading']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+            ...{ class: "eyebrow" },
+        });
+        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
+        (providerStep.value ? formatLabel(stepConfigValue(providerStep.value, 'provider') || workflowProvider.value || 'Provider') : 'No provider connected');
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: (['status-pill', providerStep.value && providerConnected.value ? 'booked' : 'new']) },
+        });
+        /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+        (providerStep.value ? (providerConnected.value ? 'Connected' : 'Needs connection') : 'Optional');
+        if (providerStep.value) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-provider-summary-detail" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
+                ...{ onChange: (...[$event]) => {
+                        void $event;
+                        if (!(workflowDraft.value))
+                            throw 0;
+                        if (!(providerStep.value))
+                            throw 0;
+                        return (setStepConfigFromEvent(providerStep.value, 'failureBehavior', $event));
+                        // @ts-ignore
+                        [providerConnected, providerConnected, providerStep, providerStep, providerStep, providerStep, providerStep, providerStep, workflowProvider,];
+                    } },
+                value: (__VLS_unwrap(providerFailureBehavior, {})),
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                value: "capture_lead",
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                value: "handoff",
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                value: "retry",
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                value: "stop",
+            });
+        }
+        else {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-provider-summary-detail" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (configureProvider) },
+                ...{ class: "outline-button small" },
+                type: "button",
+            });
+            /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['small']} */ ;
         }
     }
     if (workflowDraft.value) {
@@ -1605,7 +1869,6 @@ const __VLS_template = () => {
         });
         /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
         __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
-        (previewStep.value ? 'What customers will see' : 'Preview the experience');
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
             ...{ class: "preview-live-dot" },
         });
@@ -1659,15 +1922,15 @@ const __VLS_template = () => {
                     ...{ class: "workflow-preview-options" },
                 });
                 /** @type {__VLS_StyleScopedClasses['workflow-preview-options']} */ ;
-                const __VLS_92 = __VLS_tryAsConstant((previewStep.value.options));
-                for (const [option] of __VLS_vFor(__VLS_nonNull(__VLS_92))) {
+                const __VLS_93 = __VLS_tryAsConstant((previewStep.value.options));
+                for (const [option] of __VLS_vFor(__VLS_nonNull(__VLS_93))) {
                     __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
                         key: (option),
                         type: "button",
                     });
                     (option);
                     // @ts-ignore
-                    [workflowDraft, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, businessName,];
+                    [workflowDraft, providerFailureBehavior, businessName, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep,];
                 }
             }
             if (previewStep.value.type === 'lookup') {
@@ -1675,19 +1938,19 @@ const __VLS_template = () => {
                     ...{ class: "workflow-preview-lookup" },
                 });
                 /** @type {__VLS_StyleScopedClasses['workflow-preview-lookup']} */ ;
-                let __VLS_93;
+                let __VLS_94;
                 /** @ts-ignore @type { | typeof GitBranch} */
                 GitBranch;
                 // @ts-ignore
-                const __VLS_94 = __VLS_asFunctionalComponent1(__VLS_93, new __VLS_93({
+                const __VLS_95 = __VLS_asFunctionalComponent1(__VLS_94, new __VLS_94({
                     // @ts-ignore
                     size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
                 }));
-                const __VLS_95 = __VLS_94({
+                const __VLS_96 = __VLS_95({
                     size: (15),
                     strokeWidth: (1.8),
                     'aria-hidden': "true",
-                }, ...__VLS_functionalComponentArgsRest(__VLS_94));
+                }, ...__VLS_functionalComponentArgsRest(__VLS_95));
                 (formatLabel(stepConfigValue(previewStep.value, 'provider') || 'provider'));
             }
             if (previewStep.value.type === 'redirect') {
@@ -1709,19 +1972,19 @@ const __VLS_template = () => {
                 ...{ class: "workflow-preview-empty" },
             });
             /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-            let __VLS_98;
+            let __VLS_99;
             /** @ts-ignore @type { | typeof Sparkles} */
             Sparkles;
             // @ts-ignore
-            const __VLS_99 = __VLS_asFunctionalComponent1(__VLS_98, new __VLS_98({
+            const __VLS_100 = __VLS_asFunctionalComponent1(__VLS_99, new __VLS_99({
                 // @ts-ignore
                 size: (20), strokeWidth: (1.8), 'aria-hidden': "true",
             }));
-            const __VLS_100 = __VLS_99({
+            const __VLS_101 = __VLS_100({
                 size: (20),
                 strokeWidth: (1.8),
                 'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_99));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_100));
             __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
             __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
         }
@@ -1730,25 +1993,25 @@ const __VLS_template = () => {
                 ...{ class: "workflow-preview-input" },
             });
             /** @type {__VLS_StyleScopedClasses['workflow-preview-input']} */ ;
-            let __VLS_103;
+            let __VLS_104;
             /** @ts-ignore @type { | typeof ArrowRight} */
             ArrowRight;
             // @ts-ignore
-            const __VLS_104 = __VLS_asFunctionalComponent1(__VLS_103, new __VLS_103({
+            const __VLS_105 = __VLS_asFunctionalComponent1(__VLS_104, new __VLS_104({
                 // @ts-ignore
                 size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
             }));
-            const __VLS_105 = __VLS_104({
+            const __VLS_106 = __VLS_105({
                 size: (14),
                 strokeWidth: (1.8),
                 'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_104));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_105));
         }
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
             ...{ class: "form-help" },
         });
         /** @type {__VLS_StyleScopedClasses['form-help']} */ ;
-        (previewStep.value ? `Previewing step ${selectedStepIndex.value + 1} of ${draftSteps.value.length}.` : 'Add or select a step to see the customer experience.');
+        (previewStep.value ? `Previewing step ${selectedStepIndex.value + 1} of ${draftSteps.value.length}.` : 'Add or select a step to preview what visitors will experience.');
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ...{ class: "workflow-preview-meta" },
         });
@@ -1780,22 +2043,22 @@ const __VLS_template = () => {
             ...{ class: "workflow-save-note" },
         });
         /** @type {__VLS_StyleScopedClasses['workflow-save-note']} */ ;
-        let __VLS_108;
+        let __VLS_109;
         /** @ts-ignore @type { | typeof X} */
         X;
         // @ts-ignore
-        const __VLS_109 = __VLS_asFunctionalComponent1(__VLS_108, new __VLS_108({
+        const __VLS_110 = __VLS_asFunctionalComponent1(__VLS_109, new __VLS_109({
             // @ts-ignore
             size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_110 = __VLS_109({
+        const __VLS_111 = __VLS_110({
             size: (15),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_109));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_110));
     }
     // @ts-ignore
-    [workflowDraft, workflowDraft, configurationLabel, workflowProvider, workflowProvider, draftSteps, draftSteps, selectedStepIndex, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, workflowSaveError, workflowSaveError, workflowSaveMessage, workflowSaveMessage,];
+    [workflowDraft, workflowDraft, configurationLabel, draftSteps, draftSteps, selectedStepIndex, workflowProvider, workflowProvider, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, workflowSaveError, workflowSaveError, workflowSaveMessage, workflowSaveMessage,];
     return {};
 };
 void [__VLS_template];
