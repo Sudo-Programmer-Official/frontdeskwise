@@ -265,7 +265,9 @@ Example shape:
 ></script>
 ```
 
-The widget loads its configuration by site key, renders inside a shadow root, starts a public visitor conversation, sends questions to the API, displays citations, and offers lead capture when an answer falls back.
+The optional `data-pages` attribute accepts comma-separated URL paths and terminal-wildcard patterns. For example, `data-pages="/"` limits the widget to the home page and `data-pages="/,/services/*"` limits it to the home page plus service descendants. If omitted, the widget runs wherever the script is installed. Matching is based on `window.location.pathname`, ignores query/hash fragments, and normalizes trailing slashes. The loader checks the scope before creating its host or fetching configuration.
+
+The widget loads its configuration by site key, renders inside a shadow root, starts a public visitor conversation, sends questions to the API, displays citations, and offers lead capture when an answer falls back. See [widget-installation.md](./widget-installation.md) for the complete installation contract.
 
 The owner dashboard exposes the same assistant before installation, and the
 public sample workspace uses the read-only test route so a prospect can ask a

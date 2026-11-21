@@ -61,7 +61,7 @@ Demo sessions are hashed before storage and expire after 48 hours. Firebase Auth
 
 Migration `006_retrieval_search_fields.sql` adds a generated `tsvector` plus embedding metadata, and `007_grounded_answer_contract.sql` adds confidence, citations, and retrieval diagnostics fields. Set `OPENAI_API_KEY` and optionally `FRONTDESKWISE_EMBEDDING_MODEL` to enable asynchronous pgvector hydration. Without a healthy provider, the API may continue in explicitly labeled degraded PostgreSQL full-text mode with conservative abstention.
 
-Migration `008_embedding_jobs_widget.sql` adds retryable embedding jobs and public widget site keys. The install endpoint returns a copyable script snippet; `apps/web/public/widget.js` is the current shadow-DOM widget implementation.
+Migration `008_embedding_jobs_widget.sql` adds retryable embedding jobs and public widget site keys. The install endpoint returns a copyable script snippet; `apps/web/public/widget.js` is the current shadow-DOM widget implementation. Integrators can optionally add `data-pages="/path,/other/*"` to scope the widget to selected URL paths; see [`docs/widget-installation.md`](../../docs/widget-installation.md).
 
 Assistant messages now carry a grounded-answer contract: confidence score/band, citations, retrieval mode, and candidate count. Low-confidence answers become open knowledge gaps; an owner-approved answer is reused for the exact normalized question until it is changed.
 

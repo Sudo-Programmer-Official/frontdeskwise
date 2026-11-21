@@ -74,6 +74,21 @@ test("pricing and permissions do not fall back to unrelated web pages", () => {
   assert.deepEqual(rankMatches([unrelated], sources, "policy"), []);
 });
 
+test("title-only web shells cannot satisfy an answerability decision", () => {
+  const shell = {
+    sourceId: "home",
+    content: "Salon Management Software for More Bookings | SalonFlow",
+    metadata: { pageType: "web_page", tokenCount: 8 },
+  };
+  const decision = answerabilityDecision(
+    [{ chunk: shell, score: 0.9, evidenceScore: 0.9 }],
+    sources,
+    "services",
+  );
+  assert.equal(decision.answerable, false);
+  assert.equal(decision.reason, "insufficient_content_quality");
+});
+
 test("getting started filters legal pages and combines corroborating product chunks", () => {
   const matches = [
     { chunk: { sourceId: "home", content: "Try it free and start with a task." }, score: 0.4, evidenceScore: 0.34 },

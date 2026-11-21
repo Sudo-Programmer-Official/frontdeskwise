@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CrawlError, extractBrandColors, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
+import { CrawlError, detectSpaIndicators, extractBrandColors, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
 
 test("normalisePublicUrl adds https to a bare domain", () => {
   assert.equal(normalisePublicUrl("  example.com/path  "), "https://example.com/path");
@@ -30,4 +30,12 @@ test("extractBrandColors prefers website theme and brand colors over neutrals", 
     <body style="background: #f8fafc; color: #172033"></body>
   `);
   assert.deepEqual(colors.slice(0, 2), ["#4F46E5", "#0F766E"]);
+});
+
+test("detectSpaIndicators identifies an empty client-rendered app shell", () => {
+  const indicators = detectSpaIndicators(`
+    <html><head><script type="module" src="/assets/app.js"></script></head>
+    <body><div id="app"></div></body></html>
+  `);
+  assert.deepEqual(indicators, ["low_visible_text", "app_mount_point", "module_script"]);
 });

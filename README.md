@@ -74,7 +74,7 @@ Demo creation now performs a bounded same-site crawl (up to 20 pages, depth 2), 
 
 The ingestion chunker targets approximately 520 tokens with 80-token overlap and preserves heading/page-type metadata. Owner routes now require the issued demo bearer token. Retrieval uses tenant-scoped PostgreSQL full-text search immediately and will add reciprocal-rank hybrid results when the optional embedding worker populates pgvector vectors.
 
-The current widget is served as `apps/web/public/widget.js`. An authenticated owner can call `GET /api/v1/demo/:slug/widget/install` to receive the site key and copyable script snippet. Public widget traffic resolves by site key, not by database credentials or owner tokens.
+The current widget is served as `apps/web/public/widget.js`. An authenticated owner can call `GET /api/v1/demo/:slug/widget/install` to receive the site key and copyable script snippet. Public widget traffic resolves by site key, not by database credentials or owner tokens. Optional page scoping through `data-pages` is documented in [`docs/widget-installation.md`](docs/widget-installation.md).
 
 ## Product principle
 

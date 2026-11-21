@@ -440,7 +440,13 @@ interface WorkspaceStats {
   actions: Array<{ question: string; count: number; status: string }>;
   handoffs?: number;
   humanActive?: number;
-  setup: { completed: number; total: number; percent: number };
+  setup: {
+    completed: number;
+    total: number;
+    percent: number;
+    steps: Array<{ id: SetupStepId; label: string; complete: boolean }>;
+    nextRequiredStep: SetupStepId | null;
+  };
   conversionFunnels?: Array<{
     flowId: string;
     flowKey: string;
@@ -465,6 +471,14 @@ interface WorkspaceSource {
   lastCrawledAt: string;
 }
 
+type AgentPublishStatus = "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+
+interface AgentPublishing {
+  status: Exclude<AgentPublishStatus, "PUBLISHING">;
+  domain: string | null;
+  publishedAt: string | null;
+}
+
 interface WorkspacePayload {
   slug: string;
   status: string;
@@ -473,9 +487,13 @@ interface WorkspacePayload {
   branding?: { colors?: string[]; source?: string };
   suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
+  publishing?: AgentPublishing;
+  publishedAt?: string | null;
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
   stats?: WorkspaceStats;
 }
+
+type SetupStepId = "domain_verified" | "knowledge_ready" | "agent_tested" | "widget_installed" | "agent_published";
 
 interface BillingPlan {
   key: string;
@@ -508,6 +526,7 @@ interface BillingSnapshot {
     pendingBillingInterval: string | null;
     cancelAtPeriodEnd: boolean;
     lastPaymentStatus: string | null;
+    activationEmailQueuedAt: string | null;
     amountCents: number | null;
     currency: string;
     access: { allowed: boolean; reason: string };
@@ -980,6 +999,8 @@ const widgetInstall = ref<WidgetInstall | null>(null);
 const widgetInstallMessage = ref("");
 const widgetVerificationMessage = ref("");
 const widgetVerificationLoading = ref(false);
+const agentPublishing = ref<AgentPublishing>({ status: "NOT_PUBLISHED", domain: null, publishedAt: null });
+const agentPublishingLoading = ref(false);
 const widgetPreviewMode = ref<"desktop" | "mobile">("desktop");
 const ownershipVerification = ref<WorkspacePayload["ownership"] | null>(null);
 const verificationMethod = ref<VerificationMethod>("meta_tag");
@@ -1058,11 +1079,16 @@ const billingLoading = ref(false);
 const billingError = ref("");
 const billingMessage = ref("");
 const billingFlow = ref<"idle" | "processing" | "complete" | "pending" | "cancelled">("idle");
+type BillingSuccessState = "activating" | "pending" | "active" | "failed";
+const billingSuccessState = ref<BillingSuccessState>("activating");
+const billingSuccessExpectedPlanKey = ref("");
+let billingSuccessRunKey = "";
 const settingsTab = ref<SettingsTab>("general");
 const agentTab = ref<AgentTab>("behavior");
 const profileMenuOpen = ref(false);
 const sidebarAccountMenuOpen = ref(false);
 const setupDismissed = ref(false);
+const setupProgressOpen = ref(false);
 const showAllBusinesses = ref(false);
 const addBusinessOpen = ref(false);
 const addBusinessUrl = ref("");
@@ -1214,6 +1240,7 @@ const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
 
 const agentTabs: Array<{ id: AgentTab; label: string }> = [
   { id: "behavior", label: "Behavior" },
+  { id: "knowledge", label: "Knowledge" },
   { id: "appearance", label: "Appearance" },
   { id: "actions", label: "Quick actions" },
   { id: "test", label: "Test" },
@@ -1243,6 +1270,7 @@ const pageTitle = computed(() => {
   if (view.value === "privacy") return "Privacy Policy";
   if (view.value === "terms") return "Terms of Service";
   if (route.value.kind === "auth-reset") return "Reset your password";
+  if (route.value.kind === "billing-success") return "Subscription active";
   if (view.value === "admin") return "Admin control plane";
   if (view.value === "conversations" || view.value === "agent") return "Agent";
   if (view.value === "team" || view.value === "connections" || view.value === "billing") return "Settings";
@@ -1291,6 +1319,7 @@ const knowledgeTestAction = computed(() => {
   if (knowledgeSourcesNeedAttention.value) return { label: "Fix sources first", disabled: true };
   if (knowledgeTestContext.value === "answer") return { label: "Test this answer", disabled: false };
   if (knowledgeTestContext.value === "updated" || workspaceKnowledge.value?.status === "indexing") return { label: "Test updated knowledge", disabled: false };
+  if ((workspaceKnowledge.value?.openGaps ?? 0) > 0) return { label: "Test assistant anyway", disabled: false };
   return { label: "Test agent", disabled: false };
 });
 const chartMax = computed(() => Math.max(1, ...(workspaceStats.value?.trend ?? []).flatMap((point) => [point.conversations, point.leads])));
@@ -1300,6 +1329,18 @@ const trialDaysRemaining = computed(() => {
   return Math.max(0, Math.ceil((Date.parse(end) - Date.now()) / (24 * 60 * 60 * 1_000)));
 });
 const billingReadOnly = computed(() => Boolean(billingSnapshot.value && !billingSnapshot.value.billing.access.allowed && billingSnapshot.value.billing.mode !== "sandbox"));
+const billingSuccessPlanName = computed(() => billingSnapshot.value?.billing.plan.displayName ?? formatPlanLabel(billingSuccessExpectedPlanKey.value || "starter"));
+const billingSuccessPrice = computed(() => {
+  const billing = billingSnapshot.value?.billing;
+  if (!billing || billing.amountCents === null) return "Contact support";
+  return `${new Intl.NumberFormat("en-US", { style: "currency", currency: billing.currency.toUpperCase(), maximumFractionDigits: 0 }).format(billing.amountCents / 100)}/${billing.interval === "year" ? "year" : "month"}`;
+});
+const billingSuccessViewedKey = computed(() => {
+  const organizationId = authSnapshot.value?.activeOrganizationId ?? "workspace";
+  const sessionId = route.value.kind === "billing-success" ? route.value.sessionId : "";
+  return `frontdeskwise:billing-success-viewed:${organizationId}:${sessionId || billingSuccessExpectedPlanKey.value || "subscription"}`;
+});
+const billingSuccessToastKey = computed(() => `frontdeskwise:billing-success-toast:${authSnapshot.value?.activeOrganizationId ?? "workspace"}`);
 const settingsSurface = computed(() => ["settings", "team", "connections", "billing"].includes(view.value));
 const currentSettingsTab = computed<SettingsTab>(() => {
   if (view.value === "team") return "team";
@@ -1310,11 +1351,25 @@ const currentSettingsTab = computed<SettingsTab>(() => {
 const setupPercent = computed(() => workspaceStats.value?.setup.percent ?? 0);
 const setupComplete = computed(() => setupPercent.value >= 100);
 const setupDismissalKey = computed(() => `frontdeskwise:setup-dismissed:${authSnapshot.value?.activeOrganizationId ?? "public"}:${demoSlug.value || "workspace"}`);
-const showSetupCard = computed(() => !adminSurfaceMode.value && !setupDismissed.value && Boolean(workspaceStats.value || (authSnapshot.value && !availableBusinesses.value.length)));
-const setupNextAction = computed(() => {
-  if (!availableBusinesses.value.length) return "Add your first business";
-  if ((workspaceStats.value?.setup.completed ?? 0) < 2) return "Review your knowledge";
-  return "Test and publish your agent";
+const showSetupCard = computed(() => !adminSurfaceMode.value && Boolean(workspaceStats.value || (authSnapshot.value && !availableBusinesses.value.length)));
+const setupSteps = computed(() => workspaceStats.value?.setup.steps ?? []);
+const knowledgeSetupReady = computed(() => setupSteps.value.find((step) => step.id === "knowledge_ready")?.complete ?? false);
+const knowledgeHasOpenGaps = computed(() => (workspaceKnowledge.value?.openGaps ?? 0) > 0);
+const nextSetupStep = computed<SetupStepId | null>(() => {
+  if (!availableBusinesses.value.length) return null;
+  return workspaceStats.value?.setup.nextRequiredStep ?? setupSteps.value.find((step) => !step.complete)?.id ?? null;
+});
+const setupCardContent = computed(() => {
+  if (!availableBusinesses.value.length) return { eyebrow: "Get started", title: "Add your first business", description: "Add a website to create your AI front desk.", action: "Add business" };
+  if (!nextSetupStep.value) return { eyebrow: "Live", title: "Your AI front desk is live ✓", description: "Your AI front desk is ready and live. Everything is connected and published.", action: "View dashboard" };
+  const content: Record<SetupStepId, { eyebrow: string; title: string; description: string; action: string }> = {
+    domain_verified: { eyebrow: "Needs attention", title: "Verify your website", description: "Verify ownership before installing the live widget.", action: "Verify website" },
+    knowledge_ready: { eyebrow: "Next step", title: "Review your knowledge", description: "Make sure your assistant has reliable information.", action: "Review knowledge" },
+    agent_tested: { eyebrow: "Next step", title: "Test your assistant", description: "Ask representative customer questions before going live.", action: "Test assistant" },
+    widget_installed: { eyebrow: "Next step", title: "Install the widget", description: "Add FrontDeskWise to your website.", action: "Install widget" },
+    agent_published: { eyebrow: "Ready to go live", title: "Publish your AI front desk", description: "Everything is connected. Make the front desk live.", action: "Publish AI front desk" },
+  };
+  return content[nextSetupStep.value];
 });
 const workspaceAttention = computed(() => {
   if (!setupDismissed.value) return null;
@@ -1444,6 +1499,18 @@ async function applyRouteState(nextRoute: AppRoute) {
     return;
   }
   if (nextRoute.kind === "legal" || nextRoute.kind === "landing" || nextRoute.kind === "marketing") {
+    const legacyReturn = legacyBillingReturn();
+    if (authSnapshot.value && legacyReturn === "success") {
+      const sessionId = typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search).get("session_id")?.trim() || undefined;
+      commitRoute({ kind: "billing-success", ...(sessionId ? { sessionId } : {}) }, true);
+      return;
+    }
+    if (authSnapshot.value && legacyReturn === "cancel") {
+      commitRoute(settingsRoute("billing"), true);
+      billingFlow.value = "cancelled";
+      billingMessage.value = "Checkout was canceled. No changes were made.";
+      return;
+    }
     publicDemoMode.value = false;
     return;
   }
@@ -1491,6 +1558,16 @@ async function applyRouteState(nextRoute: AppRoute) {
   if (nextRoute.kind === "workspace-settings") {
     publicDemoMode.value = false;
     settingsTab.value = nextRoute.tab;
+    return;
+  }
+  if (nextRoute.kind === "billing-success") {
+    publicDemoMode.value = false;
+    settingsTab.value = "billing";
+    if (!authSnapshot.value) {
+      redirectToSignIn();
+      return;
+    }
+    void startBillingSuccessFlow();
     return;
   }
   if (nextRoute.kind === "agent-shortcut") {
@@ -1541,7 +1618,23 @@ function continueSetup() {
     openAddBusiness();
     return;
   }
-  view.value = (workspaceStats.value?.setup.completed ?? 0) < 2 ? "knowledge" : "agent";
+  openSetupStep(nextSetupStep.value);
+}
+
+function openSetupStep(step: SetupStepId | null) {
+  if (!step) {
+    navigateToWorkspaceView("overview");
+    return;
+  }
+  if (step === "domain_verified") {
+    openSettingsTab("verification");
+    return;
+  }
+  if (step === "knowledge_ready") {
+    navigateToWorkspaceView("knowledge");
+    return;
+  }
+  selectAgentTab(step === "agent_tested" ? "test" : "install");
 }
 
 function openWorkspaceAttention() {
@@ -1568,6 +1661,11 @@ function openAgentTest(question?: string) {
     ? demoRoute(workspaceSlugForRoute(), "agent", options)
     : workspaceRoute(workspaceSlugForRoute(), "agent", options);
   commitRoute(nextRoute);
+}
+
+function reviewKnowledgeGaps() {
+  if (typeof document === "undefined") return;
+  document.querySelector(".knowledge-review-grid")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function clearTestResponse() {
@@ -1603,6 +1701,7 @@ function openHelpAndSupport() {
 function isProtectedRoute(candidate: AppRoute = route.value): boolean {
   return candidate.kind === "agent-shortcut"
     || candidate.kind === "onboarding"
+    || candidate.kind === "billing-success"
     || candidate.kind === "platform"
     || candidate.kind === "workspace"
     || candidate.kind === "workspace-settings";
@@ -1677,7 +1776,7 @@ function navigateToWorkspaceView(nextView: View) {
   notificationMenuOpen.value = false;
   mobileNavOpen.value = false;
   if (nextView === "settings") openSettingsTab("general");
-  else view.value = nextView;
+  else commitRoute(routeForView(nextView));
 }
 
 function isExpiredDemoSessionError(error: unknown): boolean {
@@ -2011,6 +2110,8 @@ function clearWorkspaceState() {
   actionsMessage.value = "";
   widgetInstall.value = null;
   widgetVerificationMessage.value = "";
+  agentPublishing.value = { status: "NOT_PUBLISHED", domain: null, publishedAt: null };
+  agentPublishingLoading.value = false;
   ownershipVerification.value = null;
   verificationToken.value = "";
   verificationInstructions.value = "";
@@ -2068,6 +2169,11 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   showAiDisclosure.value = payload.agent?.showAiDisclosure ?? true;
   suggestedQuestions.value = payload.suggestedQuestions ?? [];
   ownershipVerification.value = payload.ownership ?? null;
+  agentPublishing.value = payload.publishing ?? {
+    status: payload.publishedAt ? "LIVE" : "NOT_PUBLISHED",
+    domain: null,
+    publishedAt: payload.publishedAt ?? null,
+  };
   workspaceStats.value = payload.stats ?? null;
   workspaceKnowledge.value = payload.knowledge ?? null;
   workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
@@ -2133,7 +2239,7 @@ async function selectBusiness(slug: string) {
   demoSlug.value = slug;
   // Keep control-plane and onboarding deep links stable while the session
   // hydrates. Workspace selection should only rewrite a workspace route.
-  if (!["workspace-settings", "platform", "onboarding"].includes(route.value.kind)) {
+  if (!["workspace-settings", "billing-success", "platform", "onboarding"].includes(route.value.kind)) {
     const nextWorkspaceView: WorkspaceView = nextView === "conversations"
       ? "agent"
       : nextView === "admin" || nextView === "home" || nextView === "privacy" || nextView === "terms"
@@ -2174,13 +2280,24 @@ async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolea
 
 async function settleAuthenticatedSession(returnTo?: string): Promise<void> {
   if (!authSnapshot.value) return;
+  const legacyReturn = legacyBillingReturn();
+  if (legacyReturn === "success") {
+    const sessionId = typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search).get("session_id")?.trim() || undefined;
+    commitRoute({ kind: "billing-success", ...(sessionId ? { sessionId } : {}) }, true, false);
+  } else if (legacyReturn === "cancel") {
+    commitRoute(settingsRoute("billing"), true, false);
+  }
   const returnRoute = routeFromReturnTo(returnTo);
   if (returnRoute) route.value = returnRoute;
   isSuperAdmin.value = authSnapshot.value.user.isSuperAdmin;
   const hasBusiness = await syncAuthenticatedBusiness(authSnapshot.value);
   if (hasBusiness) {
     await loadBilling();
-    await reconcileBillingReturn();
+    if (route.value.kind === "billing-success") await startBillingSuccessFlow();
+    else if (legacyReturn === "cancel") {
+      billingFlow.value = "cancelled";
+      billingMessage.value = "Checkout was canceled. No changes were made.";
+    } else await reconcileBillingReturn();
   }
   if (isSuperAdmin.value && (isPlatformRoute() || !hasBusiness)) await loadAdminOrganizations();
   if (isSuperAdmin.value && !hasBusiness) {
@@ -2689,6 +2806,10 @@ async function loadOwnershipVerification() {
   }
 }
 
+function continueToKnowledgeAfterVerification() {
+  window.setTimeout(() => navigateToWorkspaceView("knowledge"), 700);
+}
+
 async function requestOwnershipVerification() {
   if (!firebaseToken.value || !authSnapshot.value || verificationLoading.value) return;
   verificationLoading.value = true;
@@ -2705,8 +2826,14 @@ async function requestOwnershipVerification() {
     ownershipVerification.value = payload.verification ?? ownershipVerification.value;
     verificationToken.value = payload.token ?? "";
     verificationInstructions.value = payload.instructions ?? "";
-    verificationMessage.value = verificationMethod.value === "email" ? "Ownership verified · live publishing is enabled" : "Verification request created · complete the instructions, then check again";
+    verificationMessage.value = payload.verification?.status === "verified"
+      ? "Website verified ✓ Next: Review your assistant's knowledge."
+      : "Verification request created · complete the instructions, then check again";
     if (payload.verification?.status === "verified") await loadWidgetInstall();
+    if (payload.verification?.status === "verified") {
+      await refreshWorkspaceSummary(false);
+      continueToKnowledgeAfterVerification();
+    }
     else widgetInstall.value = null;
   } catch (error) {
     verificationError.value = error instanceof Error ? error.message : "Could not start ownership verification.";
@@ -2735,9 +2862,10 @@ async function checkOwnershipVerification() {
     if (!response.ok) throw new Error(payload.error ?? "Could not check ownership verification.");
     ownershipVerification.value = payload.verification ?? ownershipVerification.value;
     if (payload.verified) {
-      verificationMessage.value = payload.message ?? "Ownership verified · live publishing is enabled";
+      verificationMessage.value = "Website verified ✓ Next: Review your assistant's knowledge.";
       verificationToken.value = "";
-      await loadWidgetInstall();
+      await Promise.all([loadWidgetInstall(), refreshWorkspaceSummary(false)]);
+      continueToKnowledgeAfterVerification();
     } else {
       verificationError.value = payload.message ?? "The verification proof was not found yet.";
     }
@@ -3625,12 +3753,27 @@ function setFieldConditionEquals(field: ActionField, event: Event) {
   else delete field.condition.equals;
 }
 
-async function loadBilling() {
-  if (!authSnapshot.value || billingLoading.value) return;
+type BillingAnalyticsEvent = "checkout_returned" | "subscription_pending" | "subscription_activated" | "subscription_success_screen_viewed" | "subscription_success_continue_clicked";
+
+async function trackBillingEvent(event: BillingAnalyticsEvent, metadata: Record<string, unknown> = {}) {
+  if (!authSnapshot.value) return;
+  try {
+    await trackedFetch(apiUrl("/api/v1/billing/events"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ organizationId: authSnapshot.value.activeOrganizationId, event, ...metadata }),
+    }, { globalLoading: false });
+  } catch {
+    // Analytics must never interrupt subscription confirmation.
+  }
+}
+
+async function loadBilling(showLoading = true) {
+  if (!authSnapshot.value || (billingLoading.value && showLoading)) return;
   billingLoading.value = true;
   billingError.value = "";
   try {
-    const response = await trackedFetch(apiUrl(`/api/v1/billing?organizationId=${encodeURIComponent(authSnapshot.value.activeOrganizationId ?? "")}`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/billing?organizationId=${encodeURIComponent(authSnapshot.value.activeOrganizationId ?? "")}`), { headers: ownerHeaders() }, { globalLoading: showLoading });
     const payload = await response.json() as BillingSnapshot & { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load billing.");
     billingSnapshot.value = payload;
@@ -3639,6 +3782,10 @@ async function loadBilling() {
   } finally {
     billingLoading.value = false;
   }
+}
+
+function refreshBillingPage() {
+  void loadBilling();
 }
 
 function clearBillingReturnQuery() {
@@ -3650,19 +3797,108 @@ function clearBillingReturnQuery() {
 }
 
 async function waitForBillingState(expectedPlanKey?: string): Promise<boolean> {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    await loadBilling();
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await loadBilling(false);
     const billing = billingSnapshot.value?.billing;
     const settled = billing?.status === "active"
       && (!expectedPlanKey || billing.planKey === expectedPlanKey)
       && billing.checkoutStatus !== "open";
     if (settled) {
-      await Promise.all([refreshAuthenticatedSnapshot(), loadBilling()]);
+      await Promise.all([refreshAuthenticatedSnapshot(), loadBilling(false)]);
       return true;
     }
-    if (attempt < 7) await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    if (attempt < 9) await new Promise((resolve) => window.setTimeout(resolve, 1_500));
   }
   return false;
+}
+
+function billingSuccessViewed(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.sessionStorage.getItem(billingSuccessViewedKey.value) === "1";
+}
+
+function billingSuccessToastPayload(): { planName: string } | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem(billingSuccessToastKey.value);
+  if (!raw) return null;
+  try {
+    const payload = JSON.parse(raw) as { planName?: unknown };
+    return typeof payload.planName === "string" && payload.planName.trim() ? { planName: payload.planName } : null;
+  } catch {
+    return null;
+  }
+}
+
+function consumeBillingSuccessToast() {
+  if (typeof window === "undefined" || view.value !== "overview") return;
+  const payload = billingSuccessToastPayload();
+  if (!payload) return;
+  window.sessionStorage.removeItem(billingSuccessToastKey.value);
+  notifySuccess(`${payload.planName} plan activated successfully.`, "Subscription active");
+}
+
+function legacyBillingReturn(): "success" | "cancel" | null {
+  if (typeof window === "undefined") return null;
+  const value = new URLSearchParams(window.location.search).get("billing");
+  return value === "success" || value === "cancel" ? value : null;
+}
+
+async function startBillingSuccessFlow() {
+  if (!authSnapshot.value || route.value.kind !== "billing-success") return;
+  const runKey = routePath(route.value);
+  if (billingSuccessRunKey === runKey) return;
+  billingSuccessRunKey = runKey;
+  const sessionId = route.value.sessionId;
+  billingSuccessState.value = "activating";
+  await loadBilling(false);
+  const billingBeforePoll = billingSnapshot.value?.billing;
+  const expectedPlanKey = billingBeforePoll?.pendingPlanKey || billingBeforePoll?.planKey || "starter";
+  billingSuccessExpectedPlanKey.value = expectedPlanKey;
+  if (billingSuccessViewed()) {
+    commitRoute(settingsRoute("billing"), true);
+    return;
+  }
+  if (sessionId) await trackBillingEvent("checkout_returned", { sessionId });
+  let pendingTracked = false;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await loadBilling(false);
+    const billing = billingSnapshot.value?.billing;
+    if (billing?.status === "active" && billing.planKey === expectedPlanKey && billing.checkoutStatus !== "open") {
+      await refreshAuthenticatedSnapshot();
+      await loadBilling(false);
+      billingSuccessState.value = "active";
+      if (typeof window !== "undefined") window.sessionStorage.setItem(billingSuccessViewedKey.value, "1");
+      await trackBillingEvent("subscription_success_screen_viewed", { sessionId: sessionId ?? undefined, planKey: billingSnapshot.value?.billing.planKey });
+      return;
+    }
+    if (billing?.lastPaymentStatus === "failed" || billing?.status === "cancelled" || billing?.status === "paused") {
+      billingSuccessState.value = "failed";
+      return;
+    }
+    if (!pendingTracked) {
+      pendingTracked = true;
+      billingSuccessState.value = "pending";
+      await trackBillingEvent("subscription_pending", { sessionId: sessionId ?? undefined, planKey: expectedPlanKey });
+    }
+    if (attempt < 9) await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+  }
+  billingSuccessState.value = "pending";
+}
+
+function continueFromBillingSuccess() {
+  if (!authSnapshot.value || billingSuccessState.value !== "active") return;
+  if (typeof window !== "undefined") {
+    window.sessionStorage.setItem(billingSuccessToastKey.value, JSON.stringify({ planName: billingSuccessPlanName.value }));
+  }
+  void trackBillingEvent("subscription_success_continue_clicked", {
+    sessionId: route.value.kind === "billing-success" ? route.value.sessionId : undefined,
+    planKey: billingSnapshot.value?.billing.planKey,
+  });
+  commitRoute(workspaceRoute(demoSlug.value || availableBusinesses.value[0]?.slug || "", "overview"));
+}
+
+function openBillingFromSuccess() {
+  commitRoute(settingsRoute("billing"));
 }
 
 async function reconcileBillingReturn() {
@@ -3676,21 +3912,20 @@ async function reconcileBillingReturn() {
     return;
   }
   if (billingReturn !== "success") return;
-  billingFlow.value = "processing";
-  billingMessage.value = "Payment received. Activating your FrontDeskWise plan…";
-  const settled = await waitForBillingState();
-  if (settled) {
-    billingFlow.value = "complete";
-    billingMessage.value = "You’re all set — your FrontDeskWise plan is active.";
-    clearBillingReturnQuery();
-  } else {
-    billingFlow.value = "pending";
-    billingMessage.value = "Your payment was received. We’re finishing your subscription setup.";
+  if (route.value.kind !== "billing-success") {
+    const sessionId = params.get("session_id")?.trim();
+    commitRoute({ kind: "billing-success", ...(sessionId ? { sessionId } : {}) }, true, false);
   }
+  await startBillingSuccessFlow();
 }
 
 async function retryBillingRefresh() {
   billingFlow.value = "processing";
+  if (route.value.kind === "billing-success") {
+    billingSuccessRunKey = "";
+    await startBillingSuccessFlow();
+    return;
+  }
   const params = typeof window === "undefined" ? null : new URLSearchParams(window.location.search);
   if (params?.get("billing") === "success") {
     await reconcileBillingReturn();
@@ -4290,10 +4525,13 @@ async function startCheckout(plan: BillingPlan) {
       billingFlow.value = "processing";
       billingMessage.value = "Your plan change was received. Confirming the updated subscription…";
       const settled = await waitForBillingState(payload.planKey ?? plan.key);
-      billingFlow.value = settled ? "complete" : "pending";
-      billingMessage.value = settled
-        ? "You’re all set — your FrontDeskWise plan is active."
-        : "Your plan change was received. We’re finishing the update; refresh in a moment.";
+      if (settled) {
+        billingSuccessRunKey = "";
+        commitRoute({ kind: "billing-success" }, true);
+      } else {
+        billingFlow.value = "pending";
+        billingMessage.value = "Your plan change was received. We’re finishing the update; refresh in a moment.";
+      }
       return;
     }
     if (!payload.url) throw new Error(payload.error ?? "This plan is not ready for checkout yet.");
@@ -4581,6 +4819,7 @@ async function verifyWidgetInstall() {
     if (!response.ok) throw new Error(payload.error ?? "Could not verify the widget installation.");
     if (payload.verification) widgetInstall.value.verification = payload.verification;
     widgetVerificationMessage.value = payload.message ?? (payload.verified ? "Widget detected on the website." : "No widget load detected yet.");
+    await refreshWorkspaceSummary(false);
   } catch (error) {
     widgetVerificationMessage.value = error instanceof Error ? error.message : "Could not verify the widget installation.";
   } finally {
@@ -4755,6 +4994,38 @@ async function captureLead() {
   }
 }
 
+function agentConfigRequestBody(nextModel: AgentSaveModel, publish = false): Record<string, unknown> {
+  return {
+    assistantName: nextModel.assistantName,
+    welcomeMessage: nextModel.welcomeMessage,
+    tone: nextModel.tone,
+    customToneInstructions: nextModel.customToneInstructions,
+    primaryLanguage: nextModel.primaryLanguage,
+    fallbackBehavior: nextModel.fallbackBehavior,
+    humanHandoffEnabled: nextModel.humanHandoffEnabled,
+    widgetColor: nextModel.widgetColor,
+    collectLeads: nextModel.showLeadCapture,
+    showBookingAction: nextModel.showBookingAction,
+    widgetDefaultMode: nextModel.widgetDefaultMode,
+    widgetAllowExpand: nextModel.widgetAllowExpand,
+    widgetLogoUrl: nextModel.widgetLogoUrl || null,
+    widgetTheme: nextModel.widgetTheme,
+    widgetPosition: nextModel.widgetPosition,
+    widgetQuickActions: nextModel.widgetQuickActions,
+    proactiveEnabled: nextModel.proactiveEnabled,
+    proactiveDelaySeconds: nextModel.proactiveDelaySeconds,
+    proactiveMessage: nextModel.proactiveMessage,
+    proactiveTriggers: nextModel.proactiveTriggers,
+    proactiveBehavior: nextModel.proactiveBehavior,
+    proactiveFrequency: nextModel.proactiveFrequency,
+    requireLeadConsent: nextModel.requireLeadConsent,
+    privacyNoticeUrl: nextModel.privacyNoticeUrl || null,
+    retentionDays: nextModel.retentionDays,
+    showAiDisclosure: nextModel.showAiDisclosure,
+    ...(publish ? { publish: true } : {}),
+  };
+}
+
 async function saveAgent(...args: Array<AgentSaveModel | Event>) {
   if (!requireAccountForPublish()) return;
   const model = args[0];
@@ -4762,37 +5033,33 @@ async function saveAgent(...args: Array<AgentSaveModel | Event>) {
   const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/agent-config`), {
     method: "POST",
     headers: { "content-type": "application/json", ...ownerHeaders() },
-    body: JSON.stringify({
-      assistantName: nextModel.assistantName,
-      welcomeMessage: nextModel.welcomeMessage,
-      tone: nextModel.tone,
-      customToneInstructions: nextModel.customToneInstructions,
-      primaryLanguage: nextModel.primaryLanguage,
-      fallbackBehavior: nextModel.fallbackBehavior,
-      humanHandoffEnabled: nextModel.humanHandoffEnabled,
-      widgetColor: nextModel.widgetColor,
-      collectLeads: nextModel.showLeadCapture,
-      showBookingAction: nextModel.showBookingAction,
-      widgetDefaultMode: nextModel.widgetDefaultMode,
-      widgetAllowExpand: nextModel.widgetAllowExpand,
-      widgetLogoUrl: nextModel.widgetLogoUrl || null,
-      widgetTheme: nextModel.widgetTheme,
-      widgetPosition: nextModel.widgetPosition,
-      widgetQuickActions: nextModel.widgetQuickActions,
-      proactiveEnabled: nextModel.proactiveEnabled,
-      proactiveDelaySeconds: nextModel.proactiveDelaySeconds,
-      proactiveMessage: nextModel.proactiveMessage,
-      proactiveTriggers: nextModel.proactiveTriggers,
-      proactiveBehavior: nextModel.proactiveBehavior,
-      proactiveFrequency: nextModel.proactiveFrequency,
-      requireLeadConsent: nextModel.requireLeadConsent,
-      privacyNoticeUrl: nextModel.privacyNoticeUrl || null,
-      retentionDays: nextModel.retentionDays,
-      showAiDisclosure: nextModel.showAiDisclosure,
-    }),
+    body: JSON.stringify(agentConfigRequestBody(nextModel)),
   });
+  const payload = await response.json() as { agent?: WorkspacePayload["agent"]; publishing?: AgentPublishing; error?: string };
+  if (payload.publishing) agentPublishing.value = payload.publishing;
   savedMessage.value = response.ok ? "Saved · assistant settings updated" : "Could not save the assistant settings";
   window.setTimeout(() => (savedMessage.value = ""), 2600);
+}
+
+async function publishAgent(model: AgentSaveModel): Promise<void> {
+  if (!requireAccountForPublish() || agentPublishingLoading.value) return;
+  agentPublishingLoading.value = true;
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/agent-config`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify(agentConfigRequestBody(model, true)),
+    });
+    const payload = await response.json() as { agent?: WorkspacePayload["agent"]; publishing?: AgentPublishing; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not publish the AI front desk.");
+    if (payload.publishing) agentPublishing.value = payload.publishing;
+    await refreshWorkspaceSummary(false);
+    notifySuccess("Your AI front desk is live.");
+  } catch (error) {
+    notifyError(error, "Could not publish the AI front desk.");
+  } finally {
+    agentPublishingLoading.value = false;
+  }
 }
 
 function askAgentQuestion(question: string) {
@@ -4824,6 +5091,7 @@ watch(adminSection, (nextSection, previousSection) => {
 });
 
 watch(view, (nextView, previousView) => {
+  if (nextView === "overview") consumeBillingSuccessToast();
   if (nextView === "inbox") { void loadInbox(); void loadNotifications(); }
   if (nextView === "team") { settingsTab.value = "team"; void loadTeam(); }
   if (nextView === "knowledge") {
@@ -4974,6 +5242,41 @@ function startMarketingDemo() {
           <button class="text-button auth-switch" type="button" @click="openAuth('signin')">Back to sign in</button>
         </template>
       </div>
+    </section>
+    <section v-else-if="route.kind === 'billing-success'" class="billing-success-shell">
+      <article class="billing-success-card" aria-live="polite">
+        <div class="billing-success-brand"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /><span>FrontDesk<span>Wise</span></span></div>
+        <template v-if="billingSuccessState === 'active'">
+          <div class="billing-success-icon"><Check :size="30" :stroke-width="2.5" aria-hidden="true" /></div>
+          <p class="eyebrow">Payment successful</p>
+          <h1>You’re all set!</h1>
+          <p class="billing-success-lead">Your {{ billingSuccessPlanName }} plan is now active.</p>
+          <div class="billing-success-summary">
+            <div><span>Plan</span><strong>{{ billingSuccessPlanName }}</strong></div>
+            <div><span>Price</span><strong>{{ billingSuccessPrice }}</strong></div>
+            <div><span>Status</span><strong class="billing-success-status">Active</strong></div>
+            <div><span>Next billing date</span><strong>{{ formatBillingDate(billingSnapshot?.billing.currentPeriodEndAt ?? null) }}</strong></div>
+            <div><span>Business allowance</span><strong>{{ billingSnapshot?.billing.plan.maxBusinesses ?? 1 }} {{ (billingSnapshot?.billing.plan.maxBusinesses ?? 1) === 1 ? 'business' : 'businesses' }}</strong></div>
+          </div>
+          <p v-if="billingSnapshot?.billing.activationEmailQueuedAt && authSnapshot?.user.email" class="billing-success-email">A confirmation email is on its way to {{ authSnapshot.user.email }}.</p>
+          <div class="billing-success-actions"><button class="primary-button" type="button" @click="continueFromBillingSuccess">Go to dashboard</button><button class="outline-button" type="button" @click="openBillingFromSuccess">Manage billing</button></div>
+        </template>
+        <template v-else-if="billingSuccessState === 'failed'">
+          <div class="billing-success-icon billing-success-icon-danger"><CircleAlert :size="30" :stroke-width="2" aria-hidden="true" /></div>
+          <p class="eyebrow">Payment received</p>
+          <h1>We couldn’t activate your plan</h1>
+          <p class="billing-success-lead">Your subscription was not activated. No FrontDeskWise access was changed.</p>
+          <div class="billing-success-actions"><button class="primary-button" type="button" @click="openBillingFromSuccess">Return to billing</button><button class="outline-button" type="button" @click="billingSuccessRunKey = ''; void startBillingSuccessFlow()">Refresh status</button></div>
+        </template>
+        <template v-else>
+          <div class="billing-success-icon billing-success-icon-pending"><RefreshCw :size="28" :stroke-width="2" aria-hidden="true" /></div>
+          <p class="eyebrow">Payment received</p>
+          <h1>{{ billingSuccessState === 'pending' ? 'Finishing setup' : 'Activating your plan' }}</h1>
+          <p class="billing-success-lead">{{ billingSuccessState === 'pending' ? 'We’re finishing your subscription setup. This can take a few seconds.' : `We’re activating your ${billingSuccessPlanName} plan…` }}</p>
+          <div class="billing-success-progress" aria-hidden="true"><span></span></div>
+          <div class="billing-success-actions"><button class="outline-button" type="button" @click="billingSuccessRunKey = ''; void startBillingSuccessFlow()">Refresh status</button><button class="text-button" type="button" @click="openBillingFromSuccess">Go to billing</button></div>
+        </template>
+      </article>
     </section>
     <MarketingPage v-else-if="route.kind === 'marketing'" :page-path="`/${route.page}`" @start-demo="startMarketingDemo" />
     <section v-else-if="view === 'home'" class="marketing-shell landing-page">
@@ -5156,7 +5459,26 @@ function startMarketingDemo() {
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon"><ShieldCheck :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>Admin control plane</span></button>
         </nav>
         <div v-if="adminSurfaceMode" class="sidebar-bottom"><div class="admin-sidebar-note"><strong>Operations access</strong><small>Manage platform health, organizations, users, and demos from one place.</small></div><button v-if="!adminOnlyMode" class="sidebar-link" type="button" @click="view = 'overview'">← Back to workspace</button><button class="sidebar-link" type="button" @click="signOut">Sign out</button></div>
-        <div v-else class="sidebar-bottom"><div v-if="showSetupCard" class="setup-card"><template v-if="setupComplete"><div class="setup-row"><strong>Your AI front desk is ready ✓</strong><button class="sidebar-setup-dismiss" type="button" @click="dismissSetup">Dismiss</button></div><small>Everything is ready to test, publish, and install.</small></template><template v-else><div class="setup-row"><span>Setup progress</span><strong>{{ setupPercent }}%</strong></div><div class="progress-bar"><span :style="{ width: String(setupPercent) + '%' }"></span></div><small>{{ workspaceStats?.setup.completed ?? 0 }} of {{ workspaceStats?.setup.total ?? 4 }} steps complete · {{ setupNextAction }}</small><button class="sidebar-setup-action" type="button" @click="continueSetup">Continue setup</button></template></div><button v-if="workspaceAttention" class="sidebar-attention" type="button" @click="openWorkspaceAttention"><span>!</span><span><strong>Needs attention</strong><small>{{ workspaceAttention.label }}</small></span></button><div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div></div>
+        <div v-else class="sidebar-bottom">
+          <div v-if="showSetupCard" class="setup-card" aria-label="AI front desk setup">
+            <template v-if="!availableBusinesses.length">
+              <div class="setup-row"><span>{{ setupCardContent.eyebrow }}</span></div>
+              <strong class="setup-card-title">{{ setupCardContent.title }}</strong>
+              <small>{{ setupCardContent.description }}</small>
+              <button class="sidebar-setup-action" type="button" @click="continueSetup">{{ setupCardContent.action }} →</button>
+            </template>
+            <template v-else>
+              <div class="setup-row"><span>{{ setupCardContent.eyebrow }}</span><strong>{{ setupSteps.filter((step) => step.complete).length }}/{{ setupSteps.length }}</strong></div>
+              <strong class="setup-card-title">{{ setupCardContent.title }}</strong>
+              <small>{{ setupCardContent.description }}</small>
+              <button class="sidebar-setup-action" type="button" @click="continueSetup">{{ setupCardContent.action }} →</button>
+              <button class="setup-progress-toggle" type="button" :aria-expanded="setupProgressOpen" @click="setupProgressOpen = !setupProgressOpen">{{ setupProgressOpen ? 'Hide' : 'Show' }} setup progress</button>
+              <div v-if="setupProgressOpen" class="setup-progress-list"><div v-for="step in setupSteps" :key="step.id" :class="['setup-progress-step', { complete: step.complete }]" @click="step.complete ? undefined : openSetupStep(step.id)"><span>{{ step.complete ? '✓' : '○' }}</span><small>{{ step.label }}</small></div></div>
+            </template>
+          </div>
+          <button v-if="workspaceAttention" class="sidebar-attention" type="button" @click="openWorkspaceAttention"><span>!</span><span><strong>Needs attention</strong><small>{{ workspaceAttention.label }}</small></span></button>
+          <div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div>
+        </div>
       </aside>
 
       <section class="content-area">
@@ -5198,6 +5520,8 @@ function startMarketingDemo() {
             :public-demo-mode="publicDemoMode"
             :billing-read-only="billingReadOnly"
             :ownership-status="ownershipVerification?.status ?? null"
+            :publishing="agentPublishing"
+            :publishing-loading="agentPublishingLoading"
             :install="widgetInstall"
             :install-message="widgetInstallMessage"
             :verification-message="widgetVerificationMessage"
@@ -5207,6 +5531,10 @@ function startMarketingDemo() {
             :verification-token="verificationToken"
             :ownership-message="verificationMessage"
             :ownership-error="verificationError"
+            :knowledge="workspaceKnowledge ?? null"
+            :knowledge-gaps="knowledgeGaps"
+            :knowledge-ready="setupSteps.find((step) => step.id === 'knowledge_ready')?.complete ?? false"
+            :agent-tested="setupSteps.find((step) => step.id === 'agent_tested')?.complete ?? false"
             :installation-support-loading="installationSupportOwnerLoading"
             :installation-support-message="installationSupportOwnerMessage"
             :installation-support-error="installationSupportOwnerError"
@@ -5214,6 +5542,9 @@ function startMarketingDemo() {
             :test="agentTestModel"
             @select-tab="selectAgentTab"
             @save="saveAgent"
+            @publish="publishAgent"
+            @open-knowledge="navigateToWorkspaceView('knowledge')"
+            @view-dashboard="navigateToWorkspaceView('overview')"
             @require-auth="openAuth('signup')"
             @copy-snippet="copyWidgetSnippet"
             @verify-install="verifyWidgetInstall"
@@ -5282,6 +5613,7 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'knowledge'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Save an answer once. FrontDeskWise updates its searchable knowledge automatically.</p></div><div class="toolbar-actions knowledge-toolbar-actions"><span v-if="knowledgeAnswerStatus" class="saved-message">{{ knowledgeAnswerStatus }}</span><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" :title="knowledgeTestAction.disabled ? 'Review sources that need attention before testing.' : undefined" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">{{ knowledgeTestAction.label }}<span v-if="!knowledgeTestAction.disabled"> →</span></button><button class="outline-button small knowledge-toolbar-more" type="button" aria-label="Refresh knowledge" title="Refresh knowledge" @click="loadKnowledge">⋯</button></div></div>
+          <article class="knowledge-next-action panel"><div><p class="eyebrow">Next setup step</p><h3>{{ knowledgeHasOpenGaps ? 'Review answer gaps.' : knowledgeSetupReady ? 'Knowledge looks ready.' : knowledgeSourcesNeedAttention ? 'Review source health first.' : 'Build a stronger knowledge base.' }}</h3><p>{{ knowledgeHasOpenGaps ? 'You can test the assistant now while you review the questions that need stronger answers.' : knowledgeSetupReady ? 'Test your assistant with representative customer questions before you go live.' : knowledgeSourcesNeedAttention ? 'Some sources are still processing or need attention. You can still test while you review them.' : 'Add a website source or private document so the assistant has reliable information to use.' }}</p></div><div class="toolbar-actions"><button v-if="knowledgeSetupReady && !knowledgeHasOpenGaps" class="primary-button small" type="button" @click="openAgentTest()">Test assistant →</button><button v-else class="primary-button small" type="button" @click="openAgentTest()">Test assistant anyway →</button><button v-if="knowledgeHasOpenGaps" class="outline-button small" type="button" @click="reviewKnowledgeGaps">Review answer gaps</button></div></article>
           <p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p>
           <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
           <article v-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message knowledge-start-panel"><strong>Start your knowledge base</strong><p>Sign-in is complete. Add your first business website and FrontDeskWise will crawl it, index the readable content, and make it available for questions.</p><button class="primary-button small" type="button" @click="openAddBusiness">Add website / domain →</button></article>
@@ -5295,7 +5627,7 @@ function startMarketingDemo() {
           </article>
           <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
           <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
-          <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon"><CircleCheck :size="24" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Your knowledge looks healthy.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button v-if="!knowledgeSourcesNeedAttention" class="primary-button small" type="button" @click="openAgentTest()">Test agent <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article>
+          <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon"><CircleCheck :size="24" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Knowledge looks ready.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button class="primary-button small" type="button" @click="openAgentTest()">{{ knowledgeSourcesNeedAttention ? 'Test assistant anyway' : 'Test assistant' }} <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article>
           <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Ready' : '! Open gap' }}</span><h3>{{ gap.question }}</h3><small v-if="gap.intent || gap.reason" class="gap-diagnostics">Intent: {{ gap.intent ?? 'general' }} · Reason: {{ (gap.reason ?? 'legacy_unknown').replaceAll('_', ' ') }}</small></div><strong>{{ gap.occurrenceCount }}×</strong></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="gap.answerMode"><option value="knowledge">Knowledge answer · AI may summarize</option><option value="fixed_response">Fixed response · preserve wording</option></select></label><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button v-if="gap.status === 'resolved'" class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(gap)">{{ knowledgeAnswerSaving ? 'Updating…' : gap.status === 'resolved' ? 'Save answer' : 'Save answer' }}</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Answer quality</p><h2>Recent answer checks</h2><p>Review confidence and whether each answer was grounded in your knowledge.</p></div></div>
           <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Outcome</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Needs review' }}<small>{{ diagnostic.retrieval?.candidateCount ?? 0 }} knowledge matches</small></span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No answer checks yet.</div></article>
@@ -5475,7 +5807,7 @@ function startMarketingDemo() {
         </div>
 
         <div v-else-if="view === 'billing'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">One organization · every business</p><h2>Billing & plan</h2><p>Keep one subscription relationship as you add businesses to {{ activeOrganization?.name ?? 'your organization' }}.</p></div><div class="toolbar-actions"><span v-if="billingLoading" class="conversation-status">Working…</span><button v-if="billingSnapshot?.billing.providerCustomerId" class="outline-button small" type="button" @click="openBillingPortal">Manage billing ↗</button></div></div>
+          <div class="section-toolbar"><div><p class="eyebrow">One organization · every business</p><h2>Billing & plan</h2><p>Keep one subscription relationship as you add businesses to {{ activeOrganization?.name ?? 'your organization' }}.</p></div><div class="toolbar-actions"><span v-if="billingLoading" class="conversation-status">Working…</span></div></div>
           <p v-if="billingError" class="form-error">{{ billingError }}</p>
           <p v-if="billingMessage" class="saved-message">✓ {{ billingMessage }}</p>
           <template v-if="billingSnapshot">
@@ -5483,7 +5815,7 @@ function startMarketingDemo() {
             <div v-if="billingSnapshot.billing.status === 'grace'" class="billing-alert warning">Payment needs attention. Your organization remains available until {{ formatBillingDate(billingSnapshot.billing.graceEndAt) }}.</div>
             <div v-else-if="billingSnapshot.billing.status === 'cancelled' || billingSnapshot.billing.status === 'paused'" class="billing-alert danger">Billing is {{ billingSnapshot.billing.status }}. Existing data remains visible, but new paid actions and businesses are paused until billing is restored.</div>
             <div class="billing-summary-grid">
-              <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next payment: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small></article>
+              <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.status === 'active'">Your {{ billingSnapshot.billing.plan.displayName }} subscription is active.</p><p v-else-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.status === 'active' && billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</small><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ billingSnapshot.billing.lastPaymentStatus === 'paid' ? 'Paid' : formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small></article>
               <article class="panel billing-status-card"><p class="eyebrow">Business capacity</p><strong class="billing-big-number">{{ availableBusinesses.length }} <span>/ {{ billingSnapshot.billing.plan.maxBusinesses }}</span></strong><p>Businesses in this organization</p><div class="metric-progress"><span :style="{ width: `${Math.min(100, (availableBusinesses.length / billingSnapshot.billing.plan.maxBusinesses) * 100)}%` }"></span></div></article>
               <article class="panel billing-status-card"><p class="eyebrow">Last 30 days</p><div class="billing-usage-stats"><span><strong>{{ billingSnapshot.usageLast30Days.conversations }}</strong> conversations</span><span><strong>{{ billingSnapshot.usageLast30Days.leads }}</strong> leads</span><span><strong>{{ billingSnapshot.usageLast30Days.bookings }}</strong> bookings</span></div></article>
             </div>
@@ -5491,7 +5823,7 @@ function startMarketingDemo() {
             <div class="billing-plan-grid"><article v-for="plan in billingSnapshot.plans" :key="plan.key" :class="['panel', 'billing-plan-card', { selected: plan.key === billingSnapshot.billing.planKey }]" ><div class="billing-plan-top"><h3>{{ plan.displayName }}</h3><span v-if="plan.key === billingSnapshot.billing.planKey" class="status-pill booked">Current</span></div><strong class="billing-price">{{ formatPlanPrice(plan) }}<small v-if="plan.amountCents !== null">/mo</small></strong><p>{{ plan.description }}</p><div class="billing-plan-meta">Up to {{ plan.maxBusinesses }} {{ plan.maxBusinesses === 1 ? 'business' : 'businesses' }}</div><button v-if="plan.key !== billingSnapshot.billing.planKey" class="primary-button small" type="button" :disabled="billingLoading || !billingSnapshot.stripeConfigured || !plan.checkoutReady" @click="startCheckout(plan)">{{ !billingSnapshot.stripeConfigured ? 'Contact support' : plan.checkoutReady ? (billingSnapshot.billing.status === 'active' ? 'Change to this plan →' : 'Start subscription →') : 'Unavailable' }}</button><span v-else class="saved-message">✓ Active plan</span></article></div>
             <p v-if="!billingSnapshot.stripeConfigured" class="billing-note">Online subscription checkout is not available for this workspace yet. <a href="mailto:hello@frontdeskwise.com">Contact support</a> to activate a plan.</p>
           </template>
-          <article v-else class="panel empty-view"><div class="empty-icon"><DollarSign :size="30" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ billingError ? 'Billing unavailable' : 'Billing is loading' }}</h2><p>{{ billingError || 'Loading your organization plan and usage.' }}</p><button class="outline-button small" type="button" @click="loadBilling">{{ billingError ? 'Retry' : 'Refresh' }}</button></article>
+          <article v-else class="panel empty-view"><div class="empty-icon"><DollarSign :size="30" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ billingError ? 'Billing unavailable' : 'Billing is loading' }}</h2><p>{{ billingError || 'Loading your organization plan and usage.' }}</p><button class="outline-button small" type="button" @click="refreshBillingPage">{{ billingError ? 'Retry' : 'Refresh' }}</button></article>
         </div>
 
         <div v-else-if="view === 'admin' && isSuperAdmin" class="view-content">

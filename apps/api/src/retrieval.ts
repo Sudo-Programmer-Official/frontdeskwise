@@ -216,6 +216,18 @@ export type AnswerabilityDecision = {
   reason: string;
 };
 
+function isShellLikeEvidence<TChunk extends { sourceId: string }>(chunk: TChunk): boolean {
+  const candidate = chunk as TChunk & { content?: string; metadata?: Record<string, unknown> };
+  const metadata = candidate.metadata ?? {};
+  const tokenCount = typeof metadata.tokenCount === "number" ? metadata.tokenCount : null;
+  const pageType = typeof metadata.pageType === "string" ? metadata.pageType : "";
+  const contentLength = typeof candidate.content === "string" ? candidate.content.trim().length : 0;
+  return (pageType === "web_page" || metadata.sourceType === "web_page")
+    && tokenCount !== null
+    && tokenCount <= 8
+    && contentLength < 120;
+}
+
 const answerabilityThresholds: Record<RetrievalIntent, number> = {
   services: 0.32,
   hours: 0.46,
@@ -247,6 +259,7 @@ export function answerabilityDecision<TChunk extends { sourceId: string }>(
   if (!top) return { answerable: false, score: 0, threshold, reason: "no_candidates" };
   const source = sources.find((item) => item.id === top.chunk.sourceId);
   if (source && !sourceAllowedForIntent(intent, source)) return { answerable: false, score: top.evidenceScore, threshold, reason: "irrelevant_source_type" };
+  if (isShellLikeEvidence(top.chunk)) return { answerable: false, score: 0, threshold, reason: "insufficient_content_quality" };
   const eligible = matches.filter((match) => {
     const candidateSource = sources.find((item) => item.id === match.chunk.sourceId);
     return !candidateSource || sourceAllowedForIntent(intent, candidateSource);

@@ -16,7 +16,7 @@ import WidgetPreview from "./components/WidgetPreview.vue";
 import { getAccessibleTextColor, isHexColor } from "./utils/color";
 import type { WidgetAction, WidgetState } from "./widget-ui/renderer";
 
-type AgentTab = "behavior" | "appearance" | "quick-actions" | "actions" | "test" | "install";
+type AgentTab = "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
 type Tone = "friendly" | "professional" | "concise" | "custom";
 type FallbackBehavior = "contact_form" | "human" | "unavailable";
 type WidgetTheme = "light" | "dark" | "auto";
@@ -27,6 +27,13 @@ type ProactiveFrequency = "session" | "24h" | "visit";
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 type InstallPlatform = "wordpress" | "wix" | "shopify" | "squarespace" | "custom" | "not_sure";
 type SupportContactMethod = "email" | "phone";
+type AgentPublishStatus = "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+
+interface AgentPublishing {
+  status: Exclude<AgentPublishStatus, "PUBLISHING">;
+  domain: string | null;
+  publishedAt: string | null;
+}
 
 interface InstallationSupportPayload {
   name: string;
@@ -117,6 +124,24 @@ interface InstallModel {
   verification: { lastLoadedAt: string | null; loadCount: number };
 }
 
+interface KnowledgeGap {
+  question: string;
+  occurrenceCount: number;
+  status: "open" | "resolved";
+  lastSeenAt: string;
+}
+
+interface KnowledgeModel {
+  sourceCount: number;
+  chunkCount: number;
+  openGaps: number;
+  pendingSources?: number;
+  failedSources?: number;
+  status?: string;
+  indexed?: boolean;
+  sources?: Array<{ lastCrawledAt: string }>;
+}
+
 const props = defineProps<{
   tab: AgentTab;
   businessKey: string;
@@ -131,6 +156,8 @@ const props = defineProps<{
   publicDemoMode: boolean;
   billingReadOnly: boolean;
   ownershipStatus: "pending" | "verified" | "rejected" | null;
+  publishing: AgentPublishing;
+  publishingLoading: boolean;
   install: InstallModel | null;
   installMessage: string;
   verificationMessage: string;
@@ -140,6 +167,10 @@ const props = defineProps<{
   verificationToken: string;
   ownershipMessage: string;
   ownershipError: string;
+  knowledge: KnowledgeModel | null;
+  knowledgeGaps: KnowledgeGap[];
+  knowledgeReady: boolean;
+  agentTested: boolean;
   installationSupportLoading: boolean;
   installationSupportMessage: string;
   installationSupportError: string;
@@ -150,6 +181,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: "select-tab", tab: AgentTab): void;
   (event: "save", payload: AgentModel): void;
+  (event: "publish", payload: AgentModel): void;
+  (event: "open-knowledge"): void;
+  (event: "view-dashboard"): void;
   (event: "require-auth"): void;
   (event: "copy-snippet"): void;
   (event: "verify-install"): void;
@@ -183,6 +217,13 @@ const sessionHasGroundedAnswer = computed(() => props.test.messages.some((messag
 const sessionSourceCount = computed(() => new Set(props.test.messages.flatMap((message) => message.citations.map((citation) => citation.url || citation.title || ""))).size);
 const sessionHasAction = computed(() => props.test.messages.some((message) => Boolean(message.action)));
 const sessionHasCompletedAction = computed(() => props.test.messages.some((message) => message.action?.status === "completed"));
+const testCompleted = computed(() => props.agentTested || props.test.messages.some((message) => message.role === "user" && message.content.trim()));
+const openKnowledgeGaps = computed(() => props.knowledgeGaps.filter((gap) => gap.status === "open"));
+const knowledgeLastUpdated = computed(() => {
+  const dates = (props.knowledge?.sources ?? []).map((source) => Date.parse(source.lastCrawledAt)).filter((value) => Number.isFinite(value));
+  return dates.length ? new Date(Math.max(...dates)).toLocaleDateString() : "Not indexed yet";
+});
+const knowledgeStatusLabel = computed(() => props.knowledgeReady ? "Knowledge looks ready." : props.knowledge?.status === "indexing" ? "Knowledge is still indexing." : "Knowledge needs a little more review.");
 const testWidgetState = computed<Partial<WidgetState>>(() => {
   const latestAssistant = [...props.test.messages].reverse().find((message) => message.role === "assistant");
   const action = latestAssistant?.action;
@@ -219,6 +260,9 @@ const installInstructions = computed(() => ({
 }[installPlatform.value]));
 const safeWidgetColor = computed(() => isHexColor(draft.widgetColor) ? draft.widgetColor : "#2563EB");
 const accessibleWidgetText = computed(() => getAccessibleTextColor(safeWidgetColor.value));
+const publishStatus = computed<AgentPublishStatus>(() => props.publishingLoading ? "PUBLISHING" : props.publishing.status);
+const isLive = computed(() => publishStatus.value === "LIVE" || publishStatus.value === "LIVE_WITH_UNPUBLISHED_CHANGES");
+const hasUnpublishedChanges = computed(() => publishStatus.value === "LIVE_WITH_UNPUBLISHED_CHANGES");
 const toneOptions = ["friendly", "professional", "concise", "custom"].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }));
 const themeOptions = ["light", "dark", "auto"].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }));
 const positionOptions = [{ label: "Bottom right", value: "bottom-right" }, { label: "Bottom left", value: "bottom-left" }];
@@ -278,6 +322,10 @@ function saveChanges(): void {
   emit("save", cloneModel(draft));
 }
 
+function publishDraft(): void {
+  emit("publish", cloneModel(draft));
+}
+
 function hasProactiveTrigger(trigger: ProactiveTrigger): boolean {
   return draft.proactiveTriggers.includes(trigger);
 }
@@ -291,6 +339,15 @@ function toggleProactiveTrigger(trigger: ProactiveTrigger, enabled: boolean): vo
 
 function selectTab(tab: AgentTab): void {
   emit("select-tab", tab);
+}
+
+function handleGoLive(): void {
+  if (!testCompleted.value) return;
+  if (isLive.value) {
+    emit("view-dashboard");
+    return;
+  }
+  emit("publish", cloneModel(draft));
 }
 
 function startAddAction(): void {
@@ -382,6 +439,10 @@ function sendDeveloperInstructions(): void {
   ].join("\n");
   window.location.href = `mailto:?subject=${encodeURIComponent(`FrontDeskWise installation for ${props.businessName || "our website"}`)}&body=${encodeURIComponent(body)}`;
 }
+
+function openLiveWebsite(): void {
+  if (props.websiteUrl) window.open(props.websiteUrl, "_blank", "noopener,noreferrer");
+}
 </script>
 
 <template>
@@ -390,16 +451,28 @@ function sendDeveloperInstructions(): void {
     <div class="agent-header-row">
       <div>
         <p class="eyebrow">AI front desk</p>
-        <h2>Agent</h2>
+        <div class="agent-title-line"><h2>Agent</h2><span v-if="isLive" class="agent-live-pill">● Live</span></div>
         <p>Configure how your AI front desk behaves, looks, and converts visitors.</p>
       </div>
       <div class="agent-header-actions">
         <span v-if="savedMessage || localSaved" class="saved-message"><Check :size="14" :stroke-width="2" aria-hidden="true" /> {{ savedMessage || "Saved" }}</span>
         <Button v-if="tab !== 'test' && tab !== 'install'" variant="primary" size="small" @click="saveChanges">Save changes</Button>
         <Button v-if="tab === 'test'" variant="secondary" size="small" @click="emit('reset-conversation')">Reset conversation</Button>
-        <Button v-if="tab === 'install'" variant="primary" size="small" @click="saveChanges">Publish AI front desk</Button>
+        <Button v-if="tab === 'install' && publishStatus === 'NOT_PUBLISHED'" variant="primary" size="small" :disabled="ownershipStatus !== 'verified' || billingReadOnly" @click="publishDraft">Publish AI front desk</Button>
+        <Button v-if="tab === 'install' && publishStatus === 'PUBLISHING'" variant="primary" size="small" disabled>Publishing…</Button>
+        <Button v-if="tab === 'install' && hasUnpublishedChanges" variant="primary" size="small" :disabled="ownershipStatus !== 'verified' || billingReadOnly" @click="publishDraft">Publish updates</Button>
       </div>
     </div>
+
+    <div v-if="publishStatus === 'LIVE'" class="agent-live-banner" role="status">
+      <div><strong>✓ AI front desk is live</strong><span v-if="publishing.domain">Live on {{ publishing.domain }}</span></div>
+      <div class="agent-live-actions"><button class="text-button" type="button" @click="openLiveWebsite">View live widget</button><button class="outline-button small" type="button" @click="openLiveWebsite">Open website</button></div>
+    </div>
+    <div v-else-if="publishStatus === 'LIVE_WITH_UNPUBLISHED_CHANGES'" class="agent-live-banner agent-live-banner-warning" role="status">
+      <div><strong>● Live</strong><span>You have unpublished changes</span></div>
+      <Button variant="primary" size="small" :disabled="ownershipStatus !== 'verified' || billingReadOnly" @click="publishDraft">Publish updates</Button>
+    </div>
+    <div v-else-if="publishStatus === 'PUBLISHING'" class="agent-live-banner agent-live-banner-publishing" role="status"><strong>Publishing…</strong></div>
 
     <div v-if="tab === 'behavior'" class="agent-config-layout">
       <Card class="agent-form-panel">
@@ -442,6 +515,16 @@ function sendDeveloperInstructions(): void {
       <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
+    <div v-else-if="tab === 'knowledge'" class="agent-knowledge-layout">
+      <article class="agent-knowledge-summary panel">
+        <div class="agent-section-heading"><div><p class="section-kicker">Agent context</p><h3>Knowledge readiness</h3><p>Keep this view focused on what the agent can answer. Manage sources and documents in the full Knowledge workspace.</p></div><span :class="['knowledge-readiness-pill', knowledgeReady ? 'ready' : 'needs-review']">{{ knowledgeReady ? 'Ready' : 'Review' }}</span></div>
+        <div class="agent-knowledge-metrics"><div><strong>{{ knowledge?.sourceCount ?? 0 }}</strong><small>ready sources</small></div><div><strong>{{ knowledge?.openGaps ?? 0 }}</strong><small>open answer gaps</small></div><div><strong>{{ knowledge?.chunkCount ?? 0 }}</strong><small>indexed chunks</small></div><div><strong>{{ knowledgeLastUpdated }}</strong><small>last indexed</small></div></div>
+        <p class="agent-knowledge-status">{{ knowledgeStatusLabel }}</p>
+        <div v-if="openKnowledgeGaps.length" class="agent-knowledge-gaps"><strong>Open answer gaps</strong><button v-for="gap in openKnowledgeGaps.slice(0, 3)" :key="gap.question" type="button" @click="emit('open-knowledge')">{{ gap.question }} <span>{{ gap.occurrenceCount }}×</span></button><small v-if="openKnowledgeGaps.length > 3">{{ openKnowledgeGaps.length - 3 }} more gaps in Knowledge</small></div>
+        <div class="agent-knowledge-actions"><Button variant="primary" size="small" @click="emit('open-knowledge')">Add knowledge</Button><Button variant="secondary" size="small" @click="emit('open-knowledge')">Review knowledge</Button><Button v-if="openKnowledgeGaps.length" variant="secondary" size="small" @click="emit('open-knowledge')">Review gaps</Button></div>
+      </article>
+    </div>
+
     <div v-else-if="tab === 'appearance'" class="agent-config-layout">
       <Card class="agent-form-panel">
         <FormSection eyebrow="Brand" title="Appearance" description="Make the front desk feel like part of your website.">
@@ -475,16 +558,16 @@ function sendDeveloperInstructions(): void {
         <div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the same widget shell to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div>
         <WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :state="testWidgetState" :show-scenario-selector="false" :mode="previewMode" @change-mode="previewMode = $event" @ask="ask" @submit-action="submitPreviewAction" />
       </article>
-      <aside class="test-owner-panel panel"><div class="agent-section-heading"><div><p class="section-kicker">Owner checks</p><h3>What to verify</h3></div></div><div class="owner-check-list"><div><span :class="statusClass(sessionHasGroundedAnswer)">✓</span><span><strong>Grounded answers</strong><small>{{ sessionHasGroundedAnswer ? 'Grounded in business knowledge' : 'Ask a knowledge question' }}</small></span></div><div><span :class="statusClass(sessionSourceCount > 0)">✓</span><span><strong>Sources</strong><small>{{ sessionSourceCount ? `${sessionSourceCount} source${sessionSourceCount === 1 ? '' : 's'}` : 'Sources appear with grounded answers' }}</small></span></div><div><span :class="statusClass(sessionHasAction)">✓</span><span><strong>Action flows</strong><small>{{ sessionHasAction ? 'Action flow is running in the conversation' : 'Try a quick action or ask for help' }}</small></span></div><div><span :class="statusClass(sessionHasCompletedAction)">✓</span><span><strong>Completion</strong><small>{{ sessionHasCompletedAction ? 'Test lead captured' : 'Submit the conversational form to verify' }}</small></span></div></div><div v-if="sessionHasCompletedAction" class="test-success"><strong>✓ Test lead captured</strong><button class="text-button" type="button" @click="emit('view-leads')">View in Leads →</button></div><p class="test-owner-note">Internal details stay summarized here. Visitors only see the conversation.</p></aside>
+      <aside class="test-owner-panel panel"><div class="agent-section-heading"><div><p class="section-kicker">Owner checks</p><h3>What to verify</h3></div></div><div class="owner-check-list"><div><span :class="statusClass(sessionHasGroundedAnswer)">✓</span><span><strong>Grounded answers</strong><small>{{ sessionHasGroundedAnswer ? 'Grounded in business knowledge' : 'Ask a knowledge question' }}</small></span></div><div><span :class="statusClass(sessionSourceCount > 0)">✓</span><span><strong>Sources</strong><small>{{ sessionSourceCount ? `${sessionSourceCount} source${sessionSourceCount === 1 ? '' : 's'}` : 'Sources appear with grounded answers' }}</small></span></div><div><span :class="statusClass(sessionHasAction)">✓</span><span><strong>Action flows</strong><small>{{ sessionHasAction ? 'Action flow is running in the conversation' : 'Try a quick action or ask for help' }}</small></span></div><div><span :class="statusClass(sessionHasCompletedAction)">✓</span><span><strong>Completion</strong><small>{{ sessionHasCompletedAction ? 'Test lead captured' : 'Submit the conversational form to verify' }}</small></span></div></div><div v-if="sessionHasCompletedAction" class="test-success"><strong>✓ Test lead captured</strong><button class="text-button" type="button" @click="emit('view-leads')">View in Leads →</button></div><div class="test-decision"><strong>{{ testCompleted ? 'Ready for the next step.' : 'Test a representative customer question.' }}</strong><p v-if="!testCompleted">Ask at least one question to unlock the go-live path.</p><p v-else-if="!isLive">Publish when the experience looks right.</p><p v-else>Your AI front desk is live.</p><div class="test-decision-actions"><Button variant="primary" size="small" :disabled="!testCompleted" @click="handleGoLive">{{ isLive ? 'View dashboard' : 'Go live' }} →</Button><Button variant="secondary" size="small" @click="emit('open-knowledge')">{{ openKnowledgeGaps.length ? 'Review answer gaps' : 'Improve knowledge' }}</Button><Button v-if="openKnowledgeGaps.length" variant="secondary" size="small" @click="emit('open-knowledge')">Add knowledge</Button></div></div><p class="test-owner-note">Internal details stay summarized here. Visitors only see the conversation.</p></aside>
     </div>
 
     <div v-else class="install-experience">
-      <div class="install-status-card panel"><div><p class="section-kicker">Website status</p><h3>Know what is live</h3></div><div class="install-status-list"><span :class="statusClass(ownershipStatus === 'verified')">✓ <strong>Domain verified</strong></span><span :class="statusClass(Boolean(install?.verification.loadCount))">✓ <strong>Widget installed</strong></span><span :class="statusClass(authReady && !billingReadOnly)">✓ <strong>Agent published</strong></span></div></div>
+      <div class="install-status-card panel"><div><p class="section-kicker">Website status</p><h3>Know what is live</h3></div><div class="install-status-list"><span :class="statusClass(ownershipStatus === 'verified')">✓ <strong>Domain verified</strong></span><span :class="statusClass(Boolean(install?.verification.loadCount))">✓ <strong>Widget installed</strong></span><span :class="statusClass(isLive)">{{ isLive ? '✓' : '○' }} <strong>{{ isLive ? 'AI front desk live' : 'Not published' }}</strong></span></div></div>
       <div class="install-step-grid">
         <article class="install-step panel"><span class="step-number">1</span><div><p class="section-kicker">Verify website</p><h3>{{ ownershipStatus === 'verified' ? 'Website verified' : 'Protect your website' }}</h3><p>{{ ownershipStatus === 'verified' ? 'Ownership is verified for this business.' : 'Complete ownership verification before publishing the live widget.' }}</p><span v-if="ownershipStatus === 'verified'" class="status-text success">✓ Ready to publish</span><template v-else><div class="install-verification-controls"><label>Method<select v-model="verificationMethodDraft"><option value="meta_tag">Meta tag</option><option value="file">Verification file</option><option value="dns_txt">DNS TXT</option><option value="email">Email domain</option><option value="manual">Request admin review</option></select></label><div class="drawer-actions"><button class="outline-button small" type="button" :disabled="verificationLoading" @click="emit('start-verification', verificationMethodDraft)">{{ verificationLoading ? 'Preparing…' : 'Start verification' }}</button><button v-if="verificationMethodDraft !== 'email' && verificationMethodDraft !== 'manual'" class="primary-button small" type="button" :disabled="verificationLoading" @click="emit('check-verification')">Check now</button></div></div><p v-if="verificationInstructions" class="verification-instructions">{{ verificationInstructions }}</p><code v-if="verificationToken" class="verification-token">{{ verificationToken }}</code><p v-if="ownershipMessage" class="status-text success">✓ {{ ownershipMessage }}</p><p v-if="ownershipError" class="form-error">{{ ownershipError }}</p></template></div></article>
         <article class="install-step panel"><span class="step-number">2</span><div><p class="section-kicker">Install widget</p><h3>Choose your platform</h3><div class="install-platform-tabs"><button v-for="platform in ([['wordpress', 'WordPress'], ['wix', 'Wix'], ['shopify', 'Shopify'], ['squarespace', 'Squarespace'], ['custom', 'Custom'], ['not_sure', 'Not sure']] as Array<[InstallPlatform, string]>)" :key="platform[0]" :class="{ active: installPlatform === platform[0] }" type="button" @click="installPlatform = platform[0]">{{ platform[1] }}</button></div><p v-if="install" class="install-help">{{ installInstructions }} {{ businessName || 'your website' }}.</p><div v-if="install" class="snippet-box"><code>{{ install.snippet }}</code><button class="primary-button small" type="button" @click="emit('copy-snippet')">Copy code</button></div><div v-else class="install-gate"><p>{{ authReady ? 'Your private install snippet is loading.' : 'Sign in to generate a private install snippet.' }}</p><button class="outline-button small" type="button" @click="authReady ? emit('refresh-install') : emit('require-auth')">{{ authReady ? 'Refresh install details' : 'Create account to install' }}</button></div></div></article>
         <article class="install-step panel"><span class="step-number">3</span><div><p class="section-kicker">Test installation</p><h3>Check the live widget</h3><p>Confirm the widget is on the right business and the agent is online.</p><button class="outline-button small" type="button" :disabled="verificationLoading || !install" @click="emit('verify-install')">{{ verificationLoading ? 'Checking…' : 'Check installation' }}</button><p v-if="verificationMessage" :class="['status-text', install?.verification.loadCount ? 'success' : 'error']">{{ install?.verification.loadCount ? '✓' : '!' }} {{ verificationMessage }}</p><div v-if="verificationMessage && install && !install.verification.loadCount" class="install-detection-help"><strong>We couldn't detect FrontDeskWise yet.</strong><span>Check the instructions, try again, or let us help you get live.</span><div class="drawer-actions"><button class="text-button" type="button" @click="openSupportDrawer">Check instructions</button><button class="primary-button small" type="button" @click="openSupportDrawer">Get help installing</button></div></div><div v-if="install" class="install-check-results"><span :class="statusClass(Boolean(install.verification.loadCount))">✓ Widget detected</span><span :class="statusClass(Boolean(install.siteKey))">✓ Correct business ID</span><span :class="statusClass(authReady && !billingReadOnly)">✓ Agent online</span></div></div></article>
-        <article class="install-step publish-step panel"><span class="step-number">4</span><div><p class="section-kicker">Publish</p><h3>Make the front desk live</h3><p>Save the current Agent configuration and publish it to this business.</p><button class="primary-button small" type="button" :disabled="!authReady || billingReadOnly || ownershipStatus !== 'verified'" @click="saveChanges">{{ billingReadOnly ? 'Billing needs attention' : ownershipStatus !== 'verified' ? 'Verify website first' : 'Publish AI front desk' }}</button><p v-if="installMessage" class="status-text success">✓ {{ installMessage }}</p></div></article>
+        <article class="install-step publish-step panel"><span class="step-number">4</span><div><p class="section-kicker">Publish</p><template v-if="publishStatus === 'NOT_PUBLISHED'"><h3>Make the front desk live</h3><p>Publish the current Agent configuration to this business.</p><button class="primary-button small" type="button" :disabled="!authReady || billingReadOnly || ownershipStatus !== 'verified'" @click="publishDraft">{{ billingReadOnly ? 'Billing needs attention' : ownershipStatus !== 'verified' ? 'Verify website first' : 'Publish AI front desk' }}</button></template><template v-else-if="publishStatus === 'PUBLISHING'"><h3>Publishing your front desk</h3><p>Applying the current Agent configuration to the live widget.</p><button class="primary-button small" type="button" disabled>Publishing…</button></template><template v-else-if="publishStatus === 'LIVE'"><h3 class="live-heading">✓ AI front desk is live</h3><p v-if="publishing.domain">Live on {{ publishing.domain }}</p><div class="agent-live-actions"><button class="text-button" type="button" @click="openLiveWebsite">View live widget</button><button class="outline-button small" type="button" @click="openLiveWebsite">Open website</button></div></template><template v-else><h3>● Live</h3><p class="unpublished-warning">You have unpublished changes</p><button class="primary-button small" type="button" :disabled="!authReady || billingReadOnly || ownershipStatus !== 'verified'" @click="publishDraft">{{ billingReadOnly ? 'Billing needs attention' : ownershipStatus !== 'verified' ? 'Verify website first' : 'Publish updates' }}</button></template><p v-if="installMessage" class="status-text success">✓ {{ installMessage }}</p></div></article>
       </div>
       <section class="install-support panel"><div class="install-support-copy"><p class="section-kicker">Free setup help included</p><h3>Need help installing?</h3><p>You can do this yourself in minutes, or we can help you get FrontDeskWise live on your website.</p></div><div class="install-support-actions"><button class="primary-button small" type="button" @click="openSupportDrawer">Contact support</button><button class="outline-button small" type="button" @click="sendDeveloperInstructions">Send instructions to my developer</button></div></section>
       <p v-if="publicDemoMode" class="install-note">This is a public sample workspace. Create an account to verify, install, and publish your own Agent.</p>
@@ -520,6 +603,18 @@ function sendDeveloperInstructions(): void {
 .agent-header-row, .preview-label-row, .test-conversation-header, .agent-section-heading, .action-heading, .install-status-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .agent-header-row { margin-bottom: 22px; }
 .agent-header-row h2 { margin: 0; color: var(--agent-ink); font-size: 30px; letter-spacing: -.05em; }
+.agent-title-line { display: flex; align-items: center; gap: 10px; }
+.agent-live-pill { display: inline-flex; align-items: center; min-height: 25px; padding: 4px 9px; border: 1px solid #b9e8d9; border-radius: 999px; color: #08785d; background: #edfaf5; font-size: 11px; font-weight: 800; }
+.agent-live-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: -7px 0 20px; padding: 15px 17px; border: 1px solid #b9e8d9; border-radius: 12px; color: #08785d; background: linear-gradient(135deg, #effbf6, #f8fffc); }
+.agent-live-banner > div:first-child { display: grid; gap: 4px; }
+.agent-live-banner strong { font-size: 15px; }
+.agent-live-banner span { color: #47796e; font-size: 11px; }
+.agent-live-banner-warning { border-color: #f1d5a1; color: #805d1e; background: #fffaf0; }
+.agent-live-banner-warning span { color: #8c6d36; }
+.agent-live-banner-publishing { border-color: #c8daf2; color: #315d93; background: #f5f9ff; }
+.agent-live-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.live-heading { color: #08785d !important; }
+.unpublished-warning { color: #8c6d36 !important; font-weight: 750; }
 .agent-header-row p:not(.eyebrow), .agent-section-heading p:not(.section-kicker), .test-conversation-header p:not(.section-kicker), .install-step p:not(.section-kicker) { margin: 7px 0 0; color: var(--agent-muted); font-size: 13px; line-height: 1.5; }
 .agent-header-actions, .drawer-actions, .compact-action-controls, .install-platform-tabs, .preview-mode-toggle { display: flex; align-items: center; gap: 8px; }
 .agent-config-layout { display: grid; grid-template-columns: minmax(0, .82fr) minmax(360px, 1.18fr); gap: 22px; align-items: start; }
@@ -588,6 +683,27 @@ function sendDeveloperInstructions(): void {
 .action-preview-card { width: min(100%, 360px); margin: 50px auto 0; padding: 18px; }
 .action-preview-card .preview-action-button { margin-top: 10px; cursor: default; }
 .agent-test-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 22px; align-items: start; }
+.agent-knowledge-layout { display: grid; max-width: 900px; gap: 18px; }
+.agent-knowledge-summary { padding: 24px; }
+.knowledge-readiness-pill { padding: 5px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+.knowledge-readiness-pill.ready { color: #08785d; background: #e7f8f1; }
+.knowledge-readiness-pill.needs-review { color: #95630c; background: #fff5df; }
+.agent-knowledge-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 22px; }
+.agent-knowledge-metrics > div { padding: 14px; border: 1px solid var(--agent-border); border-radius: 10px; background: #fbfcfe; }
+.agent-knowledge-metrics strong, .agent-knowledge-metrics small { display: block; }
+.agent-knowledge-metrics strong { overflow: hidden; color: var(--agent-ink); font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-knowledge-metrics small { margin-top: 4px; color: var(--agent-muted); font-size: 10px; }
+.agent-knowledge-status { margin: 18px 0 0; color: #08785d; font-size: 13px; font-weight: 750; }
+.agent-knowledge-gaps { display: grid; gap: 8px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--agent-border); }
+.agent-knowledge-gaps > strong { color: var(--agent-ink); font-size: 13px; }
+.agent-knowledge-gaps button { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border: 0; color: #2168d8; background: transparent; font-size: 12px; text-align: left; }
+.agent-knowledge-gaps button span { color: var(--agent-muted); }
+.agent-knowledge-gaps small { color: var(--agent-muted); font-size: 10px; }
+.agent-knowledge-actions, .test-decision-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 22px; }
+.test-decision { margin-top: 23px; padding: 15px; border: 1px solid #cfe0f3; border-radius: 10px; background: #f8fbff; }
+.test-decision > strong { color: var(--agent-ink); font-size: 13px; }
+.test-decision > p { margin: 5px 0 0; color: var(--agent-muted); font-size: 11px; line-height: 1.45; }
+.test-decision-actions { margin-top: 14px; }
 .test-conversation, .test-owner-panel { padding: 22px; }
 .owner-check-list { display: grid; gap: 14px; margin-top: 18px; }
 .owner-check-list > div, .install-check-results { display: flex; gap: 10px; align-items: flex-start; }
@@ -651,5 +767,5 @@ function sendDeveloperInstructions(): void {
 .publish-step { background: #f8fbff; }
 @media (max-width: 980px) { .agent-config-layout, .agent-test-layout { grid-template-columns: 1fr; } .preview-sticky { position: static; } .agent-preview-column { order: -1; } .install-step-grid { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .install-support { display: block; } .install-support-actions { justify-content: flex-start; margin-top: 16px; } .install-support-drawer { padding: 24px 18px; } }
-@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer { display: block; } .agent-header-actions { margin-top: 16px; } .field-grid { grid-template-columns: 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } }
+@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer, .agent-live-banner { display: block; } .agent-header-actions, .agent-live-actions { margin-top: 16px; } .field-grid, .agent-knowledge-metrics { grid-template-columns: 1fr 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } }
 </style>

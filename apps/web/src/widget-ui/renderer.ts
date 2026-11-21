@@ -86,6 +86,7 @@ export interface WidgetState {
   action?: WidgetAction | null;
   actionStep?: number;
   actionValues?: Record<string, string>;
+  consentGiven?: boolean;
   actionSubmitting?: boolean;
   leadCaptured?: boolean;
   leadVisible?: boolean;
@@ -106,6 +107,7 @@ export interface WidgetRendererOptions {
   onLeadSubmit?: (values: { name: string; email: string; phone: string; consent: boolean }) => void;
   onActionSubmit?: (values: Record<string, string>, action: WidgetAction) => void;
   onActionValuesChange?: (values: Record<string, string>, action: WidgetAction) => void;
+  onConsentChange?: (consent: boolean) => void;
   onHandoffDismiss?: () => void;
   onProactiveDismiss?: () => void;
 }
@@ -204,9 +206,13 @@ const WIDGET_STYLES = `
   .fdw-lead-heading { display: grid; gap: 4px; margin-bottom: 2px; }
   .fdw-lead-heading strong { color: #1f3658; font-size: 13px; letter-spacing: -.01em; }
   .fdw-lead-heading small { color: #687b94; font-size: 10px; line-height: 1.4; }
-  .fdw-consent-row { display: flex; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
-  .fdw-consent-row input { flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--fdw-accent, #0d6efd); }
+  .fdw-action-form label.fdw-consent-row, .fdw-lead label.fdw-consent-row { display: flex; width: 100%; min-width: 0; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
+  .fdw-consent-row > span { display: block; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .fdw-action-form .fdw-consent-row input, .fdw-lead .fdw-consent-row input { width: 15px; height: 15px; min-width: 15px; min-height: 15px; flex: 0 0 15px; margin: 1px 0 0; padding: 0; border: 0; border-radius: 3px; accent-color: var(--fdw-accent, #0d6efd); }
+  .fdw-consent-row[hidden], .fdw-consent-saved[hidden] { display: none; }
   .fdw-consent-row a { color: #1769c2; font-weight: 700; }
+  .fdw-consent-saved { display: flex; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
+  .fdw-consent-saved-mark { color: #1d9b78; font-weight: 800; }
   .fdw-handoff-status { display: none; align-items: flex-start; gap: 8px; margin: 0 15px 10px; padding: 9px 8px 9px 11px; border: 1px solid #cfe0f7; border-radius: 9px; color: #36577e; background: #f3f8ff; font-size: 11px; line-height: 1.4; }
   .fdw-handoff-status.fdw-visible { display: flex; }
   .fdw-handoff-copy { min-width: 0; flex: 1; }
@@ -334,7 +340,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       <div class="fdw-handoff-status" role="status" aria-live="polite"><span class="fdw-handoff-copy"></span><button class="fdw-handoff-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button></div>
       <div class="fdw-quick-actions"></div>
       <form class="fdw-action-form"></form>
-      <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><button type="submit">Continue</button></form>
+      <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><div class="fdw-consent-saved" hidden><span class="fdw-consent-saved-mark" aria-hidden="true">✓</span><span>Consent saved for this visit.</span></div><button type="submit">Continue</button></form>
       <form class="fdw-composer"><input placeholder="Ask a question…" aria-label="Ask a question"><button aria-label="Send" type="submit">➤</button></form>
       <div class="fdw-powered-by" aria-label="Powered by FrontDeskWise"><span class="fdw-powered-by-label">Powered by ${SYMBOL}<strong>FrontDeskWise</strong></span></div>
     </section>`;
@@ -358,6 +364,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   const handoffCopy = root.querySelector<HTMLElement>(".fdw-handoff-copy")!;
   const poweredBy = root.querySelector<HTMLElement>(".fdw-powered-by")!;
   const leadConsentRow = root.querySelector<HTMLElement>(".fdw-consent-row")!;
+  const leadConsentSaved = root.querySelector<HTMLElement>(".fdw-consent-saved")!;
   const privacyLink = root.querySelector<HTMLAnchorElement>(".fdw-privacy-link")!;
 
   function renderLogo(): void {
@@ -465,11 +472,22 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       actionForm.appendChild(label);
     }
     if (config.requireLeadConsent) {
-      const consent = element<HTMLLabelElement>(documentRef, "label", "fdw-consent-row");
-      consent.innerHTML = "<input type=\"checkbox\" name=\"consent\" required><span>I agree to share my details with this business.</span>";
-      const consentInput = consent.querySelector<HTMLInputElement>("input");
-      if (consentInput) consentInput.checked = state.actionValues?.consent === "true" || state.actionValues?.consent === "on";
-      actionForm.appendChild(consent);
+      if (state.consentGiven) {
+        const saved = element<HTMLDivElement>(documentRef, "div", "fdw-consent-saved");
+        const mark = element<HTMLSpanElement>(documentRef, "span", "fdw-consent-saved-mark");
+        mark.setAttribute("aria-hidden", "true");
+        mark.textContent = "✓";
+        const copy = element<HTMLSpanElement>(documentRef, "span");
+        copy.textContent = "Consent saved for this visit.";
+        saved.append(mark, copy);
+        actionForm.appendChild(saved);
+      } else {
+        const consent = element<HTMLLabelElement>(documentRef, "label", "fdw-consent-row");
+        consent.innerHTML = "<input type=\"checkbox\" name=\"consent\" required><span>I agree to share my details with this business.</span>";
+        const consentInput = consent.querySelector<HTMLInputElement>("input");
+        if (consentInput) consentInput.checked = state.actionValues?.consent === "true" || state.actionValues?.consent === "on";
+        actionForm.appendChild(consent);
+      }
     }
     const submit = element<HTMLButtonElement>(documentRef, "button");
     submit.type = "submit";
@@ -503,7 +521,9 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     title.textContent = config.assistantName || "AI front desk";
     renderLogo();
     root.querySelector<HTMLButtonElement>(".fdw-expand")!.hidden = config.widgetAllowExpand === false;
-    leadConsentRow.hidden = config.requireLeadConsent !== true;
+    const consentRemembered = config.requireLeadConsent === true && state.consentGiven === true;
+    leadConsentRow.hidden = config.requireLeadConsent !== true || consentRemembered;
+    leadConsentSaved.hidden = !consentRemembered;
     const safePrivacyUrl = config.privacyNoticeUrl ? safeLinkUrl(config.privacyNoticeUrl) : null;
     if (safePrivacyUrl) {
       privacyLink.href = safePrivacyUrl;
@@ -531,6 +551,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       const control = field as HTMLInputElement | HTMLSelectElement;
       if (control.name) values[control.name] = control.type === "checkbox" ? String((control as HTMLInputElement).checked) : control.value;
     }
+    if (config.requireLeadConsent && state.consentGiven) values.consent = "true";
     return values;
   }
 
@@ -586,6 +607,13 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   });
   actionForm.addEventListener("input", rememberActionValues);
   actionForm.addEventListener("change", rememberActionValues);
+  actionForm.addEventListener("change", (event) => {
+    const control = event.target as HTMLInputElement | null;
+    if (control?.type === "checkbox" && control.name === "consent") {
+      state = { ...state, consentGiven: control.checked };
+      options.onConsentChange?.(control.checked);
+    }
+  });
   lead.addEventListener("submit", (event) => {
     event.preventDefault();
     const formData = new FormData(lead);
@@ -593,8 +621,15 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       name: String(formData.get("name") ?? "").trim(),
       email: String(formData.get("email") ?? "").trim(),
       phone: String(formData.get("phone") ?? "").trim(),
-      consent: formData.get("consent") === "on",
+      consent: state.consentGiven === true || formData.get("consent") === "on",
     });
+  });
+  lead.addEventListener("change", (event) => {
+    const control = event.target as HTMLInputElement | null;
+    if (control?.type === "checkbox" && control.name === "consent") {
+      state = { ...state, consentGiven: control.checked };
+      options.onConsentChange?.(control.checked);
+    }
   });
 
   render();

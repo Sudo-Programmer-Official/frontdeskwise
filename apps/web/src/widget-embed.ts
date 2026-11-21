@@ -9,18 +9,48 @@ import {
   type WidgetState,
 } from "./widget-ui/renderer";
 
+type PerformanceEventDetails = {
+  durationMs?: number;
+  requestId?: string;
+  metadata?: Record<string, string | number | boolean | null>;
+};
+
+type WidgetPerformanceRuntime = {
+  mark: (event: string, details?: PerformanceEventDetails) => void;
+  flush: () => Promise<void>;
+};
+
+type WidgetBootstrap = {
+  siteKey: string;
+  apiBase: string;
+  host: HTMLDivElement;
+  shadow: ShadowRoot;
+  config: Record<string, unknown> | null;
+  openOnReady?: boolean;
+  openSource?: "launcher" | "proactive";
+  configPromise?: Promise<unknown>;
+  performance: WidgetPerformanceRuntime;
+};
+
+type FrontDeskWiseWindow = Window & {
+  __FRONTDESKWISE_WIDGET_BOOTSTRAP__?: WidgetBootstrap;
+};
+
 (() => {
   "use strict";
 
   const script = document.currentScript as HTMLScriptElement | null;
   if (!script || !script.dataset.site) return;
 
-  const siteKey = script.dataset.site;
-  const apiBase = (script.dataset.api || new URL(script.src, window.location.href).origin).replace(/\/$/, "");
-  const host = document.createElement("div");
+  const widgetWindow = window as FrontDeskWiseWindow;
+  const bootstrap = widgetWindow.__FRONTDESKWISE_WIDGET_BOOTSTRAP__;
+  const siteKey = bootstrap?.siteKey || script.dataset.site;
+  const apiBase = bootstrap?.apiBase || (script.dataset.api || new URL(script.src, window.location.href).origin).replace(/\/$/, "");
+  const host = bootstrap?.host || document.createElement("div");
   host.setAttribute("data-frontdeskwise-widget", siteKey);
-  (document.body || document.documentElement).appendChild(host);
-  const shadow = host.attachShadow({ mode: "open" });
+  if (!bootstrap) (document.body || document.documentElement).appendChild(host);
+  const shadow = bootstrap?.shadow || host.attachShadow({ mode: "open" });
+  shadow.replaceChildren();
   const mount = document.createElement("div");
   shadow.appendChild(mount);
 
@@ -40,7 +70,7 @@ import {
   let visitorId = "";
   let conversationId: string | null = null;
   let lastQuestion = "";
-  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
+  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, consentGiven: false, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
   let renderer: WidgetRendererController;
   let pollTimer: number | null = null;
   let handoffNoticeTimer: number | null = null;
@@ -50,6 +80,7 @@ import {
   let proactiveCleanups: Array<() => void> = [];
   let proactiveShown = false;
   let proactiveArmed = false;
+  let lastRequestId = "";
   const renderedRemoteMessages: Record<string, boolean> = {};
   const HANDOFF_NOTICE_TIMEOUT_MS = 6000;
 
@@ -82,6 +113,35 @@ import {
   function interactionStorageKey(): string {
     const hostName = window.location.hostname || "unknown-host";
     return `frontdeskwise:${siteKey}:${hostName}:interaction`;
+  }
+
+  function consentStorageKey(): string {
+    const hostName = window.location.hostname || "unknown-host";
+    return `frontdeskwise:${siteKey}:${hostName}:consent`;
+  }
+
+  function hasRememberedConsent(): boolean {
+    try {
+      return window.sessionStorage.getItem(consentStorageKey()) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberConsent(): void {
+    try {
+      window.sessionStorage.setItem(consentStorageKey(), "1");
+    } catch {
+      // The renderer still keeps consent for this widget instance if storage is unavailable.
+    }
+  }
+
+  function forgetConsent(): void {
+    try {
+      window.sessionStorage.removeItem(consentStorageKey());
+    } catch {
+      // The renderer still keeps the current consent state if storage is unavailable.
+    }
   }
 
   function persistInteractionState(): void {
@@ -126,11 +186,19 @@ import {
     return window.matchMedia("(max-width: 640px)").matches ? "mobile" : "desktop";
   }
 
+  function markPerformance(event: string, details: PerformanceEventDetails = {}): void {
+    bootstrap?.performance.mark(event, details);
+  }
+
+  function flushPerformance(): void {
+    void bootstrap?.performance.flush();
+  }
+
   function telemetry(event: string, extra: Record<string, unknown> = {}): void {
     void fetch(`${apiBase}/api/v1/widget/${encodeURIComponent(siteKey)}/telemetry`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ event, conversationId, sourcePage: window.location.href, deviceType: deviceType(), ...extra }),
+      body: JSON.stringify({ event, conversationId, sourcePage: window.location.href, device: deviceType(), ...extra }),
     }).catch(() => { /* Telemetry must never interrupt the visitor flow. */ });
   }
 
@@ -205,6 +273,7 @@ import {
 
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(apiBase + path, { headers: { "content-type": "application/json", ...(init.headers || {}) }, ...init });
+    lastRequestId = response.headers.get("x-request-id") || "";
     const payload = await response.json() as T & { error?: string };
     if (!response.ok) throw new Error(payload.error || "The front desk is unavailable.");
     return payload;
@@ -221,14 +290,22 @@ import {
         const key = `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`;
         addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, "assistant", [], key);
       }
+      markPerformance("conversation_restored", { requestId: lastRequestId });
+      flushPerformance();
     } catch {
       // Polling is best-effort; the visitor can continue using the assistant.
     }
   }
 
   function startPolling(): void {
-    if (pollTimer !== null) return;
+    if (pollTimer !== null || !state.isOpen) return;
     pollTimer = window.setInterval(() => void syncConversation(), 5000);
+  }
+
+  function stopPolling(): void {
+    if (pollTimer === null) return;
+    window.clearInterval(pollTimer);
+    pollTimer = null;
   }
 
   function renderActionForm(action: WidgetAction | null | undefined): void {
@@ -242,7 +319,12 @@ import {
   }
 
   async function loadConfig(): Promise<void> {
-    const payload = await api<WidgetConfigResponse>(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`, { cache: "no-store" });
+    const pendingConfig = bootstrap?.configPromise ? await bootstrap.configPromise : null;
+    const payload = bootstrap?.config
+      ? { agent: bootstrap.config as Partial<AgentConfig> }
+      : pendingConfig
+        ? { agent: pendingConfig as Partial<AgentConfig> }
+        : await api<WidgetConfigResponse>(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`, { cache: "default" });
     const agent: Partial<AgentConfig> = payload.agent || {};
     config = {
       assistantName: agent.assistantName || "AI front desk",
@@ -272,8 +354,9 @@ import {
     };
     renderer.update({ config, state: { quickActions: state.quickActions.length ? state.quickActions : config.widgetQuickActions } });
     if (!state.messages.length) addMessage(config.welcomeMessage, "assistant");
-    if (conversationId) void syncConversation();
-    armProactiveEngagement(agent);
+    markPerformance("bootstrap_config_completed", { metadata: { source: bootstrap?.config ? "loader" : "shell" } });
+    if (conversationId && state.isOpen) void syncConversation();
+    if (!bootstrap) armProactiveEngagement(agent);
   }
 
   function proactiveStorageKey(suffix: string): string {
@@ -312,6 +395,9 @@ import {
   }
 
   function hasActiveHandoff(): boolean {
+    // Handoff status is visitor-scoped for recovery, but it must not suppress
+    // proactive engagement in a new session that has no current conversation.
+    if (!conversationId) return false;
     try {
       const status = window.localStorage.getItem(handoffStatusStorageKey());
       return status === "HUMAN_ACTIVE" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
@@ -348,6 +434,7 @@ import {
     proactiveShown = true;
     clearProactiveEngagement();
     suppressProactive(config.proactiveFrequency || "session", "shown");
+    markPerformance("proactive_triggered");
     telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "shown", behavior: config.proactiveBehavior || "teaser" } });
     if ((config.proactiveBehavior || "teaser") === "open") {
       renderer.open("proactive", false);
@@ -355,6 +442,7 @@ import {
       return;
     }
     updateState({ proactive: { visible: true, message: config.proactiveMessage || "Looking for the right service? I can help." } });
+    markPerformance("teaser_rendered");
   }
 
   function armProactiveEngagement(agent: Partial<AgentConfig>): void {
@@ -392,11 +480,20 @@ import {
         const maxScroll = documentHeight - viewportHeight;
         return maxScroll > 0 ? scrollTop / maxScroll : 0;
       };
+      let scrollFrame: number | null = null;
       const onScroll = (): void => {
-        if (scrollProgress() >= 0.7) oneShot();
+        if (scrollFrame !== null) return;
+        scrollFrame = window.requestAnimationFrame(() => {
+          scrollFrame = null;
+          if (scrollProgress() >= 0.7) oneShot();
+        });
       };
       window.addEventListener("scroll", onScroll, { passive: true });
-      proactiveCleanups.push(() => window.removeEventListener("scroll", onScroll));
+      proactiveCleanups.push(() => {
+        window.removeEventListener("scroll", onScroll);
+        if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
+        scrollFrame = null;
+      });
       onScroll();
     }
     if (triggers.includes("exit") && deviceType() === "desktop") {
@@ -405,13 +502,15 @@ import {
         if (event.target instanceof Node && host.contains(event.target)) return;
         oneShot();
       };
-      document.addEventListener("mouseout", onExit);
+      document.addEventListener("mouseout", onExit, { passive: true });
       proactiveCleanups.push(() => document.removeEventListener("mouseout", onExit));
     }
   }
 
   async function ask(question: string): Promise<void> {
     if (!question) return;
+    const sendStartedAt = performance.now();
+    markPerformance("user_message_sent");
     updateState({ quickActions: [], leadVisible: false, typing: false });
     lastQuestion = question;
     try {
@@ -427,7 +526,14 @@ import {
       }
       addMessage(question, "user");
       updateState({ typing: true });
+      const responseStartedAt = performance.now();
       const answer = await api<{ answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, pageUrl: window.location.href }) });
+      const responseCompletedAt = performance.now();
+      markPerformance("first_assistant_content_available", {
+        durationMs: Math.round(responseCompletedAt - responseStartedAt),
+        requestId: lastRequestId,
+        metadata: { network_round_trip_ms: Math.round(responseCompletedAt - responseStartedAt) },
+      });
       updateState({ typing: false });
       addMessage(answer.answer, "assistant", answer.citations || []);
       renderConversationStatus(answer.conversation?.status);
@@ -438,16 +544,33 @@ import {
       if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       if (answer.action) updateState({ leadVisible: false });
       if (!leadCaptured && !answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
+      requestAnimationFrame(() => {
+        const renderedAt = performance.now();
+        markPerformance("full_response_rendered", {
+          durationMs: Math.round(renderedAt - sendStartedAt),
+          requestId: lastRequestId,
+          metadata: {
+            frontend_send_ms: Math.round(responseStartedAt - sendStartedAt),
+            network_round_trip_ms: Math.round(responseCompletedAt - responseStartedAt),
+            render_ms: Math.round(renderedAt - responseCompletedAt),
+            total_response_ms: Math.round(renderedAt - sendStartedAt),
+          },
+        });
+        flushPerformance();
+      });
     } catch (error) {
       updateState({ typing: false });
       addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", "assistant");
+      markPerformance("response_error", { requestId: lastRequestId });
+      flushPerformance();
     }
   }
 
   async function submitAction(values: Record<string, string>, action: WidgetAction): Promise<void> {
     if (!conversationId || state.actionSubmitting) return;
     updateState({ actionSubmitting: true });
-    const consent = values.consent === "true" || values.consent === "on";
+    const consent = state.consentGiven === true || values.consent === "true" || values.consent === "on";
+    if (consent) rememberConsent();
     delete values.consent;
     addMessage("Submitted your details.", "user");
     try {
@@ -466,10 +589,12 @@ import {
 
   async function submitLead(values: { name: string; email: string; phone: string; consent: boolean }): Promise<void> {
     if (!values.name || !values.email || !conversationId || state.leadSubmitting) return;
-    if (config?.requireLeadConsent && !values.consent) {
+    const consent = state.consentGiven === true || values.consent;
+    if (config?.requireLeadConsent && !consent) {
       addMessage("Please confirm that you agree to share your details.", "assistant");
       return;
     }
+    if (consent) rememberConsent();
     updateState({ leadSubmitting: true });
     try {
       await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name, email: values.email, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
@@ -489,6 +614,7 @@ import {
   }
 
   visitorId = getVisitorId();
+  state = { ...state, consentGiven: hasRememberedConsent() };
   restoreInteractionState();
   renderer = createWidgetRenderer(mount, {
     surface: "embed",
@@ -506,10 +632,15 @@ import {
       proactiveShown = true;
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
       telemetry("CTA_CLICKED", { metadata: { source } });
+      requestAnimationFrame(() => {
+        markPerformance("full_shell_visible");
+        flushPerformance();
+      });
     },
     onClose: () => {
       state = { ...state, isOpen: false, openedByUser: false };
       persistInteractionState();
+      stopPolling();
       clearProactiveEngagement();
       proactiveShown = true;
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
@@ -519,6 +650,12 @@ import {
     onActionValuesChange: (values, action) => {
       if (state.action?.id !== action.id) return;
       state = { ...state, actionValues: values };
+      persistInteractionState();
+    },
+    onConsentChange: (consent) => {
+      if (consent) rememberConsent();
+      else forgetConsent();
+      state = { ...state, consentGiven: consent };
       persistInteractionState();
     },
     onLeadSubmit: (values) => { void submitLead(values); },
@@ -537,6 +674,7 @@ import {
     },
   });
   renderer.update({ state });
+  if (bootstrap?.openOnReady) renderer.open(bootstrap.openSource || "launcher", true);
   window.addEventListener("pagehide", recordAbandonment);
   void loadConfig().catch(() => { /* A manual open retries when the API is available. */ });
 })();

@@ -153,7 +153,8 @@ export function renderLifecycleEmail(template: Pick<LifecycleTemplate, "subject"
   const htmlSecondaryCtas = secondaryCtas.length
     ? `<p style="margin:18px 0 0">${secondaryCtas.map((cta) => `<a href="${htmlEscape(cta.url)}" style="display:inline-block;color:#173b35;margin:0 16px 10px 0;font-weight:600">${htmlEscape(cta.label)} →</a>`).join("")}</p>`
     : "";
-  const html = `<!doctype html><html><body style="margin:0;background:#f5f7f6;color:#15211e;font-family:Arial,sans-serif"><div style="max-width:600px;margin:32px auto;padding:32px;background:#fff;border:1px solid #e4eae7;border-radius:16px"><p style="color:#6c7974;font-size:12px;margin:0 0 20px">${htmlEscape(previewText)}</p><h1 style="font-size:26px;line-height:1.2;margin:0 0 20px">${htmlEscape(heading)}</h1>${htmlBody}${htmlCta}${htmlSecondaryCtas}<p style="color:#6c7974;font-size:12px;line-height:1.5;border-top:1px solid #e4eae7;padding-top:20px;margin-top:28px">${htmlEscape(footer)}</p></div></body></html>`;
+  const brandHeader = `<div style="margin:0 0 24px;color:#173b35;font-size:18px;font-weight:700;letter-spacing:-.03em">FrontDesk<span style="color:#2b8a78">Wise</span></div>`;
+  const html = `<!doctype html><html><body style="margin:0;background:#f5f7f6;color:#15211e;font-family:Arial,sans-serif"><div style="max-width:600px;margin:32px auto;padding:32px;background:#fff;border:1px solid #e4eae7;border-radius:16px">${brandHeader}<p style="color:#6c7974;font-size:12px;margin:0 0 20px">${htmlEscape(previewText)}</p><h1 style="font-size:26px;line-height:1.2;margin:0 0 20px">${htmlEscape(heading)}</h1>${htmlBody}${htmlCta}${htmlSecondaryCtas}<p style="color:#6c7974;font-size:12px;line-height:1.5;border-top:1px solid #e4eae7;padding-top:20px;margin-top:28px">${htmlEscape(footer)}</p></div></body></html>`;
   return { subject, text: textParts.join("\n\n"), html };
 }
 

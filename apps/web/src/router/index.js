@@ -3,7 +3,7 @@ const workspaceViews = new Set([
     "overview", "inbox", "team", "conversations", "leads", "knowledge", "actions", "connections", "agent", "analytics", "businesses", "settings", "billing",
 ]);
 const settingsTabs = new Set(["general", "team", "integrations", "verification", "notifications", "billing"]);
-const agentTabs = new Set(["behavior", "appearance", "quick-actions", "actions", "test", "install"]);
+const agentTabs = new Set(["behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
 function cleanPath(pathname) {
     const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
     return path || "/";
@@ -77,6 +77,10 @@ export function parseRoute(location = window.location) {
         const step = segments[1] && ["business", "knowledge", "agent", "install"].includes(segments[1]) ? segments[1] : "index";
         return { kind: "onboarding", step };
     }
+    if (segments[0] === "app" && segments[1] === "settings" && segments[2] === "billing" && segments[3] === "success") {
+        const sessionId = query.get("session_id")?.trim();
+        return { kind: "billing-success", ...(sessionId ? { sessionId } : {}) };
+    }
     if (segments[0] === "platform") {
         if (segments[1] === "organizations" && segments[2])
             return { kind: "platform", section: "organization-detail", organizationId: segments[2] };
@@ -128,6 +132,8 @@ export function routeView(route) {
         return route.view === "agent" || route.view === "conversations" ? "agent" : route.view;
     if (route.kind === "workspace-settings")
         return route.view;
+    if (route.kind === "billing-success")
+        return "billing";
     if (route.kind === "platform")
         return "admin";
     if (route.kind === "onboarding")
@@ -167,6 +173,10 @@ export function routePath(route) {
         return `/demo/access?token=${encodeURIComponent(route.token)}`;
     if (route.kind === "onboarding")
         return route.step === "index" ? "/onboarding" : `/onboarding/${route.step}`;
+    if (route.kind === "billing-success") {
+        const query = route.sessionId ? `?session_id=${encodeURIComponent(route.sessionId)}` : "";
+        return `/app/settings/billing/success${query}`;
+    }
     if (route.kind === "workspace-settings")
         return route.tab === "general" ? "/app/settings" : `/app/settings/${route.tab}`;
     if (route.kind === "platform") {

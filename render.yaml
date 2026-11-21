@@ -4,7 +4,7 @@ services:
     runtime: node
     region: virginia
     rootDir: apps/api
-    buildCommand: npm ci --include=dev && npm run build
+    buildCommand: npm ci --include=dev && npx playwright install chromium && npm run build
     preDeployCommand: npm run db:migrate
     startCommand: npm run start
     healthCheckPath: /ready
@@ -33,6 +33,8 @@ services:
         value: https://www.frontdeskwise.com
       - key: FRONTDESKWISE_WIDGET_URL
         value: https://www.frontdeskwise.com/widget.js
+      - key: FRONTDESKWISE_WIDGET_SHELL_URL
+        value: https://www.frontdeskwise.com/widget-shell.js
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: OPENAI_API_KEY

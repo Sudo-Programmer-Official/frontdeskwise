@@ -12,6 +12,7 @@ const widgetPreview = await readFile(resolve(here, "../src/components/WidgetPrev
 const widgetRenderer = await readFile(resolve(here, "../src/widget-ui/renderer.ts"), "utf8");
 const markdownRenderer = await readFile(resolve(here, "../src/widget-ui/markdown.ts"), "utf8");
 const widgetEmbed = await readFile(resolve(here, "../src/widget-embed.ts"), "utf8");
+const widgetLoader = await readFile(resolve(here, "../src/widget-loader.ts"), "utf8");
 const styles = await readFile(resolve(here, "../src/styles.css"), "utf8");
 const feedback = await readFile(resolve(here, "../src/AppFeedback.vue"), "utf8");
 const widget = await readFile(resolve(here, "../public/widget.js"), "utf8");
@@ -125,8 +126,9 @@ test("embedded widget uses the responsive conversation shell", () => {
 });
 
 test("production proactive engagement carries bootstrap settings into the live widget path", () => {
-  const embed = `${widget}\n${widgetEmbed}`;
+  const embed = `${widget}\n${widgetEmbed}\n${widgetLoader}`;
   for (const marker of [
+    "loader_downloaded",
     "proactiveEnabled: agent.proactiveEnabled === true",
     "proactiveDelaySeconds: Number(agent.proactiveDelaySeconds || 20)",
     "proactiveTriggers: Array.isArray(agent.proactiveTriggers)",
@@ -138,13 +140,25 @@ test("production proactive engagement carries bootstrap settings into the live w
     "body?.scrollTop || 0",
     "event.relatedTarget",
     "hasActiveHandoff()",
+    "if (!conversationId) return false;",
+    "let userOpened = false;",
   ]) {
     assert.ok(embed.includes(marker), `missing proactive runtime contract: ${marker}`);
   }
   assert.match(apiServer, /proactive_behavior = excluded\.proactive_behavior/);
   assert.match(apiServer, /proactive_frequency = excluded\.proactive_frequency/);
-  assert.match(apiServer, /Cache-Control", "no-store, max-age=0/);
-  assert.match(apiServer, /Pragma", "no-cache/);
+  assert.match(apiServer, /Cache-Control", "public, max-age=60, stale-while-revalidate=300/);
+  assert.match(apiServer, /const entityTag =/);
+});
+
+test("widget installation supports optional path scoping", () => {
+  assert.match(widgetLoader, /parseWidgetPagePatterns/);
+  assert.match(widgetLoader, /widgetPageMatches/);
+  assert.match(widgetLoader, /script\.dataset\.pages/);
+  assert.match(widgetLoader, /window\.location\.pathname/);
+  assert.match(widget, /dataset\.pages/);
+  assert.match(apiServer, /data-site=\"\$\{business\.widget\.siteKey\}\"/);
+  assert.match(apiServer, /data-shell/);
 });
 
 test("active production widget state cannot be closed by stale updates or form rerenders", () => {
@@ -217,6 +231,22 @@ test("application navigation is route-driven and refresh-safe", () => {
   assert.match(app, /window\.history\[replace \? "replaceState" : "pushState"\]/);
   assert.match(app, /window\.addEventListener\("popstate", handleRouteChange\)/);
   assert.match(app, /Keep control-plane and onboarding deep links stable/);
+});
+
+test("Stripe checkout keeps the webhook-authoritative success journey visible", () => {
+  const successRoute = parseRoute({ pathname: "/app/settings/billing/success", search: "?session_id=cs_test_123" });
+  assert.deepEqual(successRoute, { kind: "billing-success", sessionId: "cs_test_123" });
+  assert.equal(routeView(successRoute), "billing");
+  assert.equal(routePath(successRoute), "/app/settings/billing/success?session_id=cs_test_123");
+  assert.match(apiServer, /app\/settings\/billing\/success\?session_id=\{CHECKOUT_SESSION_ID\}/);
+  assert.match(apiServer, /app\.post\("\/api\/v1\/billing\/events"/);
+  assert.match(apiServer, /activationEmailQueuedAt/);
+  assert.match(app, /billingSuccessState/);
+  assert.match(app, /billingSuccessState === 'active'/);
+  assert.match(app, /billing\?\.status === "active" && billing\.planKey === expectedPlanKey/);
+  assert.match(app, /subscription_success_screen_viewed/);
+  assert.match(app, /frontdeskwise:billing-success-toast/);
+  assert.match(app, /Your \{\{ billingSuccessPlanName \}\} plan is now active/);
 });
 
 test("responsive shell and auth recovery contracts are present", () => {

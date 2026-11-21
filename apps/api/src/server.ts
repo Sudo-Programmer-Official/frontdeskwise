@@ -7,6 +7,7 @@ import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
 import { CrawlError, crawlWebsite, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
+import { createRenderedPageAdapter } from "./rendered-crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
@@ -152,6 +153,11 @@ const demoRateLimiter = new FixedWindowRateLimiter(
 const stripe = process.env.STRIPE_SECRET_KEY?.trim() ? new Stripe(process.env.STRIPE_SECRET_KEY.trim()) : null;
 const stripeAppMetadata = "frontdeskwise";
 const defaultTrialDays = Math.max(1, Number(process.env.FRONTDESKWISE_DEFAULT_TRIAL_DAYS ?? 7));
+const renderedPageAdapter = createRenderedPageAdapter();
+
+function crawlConfiguredWebsite(websiteUrl: string) {
+  return crawlWebsite(websiteUrl, { renderPage: renderedPageAdapter });
+}
 
 function trialEndFromNow(): string {
   return new Date(Date.now() + defaultTrialDays * 24 * 60 * 60 * 1_000).toISOString();
@@ -223,6 +229,8 @@ type AgentConfig = {
   showAiDisclosure: boolean;
 };
 
+type AgentPublishingStatus = "NOT_PUBLISHED" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+
 type KnowledgeAnswerMode = "knowledge" | "fixed_response";
 type KnowledgeIndexStatus = "not_indexed" | "pending" | "ready" | "failed";
 
@@ -236,6 +244,16 @@ type Source = {
   crawlStatus: "queued" | "crawling" | "ready" | "failed";
   contentHash: string;
   lastCrawledAt: string;
+  httpStatus?: number | null;
+  rawHtmlBytes?: number | null;
+  extractedCharacterCount?: number | null;
+  discoveredLinkCount?: number | null;
+  crawlMode?: "static" | "rendered";
+  renderAttempted?: boolean;
+  renderSuccess?: boolean;
+  renderDurationMs?: number | null;
+  crawlDepth?: number | null;
+  discoveryParentUrl?: string | null;
 };
 
 type KnowledgeChunk = {
@@ -336,6 +354,7 @@ type Message = {
     model?: string | null;
     reason?: string;
     latencyMs?: number;
+    rerankLatencyMs?: number;
     inputTokens?: number;
     outputTokens?: number;
     estimatedCostUsd?: number | null;
@@ -431,11 +450,46 @@ type ConversionEvent = {
   metadata: Record<string, unknown>;
 };
 
+type WidgetPerformanceEvent = {
+  id: string;
+  organizationId: string | null;
+  businessId: string;
+  conversationId: string | null;
+  requestId: string | null;
+  event: string;
+  durationMs: number | null;
+  occurredAt: string;
+  sourcePage: string | null;
+  device: string | null;
+  metrics: Record<string, string | number | boolean | null>;
+};
+
 const conversionEventTypes = new Set<ConversionEventType>([
   "FLOW_STARTED", "FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED",
   "FORM_DISPLAYED", "FORM_SUBMITTED", "ACTION_STARTED", "ACTION_SUCCEEDED",
   "ACTION_FAILED", "FLOW_COMPLETED", "CTA_CLICKED", "HANDOFF_REQUESTED",
   "LEAD_CAPTURED", "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED",
+]);
+
+const widgetPerformanceEventTypes = new Set([
+  "loader_requested",
+  "loader_downloaded",
+  "launcher_rendered",
+  "proactive_config_available",
+  "proactive_config_revalidated",
+  "proactive_triggered",
+  "teaser_rendered",
+  "teaser_clicked",
+  "teaser_dismissed",
+  "launcher_clicked",
+  "full_shell_visible",
+  "bootstrap_config_completed",
+  "conversation_restored",
+  "user_message_sent",
+  "first_assistant_content_available",
+  "full_response_rendered",
+  "response_error",
+  "message_backend",
 ]);
 
 type Notification = {
@@ -551,6 +605,7 @@ type Business = {
   ownershipVerificationExpiresAt: string | null;
   ownershipVerifiedAt: string | null;
   ownershipVerifiedByUserId: string | null;
+  agentPublishedAt: string | null;
   sources: Source[];
   chunks: KnowledgeChunk[];
   actions: ActionFlow[];
@@ -563,6 +618,8 @@ type Business = {
   leads: Lead[];
   knowledgeGaps: Map<string, KnowledgeGap>;
   agentConfig: AgentConfig;
+  publishedAgentConfig: AgentConfig | null;
+  publishedAgentConfigHash: string | null;
   billing: BillingState;
   widget: {
     siteKey: string;
@@ -683,6 +740,68 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   retentionDays: 90,
   showAiDisclosure: true,
 });
+
+function cloneAgentConfig(config: AgentConfig): AgentConfig {
+  return { ...config, widgetQuickActions: config.widgetQuickActions.map((action) => ({ ...action })), proactiveTriggers: [...config.proactiveTriggers] };
+}
+
+function agentConfigFromValue(value: unknown, businessName: string): AgentConfig {
+  const config = asRecord(value);
+  const fallback = defaultConfig(businessName);
+  return {
+    assistantName: typeof config.assistantName === "string" && config.assistantName.trim() ? config.assistantName.trim().slice(0, 120) : fallback.assistantName,
+    welcomeMessage: typeof config.welcomeMessage === "string" && config.welcomeMessage.trim() ? config.welcomeMessage.trim().slice(0, 1_000) : fallback.welcomeMessage,
+    tone: ["friendly", "professional", "concise", "custom"].includes(String(config.tone)) ? config.tone as AgentConfig["tone"] : fallback.tone,
+    customToneInstructions: typeof config.customToneInstructions === "string" ? config.customToneInstructions.slice(0, 600) : fallback.customToneInstructions,
+    primaryLanguage: typeof config.primaryLanguage === "string" && config.primaryLanguage.trim() ? config.primaryLanguage.trim().slice(0, 80) : fallback.primaryLanguage,
+    fallbackBehavior: ["contact_form", "human", "unavailable"].includes(String(config.fallbackBehavior)) ? config.fallbackBehavior as AgentConfig["fallbackBehavior"] : fallback.fallbackBehavior,
+    humanHandoffEnabled: config.humanHandoffEnabled !== false,
+    widgetColor: typeof config.widgetColor === "string" && /^#[\da-f]{6}$/i.test(config.widgetColor) ? config.widgetColor : fallback.widgetColor,
+    collectLeads: config.collectLeads !== false,
+    showBookingAction: config.showBookingAction !== false,
+    fallbackMessage: typeof config.fallbackMessage === "string" && config.fallbackMessage.trim() ? config.fallbackMessage : fallback.fallbackMessage,
+    widgetDefaultMode: normalizedWidgetMode(config.widgetDefaultMode),
+    widgetAllowExpand: config.widgetAllowExpand !== false,
+    widgetQuickActions: normalizedWidgetQuickActions(config.widgetQuickActions, businessName),
+    widgetLogoUrl: typeof config.widgetLogoUrl === "string" && config.widgetLogoUrl.trim() ? config.widgetLogoUrl.trim() : null,
+    widgetTheme: ["light", "dark", "auto"].includes(String(config.widgetTheme)) ? config.widgetTheme as AgentConfig["widgetTheme"] : fallback.widgetTheme,
+    widgetPosition: ["bottom-right", "bottom-left"].includes(String(config.widgetPosition)) ? config.widgetPosition as AgentConfig["widgetPosition"] : fallback.widgetPosition,
+    proactiveEnabled: config.proactiveEnabled === true,
+    proactiveDelaySeconds: normalizedProactiveDelay(config.proactiveDelaySeconds),
+    proactiveMessage: typeof config.proactiveMessage === "string" && config.proactiveMessage.trim() ? config.proactiveMessage.trim() : fallback.proactiveMessage,
+    proactiveTriggers: normalizedProactiveTriggers(config.proactiveTriggers),
+    proactiveBehavior: normalizedProactiveBehavior(config.proactiveBehavior),
+    proactiveFrequency: normalizedProactiveFrequency(config.proactiveFrequency),
+    requireLeadConsent: config.requireLeadConsent === true,
+    privacyNoticeUrl: typeof config.privacyNoticeUrl === "string" && config.privacyNoticeUrl.trim() ? config.privacyNoticeUrl.trim() : null,
+    retentionDays: normalizedRetentionDays(config.retentionDays),
+    showAiDisclosure: config.showAiDisclosure !== false,
+  };
+}
+
+function agentConfigHash(config: AgentConfig): string {
+  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+}
+
+function agentPublishingPayload(business: Business): {
+  status: AgentPublishingStatus;
+  domain: string | null;
+  publishedAt: string | null;
+} {
+  if (!business.publishedAgentConfig) return { status: "NOT_PUBLISHED", domain: null, publishedAt: null };
+  const publishedHash = business.publishedAgentConfigHash ?? agentConfigHash(business.publishedAgentConfig);
+  let domain: string | null = null;
+  try {
+    domain = business.websiteUrl ? new URL(business.websiteUrl).hostname.replace(/^www\./i, "") : null;
+  } catch {
+    domain = null;
+  }
+  return {
+    status: agentConfigHash(business.agentConfig) === publishedHash ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES",
+    domain,
+    publishedAt: business.agentPublishedAt,
+  };
+}
 
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
   const error = new Error(message) as Error & { statusCode: number };
@@ -922,6 +1041,7 @@ function organizationBillingPayload(row: Record<string, unknown>): Record<string
     pendingBillingInterval: typeof row.pending_billing_interval === "string" ? row.pending_billing_interval : null,
     cancelAtPeriodEnd: row.cancel_at_period_end === true,
     lastPaymentStatus: typeof row.last_payment_status === "string" ? row.last_payment_status : null,
+    activationEmailQueuedAt: nullableIso(row.subscription_activation_email_queued_at),
     amountCents: effectiveAmount === null || effectiveAmount === undefined ? null : Number(effectiveAmount),
     currency: String(row.billing_currency ?? "usd"),
     access: organizationBillingAccess(row),
@@ -1469,6 +1589,16 @@ function makeBusiness(input: {
     crawlStatus: "ready",
     contentHash: page.contentHash,
     lastCrawledAt: page.lastCrawledAt,
+    httpStatus: page.httpStatus ?? null,
+    rawHtmlBytes: page.rawHtmlBytes ?? null,
+    extractedCharacterCount: page.extractedCharacterCount ?? null,
+    discoveredLinkCount: page.discoveredLinkCount ?? null,
+    crawlMode: page.crawlMode ?? "static",
+    renderAttempted: page.renderAttempted ?? false,
+    renderSuccess: page.renderSuccess ?? false,
+    renderDurationMs: page.renderDurationMs ?? null,
+    crawlDepth: page.crawlDepth ?? null,
+    discoveryParentUrl: page.discoveryParentUrl ?? null,
   }));
   const chunks: KnowledgeChunk[] = input.pages.flatMap((page, index) => page.chunks.map((chunk) => ({
     id: randomUUID(),
@@ -1492,6 +1622,7 @@ function makeBusiness(input: {
     ownershipVerificationExpiresAt: null,
     ownershipVerifiedAt: null,
     ownershipVerifiedByUserId: null,
+    agentPublishedAt: null,
     sources,
     chunks,
     actions: defaultActionFlows(input.name, websiteContent, (key) => randomUUID()),
@@ -1504,6 +1635,8 @@ function makeBusiness(input: {
     leads: [],
     knowledgeGaps: new Map(),
     agentConfig: defaultConfig(input.name),
+    publishedAgentConfig: null,
+    publishedAgentConfigHash: null,
     billing: {
       mode: "sandbox",
       isDemo: true,
@@ -1995,8 +2128,11 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     for (const source of business.sources) {
       const originalSourceId = source.id;
       const sourceResult = await client.query<{ id: string }>(
-        `insert into business_sources (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `insert into business_sources
+           (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at,
+            http_status, raw_html_bytes, extracted_character_count, discovered_link_count, crawl_mode, render_attempted,
+            render_success, render_duration_ms, crawl_depth, discovery_parent_url)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          on conflict (business_id, content_hash) do update set
            source_url = excluded.source_url,
            canonical_url = excluded.canonical_url,
@@ -2004,9 +2140,40 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            page_type = excluded.page_type,
            crawl_status = excluded.crawl_status,
            last_crawled_at = excluded.last_crawled_at,
+           http_status = excluded.http_status,
+           raw_html_bytes = excluded.raw_html_bytes,
+           extracted_character_count = excluded.extracted_character_count,
+           discovered_link_count = excluded.discovered_link_count,
+           crawl_mode = excluded.crawl_mode,
+           render_attempted = excluded.render_attempted,
+           render_success = excluded.render_success,
+           render_duration_ms = excluded.render_duration_ms,
+           crawl_depth = excluded.crawl_depth,
+           discovery_parent_url = excluded.discovery_parent_url,
            error_message = null
          returning id`,
-        [source.id, business.id, source.url, source.canonicalUrl, source.title, source.contentType, source.pageType, source.crawlStatus, source.contentHash, source.lastCrawledAt],
+        [
+          source.id,
+          business.id,
+          source.url,
+          source.canonicalUrl,
+          source.title,
+          source.contentType,
+          source.pageType,
+          source.crawlStatus,
+          source.contentHash,
+          source.lastCrawledAt,
+          source.httpStatus ?? null,
+          source.rawHtmlBytes ?? null,
+          source.extractedCharacterCount ?? null,
+          source.discoveredLinkCount ?? null,
+          source.crawlMode ?? "static",
+          source.renderAttempted ?? false,
+          source.renderSuccess ?? false,
+          source.renderDurationMs ?? null,
+          source.crawlDepth ?? null,
+          source.discoveryParentUrl ?? null,
+        ],
       );
       source.id = sourceResult.rows[0].id;
       for (const chunk of business.chunks.filter((item) => item.sourceId === originalSourceId)) {
@@ -2306,6 +2473,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     ownershipVerificationExpiresAt: row.ownership_verification_expires_at ? toIso(row.ownership_verification_expires_at) : null,
     ownershipVerifiedAt: row.ownership_verified_at ? toIso(row.ownership_verified_at) : null,
     ownershipVerifiedByUserId: typeof row.ownership_verified_by_user_id === "string" ? row.ownership_verified_by_user_id : null,
+    agentPublishedAt: row.agent_published_at ? toIso(row.agent_published_at) : null,
     sources: sourceResult.rows.map((source) => ({
       id: String(source.id),
       url: String(source.source_url),
@@ -2316,6 +2484,16 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       crawlStatus: source.crawl_status === "queued" || source.crawl_status === "crawling" || source.crawl_status === "failed" ? source.crawl_status : "ready",
       contentHash: String(source.content_hash ?? ""),
       lastCrawledAt: source.last_crawled_at ? toIso(source.last_crawled_at) : toIso(source.created_at),
+      httpStatus: source.http_status === null || source.http_status === undefined ? null : Number(source.http_status),
+      rawHtmlBytes: source.raw_html_bytes === null || source.raw_html_bytes === undefined ? null : Number(source.raw_html_bytes),
+      extractedCharacterCount: source.extracted_character_count === null || source.extracted_character_count === undefined ? null : Number(source.extracted_character_count),
+      discoveredLinkCount: source.discovered_link_count === null || source.discovered_link_count === undefined ? null : Number(source.discovered_link_count),
+      crawlMode: source.crawl_mode === "rendered" ? "rendered" : "static",
+      renderAttempted: Boolean(source.render_attempted),
+      renderSuccess: Boolean(source.render_success),
+      renderDurationMs: source.render_duration_ms === null || source.render_duration_ms === undefined ? null : Number(source.render_duration_ms),
+      crawlDepth: source.crawl_depth === null || source.crawl_depth === undefined ? null : Number(source.crawl_depth),
+      discoveryParentUrl: typeof source.discovery_parent_url === "string" ? source.discovery_parent_url : null,
     })),
     chunks: chunkResult.rows.map((chunk) => ({
       id: String(chunk.id),
@@ -2388,35 +2566,37 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
           : "legacy_unknown",
       } satisfies KnowledgeGap,
     ])),
-    agentConfig: config ? {
-      assistantName: String(config.assistant_name),
-      welcomeMessage: String(config.welcome_message),
-      tone: ["friendly", "professional", "concise", "custom"].includes(String(config.tone)) ? String(config.tone) as AgentConfig["tone"] : "friendly",
-      customToneInstructions: typeof config.tone_instructions === "string" ? config.tone_instructions.slice(0, 600) : "",
-      primaryLanguage: typeof config.primary_language === "string" && config.primary_language.trim() ? config.primary_language.trim() : "English",
-      fallbackBehavior: ["contact_form", "human", "unavailable"].includes(String(config.fallback_behavior)) ? String(config.fallback_behavior) as AgentConfig["fallbackBehavior"] : "contact_form",
-      humanHandoffEnabled: config.human_handoff_enabled !== false,
-      widgetColor: String(config.widget_color),
-      collectLeads: Boolean(config.collect_leads),
-      showBookingAction: Boolean(config.show_booking_action),
-      fallbackMessage: String(config.fallback_message),
-      widgetDefaultMode: normalizedWidgetMode(config.widget_default_mode),
-      widgetAllowExpand: config.widget_allow_expand !== false,
-      widgetQuickActions: normalizedWidgetQuickActions(config.widget_quick_actions, String(row.name)),
-      widgetLogoUrl: typeof config.widget_logo_url === "string" && config.widget_logo_url.trim() ? config.widget_logo_url.trim() : null,
-      widgetTheme: ["light", "dark", "auto"].includes(String(config.widget_theme)) ? String(config.widget_theme) as AgentConfig["widgetTheme"] : "auto",
-      widgetPosition: ["bottom-right", "bottom-left"].includes(String(config.widget_position)) ? String(config.widget_position) as AgentConfig["widgetPosition"] : "bottom-right",
-      proactiveEnabled: config.proactive_enabled === true,
-      proactiveDelaySeconds: normalizedProactiveDelay(config.proactive_delay_seconds),
-      proactiveMessage: typeof config.proactive_message === "string" && config.proactive_message.trim() ? config.proactive_message.trim() : defaultConfig(String(row.name)).proactiveMessage,
-      proactiveTriggers: normalizedProactiveTriggers(config.proactive_triggers),
-      proactiveBehavior: normalizedProactiveBehavior(config.proactive_behavior),
-      proactiveFrequency: normalizedProactiveFrequency(config.proactive_frequency),
-      requireLeadConsent: config.require_lead_consent === true,
-      privacyNoticeUrl: typeof config.privacy_notice_url === "string" && config.privacy_notice_url.trim() ? config.privacy_notice_url.trim() : null,
-      retentionDays: normalizedRetentionDays(config.retention_days),
-      showAiDisclosure: config.show_ai_disclosure !== false,
-    } : defaultConfig(String(row.name)),
+    agentConfig: config ? agentConfigFromValue({
+      assistantName: config.assistant_name,
+      welcomeMessage: config.welcome_message,
+      tone: config.tone,
+      customToneInstructions: config.tone_instructions,
+      primaryLanguage: config.primary_language,
+      fallbackBehavior: config.fallback_behavior,
+      humanHandoffEnabled: config.human_handoff_enabled,
+      widgetColor: config.widget_color,
+      collectLeads: config.collect_leads,
+      showBookingAction: config.show_booking_action,
+      fallbackMessage: config.fallback_message,
+      widgetDefaultMode: config.widget_default_mode,
+      widgetAllowExpand: config.widget_allow_expand,
+      widgetQuickActions: config.widget_quick_actions,
+      widgetLogoUrl: config.widget_logo_url,
+      widgetTheme: config.widget_theme,
+      widgetPosition: config.widget_position,
+      proactiveEnabled: config.proactive_enabled,
+      proactiveDelaySeconds: config.proactive_delay_seconds,
+      proactiveMessage: config.proactive_message,
+      proactiveTriggers: config.proactive_triggers,
+      proactiveBehavior: config.proactive_behavior,
+      proactiveFrequency: config.proactive_frequency,
+      requireLeadConsent: config.require_lead_consent,
+      privacyNoticeUrl: config.privacy_notice_url,
+      retentionDays: config.retention_days,
+      showAiDisclosure: config.show_ai_disclosure,
+    }, String(row.name)) : defaultConfig(String(row.name)),
+    publishedAgentConfig: config?.published_config ? agentConfigFromValue(config.published_config, String(row.name)) : null,
+    publishedAgentConfigHash: typeof config?.published_config_hash === "string" ? config.published_config_hash : null,
     billing: {
       mode: (row.organization_billing_mode ?? row.billing_mode) === "live" ? "live" : "sandbox",
       isDemo: row.is_demo !== false,
@@ -2440,6 +2620,11 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     },
     createdAt: toIso(row.created_at),
   };
+  // Businesses published by the previous timestamp-only implementation keep
+  // their live state until the first explicit publish writes a snapshot.
+  if (loaded.agentPublishedAt && !loaded.publishedAgentConfig) {
+    loaded.publishedAgentConfig = cloneAgentConfig(loaded.agentConfig);
+  }
   for (const gap of loaded.knowledgeGaps.values()) {
     if (gap.status !== "resolved" || !gap.approvedAnswer) continue;
     try {
@@ -2948,6 +3133,19 @@ async function persistAgentConfig(business: Business): Promise<void> {
        tone_instructions = excluded.tone_instructions,
        updated_at = now()`,
     [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.proactiveBehavior, business.agentConfig.proactiveFrequency, business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions],
+  );
+}
+
+async function persistPublishedAgentConfig(business: Business): Promise<void> {
+  if (!business.publishedAgentConfig) return;
+  business.agentPublishedAt = business.agentPublishedAt ?? new Date().toISOString();
+  business.publishedAgentConfigHash = agentConfigHash(business.publishedAgentConfig);
+  if (!pool) return;
+  await pool.query(
+    `update agent_configs
+     set published_config = $2, published_config_hash = $3, updated_at = now()
+     where business_id = $1`,
+    [business.id, JSON.stringify(business.publishedAgentConfig), business.publishedAgentConfigHash],
   );
 }
 
@@ -3685,7 +3883,7 @@ function billingReturnUrl(kind: "success" | "cancel" | "portal"): string {
       : value;
   }
   const origin = (process.env.WEB_ORIGIN ?? "http://localhost:5173").split(",")[0].trim().replace(/\/$/, "");
-  return kind === "success" ? `${origin}/?billing=success&session_id={CHECKOUT_SESSION_ID}` : `${origin}/?billing=${kind}`;
+  return kind === "success" ? `${origin}/app/settings/billing/success?session_id={CHECKOUT_SESSION_ID}` : `${origin}/app/settings/billing?billing=${kind}`;
 }
 
 function requireStripe(): Stripe {
@@ -4039,11 +4237,16 @@ async function getBusinessBySiteKey(siteKey: unknown): Promise<Business> {
   const value = requiredString(siteKey, "siteKey", 120);
   if (pool) {
     const result = await pool.query<{ slug: string }>("select slug from businesses where public_site_key = $1", [value]);
-    if (result.rowCount) return getBusiness(result.rows[0].slug);
+    if (result.rowCount) {
+      const business = await getBusiness(result.rows[0].slug);
+      if (!business.publishedAgentConfig) throw httpError(404, "AI front desk is not published");
+      return { ...business, agentConfig: cloneAgentConfig(business.publishedAgentConfig) };
+    }
   }
   const business = [...businesses.values()].find((item) => item.widget.siteKey === value);
   if (!business) throw httpError(404, "Widget site key not found");
-  return business;
+  if (!business.publishedAgentConfig) throw httpError(404, "AI front desk is not published");
+  return { ...business, agentConfig: cloneAgentConfig(business.publishedAgentConfig) };
 }
 
 async function recordWidgetLoad(business: Business): Promise<void> {
@@ -4719,6 +4922,15 @@ function websiteBrandColors(business: Business): string[] {
   return [...new Set(colors.map((color) => color.toUpperCase()))].slice(0, 6);
 }
 
+function isLowQualityWebChunk(business: Business, chunk: KnowledgeChunk): boolean {
+  const source = business.sources.find((candidate) => candidate.id === chunk.sourceId);
+  const tokenCount = typeof chunk.metadata.tokenCount === "number" ? chunk.metadata.tokenCount : null;
+  return source?.contentType === "web_page"
+    && tokenCount !== null
+    && tokenCount <= 8
+    && chunk.content.trim().length < 120;
+}
+
 async function workspacePayload(business: Business) {
   const conversations = [...business.conversations.values()];
   const leadCount = business.leads.length;
@@ -4730,26 +4942,32 @@ async function workspacePayload(business: Business) {
   const pendingSourceCount = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling").length;
   const failedSourceCount = business.sources.filter((source) => source.crawlStatus === "failed").length;
   const chunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId)).length;
+  const meaningfulChunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId) && !isLowQualityWebChunk(business, chunk)).length;
+  const contentQualityIssue = chunkCount > 0 && meaningfulChunkCount === 0;
   const semantic = await embeddingReadinessForBusiness(business);
   const readinessScore = sourceCount === 0
     ? 0
-    : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (chunkCount > 0 ? 30 : 0) + (semantic.status === "SEMANTIC_SEARCH_HEALTHY" ? 20 : 0) + Math.max(0, 10 - gapCount * 2)));
+    : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (meaningfulChunkCount > 0 ? 30 : 0) + (semantic.status === "SEMANTIC_SEARCH_HEALTHY" && !contentQualityIssue ? 20 : 0) + Math.max(0, 10 - gapCount * 2)));
   const readinessStatus = sourceCount === 0
     ? "needs_website"
     : chunkCount === 0 || pendingSourceCount > 0
       ? "indexing"
-      : gapCount > 0 || failedSourceCount > 0
+      : contentQualityIssue || gapCount > 0 || failedSourceCount > 0
         ? "review_recommended"
         : "ready";
   const knowledgeStatus = sourceCount === 0 || chunkCount === 0 || pendingSourceCount > 0
     ? readinessStatus
-    : semantic.status;
+    : contentQualityIssue
+      ? "review_recommended"
+      : semantic.status;
   const setupSteps = [
-    sourceCount > 0,
-    chunkCount > 0,
-    Boolean(business.agentConfig.assistantName && business.agentConfig.welcomeMessage),
-    Boolean(business.widget.enabled && business.widget.siteKey),
+    { id: "domain_verified", label: "Verify website", complete: business.ownershipStatus === "verified" },
+    { id: "knowledge_ready", label: "Review knowledge", complete: sourceCount > 0 && meaningfulChunkCount > 0 && pendingSourceCount === 0 && failedSourceCount === 0 },
+    { id: "agent_tested", label: "Test assistant", complete: [...business.conversations.values()].some((conversation) => conversation.sessionId.startsWith("dashboard-") && conversation.messages.some((message) => message.role === "user" && message.content.trim())) },
+    { id: "widget_installed", label: "Install widget", complete: business.widget.loadCount > 0 },
+    { id: "agent_published", label: "Publish", complete: Boolean(business.agentPublishedAt || business.publishedAgentConfig) },
   ];
+  const nextRequiredStep = setupSteps.find((step) => !step.complete)?.id ?? null;
   const businessTerms = [...new Set(
     tokenise(business.chunks[0]?.content ?? "")
       .filter((term) => !tokenise(business.name).includes(term)),
@@ -4802,6 +5020,8 @@ async function workspacePayload(business: Business) {
       method: business.ownershipVerificationMethod,
       verifiedAt: business.ownershipVerifiedAt,
     },
+    publishing: agentPublishingPayload(business),
+    publishedAt: business.agentPublishedAt,
     billing: {
       ...business.billing,
       access: billingAccess(business.billing),
@@ -4815,11 +5035,13 @@ async function workspacePayload(business: Business) {
     knowledge: {
       sourceCount,
       chunkCount,
+      meaningfulChunkCount,
+      contentQualityIssue,
       openGaps: gapCount,
       pendingSources: pendingSourceCount,
       failedSources: failedSourceCount,
       status: knowledgeStatus,
-      indexed: sourceCount > 0 && chunkCount > 0,
+      indexed: sourceCount > 0 && meaningfulChunkCount > 0,
       semantic,
       sources: business.sources.map((source) => ({
         id: source.id,
@@ -4829,11 +5051,23 @@ async function workspacePayload(business: Business) {
         pageType: source.pageType,
         crawlStatus: source.crawlStatus,
         lastCrawledAt: source.lastCrawledAt,
+        httpStatus: source.httpStatus ?? null,
+        rawHtmlBytes: source.rawHtmlBytes ?? null,
+        extractedCharacterCount: source.extractedCharacterCount ?? null,
+        discoveredLinkCount: source.discoveredLinkCount ?? null,
+        crawlMode: source.crawlMode ?? "static",
+        renderAttempted: source.renderAttempted ?? false,
+        renderSuccess: source.renderSuccess ?? false,
+        renderDurationMs: source.renderDurationMs ?? null,
+        crawlDepth: source.crawlDepth ?? null,
+        discoveryParentUrl: source.discoveryParentUrl ?? null,
       })),
       readiness: {
         score: readinessScore,
         sources: sourceCount,
         chunks: chunkCount,
+        meaningfulChunks: meaningfulChunkCount,
+        contentQualityIssue,
         embeddedChunks: semantic.embeddedChunks,
         embeddingCoveragePercent: semantic.coveragePercent,
         semanticSearchStatus: semantic.status,
@@ -4859,9 +5093,11 @@ async function workspacePayload(business: Business) {
       handoffs: conversations.filter((conversation) => conversation.status !== "AI_ACTIVE").length,
       humanActive: conversations.filter((conversation) => conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED").length,
       setup: {
-        completed: setupSteps.filter(Boolean).length,
+        completed: setupSteps.filter((step) => step.complete).length,
         total: setupSteps.length,
-        percent: Math.round(setupSteps.filter(Boolean).length / setupSteps.length * 100),
+        percent: Math.round(setupSteps.filter((step) => step.complete).length / setupSteps.length * 100),
+        steps: setupSteps,
+        nextRequiredStep,
       },
     },
   };
@@ -4981,6 +5217,7 @@ type RetrievalResult = {
   matches: RetrievalMatch[];
   mode: string;
   latencyMs: number;
+  rerankLatencyMs: number;
   normalizedQuery: string;
   expandedQuery: string;
   candidates: RetrievalCandidateDiagnostic[];
@@ -5042,7 +5279,14 @@ function retrievalTokens(question: string, intent: RetrievalIntent): string[] {
   return [...new Set([...tokenise(question), ...intentTerms[intent]])];
 }
 
-function contentEvidenceScore(content: string, question: string, intent: RetrievalIntent, lexicalScore: number | null, vectorScore: number | null): number {
+function contentEvidenceScore(
+  content: string,
+  question: string,
+  intent: RetrievalIntent,
+  lexicalScore: number | null,
+  vectorScore: number | null,
+  metadata: Record<string, unknown> = {},
+): number {
   const terms = retrievalTokens(question, intent).filter((term) => term !== "plancraftai");
   const lower = content.toLowerCase();
   const coverage = terms.length ? terms.filter((term) => lower.includes(term)).length / terms.length : 0;
@@ -5050,8 +5294,22 @@ function contentEvidenceScore(content: string, question: string, intent: Retriev
     ? 0
     : Math.min(1, 0.2 + lexicalScore * 0.35);
   const lexicalEvidence = Math.max(coverage, lexicalSignal);
-  if (vectorScore === null || !Number.isFinite(vectorScore)) return lexicalEvidence;
-  return Math.max(0, Math.min(1, lexicalEvidence * 0.45 + Math.max(0, Math.min(1, vectorScore)) * 0.55));
+  const semanticEvidence = vectorScore === null || !Number.isFinite(vectorScore)
+    ? lexicalEvidence
+    : lexicalEvidence * 0.45 + Math.max(0, Math.min(1, vectorScore)) * 0.55;
+
+  // A title/metadata shell can score well from a single business-name token or
+  // a broad embedding while containing no answerable evidence. Keep this
+  // generic: short uploaded documents remain valid, but short web chunks with
+  // no section structure are treated as low-quality evidence.
+  const tokenCount = typeof metadata.tokenCount === "number" ? metadata.tokenCount : null;
+  const shellLike = (metadata.sourceType === "web_page" || metadata.pageType === "web_page")
+    && tokenCount !== null
+    && tokenCount <= 8
+    && content.length < 120;
+  if (shellLike) return 0;
+  const quality = tokenCount !== null && tokenCount < 20 && content.length < 180 ? 0.55 : 1;
+  return Math.max(0, Math.min(1, semanticEvidence * quality));
 }
 
 function memoryRetrieval(business: Business, question: string, expandedQuery = question, intent = classifyQuestionIntent(question)): RetrievalResult {
@@ -5060,13 +5318,16 @@ function memoryRetrieval(business: Business, question: string, expandedQuery = q
   const matches = business.chunks.map((chunk) => {
     const lower = chunk.content.toLowerCase();
     const score = tokens.reduce((total, token) => total + (lower.includes(token) ? 1 : 0), 0);
-    return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, expandedQuery, intent, null, null) };
+    return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, expandedQuery, intent, null, null, chunk.metadata) };
   }).filter((item) => item.score > 0);
+  const rerankStartedAt = performance.now();
   const ranked = rankMatches(matches, business.sources, intent, 10);
+  const rerankLatencyMs = performance.now() - rerankStartedAt;
   return {
     matches: ranked,
     mode: "memory_lexical",
     latencyMs: Date.now() - startedAt,
+    rerankLatencyMs,
     normalizedQuery: question,
     expandedQuery,
     candidates: ranked.map((match, index) => {
@@ -5164,10 +5425,13 @@ async function databaseRetrieval(business: Business, question: string, expandedQ
         intent,
         row.lexical_score === undefined || row.lexical_score === null ? null : Number(row.lexical_score),
         row.vector_score === undefined || row.vector_score === null ? null : Number(row.vector_score),
+        asRecord(row.metadata),
       ),
     }));
 
+    const rerankStartedAt = performance.now();
     const ranked = rankMatches(matches, business.sources, intent, 10);
+    const rerankLatencyMs = performance.now() - rerankStartedAt;
     const selectedByChunk = new Map(ranked.map((match) => [match.chunk.id, match]));
     const sourceById = new Map(business.sources.map((source) => [source.id, source]));
     const candidates = [...records.values()].map(({ row, lexicalRank, vectorRank }) => {
@@ -5200,6 +5464,7 @@ async function databaseRetrieval(business: Business, question: string, expandedQ
       matches: ranked,
       mode: vectorResult.rowCount ? "hybrid_rrf" : "postgres_full_text",
       latencyMs: Date.now() - startedAt,
+      rerankLatencyMs,
       normalizedQuery: question,
       expandedQuery,
       candidates: candidates.slice(0, 10),
@@ -5292,6 +5557,14 @@ async function answerQuestion(
   question: string,
   options: { recordGap?: boolean; conversation?: Conversation; currentPage?: string | null } = {},
 ) {
+  const answerStartedAt = performance.now();
+  const performanceTiming = {
+    retrievalMs: 0,
+    rerankMs: 0,
+    modelRequestStartedMs: null as number | null,
+    llmFirstTokenMs: null as number | null,
+    llmTotalMs: 0,
+  };
   const initialIntent = classifyQuestionIntent(question);
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
   const approvedGap = resolvedKnowledgeAnswer(business, question, initialIntent);
@@ -5314,6 +5587,7 @@ async function answerQuestion(
       confidenceBand: "high" as const,
       retrieval: { mode: "tier0_greeting", candidateCount: 0, topScore: 1, ...modelUsage },
       modelUsage,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
   if (approvedGap?.approvedAnswer && approvedGap.answerMode === "fixed_response") {
@@ -5335,12 +5609,15 @@ async function answerQuestion(
       confidenceBand: "high" as const,
       retrieval: { mode: "approved_answer", candidateCount: 0, topScore: 1, ...modelUsage },
       modelUsage,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
   const queryContext = retrievalContext(business, question, options.conversation, options.currentPage);
   const intent = queryContext.intent;
   const retrieval = await databaseRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, intent)
     ?? memoryRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, intent);
+  performanceTiming.retrievalMs = retrieval.latencyMs;
+  performanceTiming.rerankMs = retrieval.rerankLatencyMs;
   recordRetrieval(retrieval.mode, retrieval.latencyMs);
   const match = retrieval.matches[0];
   const secondMatch = retrieval.matches[1];
@@ -5354,6 +5631,7 @@ async function answerQuestion(
   const retrievalContract = {
     mode: retrieval.mode,
     latencyMs: retrieval.latencyMs,
+    rerankLatencyMs: retrieval.rerankLatencyMs,
     normalizedQuery: retrieval.normalizedQuery,
     expandedQuery: retrieval.expandedQuery,
     intent,
@@ -5380,6 +5658,7 @@ async function answerQuestion(
   let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" = "not_run";
   if (materiallyRelevant && match && confidenceBand !== "low" && decision.model) {
     try {
+      performanceTiming.modelRequestStartedMs = performance.now() - answerStartedAt;
       generated = await generateGroundedAnswer({
         question,
         context,
@@ -5390,9 +5669,12 @@ async function answerQuestion(
       });
       if (generated) generated.answer = shapeCustomerAnswer(generated.answer, business.agentConfig.tone);
       generationUsage = generated?.usage ?? null;
+      performanceTiming.llmFirstTokenMs = generated?.usage.latencyMs ?? null;
+      performanceTiming.llmTotalMs += generated?.usage.latencyMs ?? 0;
       if (generated) {
         const groundingCheck = await verifyGroundedAnswer({ question, answer: generated.answer, context });
         groundingCheckUsage = groundingCheck.usage;
+        performanceTiming.llmTotalMs += groundingCheck.usage.latencyMs;
         groundingCheckStatus = groundingCheck.grounded ? "passed" : "rejected";
         if (!groundingCheck.grounded) generated = null;
       }
@@ -5430,8 +5712,17 @@ async function answerQuestion(
       : (baseUsage.estimatedCostUsd ?? 0) + (groundingCheckUsage?.estimatedCostUsd ?? 0),
     latencyMs: baseUsage.latencyMs + (groundingCheckUsage?.latencyMs ?? 0),
   };
-  const enrichedRetrieval = { ...retrievalContract, ...modelUsage };
   const modelGenerationFailed = Boolean(decision.model && (!generated || groundingCheckStatus !== "passed"));
+  const enrichedRetrieval = {
+    ...retrievalContract,
+    groundingCheckStatus,
+    finalDecision: modelGenerationFailed
+      ? "fallback_model_generation_or_grounding_failure"
+      : materiallyRelevant && match && confidenceBand !== "low"
+        ? "grounded_answer"
+        : "knowledge_gap",
+    ...modelUsage,
+  };
 
   if (!materiallyRelevant || !match || confidenceBand === "low" || modelGenerationFailed) {
     const gapReason = knowledgeGapReason({
@@ -5451,6 +5742,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
@@ -5474,6 +5766,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
@@ -5486,10 +5779,20 @@ async function answerQuestion(
     confidenceBand,
     retrieval: enrichedRetrieval,
     modelUsage,
+    performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
   };
 }
 
-type AnswerResult = Awaited<ReturnType<typeof answerQuestion>>;
+type WidgetAnswerTiming = {
+  retrievalMs: number;
+  rerankMs: number;
+  modelRequestStartedMs: number | null;
+  llmFirstTokenMs: number | null;
+  llmTotalMs: number;
+  backendTotalMs: number;
+};
+
+type AnswerResult = Omit<Awaited<ReturnType<typeof answerQuestion>>, "performance"> & { performance?: WidgetAnswerTiming };
 
 type ActionFormSchema = {
   submitLabel: string;
@@ -6546,6 +6849,59 @@ async function recordConversionEvent(
   }
 }
 
+function boundedPerformanceMetrics(value: unknown): Record<string, string | number | boolean | null> {
+  const source = asRecord(value);
+  const metrics: Record<string, string | number | boolean | null> = {};
+  for (const [key, item] of Object.entries(source).slice(0, 20)) {
+    if (typeof item === "string") metrics[key.slice(0, 80)] = item.slice(0, 240);
+    else if (typeof item === "number" && Number.isFinite(item)) metrics[key.slice(0, 80)] = Math.round(item * 100) / 100;
+    else if (typeof item === "boolean" || item === null) metrics[key.slice(0, 80)] = item;
+  }
+  return metrics;
+}
+
+async function recordWidgetPerformance(
+  business: Business,
+  input: {
+    event: string;
+    organizationId?: string | null;
+    conversationId?: string | null;
+    requestId?: string | null;
+    durationMs?: number | null;
+    occurredAt?: string | null;
+    sourcePage?: string | null;
+    device?: string | null;
+    metrics?: Record<string, string | number | boolean | null>;
+  },
+): Promise<void> {
+  if (!widgetPerformanceEventTypes.has(input.event) || !pool) return;
+  const event: WidgetPerformanceEvent = {
+    id: randomUUID(),
+    organizationId: input.organizationId ?? await businessOrganizationId(business),
+    businessId: business.id,
+    conversationId: input.conversationId ?? null,
+    requestId: input.requestId?.slice(0, 160) ?? null,
+    event: input.event,
+    durationMs: typeof input.durationMs === "number" && Number.isFinite(input.durationMs) ? Math.max(0, Math.round(input.durationMs)) : null,
+    occurredAt: input.occurredAt && !Number.isNaN(Date.parse(input.occurredAt)) ? new Date(input.occurredAt).toISOString() : new Date().toISOString(),
+    sourcePage: input.sourcePage?.slice(0, 2_000) ?? null,
+    device: normalizeTelemetryDevice(input.device),
+    metrics: boundedPerformanceMetrics(input.metrics ?? {}),
+  };
+  if (!event.organizationId) return;
+  try {
+    await pool.query(
+      `insert into widget_performance_events
+         (id, organization_id, business_id, conversation_id, request_id, event_type, duration_ms, occurred_at, source_page, device, metrics)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [event.id, event.organizationId, event.businessId, event.conversationId, event.requestId, event.event, event.durationMs, event.occurredAt, event.sourcePage, event.device, JSON.stringify(event.metrics)],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: business.id }, "Widget performance table is not available yet");
+  }
+}
+
 async function staffRecipients(business: Business): Promise<Array<{ id: string; email: string; name: string; role: "owner" | "admin" | "staff" }>> {
   if (!pool) return [];
   const result = await pool.query<Record<string, unknown>>(
@@ -7433,6 +7789,66 @@ app.get("/api/v1/admin/rag/metrics", async (request) => {
   };
 });
 
+app.get("/api/v1/admin/widget-performance", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Widget performance observability requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const businessId = optionalString(query.businessId, 80);
+  const siteKey = optionalString(query.siteKey, 160);
+  const requestedLimit = Number(query.limit ?? 200);
+  const limit = Math.min(500, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 200));
+  const [summaryResult, eventsResult] = await Promise.all([
+    pool.query<Record<string, unknown>>(
+      `select wpe.event_type,
+              count(*)::integer as samples,
+              round(avg(wpe.duration_ms))::integer as average_duration_ms,
+              (percentile_cont(0.50) within group (order by wpe.duration_ms) filter (where wpe.duration_ms is not null))::integer as p50_duration_ms,
+              (percentile_cont(0.95) within group (order by wpe.duration_ms) filter (where wpe.duration_ms is not null))::integer as p95_duration_ms
+       from widget_performance_events wpe
+       join businesses b on b.id = wpe.business_id
+       where ($1::uuid is null or wpe.business_id = $1::uuid)
+         and ($2::text is null or b.public_site_key = $2)
+       group by wpe.event_type
+       order by wpe.event_type`,
+      [businessId, siteKey],
+    ),
+    pool.query<Record<string, unknown>>(
+      `select wpe.id, wpe.event_type, wpe.duration_ms, wpe.occurred_at, wpe.request_id,
+              wpe.conversation_id, wpe.source_page, wpe.device, wpe.metrics,
+              b.id as business_id, b.name as business_name, b.slug
+       from widget_performance_events wpe
+       join businesses b on b.id = wpe.business_id
+       where ($1::uuid is null or wpe.business_id = $1::uuid)
+         and ($2::text is null or b.public_site_key = $2)
+       order by wpe.occurred_at desc
+       limit $3`,
+      [businessId, siteKey, limit],
+    ),
+  ]);
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: summaryResult.rows.map((row) => ({
+      event: String(row.event_type),
+      samples: Number(row.samples ?? 0),
+      averageDurationMs: row.average_duration_ms === null ? null : Number(row.average_duration_ms),
+      p50DurationMs: row.p50_duration_ms === null ? null : Number(row.p50_duration_ms),
+      p95DurationMs: row.p95_duration_ms === null ? null : Number(row.p95_duration_ms),
+    })),
+    events: eventsResult.rows.map((row) => ({
+      id: String(row.id),
+      event: String(row.event_type),
+      durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+      occurredAt: nullableIso(row.occurred_at),
+      requestId: row.request_id ? String(row.request_id) : null,
+      conversationId: row.conversation_id ? String(row.conversation_id) : null,
+      sourcePage: row.source_page ? String(row.source_page) : null,
+      device: row.device ? String(row.device) : null,
+      metrics: boundedPerformanceMetrics(row.metrics),
+      business: { id: String(row.business_id), name: String(row.business_name), slug: String(row.slug) },
+    })),
+  };
+});
+
 app.get("/api/v1/storage/documents", async (request) => {
   const { appUser } = await authenticatedAppUser(request);
   if (!pool) throw httpError(503, "Document storage requires PostgreSQL storage");
@@ -7572,6 +7988,32 @@ app.get("/api/v1/billing", async (request) => {
   const { appUser } = await authenticatedAppUser(request);
   const organizationId = optionalString((request.query as Record<string, unknown> | undefined)?.organizationId, 80);
   return billingSnapshotForUser(appUser.id, organizationId);
+});
+
+app.post("/api/v1/billing/events", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  const body = asRecord(request.body);
+  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80));
+  const event = optionalString(body.event, 80);
+  const allowedEvents = new Set([
+    "checkout_returned",
+    "subscription_pending",
+    "subscription_activated",
+    "subscription_success_screen_viewed",
+    "subscription_success_continue_clicked",
+  ]);
+  if (!event || !allowedEvents.has(event)) throw httpError(400, "Unsupported billing event");
+  const requestedSessionId = optionalString(body.sessionId, 255);
+  const sessionId = requestedSessionId && requestedSessionId === String(organization.stripe_checkout_session_id ?? "") ? requestedSessionId : null;
+  const planKey = optionalString(body.planKey, 80) ?? String(organization.plan_key ?? "starter");
+  const eventKey = `frontend:${event}:${sessionId ?? String(organization.id)}:${planKey}`;
+  await recordBillingTimeline({
+    organizationId: String(organization.id),
+    eventKey,
+    eventName: event,
+    metadata: { sessionId, planKey },
+  });
+  return { ok: true };
 });
 
 app.post("/api/v1/billing/checkout-session", async (request) => {
@@ -8845,7 +9287,7 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
     throw httpError(402, "Your current plan has reached its business limit. Upgrade to add another business.");
   }
 
-  const crawled = await crawlWebsite(websiteUrl);
+  const crawled = await crawlConfiguredWebsite(websiteUrl);
   const firstPage = crawled.pages[0];
   const name = businessNameFromTitle(firstPage.title, websiteUrl);
   const baseSlug = slugify(name);
@@ -8912,7 +9354,7 @@ async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<
   });
 
   try {
-    const crawled = await crawlWebsite(websiteUrl);
+    const crawled = await crawlConfiguredWebsite(websiteUrl);
     const firstPage = crawled.pages[0];
     const name = businessNameFromTitle(firstPage.title, websiteUrl);
     const baseSlug = slugify(name);
@@ -9055,7 +9497,7 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
   source.crawlStatus = "crawling";
   await persistBusiness(business);
   try {
-    const crawled = await crawlWebsite(normalisePublicUrl(business.websiteUrl));
+    const crawled = await crawlConfiguredWebsite(normalisePublicUrl(business.websiteUrl));
     await replaceWebsiteSources(business, crawled.pages);
     await enqueueAndRunEmbeddingJob(business);
     return { status: "ready", sourceCount: business.sources.filter((item) => item.contentType === "web_page").length };
@@ -9274,12 +9716,14 @@ app.get("/api/v1/demo/:slug/widget/install", async (request) => {
   const apiOrigin = (process.env.FRONTDESKWISE_PUBLIC_API_ORIGIN ?? `http://localhost:${port}`).replace(/\/$/, "");
   const widgetOrigin = process.env.FRONTDESKWISE_WIDGET_ORIGIN ?? process.env.WEB_ORIGIN ?? "http://localhost:5173";
   const scriptUrl = process.env.FRONTDESKWISE_WIDGET_URL ?? `${widgetOrigin.replace(/\/$/, "")}/widget.js`;
+  const shellUrl = process.env.FRONTDESKWISE_WIDGET_SHELL_URL ?? scriptUrl.replace(/\/widget\.js(?:\?.*)?$/i, "/widget-shell.js");
   const apiAttribute = apiOrigin ? ` data-api="${apiOrigin}"` : "";
+  const shellAttribute = shellUrl ? ` data-shell="${shellUrl}"` : "";
   return {
     siteKey: business.widget.siteKey,
     enabled: business.widget.enabled,
     scriptUrl,
-    snippet: `<script async src="${scriptUrl}" data-site="${business.widget.siteKey}"${apiAttribute}></script>`,
+    snippet: `<script async src="${scriptUrl}" data-site="${business.widget.siteKey}"${apiAttribute}${shellAttribute}></script>`,
     verification: { lastLoadedAt: business.widget.lastLoadedAt, loadCount: business.widget.loadCount },
   };
 });
@@ -10231,14 +10675,19 @@ app.get("/api/v1/widget/:siteKey/config", async (request, reply) => {
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   await recordWidgetLoad(business);
-  reply.header("Cache-Control", "no-store, max-age=0");
-  reply.header("Pragma", "no-cache");
-  return reply.send({
+  const publicConfig = {
     siteKey: business.widget.siteKey,
     slug: business.slug,
     business: { name: business.name, location: business.location, websiteUrl: business.websiteUrl },
     agent: business.agentConfig,
-  });
+  };
+  const configVersion = createHash("sha256").update(JSON.stringify(publicConfig.agent)).digest("hex").slice(0, 16);
+  const entityTag = `"${configVersion}"`;
+  reply.header("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+  reply.header("ETag", entityTag);
+  reply.header("X-FrontDeskWise-Config-Version", configVersion);
+  if (request.headers["if-none-match"] === entityTag) return reply.code(304).send();
+  return reply.send(publicConfig);
 });
 
 app.post("/api/v1/widget/:siteKey/telemetry", async (request) => {
@@ -10274,6 +10723,44 @@ app.post("/api/v1/widget/:siteKey/telemetry", async (request) => {
   return { accepted: true };
 });
 
+app.post("/api/v1/widget/:siteKey/performance", async (request) => {
+  const params = request.params as { siteKey?: string };
+  const business = await getBusinessBySiteKey(params.siteKey);
+  if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  const body = asRecord(request.body);
+  const events = Array.isArray(body.events) ? body.events.slice(0, 50) : [];
+  const sourcePage = optionalString(body.sourcePage, 2_000);
+  const device = normalizeTelemetryDevice(body.device);
+  const organizationId = await businessOrganizationId(business);
+  let accepted = 0;
+  await Promise.all(events.map(async (value) => {
+    const event = asRecord(value);
+    const eventType = typeof event.event === "string" ? event.event : "";
+    if (!widgetPerformanceEventTypes.has(eventType)) return;
+    const conversationId = optionalString(event.conversationId, 120);
+    if (conversationId) maybeConversation(business, conversationId);
+    const requestId = optionalString(event.requestId, 160);
+    const atMs = typeof event.atMs === "number" && Number.isFinite(event.atMs) ? event.atMs : null;
+    const durationMs = typeof event.durationMs === "number" && Number.isFinite(event.durationMs) ? event.durationMs : null;
+    const metadata = boundedPerformanceMetrics(event.metadata);
+    if (atMs !== null) metadata.atMs = atMs;
+    await recordWidgetPerformance(business, {
+      event: eventType,
+      organizationId,
+      conversationId,
+      requestId,
+      durationMs,
+      sourcePage,
+      device,
+      metrics: metadata,
+    });
+    accepted += 1;
+  }));
+  return { accepted };
+});
+
 app.post("/api/v1/widget/:siteKey/conversations", async (request, reply) => {
   const params = request.params as { siteKey?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
@@ -10295,7 +10782,25 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
   const body = asRecord(request.body);
   const question = requiredString(body.question, "question", 1_000);
   const currentPage = optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000);
+  const requestReceivedAt = new Date().toISOString();
+  const requestStartedAt = performance.now();
   const result = await recordConversationQuestion(business, conversation, question, { currentPage });
+  void recordWidgetPerformance(business, {
+    event: "message_backend",
+    conversationId: conversation.id,
+    requestId: request.id,
+    durationMs: performance.now() - requestStartedAt,
+    sourcePage: currentPage,
+    metrics: {
+      retrieval_ms: result.performance?.retrievalMs ?? null,
+      rerank_ms: result.performance?.rerankMs ?? null,
+      model_request_started_ms: result.performance?.modelRequestStartedMs ?? null,
+      llm_first_token_ms: result.performance?.llmFirstTokenMs ?? null,
+      llm_total_ms: result.performance?.llmTotalMs ?? null,
+      backend_total_ms: result.performance?.backendTotalMs ?? null,
+      request_received_at: requestReceivedAt,
+    },
+  }).catch((error) => app.log.warn({ error: error instanceof Error ? error.message : "unknown performance telemetry error", requestId: request.id }, "Widget performance telemetry failed"));
   return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
 });
 
@@ -10642,6 +11147,13 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   await requireAuthenticatedBusinessOwner(business, request);
   requireWritableBusiness(business);
   const body = asRecord(request.body);
+  const publish = body.publish === true;
+  if (publish) {
+    requireVerifiedBusiness(business);
+    if (business.widget.loadCount < 1) {
+      throw httpError(409, "Install the widget before publishing your AI front desk");
+    }
+  }
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);
   if (["friendly", "professional", "concise", "custom"].includes(String(body.tone))) business.agentConfig.tone = body.tone as AgentConfig["tone"];
@@ -10677,7 +11189,15 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   if (body.retentionDays !== undefined) business.agentConfig.retentionDays = normalizedRetentionDays(body.retentionDays);
   if (typeof body.showAiDisclosure === "boolean") business.agentConfig.showAiDisclosure = body.showAiDisclosure;
   await persistAgentConfig(business);
-  return { agent: business.agentConfig };
+  if (publish) {
+    business.agentPublishedAt = new Date().toISOString();
+    business.publishedAgentConfig = cloneAgentConfig(business.agentConfig);
+    await persistPublishedAgentConfig(business);
+    if (pool) {
+      await pool.query("update businesses set agent_published_at = $2, updated_at = now() where id = $1", [business.id, business.agentPublishedAt]);
+    }
+  }
+  return { agent: business.agentConfig, publishing: agentPublishingPayload(business), publishedAt: business.agentPublishedAt };
 });
 
 app.post("/api/v1/demo/:slug/conversations", async (request, reply) => {
@@ -10778,6 +11298,7 @@ app.setErrorHandler((error, request: FastifyRequest, reply: FastifyReply) => {
 app.addHook("onClose", async () => {
   clearInterval(retentionCleanupTimer);
   clearInterval(lifecycleBillingTimer);
+  await renderedPageAdapter.close();
   await pool?.end();
 });
 

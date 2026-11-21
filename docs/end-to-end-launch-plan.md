@@ -229,6 +229,8 @@ The installation contract should be one snippet:
 ></script>
 ```
 
+The optional `data-pages` attribute scopes the widget to comma-separated URL paths, such as `data-pages="/"` for the home page or `data-pages="/,/services/*"` for the home page and service descendants. When omitted, the widget runs on every page where the script is installed. Query strings and hashes are ignored, and a terminal `*` matches descendants. The loader applies this filter before creating the widget or fetching configuration.
+
 The public site key is not a secret. The widget should load in an iframe or shadow-root boundary, identify the tenant server-side, and never expose database credentials or provider secrets. Installation checks should verify script load, tenant resolution, first question, citation, and lead delivery.
 
 ## Acceptance gates
