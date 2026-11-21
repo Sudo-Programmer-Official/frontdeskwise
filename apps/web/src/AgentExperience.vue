@@ -127,7 +127,7 @@ interface InstallModel {
 interface KnowledgeGap {
   question: string;
   occurrenceCount: number;
-  status: "open" | "resolved";
+  status: "open" | "resolved" | "ignored";
   lastSeenAt: string;
 }
 

@@ -16,6 +16,7 @@ const widgetLoader = await readFile(resolve(here, "../src/widget-loader.ts"), "u
 const styles = await readFile(resolve(here, "../src/styles.css"), "utf8");
 const feedback = await readFile(resolve(here, "../src/AppFeedback.vue"), "utf8");
 const widget = await readFile(resolve(here, "../public/widget.js"), "utf8");
+const widgetShell = await readFile(resolve(here, "../public/widget-shell.js"), "utf8");
 const router = await readFile(resolve(here, "../src/router/index.ts"), "utf8");
 const marketing = JSON.parse(await readFile(resolve(here, "../src/marketing-pages.json"), "utf8"));
 const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vue"), "utf8");
@@ -123,6 +124,11 @@ test("embedded widget uses the responsive conversation shell", () => {
   }
   assert.match(widgetRenderer, /fdw-typing/);
   assert.match(widgetRenderer, /fdw-preview-root/);
+});
+
+test("lazy-loaded widget shell restores hit testing after launcher handoff", () => {
+  assert.match(widgetRenderer, /\.fdw-embed-root \{ pointer-events: auto; \}/);
+  assert.match(widgetShell, /fdw-embed-root \{ pointer-events: auto; \}/);
 });
 
 test("production proactive engagement carries bootstrap settings into the live widget path", () => {

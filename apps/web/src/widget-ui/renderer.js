@@ -20,6 +20,10 @@ const WIDGET_STYLES = `
   :host { all: initial; }
   .fdw-widget-root, .fdw-widget-root * { box-sizing: border-box; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
   .fdw-widget-root { color: #182b49; font-size: 16px; }
+  /* The live loader host is intentionally pointer-transparent while it only
+     owns the launcher. The shell reuses that host, so the embed root must
+     opt its interactive subtree back into hit testing once it is mounted. */
+  .fdw-embed-root { pointer-events: auto; }
   .fdw-brand-symbol { display: block; width: 26px; height: 26px; }
   .fdw-launcher { position: fixed; right: 22px; bottom: 22px; z-index: 2147483000; display: grid; place-items: center; width: 58px; height: 58px; border: 0; border-radius: 18px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); box-shadow: 0 14px 30px rgba(13, 75, 160, .28); cursor: pointer; transition: transform .18s ease, box-shadow .18s ease; }
   .fdw-launcher:hover { transform: translateY(-2px); box-shadow: 0 18px 34px rgba(13, 75, 160, .34); }
