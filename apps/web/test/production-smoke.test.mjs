@@ -147,6 +147,26 @@ test("production proactive engagement carries bootstrap settings into the live w
   assert.match(apiServer, /Pragma", "no-cache/);
 });
 
+test("active production widget state cannot be closed by stale updates or form rerenders", () => {
+  const rendererSource = `${widgetRenderer}\n${widget}`;
+  const embedSource = `${widgetEmbed}\n${widget}`;
+  for (const marker of [
+    "openedByUser",
+    "onOpen: (source, userInitiated = true)",
+    "state = { ...state, isOpen: true",
+    "actionValues",
+    "onActionValuesChange",
+    "actionForm.addEventListener(\"input\", rememberActionValues)",
+    "actionForm.addEventListener(\"change\", rememberActionValues)",
+    "sessionStorage",
+    "if (state.isOpen && patch.state.isOpen === false)",
+  ]) {
+    assert.ok(`${rendererSource}\n${embedSource}`.includes(marker), `missing sticky widget-state contract: ${marker}`);
+  }
+  assert.doesNotMatch(`${rendererSource}\n${embedSource}`, /document\.addEventListener\(["'](?:click|pointerdown|touchstart)/);
+  assert.doesNotMatch(`${rendererSource}\n${embedSource}`, /window\.addEventListener\(["'](?:blur|visibilitychange|resize)/);
+});
+
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
   assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);

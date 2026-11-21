@@ -80,9 +80,12 @@ export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_R
 
 export interface WidgetState {
   isOpen: boolean;
+  openedByUser?: boolean;
   messages: WidgetMessage[];
   quickActions: WidgetQuickAction[];
   action?: WidgetAction | null;
+  actionStep?: number;
+  actionValues?: Record<string, string>;
   actionSubmitting?: boolean;
   leadVisible?: boolean;
   leadSubmitting?: boolean;
@@ -96,18 +99,19 @@ export interface WidgetRendererOptions {
   surface?: WidgetSurface;
   config: WidgetConfig;
   state?: Partial<WidgetState>;
-  onOpen?: (source: "launcher" | "proactive") => void;
+  onOpen?: (source: "launcher" | "proactive", userInitiated?: boolean) => void;
   onClose?: () => void;
   onAsk?: (question: string) => void;
   onLeadSubmit?: (values: { name: string; email: string; phone: string; consent: boolean }) => void;
   onActionSubmit?: (values: Record<string, string>, action: WidgetAction) => void;
+  onActionValuesChange?: (values: Record<string, string>, action: WidgetAction) => void;
   onHandoffDismiss?: () => void;
   onProactiveDismiss?: () => void;
 }
 
 export interface WidgetRendererController {
   update(patch: { config?: Partial<WidgetConfig>; state?: Partial<WidgetState> }): void;
-  open(source?: "launcher" | "proactive"): void;
+  open(source?: "launcher" | "proactive", userInitiated?: boolean): void;
   close(): void;
   destroy(): void;
 }
@@ -274,7 +278,7 @@ function element<T extends HTMLElement>(documentRef: Document, tag: string, clas
   return node;
 }
 
-function renderFormControl(documentRef: Document, field: WidgetFormField): HTMLInputElement | HTMLSelectElement {
+function renderFormControl(documentRef: Document, field: WidgetFormField, valueOverride?: string): HTMLInputElement | HTMLSelectElement {
   if (field.type === "select") {
     const select = element<HTMLSelectElement>(documentRef, "select");
     select.name = field.key;
@@ -288,13 +292,13 @@ function renderFormControl(documentRef: Document, field: WidgetFormField): HTMLI
       option.textContent = optionValue;
       select.appendChild(option);
     }
-    select.value = field.value ?? "";
+    select.value = valueOverride ?? field.value ?? "";
     return select;
   }
   const input = element<HTMLInputElement>(documentRef, "input");
   input.type = field.type === "phone" ? "tel" : field.type;
   input.name = field.key;
-  input.value = field.value ?? "";
+  input.value = valueOverride ?? field.value ?? "";
   return input;
 }
 
@@ -303,6 +307,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   let config: WidgetConfig = { ...DEFAULT_CONFIG, ...options.config };
   let state: WidgetState = {
     isOpen: false,
+    openedByUser: false,
     messages: [],
     quickActions: [],
     ...options.state,
@@ -453,7 +458,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
         labelText.appendChild(optional);
       }
       label.appendChild(labelText);
-      const control = renderFormControl(documentRef, field);
+      const control = renderFormControl(documentRef, field, state.actionValues?.[field.key]);
       control.required = Boolean(field.required);
       label.appendChild(control);
       actionForm.appendChild(label);
@@ -461,6 +466,8 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     if (config.requireLeadConsent) {
       const consent = element<HTMLLabelElement>(documentRef, "label", "fdw-consent-row");
       consent.innerHTML = "<input type=\"checkbox\" name=\"consent\" required><span>I agree to share my details with this business.</span>";
+      const consentInput = consent.querySelector<HTMLInputElement>("input");
+      if (consentInput) consentInput.checked = state.actionValues?.consent === "true" || state.actionValues?.consent === "on";
       actionForm.appendChild(consent);
     }
     const submit = element<HTMLButtonElement>(documentRef, "button");
@@ -517,15 +524,33 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     }
   }
 
-  const open = (source: "launcher" | "proactive" = "launcher"): void => {
+  function collectActionValues(): Record<string, string> {
+    const values: Record<string, string> = {};
+    for (const field of Array.from(actionForm.elements)) {
+      const control = field as HTMLInputElement | HTMLSelectElement;
+      if (control.name) values[control.name] = control.type === "checkbox" ? String((control as HTMLInputElement).checked) : control.value;
+    }
+    return values;
+  }
+
+  function rememberActionValues(): void {
+    const action = state.action;
+    if (!action) return;
+    const values = collectActionValues();
+    if (!Object.keys(values).length) return;
+    state = { ...state, actionValues: { ...(state.actionValues || {}), ...values } };
+    options.onActionValuesChange?.(state.actionValues || {}, action);
+  }
+
+  const open = (source: "launcher" | "proactive" = "launcher", userInitiated = true): void => {
     if (destroyed) return;
-    state = { ...state, isOpen: true, proactive: { ...(state.proactive ?? { visible: false, message: "" }), visible: false } };
+    state = { ...state, isOpen: true, openedByUser: state.openedByUser || userInitiated, proactive: { ...(state.proactive ?? { visible: false, message: "" }), visible: false } };
     render();
-    options.onOpen?.(source);
+    options.onOpen?.(source, userInitiated);
   };
   const close = (): void => {
     if (destroyed) return;
-    state = { ...state, isOpen: false };
+    state = { ...state, isOpen: false, openedByUser: false };
     render();
     options.onClose?.();
   };
@@ -554,13 +579,12 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   actionForm.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!state.action) return;
-    const values: Record<string, string> = {};
-    for (const field of Array.from(actionForm.elements)) {
-      const control = field as HTMLInputElement | HTMLSelectElement;
-      if (control.name) values[control.name] = control.type === "checkbox" ? String((control as HTMLInputElement).checked) : control.value;
-    }
+    rememberActionValues();
+    const values = collectActionValues();
     options.onActionSubmit?.(values, state.action);
   });
+  actionForm.addEventListener("input", rememberActionValues);
+  actionForm.addEventListener("change", rememberActionValues);
   lead.addEventListener("submit", (event) => {
     event.preventDefault();
     const formData = new FormData(lead);
@@ -577,7 +601,14 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   return {
     update(patch): void {
       if (patch.config) config = { ...config, ...patch.config };
-      if (patch.state) state = { ...state, ...patch.state };
+      if (patch.state) {
+        if (state.isOpen && patch.state.isOpen === false) {
+          const { isOpen: _ignoredIsOpen, ...safeState } = patch.state;
+          state = { ...state, ...safeState, isOpen: true };
+        } else {
+          state = { ...state, ...patch.state };
+        }
+      }
       render();
     },
     open,

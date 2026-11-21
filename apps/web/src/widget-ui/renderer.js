@@ -156,7 +156,7 @@ function element(documentRef, tag, className) {
         node.className = className;
     return node;
 }
-function renderFormControl(documentRef, field) {
+function renderFormControl(documentRef, field, valueOverride) {
     if (field.type === "select") {
         const select = element(documentRef, "select");
         select.name = field.key;
@@ -170,13 +170,13 @@ function renderFormControl(documentRef, field) {
             option.textContent = optionValue;
             select.appendChild(option);
         }
-        select.value = field.value ?? "";
+        select.value = valueOverride ?? field.value ?? "";
         return select;
     }
     const input = element(documentRef, "input");
     input.type = field.type === "phone" ? "tel" : field.type;
     input.name = field.key;
-    input.value = field.value ?? "";
+    input.value = valueOverride ?? field.value ?? "";
     return input;
 }
 export function createWidgetRenderer(mount, options) {
@@ -184,6 +184,7 @@ export function createWidgetRenderer(mount, options) {
     let config = { ...DEFAULT_CONFIG, ...options.config };
     let state = {
         isOpen: false,
+        openedByUser: false,
         messages: [],
         quickActions: [],
         ...options.state,
@@ -333,7 +334,7 @@ export function createWidgetRenderer(mount, options) {
                 labelText.appendChild(optional);
             }
             label.appendChild(labelText);
-            const control = renderFormControl(documentRef, field);
+            const control = renderFormControl(documentRef, field, state.actionValues?.[field.key]);
             control.required = Boolean(field.required);
             label.appendChild(control);
             actionForm.appendChild(label);
@@ -341,6 +342,9 @@ export function createWidgetRenderer(mount, options) {
         if (config.requireLeadConsent) {
             const consent = element(documentRef, "label", "fdw-consent-row");
             consent.innerHTML = "<input type=\"checkbox\" name=\"consent\" required><span>I agree to share my details with this business.</span>";
+            const consentInput = consent.querySelector("input");
+            if (consentInput)
+                consentInput.checked = state.actionValues?.consent === "true" || state.actionValues?.consent === "on";
             actionForm.appendChild(consent);
         }
         const submit = element(documentRef, "button");
@@ -401,17 +405,36 @@ export function createWidgetRenderer(mount, options) {
             submit.textContent = state.leadSubmitting ? "Sending…" : "Continue";
         }
     }
-    const open = (source = "launcher") => {
+    function collectActionValues() {
+        const values = {};
+        for (const field of Array.from(actionForm.elements)) {
+            const control = field;
+            if (control.name)
+                values[control.name] = control.type === "checkbox" ? String(control.checked) : control.value;
+        }
+        return values;
+    }
+    function rememberActionValues() {
+        const action = state.action;
+        if (!action)
+            return;
+        const values = collectActionValues();
+        if (!Object.keys(values).length)
+            return;
+        state = { ...state, actionValues: { ...(state.actionValues || {}), ...values } };
+        options.onActionValuesChange?.(state.actionValues || {}, action);
+    }
+    const open = (source = "launcher", userInitiated = true) => {
         if (destroyed)
             return;
-        state = { ...state, isOpen: true, proactive: { ...(state.proactive ?? { visible: false, message: "" }), visible: false } };
+        state = { ...state, isOpen: true, openedByUser: state.openedByUser || userInitiated, proactive: { ...(state.proactive ?? { visible: false, message: "" }), visible: false } };
         render();
-        options.onOpen?.(source);
+        options.onOpen?.(source, userInitiated);
     };
     const close = () => {
         if (destroyed)
             return;
-        state = { ...state, isOpen: false };
+        state = { ...state, isOpen: false, openedByUser: false };
         render();
         options.onClose?.();
     };
@@ -442,14 +465,12 @@ export function createWidgetRenderer(mount, options) {
         event.preventDefault();
         if (!state.action)
             return;
-        const values = {};
-        for (const field of Array.from(actionForm.elements)) {
-            const control = field;
-            if (control.name)
-                values[control.name] = control.type === "checkbox" ? String(control.checked) : control.value;
-        }
+        rememberActionValues();
+        const values = collectActionValues();
         options.onActionSubmit?.(values, state.action);
     });
+    actionForm.addEventListener("input", rememberActionValues);
+    actionForm.addEventListener("change", rememberActionValues);
     lead.addEventListener("submit", (event) => {
         event.preventDefault();
         const formData = new FormData(lead);
@@ -465,8 +486,15 @@ export function createWidgetRenderer(mount, options) {
         update(patch) {
             if (patch.config)
                 config = { ...config, ...patch.config };
-            if (patch.state)
-                state = { ...state, ...patch.state };
+            if (patch.state) {
+                if (state.isOpen && patch.state.isOpen === false) {
+                    const { isOpen: _ignoredIsOpen, ...safeState } = patch.state;
+                    state = { ...state, ...safeState, isOpen: true };
+                }
+                else {
+                    state = { ...state, ...patch.state };
+                }
+            }
             render();
         },
         open,

@@ -40,7 +40,7 @@ import {
   let visitorId = "";
   let conversationId: string | null = null;
   let lastQuestion = "";
-  let state: WidgetState = { isOpen: false, messages: [], quickActions: [], handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
+  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
   let renderer: WidgetRendererController;
   let pollTimer: number | null = null;
   let handoffNoticeTimer: number | null = null;
@@ -60,7 +60,9 @@ import {
   }
 
   function updateState(patch: Partial<WidgetState>): void {
+    if (state.isOpen && patch.isOpen === false) patch = { ...patch, isOpen: true };
     state = { ...state, ...patch };
+    persistInteractionState();
     renderer.update({ state });
   }
 
@@ -74,6 +76,47 @@ import {
       return value;
     } catch {
       return `visitor-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+  }
+
+  function interactionStorageKey(): string {
+    const hostName = window.location.hostname || "unknown-host";
+    return `frontdeskwise:${siteKey}:${hostName}:interaction`;
+  }
+
+  function persistInteractionState(): void {
+    try {
+      if (!conversationId && !state.action) {
+        window.sessionStorage.removeItem(interactionStorageKey());
+        return;
+      }
+      window.sessionStorage.setItem(interactionStorageKey(), JSON.stringify({
+        conversationId,
+        action: state.action && state.action.status !== "completed" ? state.action : null,
+        actionStep: state.actionStep || 0,
+        actionValues: state.actionValues || {},
+      }));
+    } catch {
+      // Best effort; the live widget state remains authoritative for this mount.
+    }
+  }
+
+  function restoreInteractionState(): void {
+    try {
+      const raw = window.sessionStorage.getItem(interactionStorageKey());
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { conversationId?: unknown; action?: unknown; actionStep?: unknown; actionValues?: unknown };
+      if (typeof saved.conversationId === "string" && saved.conversationId) conversationId = saved.conversationId;
+      const action = saved.action && typeof saved.action === "object" ? saved.action as WidgetAction : null;
+      const actionValues = saved.actionValues && typeof saved.actionValues === "object" ? saved.actionValues as Record<string, string> : {};
+      state = {
+        ...state,
+        action,
+        actionStep: typeof saved.actionStep === "number" ? saved.actionStep : 0,
+        actionValues,
+      };
+    } catch {
+      // Ignore malformed or unavailable session state.
     }
   }
 
@@ -186,7 +229,13 @@ import {
   }
 
   function renderActionForm(action: WidgetAction | null | undefined): void {
-    updateState({ action: action || null });
+    const nextAction = action || null;
+    const sameAction = Boolean(nextAction && state.action?.id === nextAction.id);
+    updateState({
+      action: nextAction,
+      actionStep: sameAction ? state.actionStep || 0 : 0,
+      actionValues: sameAction ? state.actionValues || {} : {},
+    });
   }
 
   async function loadConfig(): Promise<void> {
@@ -220,6 +269,7 @@ import {
     };
     renderer.update({ config, state: { quickActions: state.quickActions.length ? state.quickActions : config.widgetQuickActions } });
     if (!state.messages.length) addMessage(config.welcomeMessage, "assistant");
+    if (conversationId) void syncConversation();
     armProactiveEngagement(agent);
   }
 
@@ -297,7 +347,7 @@ import {
     suppressProactive(config.proactiveFrequency || "session", "shown");
     telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "shown", behavior: config.proactiveBehavior || "teaser" } });
     if ((config.proactiveBehavior || "teaser") === "open") {
-      renderer.open("proactive");
+      renderer.open("proactive", false);
       addMessage(config.proactiveMessage || "Looking for the right service? I can help.", "assistant");
       return;
     }
@@ -432,23 +482,38 @@ import {
   }
 
   visitorId = getVisitorId();
+  restoreInteractionState();
   renderer = createWidgetRenderer(mount, {
     surface: "embed",
     config: DEFAULT_CONFIG,
     state,
-    onOpen: (source) => {
+    onOpen: (source, userInitiated = true) => {
+      state = {
+        ...state,
+        isOpen: true,
+        openedByUser: state.openedByUser || userInitiated,
+        proactive: { ...(state.proactive || { visible: false, message: "" }), visible: false },
+      };
+      persistInteractionState();
       clearProactiveEngagement();
       proactiveShown = true;
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
       telemetry("CTA_CLICKED", { metadata: { source } });
     },
     onClose: () => {
+      state = { ...state, isOpen: false, openedByUser: false };
+      persistInteractionState();
       clearProactiveEngagement();
       proactiveShown = true;
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
     },
     onAsk: (question) => { void ask(question); },
     onActionSubmit: (values, action) => { void submitAction(values, action); },
+    onActionValuesChange: (values, action) => {
+      if (state.action?.id !== action.id) return;
+      state = { ...state, actionValues: values };
+      persistInteractionState();
+    },
     onLeadSubmit: (values) => { void submitLead(values); },
     onHandoffDismiss: () => {
       persistHandoffDismissal();
@@ -456,6 +521,8 @@ import {
       telemetry("CTA_CLICKED", { metadata: { source: "handoff-status", action: "dismissed", conversationStatus: handoffWaiting ? "WAITING_FOR_STAFF" : undefined } });
     },
     onProactiveDismiss: () => {
+      state = { ...state, proactive: { ...(state.proactive || { visible: false, message: "" }), visible: false } };
+      persistInteractionState();
       clearProactiveEngagement();
       proactiveShown = true;
       if (config) suppressProactive(config.proactiveFrequency || "session", "dismissed");
