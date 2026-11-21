@@ -2,6 +2,8 @@ import { computed, ref, watch } from "vue";
 const { defineProps, defineEmits, withDefaults, } = {};
 const props = withDefaults(defineProps(), {
     swatches: () => ["#2563EB", "#0F766E", "#7C3AED", "#EA580C", "#1E3A8A"],
+    websiteColors: () => [],
+    websiteLabel: "your website",
     label: "Brand color",
 });
 const emit = defineEmits();
@@ -9,6 +11,7 @@ const inputValue = ref(props.modelValue);
 watch(() => props.modelValue, (value) => { inputValue.value = value; });
 const isValid = computed(() => /^#[0-9a-f]{6}$/i.test(inputValue.value));
 const nativeColor = computed(() => isValid.value ? inputValue.value : "#2563EB");
+const websiteColors = computed(() => props.websiteColors.filter((color) => /^#[0-9a-f]{6}$/i.test(color)));
 function updateText(value) {
     inputValue.value = value;
     emit("update:modelValue", value);
@@ -18,6 +21,8 @@ function updateNative(event) {
 }
 const __VLS_defaults = {
     swatches: () => ["#2563EB", "#0F766E", "#7C3AED", "#EA580C", "#1E3A8A"],
+    websiteColors: () => [],
+    websiteLabel: "your website",
     label: "Brand color",
 };
 void __VLS_defaults;
@@ -34,6 +39,7 @@ void __VLS_ctx, __VLS_components, __VLS_intrinsics, __VLS_directives;
 const __VLS_template = () => {
     __VLS_withDotValue(inputValue, {});
     __VLS_withDotValue(isValid, {});
+    __VLS_withDotValue(websiteColors, {});
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "ds-color-picker" },
     });
@@ -70,19 +76,60 @@ const __VLS_template = () => {
         'aria-hidden': "true",
     });
     /** @type {__VLS_StyleScopedClasses['ds-color-preview']} */ ;
+    if (websiteColors.value.length) {
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "ds-color-recommendations" },
+        });
+        /** @type {__VLS_StyleScopedClasses['ds-color-recommendations']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "ds-color-recommendations-copy" },
+        });
+        /** @type {__VLS_StyleScopedClasses['ds-color-recommendations-copy']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        (__VLS_ctx.websiteLabel);
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "ds-color-swatches ds-website-swatches" },
+            'aria-label': "Website color recommendations",
+        });
+        /** @type {__VLS_StyleScopedClasses['ds-color-swatches']} */ ;
+        /** @type {__VLS_StyleScopedClasses['ds-website-swatches']} */ ;
+        const __VLS_0 = __VLS_tryAsConstant((websiteColors.value));
+        for (const [swatch] of __VLS_vFor(__VLS_nonNull(__VLS_0))) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (...[$event]) => {
+                        void $event;
+                        if (!(websiteColors.value.length))
+                            throw 0;
+                        return (updateText(swatch));
+                        // @ts-ignore
+                        [inputValue, inputValue, label, label, nativeColor, isValid, websiteColors, websiteColors, websiteLabel,];
+                    } },
+                key: (swatch),
+                type: "button",
+                ...{ class: ({ selected: inputValue.value.toUpperCase() === swatch.toUpperCase() }) },
+                ...{ style: ({ background: swatch }) },
+                'aria-label': (`Use website color ${swatch}`),
+                title: (swatch),
+            });
+            /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+            // @ts-ignore
+            [inputValue,];
+        }
+    }
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "ds-color-swatches" },
         'aria-label': "Brand color presets",
     });
     /** @type {__VLS_StyleScopedClasses['ds-color-swatches']} */ ;
-    const __VLS_0 = __VLS_tryAsConstant((__VLS_ctx.swatches));
-    for (const [swatch] of __VLS_vFor(__VLS_nonNull(__VLS_0))) {
+    const __VLS_1 = __VLS_tryAsConstant((__VLS_ctx.swatches));
+    for (const [swatch] of __VLS_vFor(__VLS_nonNull(__VLS_1))) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
             ...{ onClick: (...[$event]) => {
                     void $event;
                     return (updateText(swatch));
                     // @ts-ignore
-                    [inputValue, inputValue, label, label, nativeColor, isValid, swatches,];
+                    [swatches,];
                 } },
             key: (swatch),
             type: "button",

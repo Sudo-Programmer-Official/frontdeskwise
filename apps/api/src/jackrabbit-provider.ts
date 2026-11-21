@@ -1,5 +1,6 @@
 import type { CompletionLinkTemplate } from "./action-flows.js";
 import { generateCompletionLink, type CompletionLinkResult } from "./completion-links.js";
+import { actionResourceFromJackrabbit, type ActionResource } from "./action-registry.js";
 
 export type JackrabbitProviderOptions = {
   accessToken: string;
@@ -377,6 +378,27 @@ export class JackrabbitProvider {
         return nameMatches && locationMatches && dayMatches;
       })
       .sort(sortClassOptions);
+  }
+
+  async findRegistrationResources(
+    businessId: string,
+    search: JackrabbitClassSearch,
+    registrationTemplate?: JackrabbitRegistrationLinkTemplate,
+    values: Record<string, unknown> = {},
+  ): Promise<ActionResource[]> {
+    const options = await this.findClassOptions(search);
+    return options.flatMap((option) => {
+      let destinationUrl = option.registrationUrl;
+      if (!destinationUrl && registrationTemplate) {
+        destinationUrl = this.buildRegistrationLink(registrationTemplate, option, values).url;
+      }
+      try {
+        return [actionResourceFromJackrabbit({ businessId, option, destinationUrl })];
+      } catch {
+        // A provider URL that is not safe to expose is not an actionable result.
+        return [];
+      }
+    });
   }
 
   buildRegistrationLink(

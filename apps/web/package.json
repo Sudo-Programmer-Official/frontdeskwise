@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "prebuild": "node scripts/generate-site-metadata.mjs",
+    "prebuild": "node scripts/build-widget.mjs && node scripts/generate-site-metadata.mjs",
     "build": "vue-tsc -b && vite build",
     "postbuild": "node scripts/generate-static-marketing.mjs",
     "test": "node --test test/*.test.mjs",

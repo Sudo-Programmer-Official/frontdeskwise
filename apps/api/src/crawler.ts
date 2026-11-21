@@ -29,6 +29,42 @@ export type CrawledPage = {
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
+function normalizeHexColor(value: string): string | null {
+  const normalized = value.trim().toUpperCase();
+  if (/^#[0-9A-F]{6}$/.test(normalized)) return normalized;
+  if (/^#[0-9A-F]{3}$/.test(normalized)) return `#${normalized.slice(1).split("").map((channel) => channel + channel).join("")}`;
+  return null;
+}
+
+function isNeutralColor(value: string): boolean {
+  const red = Number.parseInt(value.slice(1, 3), 16);
+  const green = Number.parseInt(value.slice(3, 5), 16);
+  const blue = Number.parseInt(value.slice(5, 7), 16);
+  const spread = Math.max(red, green, blue) - Math.min(red, green, blue);
+  return spread < 18 && (Math.max(red, green, blue) > 235 || Math.min(red, green, blue) < 25 || spread < 8);
+}
+
+/** Extracts high-signal colors from static website branding without downloading third-party assets. */
+export function extractBrandColors(html: string): string[] {
+  const prioritized: string[] = [];
+  const collect = (value: string): void => {
+    for (const match of value.matchAll(/#[0-9a-f]{3,6}\b/gi)) {
+      const color = normalizeHexColor(match[0]);
+      if (color && !prioritized.includes(color)) prioritized.push(color);
+    }
+  };
+
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    if (/theme-color|brand|accent|primary/i.test(match[0])) collect(match[0]);
+  }
+  for (const match of html.matchAll(/--(?:brand|primary|accent|action|cta|theme)[\w-]*\s*:\s*([^;}]+)/gi)) collect(match[1]);
+  for (const match of html.matchAll(/style\s*=\s*["'][^"']*(?:color|background)[^"']*["']/gi)) collect(match[0]);
+  collect(html);
+
+  const chromatic = prioritized.filter((color) => !isNeutralColor(color));
+  return [...chromatic, ...prioritized.filter((color) => isNeutralColor(color))].slice(0, 6);
+}
+
 export function normalisePublicUrl(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) throw new CrawlError("websiteUrl is required");
   const trimmed = value.trim();
@@ -149,7 +185,7 @@ function pageType(url: string, title: string): string {
   return "web_page";
 }
 
-function chunkSections(sections: Section[], pageTypeValue: string): CrawlChunk[] {
+function chunkSections(sections: Section[], pageTypeValue: string, brandColors: string[] = []): CrawlChunk[] {
   const wordsWithHeadings = sections.flatMap((section) => {
     const heading = section.headingPath.length ? `${section.headingPath.join(" > ")}\n` : "";
     return `${heading}${section.text}`.split(/\s+/).filter(Boolean).map((word) => ({ word, headingPath: section.headingPath }));
@@ -171,6 +207,7 @@ function chunkSections(sections: Section[], pageTypeValue: string): CrawlChunk[]
         pageType: pageTypeValue,
         tokenCount: slice.length,
         overlapTokens: start === 0 ? 0 : CHUNK_OVERLAP_TOKENS,
+        ...(start === 0 && brandColors.length ? { brandColors } : {}),
       },
     });
     if (end >= words.length) break;
@@ -242,6 +279,7 @@ export async function crawlWebsite(websiteUrl: string): Promise<{ pages: Crawled
   const visited = new Set<string>();
   const seenContentHashes = new Set<string>();
   const pages: CrawledPage[] = [];
+  let brandColors: string[] = [];
   let robotsText = "";
   try {
     const robots = await fetchText(new URL("/robots.txt", root).toString(), "text/plain");
@@ -269,6 +307,7 @@ export async function crawlWebsite(websiteUrl: string): Promise<{ pages: Crawled
 
     const canonicalUrl = normalisePublicUrl(fetched.response.url || next.url);
     if (!sameSite(new URL(canonicalUrl), root)) continue;
+    if (next.depth === 0) brandColors = extractBrandColors(fetched.text);
     const extracted = extractPage(fetched.text, canonicalUrl);
     const type = pageType(canonicalUrl, extracted.title);
     const readable = extracted.sections.map((section) => section.text).join(" ").trim();
@@ -284,7 +323,7 @@ export async function crawlWebsite(websiteUrl: string): Promise<{ pages: Crawled
         contentHash,
         pageType: type,
         lastCrawledAt: now,
-        chunks: chunkSections(extracted.sections, type),
+        chunks: chunkSections(extracted.sections, type, brandColors),
       });
     }
 

@@ -1,0 +1,591 @@
+import { renderMarkdownInto, safeLinkUrl } from "./markdown";
+
+export type WidgetTheme = "light" | "dark" | "auto";
+export type WidgetPosition = "bottom-right" | "bottom-left";
+export type WidgetOpeningMode = "compact" | "expanded" | "fullscreen";
+export type WidgetSurface = "embed" | "preview";
+export type WidgetScenario =
+  | "default"
+  | "conversation"
+  | "quick-actions"
+  | "lead-form"
+  | "human-handoff"
+  | "staff-joined"
+  | "safe-fallback"
+  | "source-citation"
+  | "completion-action";
+
+export interface WidgetQuickAction {
+  label: string;
+  question: string;
+}
+
+export interface WidgetCitation {
+  title?: string;
+  url?: string;
+  pageType?: string;
+}
+
+export interface WidgetMessage {
+  id?: string;
+  remoteKey?: string;
+  role: "assistant" | "user";
+  content: string;
+  citations?: WidgetCitation[];
+}
+
+export interface WidgetFormField {
+  id?: string;
+  key: string;
+  label: string;
+  type: string;
+  required: boolean;
+  options?: string[];
+  value?: string;
+}
+
+export interface WidgetAction {
+  id: string;
+  status?: "active" | "completed";
+  linkUrl?: string;
+  linkLabel?: string;
+  form?: {
+    submitLabel: string;
+    fields: WidgetFormField[];
+  };
+}
+
+export interface WidgetConfig {
+  assistantName: string;
+  welcomeMessage: string;
+  widgetColor: string;
+  widgetTheme: WidgetTheme;
+  widgetPosition: WidgetPosition;
+  widgetDefaultMode: WidgetOpeningMode;
+  widgetAllowExpand: boolean;
+  widgetLogoUrl?: string | null;
+  widgetQuickActions: WidgetQuickAction[];
+  showAiDisclosure: boolean;
+  showPoweredBy?: boolean;
+  showSources?: boolean;
+  showLeadCapture?: boolean;
+  requireLeadConsent?: boolean;
+  privacyNoticeUrl?: string | null;
+  fallbackBehavior?: "contact_form" | "human" | "unavailable";
+  humanHandoffEnabled?: boolean;
+  tone?: "friendly" | "professional" | "concise" | "custom";
+}
+
+export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_REQUESTED" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED";
+
+export interface WidgetState {
+  isOpen: boolean;
+  messages: WidgetMessage[];
+  quickActions: WidgetQuickAction[];
+  action?: WidgetAction | null;
+  actionSubmitting?: boolean;
+  leadVisible?: boolean;
+  leadSubmitting?: boolean;
+  typing?: boolean;
+  handoffStatus?: WidgetHandoffStatus;
+  handoffNotice?: { visible: boolean; message: string };
+  proactive?: { visible: boolean; message: string };
+}
+
+export interface WidgetRendererOptions {
+  surface?: WidgetSurface;
+  config: WidgetConfig;
+  state?: Partial<WidgetState>;
+  onOpen?: (source: "launcher" | "proactive") => void;
+  onClose?: () => void;
+  onAsk?: (question: string) => void;
+  onLeadSubmit?: (values: { name: string; email: string; phone: string; consent: boolean }) => void;
+  onActionSubmit?: (values: Record<string, string>, action: WidgetAction) => void;
+  onHandoffDismiss?: () => void;
+  onProactiveDismiss?: () => void;
+}
+
+export interface WidgetRendererController {
+  update(patch: { config?: Partial<WidgetConfig>; state?: Partial<WidgetState> }): void;
+  open(source?: "launcher" | "proactive"): void;
+  close(): void;
+  destroy(): void;
+}
+
+const DEFAULT_ACCENT = "#0d6efd";
+export const DEFAULT_CONFIG: WidgetConfig = {
+  assistantName: "AI front desk",
+  welcomeMessage: "Hi! How can I help?",
+  widgetColor: DEFAULT_ACCENT,
+  widgetTheme: "auto",
+  widgetPosition: "bottom-right",
+  widgetDefaultMode: "compact",
+  widgetAllowExpand: true,
+  widgetQuickActions: [],
+  showAiDisclosure: true,
+  showPoweredBy: true,
+  showSources: true,
+  showLeadCapture: true,
+  requireLeadConsent: false,
+};
+
+const SYMBOL = "<svg class=\"fdw-brand-symbol\" viewBox=\"0 0 64 64\" aria-hidden=\"true\"><path d=\"m32 12 4.8 12.2L49 29l-12.2 4.8L32 46l-4.8-12.2L15 29l12.2-4.8L32 12Z\" fill=\"currentColor\"></path></svg>";
+
+const WIDGET_STYLES = `
+  :host { all: initial; }
+  .fdw-widget-root, .fdw-widget-root * { box-sizing: border-box; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  .fdw-widget-root { color: #182b49; font-size: 16px; }
+  .fdw-brand-symbol { display: block; width: 26px; height: 26px; }
+  .fdw-launcher { position: fixed; right: 22px; bottom: 22px; z-index: 2147483000; display: grid; place-items: center; width: 58px; height: 58px; border: 0; border-radius: 18px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); box-shadow: 0 14px 30px rgba(13, 75, 160, .28); cursor: pointer; transition: transform .18s ease, box-shadow .18s ease; }
+  .fdw-launcher:hover { transform: translateY(-2px); box-shadow: 0 18px 34px rgba(13, 75, 160, .34); }
+  .fdw-launcher[hidden], .fdw-proactive-teaser[hidden] { display: none; }
+  .fdw-launcher.fdw-position-bottom-left { right: auto; left: 22px; }
+  .fdw-proactive-teaser { position: fixed; right: 22px; bottom: 92px; z-index: 2147483000; display: flex; align-items: flex-start; gap: 9px; width: min(320px, calc(100vw - 32px)); padding: 14px 13px; border: 1px solid #d3e1f2; border-radius: 14px; color: #244d7e; background: #fff; box-shadow: 0 18px 42px rgba(13, 44, 91, .2); }
+  .fdw-proactive-teaser.fdw-position-bottom-left { right: auto; left: 22px; }
+  .fdw-teaser-mark { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border-radius: 9px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); }
+  .fdw-teaser-copy { min-width: 0; flex: 1; }
+  .fdw-teaser-copy p { margin: 0; font-size: 12px; font-weight: 650; line-height: 1.4; }
+  .fdw-teaser-action { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 0; border: 0; color: var(--fdw-accent, #0d6efd); background: transparent; cursor: pointer; font-size: 11px; font-weight: 800; }
+  .fdw-teaser-dismiss { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; margin: -4px -4px 0 0; border: 0; border-radius: 50%; color: #6c7e94; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
+  .fdw-teaser-dismiss:hover, .fdw-teaser-dismiss:focus-visible { color: #244d7e; background: #edf4fc; outline: none; }
+  .fdw-panel { position: fixed; right: 22px; bottom: 92px; z-index: 2147483000; display: none; flex-direction: column; width: min(420px, calc(100vw - 32px)); height: min(680px, calc(100vh - 120px)); overflow: hidden; border: 1px solid #d7e1ee; border-radius: 18px; color: #182b49; background: #fff; box-shadow: 0 24px 70px rgba(13, 44, 91, .24); }
+  .fdw-panel.fdw-open { display: flex; }
+  .fdw-panel.fdw-mode-expanded { width: min(760px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); }
+  .fdw-panel.fdw-mode-fullscreen { right: 0; bottom: 0; width: min(920px, 100vw); height: 100dvh; border-radius: 0; }
+  .fdw-panel.fdw-position-bottom-left { right: auto; left: 22px; }
+  .fdw-panel.fdw-theme-dark { color: #eef5ff; background: #182a43; border-color: #2f4768; }
+  .fdw-panel.fdw-theme-dark .fdw-messages, .fdw-panel.fdw-theme-dark .fdw-quick-actions { background: #122238; }
+  .fdw-panel.fdw-theme-dark .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
+  .fdw-panel.fdw-theme-dark .fdw-composer { background: #182a43; border-color: #2f4768; }
+  .fdw-panel.fdw-theme-dark .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+  .fdw-header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); }
+  .fdw-identity { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+  .fdw-logo, .fdw-orb { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.2); }
+  .fdw-orb { color: var(--fdw-accent-text, #fff); }
+  .fdw-logo { object-fit: cover; background: #fff; }
+  .fdw-title-group { display: grid; gap: 2px; min-width: 0; }
+  .fdw-title-group strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; letter-spacing: -.01em; }
+  .fdw-title-group small { display: flex; align-items: center; gap: 5px; color: currentColor; opacity: .74; font-size: 10px; }
+  .fdw-status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #2bd99b; box-shadow: 0 0 0 2px rgba(43,217,155,.14); }
+  .fdw-header-actions { display: flex; gap: 4px; }
+  .fdw-header-actions button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: currentColor; background: transparent; cursor: pointer; font-size: 17px; }
+  .fdw-header-actions button:hover, .fdw-header-actions button:focus-visible { background: rgba(255,255,255,.16); outline: none; }
+  .fdw-messages { display: flex; flex: 1; flex-direction: column; align-content: flex-start; gap: 10px; min-height: 0; overflow: auto; padding: 18px 16px 12px; background: #f8fafd; }
+  .fdw-message { align-self: flex-start; max-width: min(88%, 560px); padding: 11px 12px; border: 1px solid #e1e9f3; border-radius: 6px 14px 14px 14px; color: #445873; background: #fff; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  .fdw-message.fdw-user { align-self: flex-end; border-color: var(--fdw-accent, #0d6efd); border-radius: 14px 6px 14px 14px; color: #fff; background: var(--fdw-accent, #0d6efd); }
+  .fdw-message a { display: block; margin-top: 8px; color: #1769c2; font-size: 11px; font-weight: 800; }
+  .fdw-message.fdw-user a { color: #fff; }
+  .fdw-message p { margin: 0 0 9px; }
+  .fdw-message p:last-child { margin-bottom: 0; }
+  .fdw-message ol, .fdw-message ul { margin: 7px 0 9px; padding-left: 21px; }
+  .fdw-message li + li { margin-top: 4px; }
+  .fdw-message code { padding: 1px 4px; border-radius: 4px; background: #edf4fc; font-size: .92em; }
+  .fdw-quick-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 16px 13px; background: #f8fafd; }
+  .fdw-quick-actions:empty { display: none; }
+  .fdw-quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
+  .fdw-quick-actions button:hover, .fdw-quick-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
+  .fdw-action-form, .fdw-lead { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
+  .fdw-action-form:empty, .fdw-lead[hidden] { display: none; }
+  .fdw-action-form label, .fdw-lead label:not(.fdw-consent-row) { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
+  .fdw-action-form label > span:first-child, .fdw-lead label:not(.fdw-consent-row) > span { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
+  .fdw-action-form label > span:first-child em, .fdw-lead label:not(.fdw-consent-row) em { color: #9aa7b7; font-size: 10px; font-style: normal; font-weight: 500; }
+  .fdw-action-form label > span:first-child b, .fdw-lead b { color: #c34e47; }
+  .fdw-action-form input, .fdw-action-form select, .fdw-lead input { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cbd7e5; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 12px; }
+  .fdw-action-form input:focus, .fdw-action-form select:focus, .fdw-lead input:focus, .fdw-composer input:focus { border-color: var(--fdw-accent, #0d6efd); box-shadow: 0 0 0 3px rgba(13,110,253,.12); }
+  .fdw-action-form button, .fdw-lead button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); cursor: pointer; font-size: 12px; font-weight: 800; }
+  .fdw-action-link { display: block; padding: 10px 12px; border-radius: 8px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); font-size: 12px; font-weight: 800; text-align: center; text-decoration: none; }
+  .fdw-lead { display: none; gap: 10px; }
+  .fdw-lead.fdw-visible { display: grid; }
+  .fdw-lead-heading { display: grid; gap: 4px; margin-bottom: 2px; }
+  .fdw-lead-heading strong { color: #1f3658; font-size: 13px; letter-spacing: -.01em; }
+  .fdw-lead-heading small { color: #687b94; font-size: 10px; line-height: 1.4; }
+  .fdw-consent-row { display: flex; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
+  .fdw-consent-row input { flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--fdw-accent, #0d6efd); }
+  .fdw-consent-row a { color: #1769c2; font-weight: 700; }
+  .fdw-handoff-status { display: none; align-items: flex-start; gap: 8px; margin: 0 15px 10px; padding: 9px 8px 9px 11px; border: 1px solid #cfe0f7; border-radius: 9px; color: #36577e; background: #f3f8ff; font-size: 11px; line-height: 1.4; }
+  .fdw-handoff-status.fdw-visible { display: flex; }
+  .fdw-handoff-copy { min-width: 0; flex: 1; }
+  .fdw-handoff-dismiss { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; margin: -4px -3px 0 0; padding: 0; border: 0; border-radius: 50%; color: #547194; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
+  .fdw-handoff-dismiss:hover, .fdw-handoff-dismiss:focus-visible { color: #244d7e; background: #e3effd; outline: none; }
+  .fdw-composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e6edf5; background: #fff; }
+  .fdw-composer input { min-width: 0; flex: 1; padding: 11px 12px; border: 1px solid #d5e0ed; border-radius: 9px; outline: none; color: #243957; font-size: 12px; }
+  .fdw-composer button { width: 40px; border: 0; border-radius: 9px; color: #fff; background: var(--fdw-accent, #0d6efd); cursor: pointer; font-size: 15px; font-weight: 800; }
+  .fdw-powered-by { display: grid; grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr); align-items: center; gap: 9px; min-height: 38px; padding: 0 15px 11px; color: #8a98aa; background: #fff; font-size: 10px; }
+  .fdw-powered-by::before, .fdw-powered-by::after { content: ""; height: 1px; background: #e6edf5; }
+  .fdw-powered-by-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .fdw-powered-by .fdw-brand-symbol { width: 15px; height: 15px; color: var(--fdw-accent, #0d6efd); }
+  .fdw-powered-by strong { color: #52657e; font-size: 10px; font-weight: 800; letter-spacing: -.01em; }
+  .fdw-panel.fdw-theme-dark .fdw-powered-by { color: #a5b5cc; background: #182a43; }
+  .fdw-panel.fdw-theme-dark .fdw-powered-by::before, .fdw-panel.fdw-theme-dark .fdw-powered-by::after { background: #385578; }
+  .fdw-panel.fdw-theme-dark .fdw-powered-by .fdw-brand-symbol, .fdw-panel.fdw-theme-dark .fdw-powered-by strong { color: #eef5ff; }
+  .fdw-typing { display: inline-flex; gap: 4px; width: max-content; padding: 11px 13px; border-radius: 6px 14px 14px 14px; background: #fff; }
+  .fdw-typing span { width: 5px; height: 5px; border-radius: 50%; background: #7f91aa; animation: fdw-typing-bounce 1s infinite ease-in-out; }
+  .fdw-typing span:nth-child(2) { animation-delay: .14s; }
+  .fdw-typing span:nth-child(3) { animation-delay: .28s; }
+  @keyframes fdw-typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
+  .fdw-preview-root { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
+  .fdw-preview-root .fdw-launcher, .fdw-preview-root .fdw-proactive-teaser, .fdw-preview-root .fdw-panel { position: absolute; pointer-events: auto; }
+  .fdw-preview-root .fdw-panel { right: 22px; bottom: 22px; height: min(680px, calc(100% - 44px)); }
+  .fdw-preview-root .fdw-panel.fdw-mode-expanded { height: min(760px, calc(100% - 44px)); }
+  .fdw-preview-root .fdw-panel.fdw-mode-fullscreen { right: 0; bottom: 0; height: 100%; }
+  .fdw-preview-root .fdw-launcher { right: 22px; bottom: 22px; }
+  .fdw-preview-root .fdw-proactive-teaser { right: 22px; bottom: 92px; }
+  @media (prefers-color-scheme: dark) {
+    .fdw-panel.fdw-theme-auto { color: #eef5ff; background: #182a43; border-color: #2f4768; }
+    .fdw-panel.fdw-theme-auto .fdw-messages, .fdw-panel.fdw-theme-auto .fdw-quick-actions { background: #122238; }
+    .fdw-panel.fdw-theme-auto .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-composer { background: #182a43; border-color: #2f4768; }
+    .fdw-panel.fdw-theme-auto .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-powered-by { color: #a5b5cc; background: #182a43; }
+    .fdw-panel.fdw-theme-auto .fdw-powered-by::before, .fdw-panel.fdw-theme-auto .fdw-powered-by::after { background: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-powered-by .fdw-brand-symbol, .fdw-panel.fdw-theme-auto .fdw-powered-by strong { color: #eef5ff; }
+  }
+  @media (max-width: 640px) {
+    .fdw-launcher { right: 16px; bottom: 16px; }
+    .fdw-proactive-teaser { right: 16px; bottom: 84px; width: min(320px, calc(100vw - 32px)); }
+    .fdw-proactive-teaser.fdw-position-bottom-left { right: auto; left: 16px; }
+    .fdw-panel, .fdw-panel.fdw-mode-expanded, .fdw-panel.fdw-mode-fullscreen { inset: 0; width: 100vw; height: 100dvh; max-height: none; border-radius: 0; }
+    .fdw-header { min-height: 62px; }
+    .fdw-messages { padding-top: 16px; }
+  }
+  @container fdw-preview (max-width: 640px) {
+    .fdw-preview-root .fdw-launcher { right: 16px; bottom: 16px; }
+    .fdw-preview-root .fdw-proactive-teaser { right: 16px; bottom: 84px; width: min(320px, calc(100% - 32px)); }
+    .fdw-preview-root .fdw-proactive-teaser.fdw-position-bottom-left { right: auto; left: 16px; }
+    .fdw-preview-root .fdw-panel, .fdw-preview-root .fdw-panel.fdw-mode-expanded, .fdw-preview-root .fdw-panel.fdw-mode-fullscreen { inset: 0; width: 100%; height: 100%; max-height: none; border-radius: 0; }
+    .fdw-preview-root .fdw-header { min-height: 62px; }
+    .fdw-preview-root .fdw-messages { padding-top: 16px; }
+  }
+`;
+
+function isHexColor(value: string): boolean {
+  return /^#[\da-f]{6}$/i.test(value);
+}
+
+function accessibleTextColor(hex: string): string {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  return luminance > 0.48 ? "#14233d" : "#ffffff";
+}
+
+function element<T extends HTMLElement>(documentRef: Document, tag: string, className?: string): T {
+  const node = documentRef.createElement(tag) as T;
+  if (className) node.className = className;
+  return node;
+}
+
+function renderFormControl(documentRef: Document, field: WidgetFormField): HTMLInputElement | HTMLSelectElement {
+  if (field.type === "select") {
+    const select = element<HTMLSelectElement>(documentRef, "select");
+    select.name = field.key;
+    const empty = element<HTMLOptionElement>(documentRef, "option");
+    empty.value = "";
+    empty.textContent = "Select…";
+    select.appendChild(empty);
+    for (const optionValue of field.options ?? []) {
+      const option = element<HTMLOptionElement>(documentRef, "option");
+      option.value = optionValue;
+      option.textContent = optionValue;
+      select.appendChild(option);
+    }
+    select.value = field.value ?? "";
+    return select;
+  }
+  const input = element<HTMLInputElement>(documentRef, "input");
+  input.type = field.type === "phone" ? "tel" : field.type;
+  input.name = field.key;
+  input.value = field.value ?? "";
+  return input;
+}
+
+export function createWidgetRenderer(mount: HTMLElement, options: WidgetRendererOptions): WidgetRendererController {
+  const documentRef = mount.ownerDocument;
+  let config: WidgetConfig = { ...DEFAULT_CONFIG, ...options.config };
+  let state: WidgetState = {
+    isOpen: false,
+    messages: [],
+    quickActions: [],
+    ...options.state,
+  };
+  let destroyed = false;
+
+  const style = element<HTMLStyleElement>(documentRef, "style");
+  style.textContent = WIDGET_STYLES;
+  const root = element<HTMLDivElement>(documentRef, "div", `fdw-widget-root fdw-${options.surface ?? "embed"}-root`);
+  root.innerHTML = `
+    <button class="fdw-launcher" aria-label="Open AI front desk" type="button">${SYMBOL}</button>
+    <aside class="fdw-proactive-teaser" hidden aria-live="polite">
+      <span class="fdw-teaser-mark">${SYMBOL}</span>
+      <div class="fdw-teaser-copy"><p class="fdw-teaser-message"></p><button class="fdw-teaser-action" type="button">Ask me <span aria-hidden="true">→</span></button></div>
+      <button class="fdw-teaser-dismiss" type="button" aria-label="Dismiss message">×</button>
+    </aside>
+    <section class="fdw-panel fdw-mode-compact" aria-label="AI front desk" aria-hidden="true">
+      <header class="fdw-header">
+        <div class="fdw-identity"><span class="fdw-orb">${SYMBOL}</span><div class="fdw-title-group"><strong class="fdw-title"></strong><small class="fdw-subtitle"><span class="fdw-status-dot" aria-hidden="true"></span><span class="fdw-subtitle-text"></span></small></div></div>
+        <div class="fdw-header-actions"><button class="fdw-expand" type="button" aria-label="Expand assistant" title="Expand assistant">↗</button><button class="fdw-close" type="button" aria-label="Close assistant" title="Close assistant">×</button></div>
+      </header>
+      <div class="fdw-messages"></div>
+      <div class="fdw-handoff-status" role="status" aria-live="polite"><span class="fdw-handoff-copy"></span><button class="fdw-handoff-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button></div>
+      <div class="fdw-quick-actions"></div>
+      <form class="fdw-action-form"></form>
+      <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><button type="submit">Continue</button></form>
+      <form class="fdw-composer"><input placeholder="Ask a question…" aria-label="Ask a question"><button aria-label="Send" type="submit">➤</button></form>
+      <div class="fdw-powered-by" aria-label="Powered by FrontDeskWise"><span class="fdw-powered-by-label">Powered by ${SYMBOL}<strong>FrontDeskWise</strong></span></div>
+    </section>`;
+  root.prepend(style);
+  mount.replaceChildren(root);
+
+  const launcher = root.querySelector<HTMLButtonElement>(".fdw-launcher")!;
+  const teaser = root.querySelector<HTMLElement>(".fdw-proactive-teaser")!;
+  const teaserMessage = root.querySelector<HTMLElement>(".fdw-teaser-message")!;
+  const panel = root.querySelector<HTMLElement>(".fdw-panel")!;
+  const title = root.querySelector<HTMLElement>(".fdw-title")!;
+  const subtitleText = root.querySelector<HTMLElement>(".fdw-subtitle-text")!;
+  const logoSlot = root.querySelector<HTMLElement>(".fdw-orb")!;
+  const messages = root.querySelector<HTMLElement>(".fdw-messages")!;
+  const quickActions = root.querySelector<HTMLElement>(".fdw-quick-actions")!;
+  const actionForm = root.querySelector<HTMLFormElement>(".fdw-action-form")!;
+  const lead = root.querySelector<HTMLFormElement>(".fdw-lead")!;
+  const composer = root.querySelector<HTMLFormElement>(".fdw-composer")!;
+  const composerInput = composer.querySelector<HTMLInputElement>("input")!;
+  const handoffStatus = root.querySelector<HTMLElement>(".fdw-handoff-status")!;
+  const handoffCopy = root.querySelector<HTMLElement>(".fdw-handoff-copy")!;
+  const poweredBy = root.querySelector<HTMLElement>(".fdw-powered-by")!;
+  const leadConsentRow = root.querySelector<HTMLElement>(".fdw-consent-row")!;
+  const privacyLink = root.querySelector<HTMLAnchorElement>(".fdw-privacy-link")!;
+
+  function renderLogo(): void {
+    const logoUrl = config.widgetLogoUrl?.trim();
+    if (!logoUrl) {
+      logoSlot.innerHTML = SYMBOL;
+      return;
+    }
+    const image = element<HTMLImageElement>(documentRef, "img", "fdw-logo");
+    image.src = logoUrl;
+    image.alt = "";
+    image.addEventListener("error", () => { logoSlot.innerHTML = SYMBOL; });
+    logoSlot.replaceChildren(image);
+  }
+
+  function renderMessages(): void {
+    messages.replaceChildren();
+    for (const message of state.messages) {
+      const item = element<HTMLDivElement>(documentRef, "div", `fdw-message${message.role === "user" ? " fdw-user" : ""}`);
+      if (message.role === "assistant") renderMarkdownInto(documentRef, item, message.content);
+      else item.textContent = message.content;
+      if (message.role === "assistant" && config.showSources !== false) {
+        const citation = message.citations?.find((candidate) => candidate?.url);
+        if (citation?.url) {
+          const link = element<HTMLAnchorElement>(documentRef, "a");
+          const safeUrl = safeLinkUrl(citation.url);
+          if (safeUrl) {
+            link.href = safeUrl;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "View source ↗";
+            item.appendChild(link);
+          }
+        }
+      }
+      messages.appendChild(item);
+    }
+    if (state.typing) {
+      const typing = element<HTMLDivElement>(documentRef, "div", "fdw-typing");
+      typing.setAttribute("role", "status");
+      typing.setAttribute("aria-label", "Assistant is typing");
+      typing.innerHTML = "<span></span><span></span><span></span>";
+      messages.appendChild(typing);
+    }
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function renderQuickActions(): void {
+    quickActions.replaceChildren();
+    for (const action of state.quickActions.slice(0, 4)) {
+      if (!action?.label) continue;
+      const button = element<HTMLButtonElement>(documentRef, "button");
+      button.type = "button";
+      button.textContent = action.label;
+      button.addEventListener("click", () => {
+        if (action.question) {
+          composerInput.value = "";
+          options.onAsk?.(action.question);
+        }
+        else composerInput.focus();
+      });
+      quickActions.appendChild(button);
+    }
+  }
+
+  function renderActionForm(): void {
+    actionForm.replaceChildren();
+    const action = state.action;
+    if (!action || action.status === "completed") {
+      actionForm.hidden = true;
+      const safeActionUrl = action?.linkUrl ? safeLinkUrl(action.linkUrl) : null;
+      if (safeActionUrl) {
+        const link = element<HTMLAnchorElement>(documentRef, "a");
+        link.href = safeActionUrl;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = action?.linkLabel || "Continue";
+        link.className = "fdw-action-link";
+        actionForm.appendChild(link);
+        actionForm.hidden = false;
+      }
+      return;
+    }
+    if (!action.form?.fields?.length) {
+      actionForm.hidden = true;
+      return;
+    }
+    for (const field of action.form.fields) {
+      const label = element<HTMLLabelElement>(documentRef, "label");
+      const labelText = element<HTMLSpanElement>(documentRef, "span");
+      labelText.textContent = field.label;
+      if (field.required) {
+        const required = element<HTMLElement>(documentRef, "b");
+        required.textContent = " *";
+        labelText.appendChild(required);
+      } else {
+        const optional = element<HTMLElement>(documentRef, "em");
+        optional.textContent = "Optional";
+        labelText.appendChild(optional);
+      }
+      label.appendChild(labelText);
+      const control = renderFormControl(documentRef, field);
+      control.required = Boolean(field.required);
+      label.appendChild(control);
+      actionForm.appendChild(label);
+    }
+    if (config.requireLeadConsent) {
+      const consent = element<HTMLLabelElement>(documentRef, "label", "fdw-consent-row");
+      consent.innerHTML = "<input type=\"checkbox\" name=\"consent\" required><span>I agree to share my details with this business.</span>";
+      actionForm.appendChild(consent);
+    }
+    const submit = element<HTMLButtonElement>(documentRef, "button");
+    submit.type = "submit";
+    submit.disabled = Boolean(state.actionSubmitting);
+    submit.textContent = state.actionSubmitting ? "Submitting…" : action.form.submitLabel || "Continue";
+    actionForm.appendChild(submit);
+    actionForm.hidden = false;
+  }
+
+  function renderHandoff(): void {
+    const status = state.handoffStatus;
+    if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") subtitleText.textContent = "Waiting for a team member";
+    else if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED") subtitleText.textContent = "Connected to the team";
+    else if (status === "RESOLVED") subtitleText.textContent = "Conversation resolved";
+    else subtitleText.textContent = config.showAiDisclosure === false ? "Here to help" : "Usually replies in a few seconds";
+    const notice = state.handoffNotice;
+    handoffCopy.textContent = notice?.message ?? "";
+    handoffStatus.classList.toggle("fdw-visible", Boolean(notice?.visible));
+  }
+
+  function render(): void {
+    if (destroyed) return;
+    const accent = isHexColor(config.widgetColor) ? config.widgetColor : DEFAULT_ACCENT;
+    root.style.setProperty("--fdw-accent", accent);
+    root.style.setProperty("--fdw-accent-text", accessibleTextColor(accent));
+    launcher.classList.toggle("fdw-position-bottom-left", config.widgetPosition === "bottom-left");
+    teaser.classList.toggle("fdw-position-bottom-left", config.widgetPosition === "bottom-left");
+    panel.className = `fdw-panel fdw-theme-${config.widgetTheme || "auto"} fdw-position-${config.widgetPosition || "bottom-right"} fdw-mode-${config.widgetDefaultMode || "compact"}${state.isOpen ? " fdw-open" : ""}`;
+    panel.setAttribute("aria-hidden", String(!state.isOpen));
+    launcher.hidden = state.isOpen;
+    title.textContent = config.assistantName || "AI front desk";
+    renderLogo();
+    root.querySelector<HTMLButtonElement>(".fdw-expand")!.hidden = config.widgetAllowExpand === false;
+    leadConsentRow.hidden = config.requireLeadConsent !== true;
+    const safePrivacyUrl = config.privacyNoticeUrl ? safeLinkUrl(config.privacyNoticeUrl) : null;
+    if (safePrivacyUrl) {
+      privacyLink.href = safePrivacyUrl;
+      privacyLink.hidden = false;
+    } else privacyLink.hidden = true;
+    poweredBy.hidden = config.showPoweredBy === false;
+    teaser.hidden = !state.proactive?.visible;
+    teaserMessage.textContent = state.proactive?.message ?? "";
+    renderHandoff();
+    renderMessages();
+    renderQuickActions();
+    renderActionForm();
+    lead.hidden = !(state.leadVisible && config.showLeadCapture !== false);
+    lead.classList.toggle("fdw-visible", state.leadVisible === true && config.showLeadCapture !== false);
+    const submit = lead.querySelector<HTMLButtonElement>("button[type=submit]");
+    if (submit) {
+      submit.disabled = Boolean(state.leadSubmitting);
+      submit.textContent = state.leadSubmitting ? "Sending…" : "Continue";
+    }
+  }
+
+  const open = (source: "launcher" | "proactive" = "launcher"): void => {
+    if (destroyed) return;
+    state = { ...state, isOpen: true, proactive: { ...(state.proactive ?? { visible: false, message: "" }), visible: false } };
+    render();
+    options.onOpen?.(source);
+  };
+  const close = (): void => {
+    if (destroyed) return;
+    state = { ...state, isOpen: false };
+    render();
+    options.onClose?.();
+  };
+
+  launcher.addEventListener("click", () => open("launcher"));
+  root.querySelector<HTMLButtonElement>(".fdw-teaser-action")!.addEventListener("click", () => open("proactive"));
+  root.querySelector<HTMLButtonElement>(".fdw-teaser-dismiss")!.addEventListener("click", () => {
+    state = { ...state, proactive: { ...(state.proactive ?? { visible: false, message: "" }), visible: false } };
+    render();
+    options.onProactiveDismiss?.();
+  });
+  root.querySelector<HTMLButtonElement>(".fdw-close")!.addEventListener("click", close);
+  root.querySelector<HTMLButtonElement>(".fdw-expand")!.addEventListener("click", () => {
+    if (!config.widgetAllowExpand) return;
+    config = { ...config, widgetDefaultMode: config.widgetDefaultMode === "compact" ? "expanded" : "compact" };
+    render();
+  });
+  root.querySelector<HTMLButtonElement>(".fdw-handoff-dismiss")!.addEventListener("click", () => options.onHandoffDismiss?.());
+  composer.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const question = composerInput.value.trim();
+    if (!question) return;
+    composerInput.value = "";
+    options.onAsk?.(question);
+  });
+  actionForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!state.action) return;
+    const values: Record<string, string> = {};
+    for (const field of Array.from(actionForm.elements)) {
+      const control = field as HTMLInputElement | HTMLSelectElement;
+      if (control.name) values[control.name] = control.type === "checkbox" ? String((control as HTMLInputElement).checked) : control.value;
+    }
+    options.onActionSubmit?.(values, state.action);
+  });
+  lead.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const formData = new FormData(lead);
+    options.onLeadSubmit?.({
+      name: String(formData.get("name") ?? "").trim(),
+      email: String(formData.get("email") ?? "").trim(),
+      phone: String(formData.get("phone") ?? "").trim(),
+      consent: formData.get("consent") === "on",
+    });
+  });
+
+  render();
+
+  return {
+    update(patch): void {
+      if (patch.config) config = { ...config, ...patch.config };
+      if (patch.state) state = { ...state, ...patch.state };
+      render();
+    },
+    open,
+    close,
+    destroy(): void {
+      destroyed = true;
+      mount.replaceChildren();
+    },
+  };
+}
+

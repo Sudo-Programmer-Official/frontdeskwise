@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, toRef, watch } from "vue";
-import { ArrowRight, Check, CircleAlert, CircleCheck, GripVertical, Plus, X } from "@lucide/vue";
+import { computed, reactive, ref, toRef, watch } from "vue";
+import { Check, GripVertical, Plus, X } from "@lucide/vue";
 import Button from "./components/ui/Button.vue";
 import Card from "./components/ui/Card.vue";
 import ColorPicker from "./components/ui/ColorPicker.vue";
@@ -14,12 +14,16 @@ import TextInput from "./components/ui/TextInput.vue";
 import Textarea from "./components/ui/Textarea.vue";
 import WidgetPreview from "./components/WidgetPreview.vue";
 import { getAccessibleTextColor, isHexColor } from "./utils/color";
+import type { WidgetAction, WidgetState } from "./widget-ui/renderer";
 
 type AgentTab = "behavior" | "appearance" | "quick-actions" | "actions" | "test" | "install";
 type Tone = "friendly" | "professional" | "concise" | "custom";
 type FallbackBehavior = "contact_form" | "human" | "unavailable";
 type WidgetTheme = "light" | "dark" | "auto";
 type WidgetPosition = "bottom-right" | "bottom-left";
+type ProactiveTrigger = "delay" | "scroll" | "exit" | "returning";
+type ProactiveBehavior = "teaser" | "open";
+type ProactiveFrequency = "session" | "24h" | "visit";
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 type InstallPlatform = "wordpress" | "wix" | "shopify" | "squarespace" | "custom" | "not_sure";
 type SupportContactMethod = "email" | "phone";
@@ -43,6 +47,7 @@ interface AgentModel {
   assistantName: string;
   welcomeMessage: string;
   tone: Tone;
+  customToneInstructions: string;
   primaryLanguage: string;
   fallbackBehavior: FallbackBehavior;
   humanHandoffEnabled: boolean;
@@ -53,6 +58,12 @@ interface AgentModel {
   widgetTheme: WidgetTheme;
   widgetPosition: WidgetPosition;
   widgetQuickActions: QuickAction[];
+  proactiveEnabled: boolean;
+  proactiveDelaySeconds: number;
+  proactiveMessage: string;
+  proactiveTriggers: ProactiveTrigger[];
+  proactiveBehavior: ProactiveBehavior;
+  proactiveFrequency: ProactiveFrequency;
   showLeadCapture: boolean;
   showBookingAction: boolean;
   showAiDisclosure: boolean;
@@ -68,6 +79,7 @@ interface TestActionField {
   type: string;
   required: boolean;
   options?: string[];
+  value?: string;
 }
 
 interface TestAction {
@@ -110,6 +122,7 @@ const props = defineProps<{
   businessKey: string;
   businessName: string;
   websiteUrl: string;
+  websiteBrandColors: string[];
   model: AgentModel;
   savedMessage: string;
   authReady: boolean;
@@ -166,11 +179,33 @@ const actionQuestion = toRef(actionDraft, "question");
 const logoPreview = ref(props.model.widgetLogoUrl);
 const logoFileName = ref("");
 const testPrompt = ref("");
-const testThread = ref<HTMLElement | null>(null);
 const sessionHasGroundedAnswer = computed(() => props.test.messages.some((message) => message.role === "assistant" && message.grounded));
 const sessionSourceCount = computed(() => new Set(props.test.messages.flatMap((message) => message.citations.map((citation) => citation.url || citation.title || ""))).size);
 const sessionHasAction = computed(() => props.test.messages.some((message) => Boolean(message.action)));
 const sessionHasCompletedAction = computed(() => props.test.messages.some((message) => message.action?.status === "completed"));
+const testWidgetState = computed<Partial<WidgetState>>(() => {
+  const latestAssistant = [...props.test.messages].reverse().find((message) => message.role === "assistant");
+  const action = latestAssistant?.action;
+  const widgetAction: WidgetAction | null = action ? {
+    id: action.id,
+    status: action.status,
+    linkUrl: action.linkUrl,
+    linkLabel: action.linkLabel,
+    form: action.form ? {
+      submitLabel: action.form.submitLabel,
+      fields: action.form.fields.map((field) => ({ id: field.id, key: field.key, label: field.label, type: field.type, required: field.required, options: field.options, value: latestAssistant.formValues[field.key] ?? "" })),
+    } : undefined,
+  } : null;
+  return {
+    isOpen: true,
+    messages: [{ id: "test-welcome", role: "assistant", content: agentDraft.value.welcomeMessage || "Hi! How can I help?" }, ...props.test.messages.map((message) => ({ id: message.id, role: message.role, content: message.content, citations: message.citations }))],
+    quickActions: latestAssistant?.quickActions ?? [],
+    action: widgetAction,
+    typing: props.test.isAsking,
+    handoffStatus: "AI_ACTIVE",
+    handoffNotice: { visible: false, message: "" },
+  };
+});
 const localSaved = ref(false);
 const installPlatform = ref<InstallPlatform>("custom");
 const verificationMethodDraft = ref<VerificationMethod>(props.verificationMethod);
@@ -190,6 +225,8 @@ const positionOptions = [{ label: "Bottom right", value: "bottom-right" }, { lab
 const openingSizeOptions = [{ label: "Compact", value: "compact" }, { label: "Expanded", value: "expanded" }, { label: "Full screen", value: "fullscreen" }];
 const languageOptions = ["English", "Spanish", "French", "Portuguese"].map((value) => ({ label: value, value }));
 const fallbackOptions = [{ label: "Offer contact form", value: "contact_form" }, { label: "Request human", value: "human" }, { label: "Say information is unavailable", value: "unavailable" }];
+const proactiveBehaviorOptions = [{ label: "Show small prompt", value: "teaser" }, { label: "Open chat automatically", value: "open" }];
+const proactiveFrequencyOptions = [{ label: "Once per session", value: "session" }, { label: "Every 24 hours", value: "24h" }, { label: "Every visit", value: "visit" }];
 const supportDrawerOpen = ref(false);
 const supportSubmitted = ref(false);
 const supportForm = reactive<InstallationSupportPayload>({
@@ -220,11 +257,6 @@ watch(() => props.model, (model) => syncModel(model), { deep: true });
 watch(() => props.verificationMethod, (method) => {
   verificationMethodDraft.value = method;
 });
-watch(() => [props.test.messages.length, props.test.isAsking], () => {
-  void nextTick(() => {
-    if (testThread.value) testThread.value.scrollTop = testThread.value.scrollHeight;
-  });
-});
 watch(() => props.openSupportRequest, (signal) => {
   if (signal > 0) openSupportDrawer();
 }, { immediate: true });
@@ -244,6 +276,17 @@ function saveChanges(): void {
   localSaved.value = true;
   window.setTimeout(() => (localSaved.value = false), 2600);
   emit("save", cloneModel(draft));
+}
+
+function hasProactiveTrigger(trigger: ProactiveTrigger): boolean {
+  return draft.proactiveTriggers.includes(trigger);
+}
+
+function toggleProactiveTrigger(trigger: ProactiveTrigger, enabled: boolean): void {
+  const next = new Set(draft.proactiveTriggers);
+  if (enabled) next.add(trigger);
+  else next.delete(trigger);
+  draft.proactiveTriggers = [...next];
 }
 
 function selectTab(tab: AgentTab): void {
@@ -296,9 +339,10 @@ function ask(question = testPrompt.value): void {
   testPrompt.value = "";
 }
 
-function submitAction(message: TestMessage): void {
-  if (!message.action) return;
-  emit("submit-action", { messageId: message.id, actionId: message.action.id, values: { ...message.formValues } });
+function submitPreviewAction(payload: { action: WidgetAction; values: Record<string, string> }): void {
+  const message = props.test.messages.find((candidate) => candidate.action?.id === payload.action.id);
+  if (!message?.action) return;
+  emit("submit-action", { messageId: message.id, actionId: message.action.id, values: payload.values });
 }
 
 function statusClass(ready: boolean): string {
@@ -368,6 +412,23 @@ function sendDeveloperInstructions(): void {
             <FormField label="Tone"><SegmentedControl v-model="draft.tone" :options="toneOptions" aria-label="Assistant tone" /></FormField>
             <FormField label="Primary language"><Select v-model="draft.primaryLanguage" :options="languageOptions" placeholder="" /></FormField>
           </div>
+          <FormField v-if="draft.tone === 'custom'" label="Custom tone instructions" hint="These instructions guide answer style while keeping customer answers grounded and concise."><Textarea v-model="draft.customToneInstructions" :rows="4" :maxlength="600" placeholder="Warm, direct, and reassuring. Use short paragraphs and avoid jargon." /></FormField>
+        </FormSection>
+        <FormSection eyebrow="Proactive engagement" title="Invite visitors before they ask" description="Start with a small prompt above the launcher. Visitors can open the full assistant when they are ready.">
+          <Switch v-model="draft.proactiveEnabled" label="Engage visitors automatically" description="Show a proactive message when a visitor reaches one of your selected triggers." />
+          <template v-if="draft.proactiveEnabled">
+            <div class="proactive-trigger-grid">
+              <label class="proactive-check"><input type="checkbox" :checked="hasProactiveTrigger('delay')" @change="toggleProactiveTrigger('delay', ($event.target as HTMLInputElement).checked)" /><span><strong>After a few seconds</strong><small>Useful for visitors who pause on a page.</small></span></label>
+              <label class="proactive-check"><input type="checkbox" :checked="hasProactiveTrigger('scroll')" @change="toggleProactiveTrigger('scroll', ($event.target as HTMLInputElement).checked)" /><span><strong>After 70% scroll</strong><small>Reach visitors after they engage with the page.</small></span></label>
+              <label class="proactive-check"><input type="checkbox" :checked="hasProactiveTrigger('returning')" @change="toggleProactiveTrigger('returning', ($event.target as HTMLInputElement).checked)" /><span><strong>Returning visit</strong><small>Welcome visitors who have been here before.</small></span></label>
+              <label class="proactive-check"><input type="checkbox" :checked="hasProactiveTrigger('exit')" @change="toggleProactiveTrigger('exit', ($event.target as HTMLInputElement).checked)" /><span><strong>Exit intent</strong><small>Desktop only; use sparingly for high-intent pages.</small></span></label>
+            </div>
+            <div v-if="hasProactiveTrigger('delay')" class="proactive-delay-control"><label for="proactive-delay">Delay in seconds</label><input id="proactive-delay" v-model.number="draft.proactiveDelaySeconds" type="number" min="10" max="120" step="5" /><span>10–120 seconds</span></div>
+            <FormField label="Message"><Textarea v-model="draft.proactiveMessage" :rows="3" :maxlength="240" placeholder="Want help finding the right solution?" /></FormField>
+            <FormField label="Behavior"><SegmentedControl v-model="draft.proactiveBehavior" :options="proactiveBehaviorOptions" aria-label="Proactive engagement behavior" /></FormField>
+            <FormField label="Frequency"><SegmentedControl v-model="draft.proactiveFrequency" :options="proactiveFrequencyOptions" aria-label="Proactive engagement frequency" /></FormField>
+            <p class="form-help">After a visitor dismisses or opens the prompt, FrontDeskWise respects this frequency and will not keep interrupting them.</p>
+          </template>
         </FormSection>
         <FormSection eyebrow="When AI cannot answer" title="Make the next step clear">
           <FormField label="Fallback behavior"><Select v-model="draft.fallbackBehavior" :options="fallbackOptions" placeholder="" /></FormField>
@@ -378,7 +439,7 @@ function sendDeveloperInstructions(): void {
           <Button variant="primary" size="small" @click="saveChanges">Save changes</Button>
         </section>
       </Card>
-      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :quick-actions="agentDraft.widgetQuickActions" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
+      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
     <div v-else-if="tab === 'appearance'" class="agent-config-layout">
@@ -386,7 +447,7 @@ function sendDeveloperInstructions(): void {
         <FormSection eyebrow="Brand" title="Appearance" description="Make the front desk feel like part of your website.">
           <FileUpload :filename="logoFileName || (draft.widgetLogoUrl ? 'Current logo' : '')" :preview-url="logoPreview" accept="image/png,image/jpeg,image/svg+xml" @change="previewLogo" />
           <details class="advanced-setting"><summary>Advanced · logo URL</summary><FormField label="Logo URL" hint="Use an HTTPS URL when the logo should persist to the published widget."><TextInput v-model="draft.widgetLogoUrl" type="url" placeholder="https://yourbusiness.com/logo.png" /></FormField></details>
-          <FormField label="Brand color" hint="Used for CTAs, accents, focus rings, and quick actions. Text contrast adjusts automatically."><ColorPicker v-model="draft.widgetColor" /></FormField>
+          <FormField label="Brand color" hint="Used for CTAs, accents, focus rings, and quick actions. Text contrast adjusts automatically."><ColorPicker v-model="draft.widgetColor" :website-colors="websiteBrandColors" :website-label="businessName || websiteUrl || 'your website'" /></FormField>
           <p class="accessible-color-note"><span :style="{ background: safeWidgetColor, color: accessibleWidgetText }">Aa</span> Accessible text preview</p>
         </FormSection>
         <FormSection eyebrow="Widget" title="Visitor controls">
@@ -397,7 +458,7 @@ function sendDeveloperInstructions(): void {
         </FormSection>
         <section class="agent-section agent-section-footer"><div><strong>Visual changes are ready to review.</strong><p>Save changes when the preview feels right.</p></div><Button variant="primary" size="small" @click="saveChanges">Save changes</Button></section>
       </Card>
-      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
+      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
     <div v-else-if="tab === 'quick-actions' || tab === 'actions'" class="agent-config-layout">
@@ -406,34 +467,13 @@ function sendDeveloperInstructions(): void {
         <section v-if="quickActionEditorOpen" class="action-drawer"><div class="agent-section-heading"><div><p class="section-kicker">{{ editingActionIndex === null ? 'New action' : 'Edit action' }}</p><h3>Quick action details</h3></div><button class="icon-button" type="button" aria-label="Close" @click="quickActionEditorOpen = false"><X :size="18" :stroke-width="1.8" aria-hidden="true" /></button></div><FormField label="Label" required><TextInput v-model="actionLabel" :maxlength="48" placeholder="Explore services" /></FormField><FormField label="Customer message" required><TextInput v-model="actionQuestion" :maxlength="300" placeholder="What services do you offer?" /></FormField><FormField label="Action type"><Select :options="[{ label: 'Ask AI', value: 'ask' }, { label: 'Open lead form', value: 'lead' }, { label: 'Request human', value: 'human' }]" placeholder="" /></FormField><div class="drawer-actions"><Button variant="secondary" size="small" @click="quickActionEditorOpen = false">Cancel</Button><Button variant="primary" size="small" :disabled="!actionLabel.trim() || !actionQuestion.trim()" @click="saveAction">Save action</Button></div></section>
         <section class="agent-section agent-section-footer"><div><strong>{{ agentDraft.widgetQuickActions.length }} of 5 recommended actions</strong><p>Use specific questions that help visitors choose what to do next.</p></div><Button variant="primary" size="small" @click="saveChanges">Save changes</Button></section>
       </article>
-      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
+      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
 
     <div v-else-if="tab === 'test'" class="agent-test-layout">
       <article class="test-conversation panel">
-        <div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the real conversation path to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div>
-        <div ref="testThread" class="test-thread">
-          <div class="test-welcome"><span class="preview-orb" :style="{ background: agentDraft.widgetColor }"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>{{ agentDraft.assistantName || 'AI assistant' }}</strong><small>Answers from {{ businessName || 'your business' }} knowledge</small></div></div>
-          <template v-if="test.messages.length">
-            <template v-for="message in test.messages" :key="message.id">
-              <div v-if="message.role === 'user'" class="test-user-message">{{ message.content }}</div>
-              <article v-else class="test-answer-message">
-                <div class="answer-meta"><span v-if="message.action" class="answer-badge grounded"><Check :size="13" :stroke-width="2" aria-hidden="true" /> {{ message.action.status === 'completed' ? 'Flow completed' : 'Conversation flow' }}</span><span v-else :class="['answer-badge', message.grounded ? 'grounded' : 'fallback']"><component :is="message.grounded ? CircleCheck : CircleAlert" :size="13" :stroke-width="2" aria-hidden="true" /> {{ message.grounded ? 'Grounded answer' : 'Safe fallback' }}</span></div>
-                <p>{{ message.content }}</p>
-                <div v-if="message.quickActions.length" class="test-quick-actions"><button v-for="quickAction in message.quickActions" :key="quickAction.label" class="text-button" type="button" @click="ask(quickAction.question)">{{ quickAction.label }} <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></button></div>
-                <form v-if="message.action?.form" class="test-action-form" @submit.prevent="submitAction(message)">
-                  <label v-for="field in message.action.form.fields" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><select v-if="field.type === 'select'" v-model="message.formValues[field.key]" :required="field.required"><option value="">Select…</option><option v-for="option in field.options ?? []" :key="option" :value="option">{{ option }}</option></select><input v-else v-model="message.formValues[field.key]" :type="field.type === 'phone' ? 'tel' : field.type" :required="field.required" /></label>
-                  <button class="primary-button small" type="submit" :disabled="test.isAsking">{{ test.isAsking ? 'Submitting…' : message.action.form.submitLabel }}</button>
-                </form>
-                <div v-if="message.citations.length" class="test-citations"><span>Sources ({{ message.citations.length }})</span><a v-for="citation in message.citations" :key="`${message.id}-${citation.url || citation.title}`" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.title || citation.url }} <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></a></div>
-              </article>
-            </template>
-            <div v-if="test.isAsking" class="test-typing" role="status" aria-label="Assistant is typing"><span></span><span></span><span></span></div>
-          </template>
-          <div v-else class="test-empty">Ask a question to see the live answer and its sources.</div>
-        </div>
-        <div v-if="test.suggestedQuestions.length" class="test-suggestions"><span>Try a common question</span><button v-for="suggestion in test.suggestedQuestions.slice(0, 4)" :key="suggestion" type="button" @click="ask(suggestion)">{{ suggestion }} <b>›</b></button></div>
-        <form class="test-composer" @submit.prevent="ask()"><input v-model="testPrompt" type="text" placeholder="e.g. What services do you offer?" aria-label="Test customer question" /><button class="primary-button small" type="submit" :disabled="test.isAsking || !testPrompt.trim()">{{ test.isAsking ? 'Checking…' : 'Send as visitor' }}</button></form>
+        <div class="test-conversation-header"><div><p class="section-kicker">Production conversation</p><h3>Test what customers will experience</h3><p>Use the same widget shell to check answers, actions, forms, and handoff.</p></div><span v-if="test.conversationId" class="conversation-status">Conversation active</span></div>
+        <WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :state="testWidgetState" :show-scenario-selector="false" :mode="previewMode" @change-mode="previewMode = $event" @ask="ask" @submit-action="submitPreviewAction" />
       </article>
       <aside class="test-owner-panel panel"><div class="agent-section-heading"><div><p class="section-kicker">Owner checks</p><h3>What to verify</h3></div></div><div class="owner-check-list"><div><span :class="statusClass(sessionHasGroundedAnswer)">✓</span><span><strong>Grounded answers</strong><small>{{ sessionHasGroundedAnswer ? 'Grounded in business knowledge' : 'Ask a knowledge question' }}</small></span></div><div><span :class="statusClass(sessionSourceCount > 0)">✓</span><span><strong>Sources</strong><small>{{ sessionSourceCount ? `${sessionSourceCount} source${sessionSourceCount === 1 ? '' : 's'}` : 'Sources appear with grounded answers' }}</small></span></div><div><span :class="statusClass(sessionHasAction)">✓</span><span><strong>Action flows</strong><small>{{ sessionHasAction ? 'Action flow is running in the conversation' : 'Try a quick action or ask for help' }}</small></span></div><div><span :class="statusClass(sessionHasCompletedAction)">✓</span><span><strong>Completion</strong><small>{{ sessionHasCompletedAction ? 'Test lead captured' : 'Submit the conversational form to verify' }}</small></span></div></div><div v-if="sessionHasCompletedAction" class="test-success"><strong>✓ Test lead captured</strong><button class="text-button" type="button" @click="emit('view-leads')">View in Leads →</button></div><p class="test-owner-note">Internal details stay summarized here. Visitors only see the conversation.</p></aside>
     </div>
@@ -488,11 +528,21 @@ function sendDeveloperInstructions(): void {
 .agent-section:last-child { border-bottom: 0; }
 .agent-section h3, .preview-label-row h3, .test-conversation-header h3, .install-step h3, .install-status-card h3 { margin: 0; color: var(--agent-ink); font-size: 17px; letter-spacing: -.025em; }
 .section-kicker { margin: 0 0 7px; color: #2f80ed; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
-.agent-section label, .action-drawer label, .test-action-form label { display: grid; gap: 7px; margin-top: 18px; color: #586b86; font-size: 12px; font-weight: 700; }
+.agent-section label, .action-drawer label { display: grid; gap: 7px; margin-top: 18px; color: #586b86; font-size: 12px; font-weight: 700; }
 .agent-section label:first-of-type { margin-top: 18px; }
-.agent-section input:not([type="checkbox"]):not([type="color"]), .agent-section textarea, .agent-section select, .action-drawer input, .action-drawer select, .test-composer input, .test-action-form input, .test-action-form select { width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid #c5d5e6; border-radius: 9px; color: var(--agent-ink); background: #fff; font-size: 13px; font-weight: 500; line-height: 1.35; }
+.agent-section input:not([type="checkbox"]):not([type="color"]), .agent-section textarea, .agent-section select, .action-drawer input, .action-drawer select { width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid #c5d5e6; border-radius: 9px; color: var(--agent-ink); background: #fff; font-size: 13px; font-weight: 500; line-height: 1.35; }
 .agent-section textarea { resize: vertical; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.proactive-trigger-grid { display: grid; gap: 8px; margin-top: 18px; }
+.proactive-check { display: flex !important; grid-template-columns: none !important; align-items: flex-start; gap: 10px; margin-top: 0 !important; padding: 11px 12px; border: 1px solid var(--agent-border); border-radius: 10px; background: #fbfcfe; cursor: pointer; }
+.proactive-check input { width: 16px; height: 16px; flex: 0 0 auto; margin: 1px 0 0; accent-color: #1769e8; }
+.proactive-check span { display: grid; gap: 3px; }
+.proactive-check strong { color: var(--agent-ink); font-size: 12px; }
+.proactive-check small { color: var(--agent-muted); font-size: 11px; font-weight: 500; line-height: 1.35; }
+.proactive-delay-control { display: grid; grid-template-columns: auto 92px auto; align-items: center; gap: 9px; margin-top: 17px; color: #586b86; font-size: 12px; font-weight: 700; }
+.proactive-delay-control input { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #c5d5e6; border-radius: 8px; color: var(--agent-ink); background: #fff; font-size: 13px; }
+.proactive-delay-control span { color: var(--agent-muted); font-size: 10px; font-weight: 500; }
+.form-help { margin: 10px 0 0; color: var(--agent-muted); font-size: 11px; line-height: 1.45; }
 .segmented-control { display: flex; gap: 4px; flex-wrap: wrap; padding: 3px; border: 1px solid #d7e0eb; border-radius: 9px; background: #f3f6fa; }
 .segmented-control button { flex: 1; min-width: 72px; padding: 8px 9px; border: 0; border-radius: 6px; color: var(--agent-muted); background: transparent; font-size: 11px; font-weight: 700; }
 .segmented-control button.active { color: #163e81; background: #fff; box-shadow: 0 1px 2px rgba(20,42,74,.12); }
@@ -504,40 +554,6 @@ function sendDeveloperInstructions(): void {
 .agent-section-footer { display: flex; justify-content: space-between; align-items: center; gap: 14px; background: #fbfcfe; }
 .agent-section-footer strong { color: var(--agent-ink); font-size: 12px; }
 .agent-section-footer p { margin: 4px 0 0; color: var(--agent-muted); font-size: 11px; }
-.preview-sticky { position: sticky; top: calc(var(--workspace-header-height, 72px) + 22px); }
-.preview-label-row { align-items: center; margin-bottom: 10px; }
-.preview-mode-toggle { padding: 3px; border: 1px solid #d7e0eb; border-radius: 7px; background: #eef2f7; }
-.preview-mode-toggle button { padding: 6px 9px; border: 0; border-radius: 5px; color: var(--agent-muted); background: transparent; font-size: 11px; font-weight: 700; }
-.preview-mode-toggle button.active { color: var(--agent-ink); background: #fff; box-shadow: 0 1px 2px rgba(20,42,74,.12); }
-.customer-preview { position: relative; min-height: 570px; overflow: hidden; border: 1px solid var(--agent-border); border-radius: 14px; background: #eaf7fc; box-shadow: 0 18px 45px rgba(20,42,74,.08); }
-.customer-preview.preview-mobile { width: min(100%, 390px); min-height: 640px; margin: 0 auto; }
-.preview-site-bar { display: flex; align-items: center; gap: 6px; padding: 12px 15px; color: #8795a8; background: #f8fafc; font-size: 10px; }
-.preview-site-bar > span:last-child { flex: 1; margin-left: 5px; padding: 6px 9px; border-radius: 6px; background: #fff; }
-.preview-site-body { position: relative; min-height: 526px; overflow: hidden; background: linear-gradient(135deg, #dff5fb, #effafe 50%, #d6edf8); }
-.preview-site-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 22px; color: #2b6489; background: rgba(255,255,255,.85); font-size: 10px; }
-.preview-site-nav strong { color: #164c86; font-size: 12px; }
-.preview-site-copy { padding: 60px 28px; color: #155277; }
-.preview-badge { color: #2f80ed; font-size: 9px; font-weight: 800; letter-spacing: .12em; }
-.preview-site-copy h4 { margin: 12px 0 8px; color: #125687; font-size: 34px; line-height: 1; letter-spacing: -.06em; }
-.preview-site-copy p { max-width: 220px; color: #4a7e9c; font-size: 12px; line-height: 1.5; }
-.preview-chat, .action-preview-card { border: 1px solid #dbe4ef; border-radius: 15px; background: #fff; box-shadow: 0 18px 45px rgba(20,42,74,.17); }
-.preview-chat { position: absolute; right: 22px; bottom: 22px; width: 270px; padding: 14px; }
-.preview-mobile .preview-chat { right: 12px; left: 12px; width: auto; }
-.preview-chat-header, .test-welcome { display: flex; align-items: center; gap: 8px; color: #17386e; font-size: 12px; font-weight: 750; }
-.preview-orb { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border-radius: 8px; color: #fff; background: var(--preview-accent, #1769e8); }
-.online-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: #19b486; }
-.preview-chat-bubble { margin-top: 13px; padding: 10px; border-radius: 8px 12px 12px 12px; color: #52657e; background: #f5f8fc; font-size: 11px; line-height: 1.45; }
-.preview-suggested-action, .preview-action-button { display: flex; justify-content: space-between; width: 100%; margin-top: 8px; padding: 9px 10px; border: 1px solid #d5e3f2; border-radius: 8px; color: #21568f; background: #fff; font-size: 10px; font-weight: 700; text-align: left; }
-.preview-suggested-action span, .preview-action-button span { color: var(--preview-accent, #1769e8); font-size: 15px; line-height: 10px; }
-.preview-chat-input { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding: 10px 4px 0; border-top: 1px solid #edf0f5; color: #9aa7b7; font-size: 10px; }
-.preview-chat-input span { color: var(--preview-accent, #1769e8); font-size: 14px; }
-.preview-note, .test-owner-note, .install-note { margin: 10px 0 0; color: var(--agent-muted); font-size: 11px; line-height: 1.5; }
-.theme-dark .preview-site-body { background: #192941; }
-.theme-dark .preview-site-nav { color: #d4e1f1; background: #243a58; }
-.theme-dark .preview-site-nav strong, .theme-dark .preview-site-copy, .theme-dark .preview-site-copy h4 { color: #fff; }
-.theme-dark .preview-site-copy p { color: #bfd0e5; }
-.position-bottom-left .preview-chat { right: auto; left: 22px; }
-.position-bottom-left.preview-mobile .preview-chat { left: 12px; }
 .logo-upload-row { display: flex; align-items: center; gap: 14px; }
 .logo-preview { display: grid; width: 54px; height: 54px; place-items: center; overflow: hidden; border: 1px solid var(--agent-border); border-radius: 12px; color: #1769e8; background: #f4f7fb; font-size: 24px; }
 .logo-preview img { width: 100%; height: 100%; object-fit: contain; }
@@ -573,36 +589,6 @@ function sendDeveloperInstructions(): void {
 .action-preview-card .preview-action-button { margin-top: 10px; cursor: default; }
 .agent-test-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 22px; align-items: start; }
 .test-conversation, .test-owner-panel { padding: 22px; }
-.test-thread { display: grid; gap: 12px; min-height: 330px; max-height: 540px; margin-top: 20px; padding: 18px; overflow-y: auto; align-content: start; border: 1px solid var(--agent-border); border-radius: 12px; background: #f8fafd; scroll-behavior: smooth; }
-.test-welcome { padding-bottom: 14px; border-bottom: 1px solid var(--agent-border); }
-.test-welcome strong, .test-welcome small { display: block; }
-.test-welcome small { margin-top: 3px; color: var(--agent-muted); font-size: 11px; font-weight: 500; }
-.test-user-message, .test-answer-message { max-width: 86%; padding: 11px 13px; border-radius: 8px 14px 14px 14px; font-size: 13px; line-height: 1.5; }
-.test-user-message { justify-self: end; border-radius: 14px 8px 14px 14px; color: #fff; background: #1769e8; }
-.test-answer-message { color: #40516d; background: #fff; }
-.test-answer-message p { margin: 10px 0 0; white-space: pre-wrap; }
-.test-typing { display: inline-flex; gap: 4px; width: max-content; padding: 11px 13px; border-radius: 8px 14px 14px 14px; background: #fff; box-shadow: 0 4px 12px rgba(20, 42, 74, .05); }
-.test-typing span { width: 5px; height: 5px; border-radius: 50%; background: #7f91aa; animation: test-typing-bounce 1s infinite ease-in-out; }
-.test-typing span:nth-child(2) { animation-delay: .14s; }
-.test-typing span:nth-child(3) { animation-delay: .28s; }
-@keyframes test-typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
-.answer-meta { display: flex; gap: 7px; align-items: center; }
-.answer-badge { display: inline-flex; padding: 4px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
-.answer-badge.grounded { color: #08785d; background: #e7f8f1; }
-.answer-badge.fallback { color: #95630c; background: #fff5df; }
-.test-action-form { display: grid; gap: 8px; margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--agent-border); }
-.test-action-form label { margin-top: 0; font-size: 11px; }
-.test-action-form label > span { color: #8a9ab1; font-size: 10px; font-weight: 500; }
-.test-citations { display: grid; gap: 5px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--agent-border); font-size: 11px; }
-.test-citations span { color: var(--agent-muted); font-weight: 750; }
-.test-citations a { overflow: hidden; color: #2168d8; text-overflow: ellipsis; white-space: nowrap; }
-.test-empty { display: grid; min-height: 210px; place-items: center; color: var(--agent-muted); font-size: 12px; text-align: center; }
-.test-suggestions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
-.test-suggestions > span { width: 100%; color: var(--agent-muted); font-size: 11px; font-weight: 700; }
-.test-suggestions button { padding: 8px 10px; border: 1px solid #cfe0f3; border-radius: 999px; color: #20558e; background: #fff; font-size: 11px; font-weight: 700; }
-.test-suggestions button b { color: #1769e8; font-size: 15px; }
-.test-composer { display: flex; gap: 8px; margin-top: 16px; }
-.test-composer input { min-width: 0; flex: 1; }
 .owner-check-list { display: grid; gap: 14px; margin-top: 18px; }
 .owner-check-list > div, .install-check-results { display: flex; gap: 10px; align-items: flex-start; }
 .owner-check-list > div > span:first-child { display: grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center; border-radius: 50%; font-size: 11px; font-weight: 800; }
@@ -665,5 +651,5 @@ function sendDeveloperInstructions(): void {
 .publish-step { background: #f8fbff; }
 @media (max-width: 980px) { .agent-config-layout, .agent-test-layout { grid-template-columns: 1fr; } .preview-sticky { position: static; } .agent-preview-column { order: -1; } .install-step-grid { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .install-support { display: block; } .install-support-actions { justify-content: flex-start; margin-top: 16px; } .install-support-drawer { padding: 24px 18px; } }
-@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer { display: block; } .agent-header-actions { margin-top: 16px; } .field-grid { grid-template-columns: 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .test-composer { display: grid; } .test-composer .primary-button { width: 100%; } .install-status-list { margin-top: 15px; } }
+@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer { display: block; } .agent-header-actions { margin-top: 16px; } .field-grid { grid-template-columns: 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } }
 </style>

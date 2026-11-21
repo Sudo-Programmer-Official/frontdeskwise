@@ -118,6 +118,15 @@ function htmlEscape(value: string): string {
   })[character] ?? character);
 }
 
+function normalizeTemplateLineBreaks(value: string): string {
+  return value
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\n")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
 export function interpolateTemplate(source: string, variables: Record<string, unknown>): string {
   return source.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_match, key: string) => {
     const value = variables[key];
@@ -129,7 +138,7 @@ export function renderLifecycleEmail(template: Pick<LifecycleTemplate, "subject"
   const subject = interpolateTemplate(template.subject, variables).trim();
   const previewText = interpolateTemplate(template.previewText, variables).trim();
   const heading = interpolateTemplate(template.heading, variables).trim();
-  const body = interpolateTemplate(template.body, variables).trim();
+  const body = normalizeTemplateLineBreaks(interpolateTemplate(template.body, variables)).trim();
   const ctaLabel = template.ctaLabel ? interpolateTemplate(template.ctaLabel, variables).trim() : "";
   const ctaUrl = template.ctaUrl ? interpolateTemplate(template.ctaUrl, variables).trim() : "";
   const secondaryCtas = (template.secondaryCtas ?? [])

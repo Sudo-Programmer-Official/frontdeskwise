@@ -12,6 +12,8 @@ The first certification slice uses the API's v1 endpoints:
 
 The adapter merges both read models by class ID, so a FrontDeskWise action can resolve a human request such as `Turtle 2` at `Largo` to the exact Jackrabbit class IDs and return the matching day/time options. It also has a small registration-link helper that injects the selected class ID into the existing `linkTemplate` handoff model.
 
+Enrollment workflows can now use the structured action registry directly. A `lookup` step with `provider: "jackrabbit"` queries live classes/listings, converts each safe result into a `registration` action resource, carries the provider class ID and current openings/waitlist state, and only exposes an HTTPS registration destination. Knowledge retrieval is not used to select the class or link. If multiple classes match, the result stays ambiguous until the presentation layer lets the visitor choose.
+
 ## Local certification
 
 For local certification without a saved business connection, put the Customer API token in the local `apps/api/.env` only. Do not paste it into chat, commit it, or print it in logs. The application resolves a stored business connection first and allows the environment fallback only outside production. Then run:

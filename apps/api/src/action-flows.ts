@@ -121,6 +121,7 @@ export type ConversationActionState = {
   currentStepId?: string;
   completedStepIds?: string[];
   lookupResults?: Record<string, unknown>;
+  selectedActionResourceId?: string;
   completionUrl?: string;
   participants?: ActionParticipant[];
   activeParticipantId?: string;
@@ -238,6 +239,7 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
       field("child_age", "Child’s age", "number", "How old is the student?"),
       field("location", "Preferred location", "text", "Which location would you prefer?"),
       field("program", "Program", "text", "Which program are you interested in?", false),
+      field("schedule_preference", "Schedule preference", "text", "Do you have a preferred day or schedule?", false),
       field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?"),
       field("email", "Email", "email", "What email address should we use?"),
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
@@ -245,7 +247,8 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
     steps: [
       { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age"], maxParticipants: 8 } },
       { id: "student-age", type: "capture", fieldKey: "child_age" },
-      { id: "enrollment-details", type: "form", config: { fieldKeys: ["location", "program", "parent_name", "email", "phone"] } },
+      { id: "enrollment-details", type: "form", config: { fieldKeys: ["location", "program", "schedule_preference", "parent_name", "email", "phone"] } },
+      { id: "registration-options", type: "lookup", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", includeWaitlist: true } },
       { id: "enrollment-confirm", type: "confirm", question: "I have the details I need. Shall I prepare the registration link?" },
       { id: "registration-link", type: "generate_link", config: { completion: "external_provider" } },
       { id: "enrollment-complete", type: "complete" },

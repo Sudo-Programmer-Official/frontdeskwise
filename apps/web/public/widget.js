@@ -1,542 +1,900 @@
-(function () {
+(function() {
   "use strict";
-
-  var script = document.currentScript;
-  if (!script || !script.dataset.site) return;
-
-  var siteKey = script.dataset.site;
-  var apiBase = (script.dataset.api || new URL(script.src, window.location.href).origin).replace(/\/$/, "");
-  var host = document.createElement("div");
-  host.setAttribute("data-frontdeskwise-widget", siteKey);
-  (document.body || document.documentElement).appendChild(host);
-  var shadow = host.attachShadow({ mode: "open" });
-  shadow.innerHTML = `
-    <style>
-      :host { all: initial; }
-      * { box-sizing: border-box; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
-      .launcher { position: fixed; right: 22px; bottom: 22px; z-index: 2147483000; display: grid; place-items: center; width: 58px; height: 58px; border: 0; border-radius: 18px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); box-shadow: 0 14px 30px rgba(13, 75, 160, .28); cursor: pointer; font-size: 24px; transition: transform .18s ease, box-shadow .18s ease; }
-      .launcher:hover { transform: translateY(-2px); box-shadow: 0 18px 34px rgba(13, 75, 160, .34); }
-      .launcher[hidden] { display: none; }
-      .panel { position: fixed; right: 22px; bottom: 92px; z-index: 2147483000; display: none; flex-direction: column; width: min(420px, calc(100vw - 32px)); height: min(680px, calc(100vh - 120px)); overflow: hidden; border: 1px solid #d7e1ee; border-radius: 18px; color: #182b49; background: #fff; box-shadow: 0 24px 70px rgba(13, 44, 91, .24); }
-      .panel.open { display: flex; }
-      .panel.mode-expanded { width: min(760px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); }
-      .panel.mode-fullscreen { right: 0; bottom: 0; width: min(920px, 100vw); height: 100dvh; border-radius: 0; }
-      .launcher.position-bottom-left { right: auto; left: 22px; }
-      .panel.position-bottom-left { right: auto; left: 22px; }
-      .panel.theme-dark { color: #eef5ff; background: #182a43; border-color: #2f4768; }
-      .panel.theme-dark .messages, .panel.theme-dark .quick-actions { background: #122238; }
-      .panel.theme-dark .message { color: #e4edf9; background: #243b5c; border-color: #385578; }
-      .panel.theme-dark .composer { background: #182a43; border-color: #2f4768; }
-      .panel.theme-dark .composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
-      @media (prefers-color-scheme: dark) {
-        .panel.theme-auto { color: #eef5ff; background: #182a43; border-color: #2f4768; }
-        .panel.theme-auto .messages, .panel.theme-auto .quick-actions { background: #122238; }
-        .panel.theme-auto .message { color: #e4edf9; background: #243b5c; border-color: #385578; }
-        .panel.theme-auto .composer { background: #182a43; border-color: #2f4768; }
-        .panel.theme-auto .composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+  function safeLinkUrl(value) {
+    try {
+      const url = new URL(value.trim());
+      return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+  function escapeHtml(value) {
+    return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  }
+  function renderInline(value) {
+    const pattern = new RegExp("(\\[([^\\]]+)\\]\\(([^\\s)]+)(?:\\s+[\"']([^\"']*)[\"'])?\\)|`([^`]+)`|\\*\\*([^*]+)\\*\\*|__([^_]+)__|(?<!\\w)\\*([^*]+)\\*(?!\\w)|(?<!\\w)_([^_]+)_(?!\\w))", "g");
+    let output = "";
+    let cursor = 0;
+    for (const match of value.matchAll(pattern)) {
+      const index = match.index ?? 0;
+      output += escapeHtml(value.slice(cursor, index));
+      if (match[2] !== void 0) {
+        const href = safeLinkUrl(match[3]);
+        output += href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(match[2])}</a>` : escapeHtml(match[2]);
+      } else if (match[5] !== void 0) {
+        output += `<code>${escapeHtml(match[5])}</code>`;
+      } else if (match[6] !== void 0 || match[7] !== void 0) {
+        output += `<strong>${escapeHtml(match[6] ?? match[7] ?? "")}</strong>`;
+      } else {
+        output += `<em>${escapeHtml(match[8] ?? match[9] ?? "")}</em>`;
       }
-      .header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); }
-      .identity { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
-      .logo, .orb { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.2); }
-      .logo { object-fit: cover; background: #fff; }
-      .title-group { display: grid; gap: 2px; min-width: 0; }
-      .title-group strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; letter-spacing: -.01em; }
-      .title-group small { color: currentColor; opacity: .68; font-size: 10px; }
-      .handoff-status { display: none; margin: 0 15px 10px; padding: 9px 11px; border: 1px solid #cfe0f7; border-radius: 9px; color: #36577e; background: #f3f8ff; font-size: 11px; line-height: 1.4; }
-      .handoff-status.open { display: block; }
-      .header-actions { display: flex; gap: 4px; }
-      .header-actions button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: currentColor; background: transparent; cursor: pointer; font-size: 17px; }
-      .header-actions button:hover, .header-actions button:focus-visible { background: rgba(255,255,255,.16); outline: none; }
-      .messages { display: flex; flex: 1; flex-direction: column; align-content: flex-start; gap: 10px; min-height: 0; overflow: auto; padding: 18px 16px 12px; background: #f8fafd; }
-      .message { align-self: flex-start; max-width: min(88%, 560px); padding: 11px 12px; border: 1px solid #e1e9f3; border-radius: 6px 14px 14px 14px; color: #445873; background: #fff; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
-      .message.user { align-self: flex-end; border-color: var(--accent, #0d6efd); border-radius: 14px 6px 14px 14px; color: #fff; background: var(--accent, #0d6efd); }
-      .message a { display: block; margin-top: 8px; color: #1769c2; font-size: 11px; font-weight: 800; }
-      .message.user a { color: #fff; }
-      .quick-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 16px 13px; background: #f8fafd; }
-      .quick-actions[hidden] { display: none; }
-      .quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
-      .quick-actions button:hover, .quick-actions button:focus-visible { border-color: var(--accent, #0d6efd); color: var(--accent, #0d6efd); outline: none; }
-      .action-form { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
-      .action-form[hidden] { display: none; }
-      .action-form label { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
-      .action-form label > span:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
-      .action-form label > span:first-child em { color: #9aa7b7; font-size: 10px; font-style: normal; font-weight: 500; }
-      .action-form label > span:first-child b, .lead-heading b { color: #c34e47; }
-      .action-form input, .action-form select { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cbd7e5; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 12px; }
-      .action-form input:focus, .action-form select:focus, .lead input:focus, .composer input:focus { border-color: var(--accent, #0d6efd); box-shadow: 0 0 0 3px rgba(13,110,253,.12); }
-      .action-form button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); cursor: pointer; font-size: 12px; font-weight: 800; }
-      .lead { display: none; gap: 10px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
-      .lead.open { display: grid; }
-      .lead-heading { display: grid; gap: 4px; margin-bottom: 2px; }
-      .lead-heading strong { color: #1f3658; font-size: 13px; letter-spacing: -.01em; }
-      .lead-heading small { color: #687b94; font-size: 10px; line-height: 1.4; }
-      .lead label:not(.consent-row) { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
-      .lead label:not(.consent-row) > span { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
-      .lead label:not(.consent-row) em { color: #9aa7b7; font-size: 10px; font-style: normal; font-weight: 500; }
-      .lead input { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cbd7e5; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 12px; }
-      .consent-row { display: flex; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
-      .consent-row[hidden] { display: none; }
-      .consent-row input { flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--accent, #0d6efd); }
-      .consent-row a { color: #1769c2; font-weight: 700; }
-      .lead button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--accent-text, #fff); background: var(--accent, #0d6efd); cursor: pointer; font-size: 12px; font-weight: 800; }
-      .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e6edf5; background: #fff; }
-      .composer input { min-width: 0; flex: 1; padding: 11px 12px; border: 1px solid #d5e0ed; border-radius: 9px; outline: none; color: #243957; font-size: 12px; }
-      .composer button { width: 40px; border: 0; border-radius: 9px; color: #fff; background: var(--accent, #0d6efd); cursor: pointer; font-size: 15px; font-weight: 800; }
-      @media (max-width: 640px) {
-        .launcher { right: 16px; bottom: 16px; }
-        .panel, .panel.mode-expanded, .panel.mode-fullscreen { inset: 0; width: 100vw; height: 100dvh; max-height: none; border-radius: 0; }
-        .header { min-height: 62px; }
-        .messages { padding-top: 16px; }
+      cursor = index + match[0].length;
+    }
+    return output + escapeHtml(value.slice(cursor));
+  }
+  function markdownToSafeHtml(markdown) {
+    const lines = String(markdown ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+    const blocks = [];
+    let paragraph = [];
+    let listType = null;
+    let listItems = [];
+    const flushList = () => {
+      if (!listType || !listItems.length)
+        return;
+      blocks.push(`<${listType}>${listItems.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${listType}>`);
+      listType = null;
+      listItems = [];
+    };
+    const flushParagraph = () => {
+      if (!paragraph.length)
+        return;
+      blocks.push(`<p>${paragraph.map((line) => renderInline(line)).join(" ")}</p>`);
+      paragraph = [];
+    };
+    for (const line of lines) {
+      const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+      if (ordered || unordered) {
+        flushParagraph();
+        const nextType = ordered ? "ol" : "ul";
+        if (listType && listType !== nextType)
+          flushList();
+        listType = nextType;
+        listItems.push((ordered ?? unordered)?.[1] ?? "");
+        continue;
       }
-    </style>
-    <button class="launcher" aria-label="Open AI front desk">✦</button>
-    <section class="panel mode-compact" aria-label="AI front desk" aria-hidden="true">
-      <header class="header">
-        <div class="identity"><span class="orb">✦</span><div class="title-group"><strong class="title">AI front desk</strong><small class="subtitle">Usually replies in a few seconds</small></div></div>
-        <div class="header-actions"><button class="expand" type="button" aria-label="Expand assistant" title="Expand assistant">↗</button><button class="close" type="button" aria-label="Close assistant" title="Close assistant">×</button></div>
-      </header>
-      <div class="messages"></div>
-      <div class="handoff-status"></div>
-      <div class="quick-actions" hidden></div>
-      <form class="action-form" hidden></form>
-      <form class="lead"><div class="lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required/></label><label><span>Email <b>*</b></span><input class="lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required/></label><label><span>Phone <em>Optional</em></span><input class="lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"/></label><label class="consent-row" hidden><input class="lead-consent" type="checkbox" name="consent"/><span>I agree to share my details with this business. <a class="privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><button type="submit">Continue</button></form>
-      <form class="composer"><input placeholder="Ask a question…" aria-label="Ask a question"/><button aria-label="Send" type="submit">➤</button></form>
-    </section>`;
-
-  var launcher = shadow.querySelector(".launcher");
-  var panel = shadow.querySelector(".panel");
-  var close = shadow.querySelector(".close");
-  var expand = shadow.querySelector(".expand");
-  var title = shadow.querySelector(".title");
-  var subtitle = shadow.querySelector(".subtitle");
-  var handoffStatus = shadow.querySelector(".handoff-status");
-  var logoSlot = shadow.querySelector(".orb");
-  var messages = shadow.querySelector(".messages");
-  var quickActions = shadow.querySelector(".quick-actions");
-  var composer = shadow.querySelector(".composer");
-  var input = composer.querySelector("input");
-  var actionForm = shadow.querySelector(".action-form");
-  var lead = shadow.querySelector(".lead");
-  var leadNameInput = lead.querySelector(".lead-name");
-  var leadEmailInput = lead.querySelector(".lead-email");
-  var leadPhoneInput = lead.querySelector(".lead-phone");
-  var leadConsentRow = shadow.querySelector(".consent-row");
-  var leadConsent = shadow.querySelector(".lead-consent");
-  var privacyLink = shadow.querySelector(".privacy-link");
-  var conversationId = null;
-  var lastQuestion = "";
-  var config = null;
-  var activeAction = null;
-  var actionSubmitting = false;
-  var pollTimer = null;
-  var renderedRemoteMessages = {};
-  var mode = "compact";
-  var lastViewedField = null;
-  var visitorId = getVisitorId();
-
+      flushList();
+      if (!line.trim()) {
+        flushParagraph();
+        continue;
+      }
+      paragraph.push(line.trim());
+    }
+    flushList();
+    flushParagraph();
+    return blocks.join("");
+  }
+  function renderMarkdownInto(documentRef, container, markdown) {
+    container.replaceChildren();
+    container.innerHTML = markdownToSafeHtml(markdown);
+  }
+  const DEFAULT_ACCENT = "#0d6efd";
+  const DEFAULT_CONFIG = {
+    assistantName: "AI front desk",
+    welcomeMessage: "Hi! How can I help?",
+    widgetColor: DEFAULT_ACCENT,
+    widgetTheme: "auto",
+    widgetPosition: "bottom-right",
+    widgetDefaultMode: "compact",
+    widgetAllowExpand: true,
+    widgetQuickActions: [],
+    showAiDisclosure: true,
+    showPoweredBy: true,
+    showSources: true,
+    showLeadCapture: true,
+    requireLeadConsent: false
+  };
+  const SYMBOL = '<svg class="fdw-brand-symbol" viewBox="0 0 64 64" aria-hidden="true"><path d="m32 12 4.8 12.2L49 29l-12.2 4.8L32 46l-4.8-12.2L15 29l12.2-4.8L32 12Z" fill="currentColor"></path></svg>';
+  const WIDGET_STYLES = `
+  :host { all: initial; }
+  .fdw-widget-root, .fdw-widget-root * { box-sizing: border-box; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  .fdw-widget-root { color: #182b49; font-size: 16px; }
+  .fdw-brand-symbol { display: block; width: 26px; height: 26px; }
+  .fdw-launcher { position: fixed; right: 22px; bottom: 22px; z-index: 2147483000; display: grid; place-items: center; width: 58px; height: 58px; border: 0; border-radius: 18px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); box-shadow: 0 14px 30px rgba(13, 75, 160, .28); cursor: pointer; transition: transform .18s ease, box-shadow .18s ease; }
+  .fdw-launcher:hover { transform: translateY(-2px); box-shadow: 0 18px 34px rgba(13, 75, 160, .34); }
+  .fdw-launcher[hidden], .fdw-proactive-teaser[hidden] { display: none; }
+  .fdw-launcher.fdw-position-bottom-left { right: auto; left: 22px; }
+  .fdw-proactive-teaser { position: fixed; right: 22px; bottom: 92px; z-index: 2147483000; display: flex; align-items: flex-start; gap: 9px; width: min(320px, calc(100vw - 32px)); padding: 14px 13px; border: 1px solid #d3e1f2; border-radius: 14px; color: #244d7e; background: #fff; box-shadow: 0 18px 42px rgba(13, 44, 91, .2); }
+  .fdw-proactive-teaser.fdw-position-bottom-left { right: auto; left: 22px; }
+  .fdw-teaser-mark { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border-radius: 9px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); }
+  .fdw-teaser-copy { min-width: 0; flex: 1; }
+  .fdw-teaser-copy p { margin: 0; font-size: 12px; font-weight: 650; line-height: 1.4; }
+  .fdw-teaser-action { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 0; border: 0; color: var(--fdw-accent, #0d6efd); background: transparent; cursor: pointer; font-size: 11px; font-weight: 800; }
+  .fdw-teaser-dismiss { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; margin: -4px -4px 0 0; border: 0; border-radius: 50%; color: #6c7e94; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
+  .fdw-teaser-dismiss:hover, .fdw-teaser-dismiss:focus-visible { color: #244d7e; background: #edf4fc; outline: none; }
+  .fdw-panel { position: fixed; right: 22px; bottom: 92px; z-index: 2147483000; display: none; flex-direction: column; width: min(420px, calc(100vw - 32px)); height: min(680px, calc(100vh - 120px)); overflow: hidden; border: 1px solid #d7e1ee; border-radius: 18px; color: #182b49; background: #fff; box-shadow: 0 24px 70px rgba(13, 44, 91, .24); }
+  .fdw-panel.fdw-open { display: flex; }
+  .fdw-panel.fdw-mode-expanded { width: min(760px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); }
+  .fdw-panel.fdw-mode-fullscreen { right: 0; bottom: 0; width: min(920px, 100vw); height: 100dvh; border-radius: 0; }
+  .fdw-panel.fdw-position-bottom-left { right: auto; left: 22px; }
+  .fdw-panel.fdw-theme-dark { color: #eef5ff; background: #182a43; border-color: #2f4768; }
+  .fdw-panel.fdw-theme-dark .fdw-messages, .fdw-panel.fdw-theme-dark .fdw-quick-actions { background: #122238; }
+  .fdw-panel.fdw-theme-dark .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
+  .fdw-panel.fdw-theme-dark .fdw-composer { background: #182a43; border-color: #2f4768; }
+  .fdw-panel.fdw-theme-dark .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+  .fdw-header { display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 13px 15px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); }
+  .fdw-identity { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+  .fdw-logo, .fdw-orb { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.2); }
+  .fdw-orb { color: var(--fdw-accent-text, #fff); }
+  .fdw-logo { object-fit: cover; background: #fff; }
+  .fdw-title-group { display: grid; gap: 2px; min-width: 0; }
+  .fdw-title-group strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; letter-spacing: -.01em; }
+  .fdw-title-group small { display: flex; align-items: center; gap: 5px; color: currentColor; opacity: .74; font-size: 10px; }
+  .fdw-status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #2bd99b; box-shadow: 0 0 0 2px rgba(43,217,155,.14); }
+  .fdw-header-actions { display: flex; gap: 4px; }
+  .fdw-header-actions button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: currentColor; background: transparent; cursor: pointer; font-size: 17px; }
+  .fdw-header-actions button:hover, .fdw-header-actions button:focus-visible { background: rgba(255,255,255,.16); outline: none; }
+  .fdw-messages { display: flex; flex: 1; flex-direction: column; align-content: flex-start; gap: 10px; min-height: 0; overflow: auto; padding: 18px 16px 12px; background: #f8fafd; }
+  .fdw-message { align-self: flex-start; max-width: min(88%, 560px); padding: 11px 12px; border: 1px solid #e1e9f3; border-radius: 6px 14px 14px 14px; color: #445873; background: #fff; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  .fdw-message.fdw-user { align-self: flex-end; border-color: var(--fdw-accent, #0d6efd); border-radius: 14px 6px 14px 14px; color: #fff; background: var(--fdw-accent, #0d6efd); }
+  .fdw-message a { display: block; margin-top: 8px; color: #1769c2; font-size: 11px; font-weight: 800; }
+  .fdw-message.fdw-user a { color: #fff; }
+  .fdw-message p { margin: 0 0 9px; }
+  .fdw-message p:last-child { margin-bottom: 0; }
+  .fdw-message ol, .fdw-message ul { margin: 7px 0 9px; padding-left: 21px; }
+  .fdw-message li + li { margin-top: 4px; }
+  .fdw-message code { padding: 1px 4px; border-radius: 4px; background: #edf4fc; font-size: .92em; }
+  .fdw-quick-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 16px 13px; background: #f8fafd; }
+  .fdw-quick-actions:empty { display: none; }
+  .fdw-quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
+  .fdw-quick-actions button:hover, .fdw-quick-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
+  .fdw-action-form, .fdw-lead { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
+  .fdw-action-form:empty, .fdw-lead[hidden] { display: none; }
+  .fdw-action-form label, .fdw-lead label:not(.fdw-consent-row) { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
+  .fdw-action-form label > span:first-child, .fdw-lead label:not(.fdw-consent-row) > span { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
+  .fdw-action-form label > span:first-child em, .fdw-lead label:not(.fdw-consent-row) em { color: #9aa7b7; font-size: 10px; font-style: normal; font-weight: 500; }
+  .fdw-action-form label > span:first-child b, .fdw-lead b { color: #c34e47; }
+  .fdw-action-form input, .fdw-action-form select, .fdw-lead input { width: 100%; min-height: 40px; padding: 10px 11px; border: 1px solid #cbd7e5; border-radius: 8px; outline: none; color: #243957; background: #fff; font-size: 12px; }
+  .fdw-action-form input:focus, .fdw-action-form select:focus, .fdw-lead input:focus, .fdw-composer input:focus { border-color: var(--fdw-accent, #0d6efd); box-shadow: 0 0 0 3px rgba(13,110,253,.12); }
+  .fdw-action-form button, .fdw-lead button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); cursor: pointer; font-size: 12px; font-weight: 800; }
+  .fdw-action-link { display: block; padding: 10px 12px; border-radius: 8px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); font-size: 12px; font-weight: 800; text-align: center; text-decoration: none; }
+  .fdw-lead { display: none; gap: 10px; }
+  .fdw-lead.fdw-visible { display: grid; }
+  .fdw-lead-heading { display: grid; gap: 4px; margin-bottom: 2px; }
+  .fdw-lead-heading strong { color: #1f3658; font-size: 13px; letter-spacing: -.01em; }
+  .fdw-lead-heading small { color: #687b94; font-size: 10px; line-height: 1.4; }
+  .fdw-consent-row { display: flex; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
+  .fdw-consent-row input { flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--fdw-accent, #0d6efd); }
+  .fdw-consent-row a { color: #1769c2; font-weight: 700; }
+  .fdw-handoff-status { display: none; align-items: flex-start; gap: 8px; margin: 0 15px 10px; padding: 9px 8px 9px 11px; border: 1px solid #cfe0f7; border-radius: 9px; color: #36577e; background: #f3f8ff; font-size: 11px; line-height: 1.4; }
+  .fdw-handoff-status.fdw-visible { display: flex; }
+  .fdw-handoff-copy { min-width: 0; flex: 1; }
+  .fdw-handoff-dismiss { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; margin: -4px -3px 0 0; padding: 0; border: 0; border-radius: 50%; color: #547194; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
+  .fdw-handoff-dismiss:hover, .fdw-handoff-dismiss:focus-visible { color: #244d7e; background: #e3effd; outline: none; }
+  .fdw-composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e6edf5; background: #fff; }
+  .fdw-composer input { min-width: 0; flex: 1; padding: 11px 12px; border: 1px solid #d5e0ed; border-radius: 9px; outline: none; color: #243957; font-size: 12px; }
+  .fdw-composer button { width: 40px; border: 0; border-radius: 9px; color: #fff; background: var(--fdw-accent, #0d6efd); cursor: pointer; font-size: 15px; font-weight: 800; }
+  .fdw-powered-by { display: grid; grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr); align-items: center; gap: 9px; min-height: 38px; padding: 0 15px 11px; color: #8a98aa; background: #fff; font-size: 10px; }
+  .fdw-powered-by::before, .fdw-powered-by::after { content: ""; height: 1px; background: #e6edf5; }
+  .fdw-powered-by-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .fdw-powered-by .fdw-brand-symbol { width: 15px; height: 15px; color: var(--fdw-accent, #0d6efd); }
+  .fdw-powered-by strong { color: #52657e; font-size: 10px; font-weight: 800; letter-spacing: -.01em; }
+  .fdw-panel.fdw-theme-dark .fdw-powered-by { color: #a5b5cc; background: #182a43; }
+  .fdw-panel.fdw-theme-dark .fdw-powered-by::before, .fdw-panel.fdw-theme-dark .fdw-powered-by::after { background: #385578; }
+  .fdw-panel.fdw-theme-dark .fdw-powered-by .fdw-brand-symbol, .fdw-panel.fdw-theme-dark .fdw-powered-by strong { color: #eef5ff; }
+  .fdw-typing { display: inline-flex; gap: 4px; width: max-content; padding: 11px 13px; border-radius: 6px 14px 14px 14px; background: #fff; }
+  .fdw-typing span { width: 5px; height: 5px; border-radius: 50%; background: #7f91aa; animation: fdw-typing-bounce 1s infinite ease-in-out; }
+  .fdw-typing span:nth-child(2) { animation-delay: .14s; }
+  .fdw-typing span:nth-child(3) { animation-delay: .28s; }
+  @keyframes fdw-typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
+  .fdw-preview-root { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
+  .fdw-preview-root .fdw-launcher, .fdw-preview-root .fdw-proactive-teaser, .fdw-preview-root .fdw-panel { position: absolute; pointer-events: auto; }
+  .fdw-preview-root .fdw-panel { right: 22px; bottom: 22px; height: min(680px, calc(100% - 44px)); }
+  .fdw-preview-root .fdw-panel.fdw-mode-expanded { height: min(760px, calc(100% - 44px)); }
+  .fdw-preview-root .fdw-panel.fdw-mode-fullscreen { right: 0; bottom: 0; height: 100%; }
+  .fdw-preview-root .fdw-launcher { right: 22px; bottom: 22px; }
+  .fdw-preview-root .fdw-proactive-teaser { right: 22px; bottom: 92px; }
+  @media (prefers-color-scheme: dark) {
+    .fdw-panel.fdw-theme-auto { color: #eef5ff; background: #182a43; border-color: #2f4768; }
+    .fdw-panel.fdw-theme-auto .fdw-messages, .fdw-panel.fdw-theme-auto .fdw-quick-actions { background: #122238; }
+    .fdw-panel.fdw-theme-auto .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-composer { background: #182a43; border-color: #2f4768; }
+    .fdw-panel.fdw-theme-auto .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-powered-by { color: #a5b5cc; background: #182a43; }
+    .fdw-panel.fdw-theme-auto .fdw-powered-by::before, .fdw-panel.fdw-theme-auto .fdw-powered-by::after { background: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-powered-by .fdw-brand-symbol, .fdw-panel.fdw-theme-auto .fdw-powered-by strong { color: #eef5ff; }
+  }
+  @media (max-width: 640px) {
+    .fdw-launcher { right: 16px; bottom: 16px; }
+    .fdw-proactive-teaser { right: 16px; bottom: 84px; width: min(320px, calc(100vw - 32px)); }
+    .fdw-proactive-teaser.fdw-position-bottom-left { right: auto; left: 16px; }
+    .fdw-panel, .fdw-panel.fdw-mode-expanded, .fdw-panel.fdw-mode-fullscreen { inset: 0; width: 100vw; height: 100dvh; max-height: none; border-radius: 0; }
+    .fdw-header { min-height: 62px; }
+    .fdw-messages { padding-top: 16px; }
+  }
+  @container fdw-preview (max-width: 640px) {
+    .fdw-preview-root .fdw-launcher { right: 16px; bottom: 16px; }
+    .fdw-preview-root .fdw-proactive-teaser { right: 16px; bottom: 84px; width: min(320px, calc(100% - 32px)); }
+    .fdw-preview-root .fdw-proactive-teaser.fdw-position-bottom-left { right: auto; left: 16px; }
+    .fdw-preview-root .fdw-panel, .fdw-preview-root .fdw-panel.fdw-mode-expanded, .fdw-preview-root .fdw-panel.fdw-mode-fullscreen { inset: 0; width: 100%; height: 100%; max-height: none; border-radius: 0; }
+    .fdw-preview-root .fdw-header { min-height: 62px; }
+    .fdw-preview-root .fdw-messages { padding-top: 16px; }
+  }
+`;
+  function isHexColor(value) {
+    return /^#[\da-f]{6}$/i.test(value);
+  }
   function accessibleTextColor(hex) {
-    if (!/^#[0-9a-f]{6}$/i.test(hex || "")) return "#ffffff";
-    var channels = [1, 3, 5].map(function (offset) {
-      var channel = parseInt(hex.slice(offset, offset + 2), 16) / 255;
-      return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
-    });
-    var luminance = channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
-    return luminance > .48 ? "#14233d" : "#ffffff";
+    const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+    const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    return luminance > 0.48 ? "#14233d" : "#ffffff";
   }
-  var proactiveTimer = null;
-  var proactiveShown = false;
-
-  function getVisitorId() {
-    var key = "frontdeskwise:visitor:" + siteKey;
-    try {
-      var stored = window.localStorage.getItem(key);
-      if (stored) return stored;
-      var generated = "visitor-" + (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now() + "-" + Math.random().toString(36).slice(2));
-      window.localStorage.setItem(key, generated);
-      return generated;
-    } catch (_) {
-      return "visitor-" + Date.now() + "-" + Math.random().toString(36).slice(2);
-    }
+  function element(documentRef, tag, className) {
+    const node = documentRef.createElement(tag);
+    if (className)
+      node.className = className;
+    return node;
   }
-
-  function deviceType() {
-    var width = window.innerWidth || 1024;
-    return width < 640 ? "mobile" : width < 1024 ? "tablet" : "desktop";
-  }
-
-  function telemetry(event, extra) {
-    var payload = Object.assign({
-      event: event,
-      conversationId: conversationId,
-      sourcePage: window.location.href,
-      device: deviceType(),
-      timestamp: new Date().toISOString()
-    }, extra || {});
-    fetch(apiBase + "/api/v1/widget/" + encodeURIComponent(siteKey) + "/telemetry", {
-      method: "POST",
-      keepalive: true,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload)
-    }).catch(function () { /* Telemetry must never interrupt the visitor flow. */ });
-  }
-
-  function setMode(nextMode) {
-    mode = nextMode === "expanded" || nextMode === "fullscreen" ? nextMode : "compact";
-    panel.classList.remove("mode-compact", "mode-expanded", "mode-fullscreen");
-    panel.classList.add("mode-" + mode);
-    var expanded = mode !== "compact";
-    expand.textContent = expanded ? "↙" : "↗";
-    expand.setAttribute("aria-label", expanded ? "Collapse assistant" : "Expand assistant");
-    expand.title = expanded ? "Collapse assistant" : "Expand assistant";
-  }
-
-  function addMessage(text, user, citation, remoteKey) {
-    if (remoteKey && renderedRemoteMessages[remoteKey]) return;
-    if (remoteKey) renderedRemoteMessages[remoteKey] = true;
-    var item = document.createElement("div");
-    item.className = "message" + (user ? " user" : "");
-    item.textContent = text;
-    if (citation && citation.url) {
-      var link = document.createElement("a");
-      link.href = citation.url;
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      link.textContent = "View source ↗";
-      item.appendChild(link);
-    }
-    messages.appendChild(item);
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  function renderConversationStatus(status) {
-    if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") {
-      handoffStatus.textContent = "A team member has been notified and will join this conversation shortly.";
-      handoffStatus.classList.add("open");
-      subtitle.textContent = "Waiting for a team member";
-      return;
-    }
-    if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED") {
-      handoffStatus.textContent = "A team member is now helping you. You can keep sending messages here.";
-      handoffStatus.classList.add("open");
-      subtitle.textContent = "Connected to the team";
-      return;
-    }
-    if (status === "RESOLVED") {
-      handoffStatus.textContent = "This conversation is resolved. Start a new message if you need anything else.";
-      handoffStatus.classList.add("open");
-      subtitle.textContent = "Conversation resolved";
-      return;
-    }
-    handoffStatus.classList.remove("open");
-    subtitle.textContent = config && config.agent && config.agent.showAiDisclosure === false ? "Here to help" : "AI assistant · Usually replies in a few seconds";
-  }
-
-  async function syncConversation() {
-    if (!conversationId) return;
-    try {
-      var payload = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/conversations/" + encodeURIComponent(conversationId));
-      renderConversationStatus(payload.conversation && payload.conversation.status);
-      (payload.messages || []).forEach(function (message) {
-        if (message.role !== "human" && message.role !== "system") return;
-        var key = String(message.createdAt || "") + ":" + String(message.role || "") + ":" + String(message.content || "");
-        addMessage((message.authorName ? message.authorName + ": " : "") + (message.content || ""), false, null, key);
-      });
-    } catch (_) {
-      // Polling is best-effort; the visitor can continue using the assistant.
-    }
-  }
-
-  function startPolling() {
-    if (pollTimer) return;
-    pollTimer = window.setInterval(syncConversation, 5000);
-  }
-
-  function renderQuickActions(actions) {
-    quickActions.innerHTML = "";
-    (actions || []).slice(0, 4).forEach(function (action) {
-      if (!action || !action.label) return;
-      var button = document.createElement("button");
-      button.type = "button";
-      button.textContent = action.label;
-      button.addEventListener("click", function () {
-        if (action.question) ask(action.question);
-        else input.focus();
-      });
-      quickActions.appendChild(button);
-    });
-    quickActions.hidden = !quickActions.children.length;
-  }
-
-  function renderActionForm(action) {
-    activeAction = action || null;
-    lastViewedField = null;
-    actionForm.innerHTML = "";
-    if (!action || !action.form || !action.form.fields || !action.form.fields.length || action.status === "completed") {
-      actionForm.hidden = true;
-      if (action && action.linkUrl) {
-        var link = document.createElement("a");
-        link.href = action.linkUrl;
-        link.target = "_blank";
-        link.rel = "noreferrer";
-        link.textContent = action.linkLabel || "Continue";
-        link.style.display = "block";
-        link.style.padding = "10px";
-        link.style.color = "#fff";
-        link.style.background = "var(--accent, #0d6efd)";
-        link.style.borderRadius = "8px";
-        link.style.textAlign = "center";
-        link.style.textDecoration = "none";
-        actionForm.appendChild(link);
-        actionForm.hidden = false;
-        link.addEventListener("click", function () { telemetry("BOOKING_LINK_OPENED", { flowId: action.id, metadata: { url: action.linkUrl } }); });
+  function renderFormControl(documentRef, field) {
+    if (field.type === "select") {
+      const select = element(documentRef, "select");
+      select.name = field.key;
+      const empty = element(documentRef, "option");
+      empty.value = "";
+      empty.textContent = "Select…";
+      select.appendChild(empty);
+      for (const optionValue of field.options ?? []) {
+        const option = element(documentRef, "option");
+        option.value = optionValue;
+        option.textContent = optionValue;
+        select.appendChild(option);
       }
-      return;
+      select.value = field.value ?? "";
+      return select;
     }
-    action.form.fields.forEach(function (field) {
-      var label = document.createElement("label");
-      var labelText = document.createElement("span");
-      labelText.textContent = field.label;
-      if (field.required) {
-        var required = document.createElement("b");
-        required.textContent = " *";
-        labelText.appendChild(required);
-      } else {
-        var optional = document.createElement("em");
-        optional.textContent = "Optional";
-        labelText.appendChild(optional);
-      }
-      label.appendChild(labelText);
-      var control;
-      if (field.type === "select") {
-        control = document.createElement("select");
-        var empty = document.createElement("option");
-        empty.value = "";
-        empty.textContent = "Select…";
-        control.appendChild(empty);
-        (field.options || []).forEach(function (option) {
-          var item = document.createElement("option");
-          item.value = option;
-          item.textContent = option;
-          control.appendChild(item);
-        });
-      } else {
-        control = document.createElement("input");
-        control.type = field.type === "phone" ? "tel" : field.type;
-      }
-      control.name = field.key;
-      control.required = Boolean(field.required);
-      control.value = field.value || "";
-      control.addEventListener("focus", function () {
-        lastViewedField = field.key;
-        telemetry("FIELD_VIEWED", { flowId: action.id, fieldId: field.key });
-      });
-      label.appendChild(control);
-      actionForm.appendChild(label);
-    });
-    if (config && config.agent && config.agent.requireLeadConsent) {
-      var consentLabel = document.createElement("label");
-      consentLabel.className = "consent-row";
-      var consent = document.createElement("input");
-      consent.type = "checkbox";
-      consent.name = "consent";
-      consent.required = true;
-      var consentText = document.createElement("span");
-      consentText.textContent = "I agree to share my details with this business.";
-      consentLabel.appendChild(consent);
-      consentLabel.appendChild(consentText);
-      actionForm.appendChild(consentLabel);
-    }
-    var submit = document.createElement("button");
-    submit.type = "submit";
-    submit.textContent = action.form.submitLabel || "Continue";
-    actionForm.appendChild(submit);
-    actionForm.hidden = false;
+    const input = element(documentRef, "input");
+    input.type = field.type === "phone" ? "tel" : field.type;
+    input.name = field.key;
+    input.value = field.value ?? "";
+    return input;
   }
-
-  async function api(path, options) {
-    var response = await fetch(apiBase + path, Object.assign({ headers: { "content-type": "application/json" } }, options || {}));
-    var payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "The front desk is unavailable.");
-    return payload;
-  }
-
-  async function loadConfig() {
-    var payload = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/config");
-    config = payload;
-    var agent = payload.agent || {};
-    var accent = /^#[0-9a-f]{6}$/i.test(agent.widgetColor || "") ? agent.widgetColor : "#0d6efd";
-    panel.style.setProperty("--accent", accent);
-    panel.style.setProperty("--accent-text", accessibleTextColor(accent));
-    launcher.style.setProperty("--accent", accent);
-    launcher.style.setProperty("--accent-text", accessibleTextColor(accent));
-    panel.classList.remove("theme-light", "theme-dark", "theme-auto", "position-bottom-right", "position-bottom-left");
-    launcher.classList.remove("position-bottom-right", "position-bottom-left");
-    panel.classList.add("theme-" + (agent.widgetTheme || "auto"), "position-" + (agent.widgetPosition || "bottom-right"));
-    launcher.classList.add("position-" + (agent.widgetPosition || "bottom-right"));
-    title.textContent = agent.assistantName || "AI front desk";
-    if (agent.widgetLogoUrl) {
-      var image = document.createElement("img");
-      image.className = "logo";
-      image.src = agent.widgetLogoUrl;
-      image.alt = "";
-      var fallbackLogo = logoSlot;
-      image.addEventListener("error", function () { image.replaceWith(fallbackLogo); logoSlot = fallbackLogo; });
-      logoSlot.replaceWith(image);
-      logoSlot = image;
-    }
-    if (agent.widgetAllowExpand === false) expand.hidden = true;
-    subtitle.textContent = agent.showAiDisclosure === false ? "Here to help" : "AI assistant · Usually replies in a few seconds";
-    leadConsentRow.hidden = agent.requireLeadConsent !== true;
-    if (agent.privacyNoticeUrl) {
-      privacyLink.href = agent.privacyNoticeUrl;
-      privacyLink.hidden = false;
-    }
-    mode = agent.widgetDefaultMode || "compact";
-    setMode(mode);
-    addMessage(agent.welcomeMessage || "Hi! How can I help?", false);
-    renderQuickActions(agent.widgetQuickActions);
-    armProactiveEngagement(agent);
-  }
-
-  function showProactivePrompt() {
-    if (proactiveShown || !config || !config.agent || !config.agent.proactiveEnabled || panel.classList.contains("open")) return;
-    proactiveShown = true;
-    try { window.sessionStorage.setItem("frontdeskwise:proactive:" + siteKey, "1"); } catch (_) { /* Best effort. */ }
-    panel.classList.add("open");
-    panel.setAttribute("aria-hidden", "false");
-    launcher.hidden = true;
-    addMessage(config.agent.proactiveMessage || "Looking for the right service? I can help.", false);
-    telemetry("CTA_CLICKED", { metadata: { source: "proactive" } });
-  }
-
-  function armProactiveEngagement(agent) {
-    if (!agent.proactiveEnabled || proactiveShown) return;
-    try {
-      if (window.sessionStorage.getItem("frontdeskwise:proactive:" + siteKey)) {
-        proactiveShown = true;
+  function createWidgetRenderer(mount, options) {
+    const documentRef = mount.ownerDocument;
+    let config = { ...DEFAULT_CONFIG, ...options.config };
+    let state = {
+      isOpen: false,
+      messages: [],
+      quickActions: [],
+      ...options.state
+    };
+    let destroyed = false;
+    const style = element(documentRef, "style");
+    style.textContent = WIDGET_STYLES;
+    const root = element(documentRef, "div", `fdw-widget-root fdw-${options.surface ?? "embed"}-root`);
+    root.innerHTML = `
+    <button class="fdw-launcher" aria-label="Open AI front desk" type="button">${SYMBOL}</button>
+    <aside class="fdw-proactive-teaser" hidden aria-live="polite">
+      <span class="fdw-teaser-mark">${SYMBOL}</span>
+      <div class="fdw-teaser-copy"><p class="fdw-teaser-message"></p><button class="fdw-teaser-action" type="button">Ask me <span aria-hidden="true">→</span></button></div>
+      <button class="fdw-teaser-dismiss" type="button" aria-label="Dismiss message">×</button>
+    </aside>
+    <section class="fdw-panel fdw-mode-compact" aria-label="AI front desk" aria-hidden="true">
+      <header class="fdw-header">
+        <div class="fdw-identity"><span class="fdw-orb">${SYMBOL}</span><div class="fdw-title-group"><strong class="fdw-title"></strong><small class="fdw-subtitle"><span class="fdw-status-dot" aria-hidden="true"></span><span class="fdw-subtitle-text"></span></small></div></div>
+        <div class="fdw-header-actions"><button class="fdw-expand" type="button" aria-label="Expand assistant" title="Expand assistant">↗</button><button class="fdw-close" type="button" aria-label="Close assistant" title="Close assistant">×</button></div>
+      </header>
+      <div class="fdw-messages"></div>
+      <div class="fdw-handoff-status" role="status" aria-live="polite"><span class="fdw-handoff-copy"></span><button class="fdw-handoff-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button></div>
+      <div class="fdw-quick-actions"></div>
+      <form class="fdw-action-form"></form>
+      <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><button type="submit">Continue</button></form>
+      <form class="fdw-composer"><input placeholder="Ask a question…" aria-label="Ask a question"><button aria-label="Send" type="submit">➤</button></form>
+      <div class="fdw-powered-by" aria-label="Powered by FrontDeskWise"><span class="fdw-powered-by-label">Powered by ${SYMBOL}<strong>FrontDeskWise</strong></span></div>
+    </section>`;
+    root.prepend(style);
+    mount.replaceChildren(root);
+    const launcher = root.querySelector(".fdw-launcher");
+    const teaser = root.querySelector(".fdw-proactive-teaser");
+    const teaserMessage = root.querySelector(".fdw-teaser-message");
+    const panel = root.querySelector(".fdw-panel");
+    const title = root.querySelector(".fdw-title");
+    const subtitleText = root.querySelector(".fdw-subtitle-text");
+    const logoSlot = root.querySelector(".fdw-orb");
+    const messages = root.querySelector(".fdw-messages");
+    const quickActions = root.querySelector(".fdw-quick-actions");
+    const actionForm = root.querySelector(".fdw-action-form");
+    const lead = root.querySelector(".fdw-lead");
+    const composer = root.querySelector(".fdw-composer");
+    const composerInput = composer.querySelector("input");
+    const handoffStatus = root.querySelector(".fdw-handoff-status");
+    const handoffCopy = root.querySelector(".fdw-handoff-copy");
+    const poweredBy = root.querySelector(".fdw-powered-by");
+    const leadConsentRow = root.querySelector(".fdw-consent-row");
+    const privacyLink = root.querySelector(".fdw-privacy-link");
+    function renderLogo() {
+      const logoUrl = config.widgetLogoUrl?.trim();
+      if (!logoUrl) {
+        logoSlot.innerHTML = SYMBOL;
         return;
       }
-    } catch (_) { /* Best effort. */ }
-    var triggers = Array.isArray(agent.proactiveTriggers) ? agent.proactiveTriggers : [];
-    var oneShot = function () { showProactivePrompt(); };
-    if (triggers.indexOf("delay") >= 0) proactiveTimer = window.setTimeout(oneShot, Number(agent.proactiveDelaySeconds || 20) * 1000);
-    if (triggers.indexOf("returning") >= 0) {
-      try {
-        if (window.localStorage.getItem("frontdeskwise:visited:" + siteKey)) window.setTimeout(oneShot, 900);
-        window.localStorage.setItem("frontdeskwise:visited:" + siteKey, "1");
-      } catch (_) { /* Best effort. */ }
+      const image = element(documentRef, "img", "fdw-logo");
+      image.src = logoUrl;
+      image.alt = "";
+      image.addEventListener("error", () => {
+        logoSlot.innerHTML = SYMBOL;
+      });
+      logoSlot.replaceChildren(image);
     }
-    if (triggers.indexOf("scroll") >= 0) {
-      var onScroll = function () {
-        var max = document.documentElement.scrollHeight - window.innerHeight;
-        if (max > 0 && window.scrollY / max >= .7) { window.removeEventListener("scroll", onScroll); oneShot(); }
-      };
-      window.addEventListener("scroll", onScroll, { passive: true });
+    function renderMessages() {
+      messages.replaceChildren();
+      for (const message of state.messages) {
+        const item = element(documentRef, "div", `fdw-message${message.role === "user" ? " fdw-user" : ""}`);
+        if (message.role === "assistant")
+          renderMarkdownInto(documentRef, item, message.content);
+        else
+          item.textContent = message.content;
+        if (message.role === "assistant" && config.showSources !== false) {
+          const citation = message.citations?.find((candidate) => candidate?.url);
+          if (citation?.url) {
+            const link = element(documentRef, "a");
+            const safeUrl = safeLinkUrl(citation.url);
+            if (safeUrl) {
+              link.href = safeUrl;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.textContent = "View source ↗";
+              item.appendChild(link);
+            }
+          }
+        }
+        messages.appendChild(item);
+      }
+      if (state.typing) {
+        const typing = element(documentRef, "div", "fdw-typing");
+        typing.setAttribute("role", "status");
+        typing.setAttribute("aria-label", "Assistant is typing");
+        typing.innerHTML = "<span></span><span></span><span></span>";
+        messages.appendChild(typing);
+      }
+      messages.scrollTop = messages.scrollHeight;
     }
-    if (triggers.indexOf("exit") >= 0 && deviceType() === "desktop") {
-      var onExit = function (event) {
-        if (event.clientY <= 0) { document.removeEventListener("mouseout", onExit); oneShot(); }
-      };
-      document.addEventListener("mouseout", onExit);
+    function renderQuickActions() {
+      quickActions.replaceChildren();
+      for (const action of state.quickActions.slice(0, 4)) {
+        if (!action?.label)
+          continue;
+        const button = element(documentRef, "button");
+        button.type = "button";
+        button.textContent = action.label;
+        button.addEventListener("click", () => {
+          if (action.question) {
+            composerInput.value = "";
+            options.onAsk?.(action.question);
+          } else
+            composerInput.focus();
+        });
+        quickActions.appendChild(button);
+      }
     }
+    function renderActionForm() {
+      actionForm.replaceChildren();
+      const action = state.action;
+      if (!action || action.status === "completed") {
+        actionForm.hidden = true;
+        const safeActionUrl = action?.linkUrl ? safeLinkUrl(action.linkUrl) : null;
+        if (safeActionUrl) {
+          const link = element(documentRef, "a");
+          link.href = safeActionUrl;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = action?.linkLabel || "Continue";
+          link.className = "fdw-action-link";
+          actionForm.appendChild(link);
+          actionForm.hidden = false;
+        }
+        return;
+      }
+      if (!action.form?.fields?.length) {
+        actionForm.hidden = true;
+        return;
+      }
+      for (const field of action.form.fields) {
+        const label = element(documentRef, "label");
+        const labelText = element(documentRef, "span");
+        labelText.textContent = field.label;
+        if (field.required) {
+          const required = element(documentRef, "b");
+          required.textContent = " *";
+          labelText.appendChild(required);
+        } else {
+          const optional = element(documentRef, "em");
+          optional.textContent = "Optional";
+          labelText.appendChild(optional);
+        }
+        label.appendChild(labelText);
+        const control = renderFormControl(documentRef, field);
+        control.required = Boolean(field.required);
+        label.appendChild(control);
+        actionForm.appendChild(label);
+      }
+      if (config.requireLeadConsent) {
+        const consent = element(documentRef, "label", "fdw-consent-row");
+        consent.innerHTML = '<input type="checkbox" name="consent" required><span>I agree to share my details with this business.</span>';
+        actionForm.appendChild(consent);
+      }
+      const submit = element(documentRef, "button");
+      submit.type = "submit";
+      submit.disabled = Boolean(state.actionSubmitting);
+      submit.textContent = state.actionSubmitting ? "Submitting…" : action.form.submitLabel || "Continue";
+      actionForm.appendChild(submit);
+      actionForm.hidden = false;
+    }
+    function renderHandoff() {
+      const status = state.handoffStatus;
+      if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED")
+        subtitleText.textContent = "Waiting for a team member";
+      else if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED")
+        subtitleText.textContent = "Connected to the team";
+      else if (status === "RESOLVED")
+        subtitleText.textContent = "Conversation resolved";
+      else
+        subtitleText.textContent = config.showAiDisclosure === false ? "Here to help" : "Usually replies in a few seconds";
+      const notice = state.handoffNotice;
+      handoffCopy.textContent = notice?.message ?? "";
+      handoffStatus.classList.toggle("fdw-visible", Boolean(notice?.visible));
+    }
+    function render() {
+      if (destroyed)
+        return;
+      const accent = isHexColor(config.widgetColor) ? config.widgetColor : DEFAULT_ACCENT;
+      root.style.setProperty("--fdw-accent", accent);
+      root.style.setProperty("--fdw-accent-text", accessibleTextColor(accent));
+      launcher.classList.toggle("fdw-position-bottom-left", config.widgetPosition === "bottom-left");
+      teaser.classList.toggle("fdw-position-bottom-left", config.widgetPosition === "bottom-left");
+      panel.className = `fdw-panel fdw-theme-${config.widgetTheme || "auto"} fdw-position-${config.widgetPosition || "bottom-right"} fdw-mode-${config.widgetDefaultMode || "compact"}${state.isOpen ? " fdw-open" : ""}`;
+      panel.setAttribute("aria-hidden", String(!state.isOpen));
+      launcher.hidden = state.isOpen;
+      title.textContent = config.assistantName || "AI front desk";
+      renderLogo();
+      root.querySelector(".fdw-expand").hidden = config.widgetAllowExpand === false;
+      leadConsentRow.hidden = config.requireLeadConsent !== true;
+      const safePrivacyUrl = config.privacyNoticeUrl ? safeLinkUrl(config.privacyNoticeUrl) : null;
+      if (safePrivacyUrl) {
+        privacyLink.href = safePrivacyUrl;
+        privacyLink.hidden = false;
+      } else
+        privacyLink.hidden = true;
+      poweredBy.hidden = config.showPoweredBy === false;
+      teaser.hidden = !state.proactive?.visible;
+      teaserMessage.textContent = state.proactive?.message ?? "";
+      renderHandoff();
+      renderMessages();
+      renderQuickActions();
+      renderActionForm();
+      lead.hidden = !(state.leadVisible && config.showLeadCapture !== false);
+      lead.classList.toggle("fdw-visible", state.leadVisible === true && config.showLeadCapture !== false);
+      const submit = lead.querySelector("button[type=submit]");
+      if (submit) {
+        submit.disabled = Boolean(state.leadSubmitting);
+        submit.textContent = state.leadSubmitting ? "Sending…" : "Continue";
+      }
+    }
+    const open = (source = "launcher") => {
+      if (destroyed)
+        return;
+      state = { ...state, isOpen: true, proactive: { ...state.proactive ?? { visible: false, message: "" }, visible: false } };
+      render();
+      options.onOpen?.(source);
+    };
+    const close = () => {
+      if (destroyed)
+        return;
+      state = { ...state, isOpen: false };
+      render();
+      options.onClose?.();
+    };
+    launcher.addEventListener("click", () => open("launcher"));
+    root.querySelector(".fdw-teaser-action").addEventListener("click", () => open("proactive"));
+    root.querySelector(".fdw-teaser-dismiss").addEventListener("click", () => {
+      state = { ...state, proactive: { ...state.proactive ?? { visible: false, message: "" }, visible: false } };
+      render();
+      options.onProactiveDismiss?.();
+    });
+    root.querySelector(".fdw-close").addEventListener("click", close);
+    root.querySelector(".fdw-expand").addEventListener("click", () => {
+      if (!config.widgetAllowExpand)
+        return;
+      config = { ...config, widgetDefaultMode: config.widgetDefaultMode === "compact" ? "expanded" : "compact" };
+      render();
+    });
+    root.querySelector(".fdw-handoff-dismiss").addEventListener("click", () => options.onHandoffDismiss?.());
+    composer.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const question = composerInput.value.trim();
+      if (!question)
+        return;
+      composerInput.value = "";
+      options.onAsk?.(question);
+    });
+    actionForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!state.action)
+        return;
+      const values = {};
+      for (const field of Array.from(actionForm.elements)) {
+        const control = field;
+        if (control.name)
+          values[control.name] = control.type === "checkbox" ? String(control.checked) : control.value;
+      }
+      options.onActionSubmit?.(values, state.action);
+    });
+    lead.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const formData = new FormData(lead);
+      options.onLeadSubmit?.({
+        name: String(formData.get("name") ?? "").trim(),
+        email: String(formData.get("email") ?? "").trim(),
+        phone: String(formData.get("phone") ?? "").trim(),
+        consent: formData.get("consent") === "on"
+      });
+    });
+    render();
+    return {
+      update(patch) {
+        if (patch.config)
+          config = { ...config, ...patch.config };
+        if (patch.state)
+          state = { ...state, ...patch.state };
+        render();
+      },
+      open,
+      close,
+      destroy() {
+        destroyed = true;
+        mount.replaceChildren();
+      }
+    };
   }
-
-  async function ask(question) {
-    if (!question) return;
-    quickActions.hidden = true;
-    lastQuestion = question;
-    input.value = "";
-    try {
-      if (!conversationId) {
-        var started = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/conversations", { method: "POST", body: JSON.stringify({ sessionId: visitorId }) });
-        conversationId = started.conversationId;
-        if (started.resumed) {
-          var history = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/conversations/" + encodeURIComponent(conversationId));
-          (history.messages || []).forEach(function (message) { addMessage((message.role === "human" && message.authorName ? message.authorName + ": " : "") + (message.content || ""), message.role === "user", message.citations && message.citations[0], String(message.createdAt || "") + ":history"); });
-          renderConversationStatus(history.conversation && history.conversation.status);
+  (() => {
+    const script = document.currentScript;
+    if (!script || !script.dataset.site) return;
+    const siteKey = script.dataset.site;
+    const apiBase = (script.dataset.api || new URL(script.src, window.location.href).origin).replace(/\/$/, "");
+    const host = document.createElement("div");
+    host.setAttribute("data-frontdeskwise-widget", siteKey);
+    (document.body || document.documentElement).appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const mount = document.createElement("div");
+    shadow.appendChild(mount);
+    let config = null;
+    let visitorId = "";
+    let conversationId = null;
+    let lastQuestion = "";
+    let state = { isOpen: false, messages: [], quickActions: [], handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
+    let renderer;
+    let pollTimer = null;
+    let handoffNoticeTimer = null;
+    let handoffWaiting = false;
+    let handoffDismissedKey = null;
+    let proactiveTimers = [];
+    let proactiveCleanups = [];
+    let proactiveShown = false;
+    const renderedRemoteMessages = {};
+    const HANDOFF_NOTICE_TIMEOUT_MS = 6e3;
+    function updateState(patch) {
+      state = { ...state, ...patch };
+      renderer.update({ state });
+    }
+    function getVisitorId() {
+      try {
+        const key = "frontdeskwise:visitor:" + siteKey;
+        const existing = window.localStorage.getItem(key);
+        if (existing) return existing;
+        const value = window.crypto?.randomUUID?.() || `visitor-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        window.localStorage.setItem(key, value);
+        return value;
+      } catch {
+        return `visitor-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      }
+    }
+    function deviceType() {
+      return window.matchMedia("(max-width: 640px)").matches ? "mobile" : "desktop";
+    }
+    function telemetry(event, extra = {}) {
+      void fetch(`${apiBase}/api/v1/widget/${encodeURIComponent(siteKey)}/telemetry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event, conversationId, sourcePage: window.location.href, deviceType: deviceType(), ...extra })
+      }).catch(() => {
+      });
+    }
+    function handoffDismissalKey() {
+      return `frontdeskwise:handoff-dismissed:${siteKey}:${conversationId ? `conversation:${conversationId}` : `session:${visitorId}`}`;
+    }
+    function handoffNoticeDismissed() {
+      const key = handoffDismissalKey();
+      if (handoffDismissedKey === key) return true;
+      try {
+        return window.sessionStorage.getItem(key) === "1";
+      } catch {
+        return false;
+      }
+    }
+    function persistHandoffDismissal() {
+      const key = handoffDismissalKey();
+      handoffDismissedKey = key;
+      try {
+        window.sessionStorage.setItem(key, "1");
+      } catch {
+      }
+    }
+    function hideHandoffNotice() {
+      if (handoffNoticeTimer !== null) {
+        window.clearTimeout(handoffNoticeTimer);
+        handoffNoticeTimer = null;
+      }
+      updateState({ handoffNotice: { visible: false, message: "" } });
+    }
+    function showHandoffNotice(message) {
+      if (handoffNoticeDismissed()) return;
+      updateState({ handoffNotice: { visible: true, message } });
+      if (handoffNoticeTimer !== null) window.clearTimeout(handoffNoticeTimer);
+      handoffNoticeTimer = window.setTimeout(() => {
+        handoffNoticeTimer = null;
+        hideHandoffNotice();
+      }, HANDOFF_NOTICE_TIMEOUT_MS);
+    }
+    function renderConversationStatus(status) {
+      const waitingForStaff = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+      const normalizedStatus = status || "AI_ACTIVE";
+      if (waitingForStaff) {
+        updateState({ handoffStatus: normalizedStatus });
+        if (!handoffWaiting) {
+          handoffWaiting = true;
+          showHandoffNotice("A team member has been notified.");
+        }
+        return;
+      }
+      handoffWaiting = false;
+      updateState({ handoffStatus: normalizedStatus });
+      hideHandoffNotice();
+    }
+    function addMessage(content, role, citations = [], remoteKey) {
+      if (remoteKey && renderedRemoteMessages[remoteKey]) return;
+      if (remoteKey) renderedRemoteMessages[remoteKey] = true;
+      updateState({ messages: [...state.messages, { id: remoteKey || `${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`, remoteKey, role, content, citations }] });
+    }
+    async function api(path, init = {}) {
+      const response = await fetch(apiBase + path, { headers: { "content-type": "application/json", ...init.headers || {} }, ...init });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "The front desk is unavailable.");
+      return payload;
+    }
+    async function syncConversation() {
+      if (!conversationId) return;
+      try {
+        const payload = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+        renderConversationStatus(payload.conversation?.status);
+        for (const message of payload.messages || []) {
+          if (message.role !== "human" && message.role !== "system") continue;
+          const key = `${message.createdAt || ""}:${message.role || ""}:${message.content || ""}`;
+          addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, "assistant", [], key);
+        }
+      } catch {
+      }
+    }
+    function startPolling() {
+      if (pollTimer !== null) return;
+      pollTimer = window.setInterval(() => void syncConversation(), 5e3);
+    }
+    function renderActionForm(action) {
+      updateState({ action: action || null });
+    }
+    async function loadConfig() {
+      const payload = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/config`);
+      const agent = payload.agent || {};
+      config = {
+        assistantName: agent.assistantName || "AI front desk",
+        welcomeMessage: agent.welcomeMessage || "Hi! How can I help?",
+        widgetColor: agent.widgetColor || "#0d6efd",
+        widgetTheme: agent.widgetTheme || "auto",
+        widgetPosition: agent.widgetPosition || "bottom-right",
+        widgetDefaultMode: agent.widgetDefaultMode || "compact",
+        widgetAllowExpand: agent.widgetAllowExpand !== false,
+        widgetLogoUrl: agent.widgetLogoUrl || "",
+        widgetQuickActions: agent.widgetQuickActions || [],
+        showAiDisclosure: agent.showAiDisclosure !== false,
+        showPoweredBy: true,
+        showSources: true,
+        showLeadCapture: agent.collectLeads !== false,
+        requireLeadConsent: agent.requireLeadConsent === true,
+        privacyNoticeUrl: agent.privacyNoticeUrl || null,
+        fallbackBehavior: agent.fallbackBehavior,
+        humanHandoffEnabled: agent.humanHandoffEnabled,
+        tone: agent.tone
+      };
+      renderer.update({ config, state: { quickActions: state.quickActions.length ? state.quickActions : config.widgetQuickActions } });
+      if (!state.messages.length) addMessage(config.welcomeMessage, "assistant");
+      armProactiveEngagement(agent);
+    }
+    function proactiveStorageKey(suffix) {
+      return `frontdeskwise:proactive:${siteKey}:${suffix}`;
+    }
+    function proactiveSuppressed(frequency) {
+      try {
+        if (window.sessionStorage.getItem(proactiveStorageKey("session")) || window.sessionStorage.getItem(`frontdeskwise:proactive:${siteKey}`)) return true;
+        if (frequency === "24h") {
+          const timestamp = Number(window.localStorage.getItem(proactiveStorageKey("24h")) || 0);
+          return timestamp > 0 && Date.now() - timestamp < 24 * 60 * 60 * 1e3;
+        }
+      } catch {
+      }
+      return false;
+    }
+    function suppressProactive(frequency) {
+      try {
+        if (frequency === "session") window.sessionStorage.setItem(proactiveStorageKey("session"), "1");
+        if (frequency === "24h") window.localStorage.setItem(proactiveStorageKey("24h"), String(Date.now()));
+      } catch {
+      }
+    }
+    function clearProactiveEngagement() {
+      proactiveTimers.forEach((timer) => window.clearTimeout(timer));
+      proactiveTimers = [];
+      proactiveCleanups.forEach((cleanup) => cleanup());
+      proactiveCleanups = [];
+    }
+    function showProactivePrompt() {
+      if (proactiveShown || !config || !config.proactiveEnabled || state.isOpen) return;
+      proactiveShown = true;
+      clearProactiveEngagement();
+      suppressProactive(config.proactiveFrequency || "session");
+      telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "shown", behavior: config.proactiveBehavior || "teaser" } });
+      if ((config.proactiveBehavior || "teaser") === "open") {
+        renderer.open("proactive");
+        addMessage(config.proactiveMessage || "Looking for the right service? I can help.", "assistant");
+        return;
+      }
+      updateState({ proactive: { visible: true, message: config.proactiveMessage || "Looking for the right service? I can help." } });
+    }
+    function armProactiveEngagement(agent) {
+      if (!agent.proactiveEnabled || proactiveShown || proactiveSuppressed(agent.proactiveFrequency || "session")) return;
+      const triggers = Array.isArray(agent.proactiveTriggers) ? agent.proactiveTriggers : [];
+      const oneShot = () => showProactivePrompt();
+      if (triggers.includes("delay")) proactiveTimers.push(window.setTimeout(oneShot, Number(agent.proactiveDelaySeconds || 20) * 1e3));
+      if (triggers.includes("returning")) {
+        try {
+          if (window.localStorage.getItem(`frontdeskwise:visited:${siteKey}`)) proactiveTimers.push(window.setTimeout(oneShot, 900));
+          window.localStorage.setItem(`frontdeskwise:visited:${siteKey}`, "1");
+        } catch {
         }
       }
-      addMessage(question, true);
-      var answer = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/conversations/" + encodeURIComponent(conversationId) + "/messages", { method: "POST", body: JSON.stringify({ question: question }) });
-      addMessage(answer.answer, false, answer.citations && answer.citations[0]);
-      renderConversationStatus(answer.conversation && answer.conversation.status);
-      if (answer.conversation && answer.conversation.status !== "AI_ACTIVE") startPolling();
-      renderQuickActions(answer.quickActions);
-      renderActionForm(answer.action);
-      if (answer.action) lead.classList.remove("open");
-      if (!answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length)) lead.classList.add("open");
-    } catch (error) {
-      addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", false);
+      if (triggers.includes("scroll")) {
+        const onScroll = () => {
+          const max = document.documentElement.scrollHeight - window.innerHeight;
+          if (max > 0 && window.scrollY / max >= 0.7) oneShot();
+        };
+        window.addEventListener("scroll", onScroll, { passive: true });
+        proactiveCleanups.push(() => window.removeEventListener("scroll", onScroll));
+      }
+      if (triggers.includes("exit") && deviceType() === "desktop") {
+        const onExit = (event) => {
+          if (event.clientY <= 0) oneShot();
+        };
+        document.addEventListener("mouseout", onExit);
+        proactiveCleanups.push(() => document.removeEventListener("mouseout", onExit));
+      }
     }
-  }
-
-  launcher.addEventListener("click", function () {
-    proactiveShown = true;
-    if (proactiveTimer) window.clearTimeout(proactiveTimer);
-    panel.classList.add("open");
-    panel.setAttribute("aria-hidden", "false");
-    launcher.hidden = true;
-    telemetry("CTA_CLICKED", { metadata: { source: "launcher" } });
-    if (!config) loadConfig().catch(function (error) { addMessage(error.message, false); });
-  });
-  close.addEventListener("click", function () {
-    panel.classList.remove("open");
-    panel.setAttribute("aria-hidden", "true");
-    launcher.hidden = false;
-  });
-  expand.addEventListener("click", function () {
-    if (expand.hidden) return;
-    setMode(mode === "compact" ? "expanded" : "compact");
-  });
-  composer.addEventListener("submit", function (event) { event.preventDefault(); var question = input.value.trim(); if (question) ask(question); });
-  actionForm.addEventListener("submit", async function (event) {
-    event.preventDefault();
-    if (!activeAction || !activeAction.form || !conversationId || actionSubmitting) return;
-    actionSubmitting = true;
-    var values = {};
-    Array.prototype.forEach.call(actionForm.elements, function (element) { if (element.name) values[element.name] = element.type === "checkbox" ? element.checked : element.value; });
-    var consent = values.consent === true;
-    delete values.consent;
-    addMessage("Submitted your details.", true);
-    try {
-      var answer = await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/conversations/" + encodeURIComponent(conversationId) + "/actions/" + encodeURIComponent(activeAction.id) + "/submit", { method: "POST", body: JSON.stringify({ values: values, consent: consent }) });
-      addMessage(answer.answer, false, answer.citations && answer.citations[0]);
-      renderConversationStatus(answer.conversation && answer.conversation.status);
-      if (answer.conversation && answer.conversation.status !== "AI_ACTIVE") startPolling();
-      renderActionForm(answer.action);
-    } catch (error) {
-      addMessage(error instanceof Error ? error.message : "Could not send your details.", false);
-    } finally {
-      actionSubmitting = false;
+    async function ask(question) {
+      if (!question) return;
+      updateState({ quickActions: [], leadVisible: false, typing: false });
+      lastQuestion = question;
+      try {
+        if (!conversationId) {
+          const started = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations`, { method: "POST", body: JSON.stringify({ sessionId: visitorId }) });
+          conversationId = started.conversationId;
+          if (started.resumed) {
+            const history = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+            for (const message of history.messages || []) addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, message.role === "user" ? "user" : "assistant", message.citations, `${message.createdAt || ""}:history`);
+            renderConversationStatus(history.conversation?.status);
+          }
+        }
+        addMessage(question, "user");
+        updateState({ typing: true });
+        const answer = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question }) });
+        updateState({ typing: false });
+        addMessage(answer.answer, "assistant", answer.citations || []);
+        renderConversationStatus(answer.conversation?.status);
+        if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
+        updateState({ quickActions: answer.quickActions || [] });
+        renderActionForm(answer.action);
+        if (answer.action) updateState({ leadVisible: false });
+        if (!answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
+      } catch (error) {
+        updateState({ typing: false });
+        addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", "assistant");
+      }
     }
-  });
-  lead.addEventListener("submit", async function (event) {
-    event.preventDefault();
-    var name = leadNameInput.value.trim();
-    var email = leadEmailInput.value.trim();
-    var phone = leadPhoneInput.value.trim();
-    if (!name || !email || !conversationId) return;
-    if (config && config.agent && config.agent.requireLeadConsent && !leadConsent.checked) {
-      addMessage("Please confirm that you agree to share your details.", false);
-      return;
+    async function submitAction(values, action) {
+      if (!conversationId || state.actionSubmitting) return;
+      updateState({ actionSubmitting: true });
+      const consent = values.consent === "true" || values.consent === "on";
+      delete values.consent;
+      addMessage("Submitted your details.", "user");
+      try {
+        const answer = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent }) });
+        addMessage(answer.answer, "assistant", answer.citations || []);
+        renderConversationStatus(answer.conversation?.status);
+        if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
+        renderActionForm(answer.action);
+      } catch (error) {
+        addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
+      } finally {
+        updateState({ actionSubmitting: false });
+      }
     }
-    try {
-      await api("/api/v1/widget/" + encodeURIComponent(siteKey) + "/leads", { method: "POST", body: JSON.stringify({ conversationId: conversationId, name: name, email: email, phone: phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
-      lead.classList.remove("open");
-      addMessage("Thanks — the team can follow up with you.", false);
-    } catch (error) {
-      addMessage(error instanceof Error ? error.message : "Could not send your details.", false);
+    async function submitLead(values) {
+      if (!values.name || !values.email || !conversationId || state.leadSubmitting) return;
+      if (config?.requireLeadConsent && !values.consent) {
+        addMessage("Please confirm that you agree to share your details.", "assistant");
+        return;
+      }
+      updateState({ leadSubmitting: true });
+      try {
+        await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name, email: values.email, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: (/* @__PURE__ */ new Date()).toISOString() }) });
+        updateState({ leadVisible: false });
+        addMessage("Thanks — the team can follow up with you.", "assistant");
+      } catch (error) {
+        addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
+      } finally {
+        updateState({ leadSubmitting: false });
+      }
     }
-  });
-
-  function recordAbandonment() {
-    if (!conversationId) return;
-    if (activeAction && activeAction.status === "completed") return;
-    if (activeAction && activeAction.status === "active") {
-      telemetry("FIELD_ABANDONED", { flowId: activeAction.id, fieldId: lastViewedField || undefined });
+    function recordAbandonment() {
+      if (!conversationId) return;
+      if (state.action?.status === "completed") return;
+      telemetry("CONVERSATION_ABANDONED", { flowId: state.action?.id });
     }
-    telemetry("CONVERSATION_ABANDONED", { flowId: activeAction ? activeAction.id : undefined });
-  }
-  window.addEventListener("pagehide", recordAbandonment);
-  loadConfig().catch(function () { /* A manual open retries when the API is available. */ });
+    visitorId = getVisitorId();
+    renderer = createWidgetRenderer(mount, {
+      surface: "embed",
+      config: DEFAULT_CONFIG,
+      state,
+      onOpen: (source) => {
+        clearProactiveEngagement();
+        proactiveShown = true;
+        if (config) suppressProactive(config.proactiveFrequency || "session");
+        telemetry("CTA_CLICKED", { metadata: { source } });
+      },
+      onClose: () => {
+        clearProactiveEngagement();
+        proactiveShown = true;
+        if (config) suppressProactive(config.proactiveFrequency || "session");
+      },
+      onAsk: (question) => {
+        void ask(question);
+      },
+      onActionSubmit: (values, action) => {
+        void submitAction(values, action);
+      },
+      onLeadSubmit: (values) => {
+        void submitLead(values);
+      },
+      onHandoffDismiss: () => {
+        persistHandoffDismissal();
+        hideHandoffNotice();
+        telemetry("CTA_CLICKED", { metadata: { source: "handoff-status", action: "dismissed", conversationStatus: handoffWaiting ? "WAITING_FOR_STAFF" : void 0 } });
+      },
+      onProactiveDismiss: () => {
+        clearProactiveEngagement();
+        proactiveShown = true;
+        if (config) suppressProactive(config.proactiveFrequency || "session");
+        telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "dismissed" } });
+      }
+    });
+    renderer.update({ state });
+    window.addEventListener("pagehide", recordAbandonment);
+    void loadConfig().catch(() => {
+    });
+  })();
 })();

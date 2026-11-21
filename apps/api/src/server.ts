@@ -12,6 +12,7 @@ import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealt
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { generateGroundedAnswer, routeQuestion, verifyGroundedAnswer, type ModelUsage } from "./model-routing.js";
+import { shapeCustomerAnswer, type AnswerTone } from "./answer-shaping.js";
 import {
   ACTION_TEMPLATES,
   actionTemplate,
@@ -27,6 +28,15 @@ import {
   type ConversationActionState,
 } from "./action-flows.js";
 import { generateCompletionLink } from "./completion-links.js";
+import {
+  ACTION_RESOURCE_TYPES,
+  normalizeActionResource,
+  resolveAction,
+  type ActionResource,
+  type ActionResourceInput,
+  type ActionResourceStatus,
+  type ActionResourceType,
+} from "./action-registry.js";
 import {
   applyWorkflowInput,
   addWorkflowParticipant,
@@ -173,6 +183,8 @@ validateProductionConfiguration();
 
 type WidgetMode = "compact" | "expanded" | "fullscreen";
 type ProactiveTrigger = "delay" | "scroll" | "exit" | "returning";
+type ProactiveBehavior = "teaser" | "open";
+type ProactiveFrequency = "session" | "24h" | "visit";
 
 type WidgetQuickAction = {
   label: string;
@@ -183,6 +195,7 @@ type AgentConfig = {
   assistantName: string;
   welcomeMessage: string;
   tone: "friendly" | "professional" | "concise" | "custom";
+  customToneInstructions: string;
   primaryLanguage: string;
   fallbackBehavior: "contact_form" | "human" | "unavailable";
   humanHandoffEnabled: boolean;
@@ -200,11 +213,15 @@ type AgentConfig = {
   proactiveDelaySeconds: number;
   proactiveMessage: string;
   proactiveTriggers: ProactiveTrigger[];
+  proactiveBehavior: ProactiveBehavior;
+  proactiveFrequency: ProactiveFrequency;
   requireLeadConsent: boolean;
   privacyNoticeUrl: string | null;
   retentionDays: number;
   showAiDisclosure: boolean;
 };
+
+type KnowledgeAnswerMode = "knowledge" | "fixed_response";
 
 type Source = {
   id: string;
@@ -466,6 +483,7 @@ type KnowledgeGap = {
   occurrenceCount: number;
   status: "open" | "resolved";
   approvedAnswer: string | null;
+  answerMode: KnowledgeAnswerMode;
   lastSeenAt: string;
   intent: RetrievalIntent | null;
   reason: KnowledgeGapReason | "legacy_unknown";
@@ -529,6 +547,7 @@ type Business = {
   sources: Source[];
   chunks: KnowledgeChunk[];
   actions: ActionFlow[];
+  actionResources: ActionResource[];
   conversations: Map<string, Conversation>;
   conversationEvents: ConversationEvent[];
   conversionEvents: ConversionEvent[];
@@ -615,6 +634,14 @@ function normalizedProactiveDelay(value: unknown): number {
   return Number.isFinite(seconds) ? Math.max(10, Math.min(120, Math.round(seconds))) : 20;
 }
 
+function normalizedProactiveBehavior(value: unknown): ProactiveBehavior {
+  return value === "open" ? "open" : "teaser";
+}
+
+function normalizedProactiveFrequency(value: unknown): ProactiveFrequency {
+  return value === "24h" || value === "visit" ? value : "session";
+}
+
 function normalizedRetentionDays(value: unknown): number {
   const days = Number(value);
   return [30, 60, 90, 365].includes(days) ? days : 90;
@@ -624,6 +651,7 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   assistantName: `${businessName} Assistant`,
   welcomeMessage: `Hi! I’m the ${businessName} assistant. I can answer questions, help you choose a service, or get you started.`,
   tone: "friendly",
+  customToneInstructions: "",
   primaryLanguage: "English",
   fallbackBehavior: "contact_form",
   humanHandoffEnabled: true,
@@ -640,7 +668,9 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   proactiveEnabled: false,
   proactiveDelaySeconds: 20,
   proactiveMessage: "Looking for the right service? I can help.",
-  proactiveTriggers: ["delay", "scroll", "exit"],
+  proactiveTriggers: ["delay", "scroll", "returning"],
+  proactiveBehavior: "teaser",
+  proactiveFrequency: "session",
   requireLeadConsent: false,
   privacyNoticeUrl: null,
   retentionDays: 90,
@@ -1003,7 +1033,7 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
       [userId],
     ),
     pool.query<Record<string, unknown>>(
-      `select b.id, b.organization_id, b.name, b.slug, b.website_url, b.is_demo,
+      `select b.id, b.organization_id, b.name, b.slug, b.website_url, b.website_url_key, b.is_demo,
               o.billing_status, o.plan_key,
               coalesce(bm.role, case when om.role in ('owner', 'admin') then 'admin' else null end) as business_role
        from businesses b
@@ -1017,11 +1047,29 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
   ]);
   if (!userResult.rowCount) throw httpError(401, "FrontDeskWise account not found");
   const businessesByOrganization = new Map<string, Array<Record<string, unknown>>>();
+  const seenBusinessIdentities = new Set<string>();
   for (const row of businessResult.rows) {
     const organizationId = String(row.organization_id);
+    const businessId = String(row.id);
+    const websiteValue = typeof row.website_url === "string" && row.website_url.trim()
+      ? row.website_url
+      : typeof row.website_url_key === "string" && row.website_url_key.trim()
+        ? row.website_url_key
+        : null;
+    let businessIdentity = businessId;
+    if (websiteValue) {
+      try {
+        businessIdentity = websiteIdentityKey(websiteValue);
+      } catch {
+        // Keep the row addressable by id when legacy website data is malformed.
+      }
+    }
+    const dedupeKey = `${organizationId}:${businessIdentity}`;
+    if (seenBusinessIdentities.has(dedupeKey)) continue;
+    seenBusinessIdentities.add(dedupeKey);
     const list = businessesByOrganization.get(organizationId) ?? [];
     list.push({
-      id: String(row.id),
+      id: businessId,
       name: String(row.name),
       slug: String(row.slug),
       websiteUrl: typeof row.website_url === "string" ? row.website_url : null,
@@ -1295,6 +1343,46 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
   };
 }
 
+function actionResourceFromRow(row: Record<string, unknown>): ActionResource {
+  const type = (ACTION_RESOURCE_TYPES as readonly string[]).includes(String(row.resource_type))
+    ? String(row.resource_type) as ActionResourceType
+    : "custom";
+  const resourceProviders = ["manual", "jackrabbit", "square", "mindbody", "calendly", "greenhouse", "lever", "hubspot", "custom"] as const;
+  const rowProvider = typeof row.provider === "string" && resourceProviders.includes(row.provider as typeof resourceProviders[number])
+    ? row.provider as typeof resourceProviders[number]
+    : "manual";
+  const input: ActionResourceInput = {
+    id: String(row.id),
+    businessId: String(row.business_id),
+    type,
+    name: String(row.name ?? "Action resource"),
+    provider: rowProvider,
+    providerObjectId: typeof row.provider_object_id === "string" ? row.provider_object_id : null,
+    location: typeof row.location === "string" ? row.location : null,
+    program: typeof row.program === "string" ? row.program : null,
+    day: typeof row.day === "string" ? row.day : null,
+    startTime: typeof row.start_time === "string" ? row.start_time : null,
+    endTime: typeof row.end_time === "string" ? row.end_time : null,
+    role: typeof row.role === "string" ? row.role : null,
+    department: typeof row.department === "string" ? row.department : null,
+    service: typeof row.service === "string" ? row.service : null,
+    price: typeof row.price === "string" || typeof row.price === "number" ? row.price : null,
+    availability: row.availability === null || row.availability === undefined ? null : Number(row.availability),
+    metadata: asRecord(row.metadata),
+    conditions: Array.isArray(row.conditions) ? row.conditions as ActionResource["conditions"] : [],
+    destination: row.destination && typeof row.destination === "object" ? row.destination as ActionResource["destination"] : null,
+    status: typeof row.status === "string" ? row.status.toUpperCase() as ActionResourceStatus : "ACTIVE",
+    validFrom: row.valid_from ? toIso(row.valid_from) : null,
+    validUntil: row.valid_until ? toIso(row.valid_until) : null,
+    source: typeof row.source === "string" ? row.source : "manual",
+    lastSyncedAt: row.last_synced_at ? toIso(row.last_synced_at) : null,
+    version: Number(row.version ?? 1),
+    createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
+    updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
+  };
+  return normalizeActionResource(input);
+}
+
 function crmLeadPayload(business: Business, lead: Lead, eventId: string): CrmLeadPayload {
   return {
     eventId,
@@ -1400,6 +1488,7 @@ function makeBusiness(input: {
     sources,
     chunks,
     actions: defaultActionFlows(input.name, websiteContent, (key) => randomUUID()),
+    actionResources: [],
     conversations: new Map(),
     conversationEvents: [],
     conversionEvents: [],
@@ -1662,6 +1751,12 @@ async function processEmbeddingJob(business: Business, jobId: string): Promise<v
        where id = $1`,
       [jobId],
     );
+    // An owner can edit a FAQ while a website/document job is already
+    // running. Re-check after this job so the newly changed chunk is never
+    // left outside the searchable index just because it missed the worker's
+    // initial pending-chunk snapshot.
+    const followUpJobId = await enqueueEmbeddingJob(business);
+    if (followUpJobId) void processEmbeddingJob(business, followUpJobId);
   } catch (error) {
     recordEmbeddingJobFailure();
     const retryDelaySeconds = await markEmbeddingJobRetry(jobId, error);
@@ -1672,9 +1767,10 @@ async function processEmbeddingJob(business: Business, jobId: string): Promise<v
   }
 }
 
-async function enqueueAndRunEmbeddingJob(business: Business): Promise<void> {
+async function enqueueAndRunEmbeddingJob(business: Business): Promise<"queued" | "ready"> {
   const jobId = await enqueueEmbeddingJob(business);
   if (jobId) void processEmbeddingJob(business, jobId);
+  return jobId ? "queued" : "ready";
 }
 
 async function processOrganizationDocument(documentId: string): Promise<void> {
@@ -1955,9 +2051,74 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
       );
     }
 
+    for (const resource of business.actionResources) {
+      await client.query(
+        `insert into business_action_resources
+           (id, business_id, resource_type, name, provider, provider_object_id, location, program, day,
+            start_time, end_time, role, department, service, price, availability, metadata, conditions,
+            destination, status, valid_from, valid_until, source, last_synced_at, version, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                 $20, $21, $22, $23, $24, $25, $26, $27)
+         on conflict (id) do update set
+           resource_type = excluded.resource_type,
+           name = excluded.name,
+           provider = excluded.provider,
+           provider_object_id = excluded.provider_object_id,
+           location = excluded.location,
+           program = excluded.program,
+           day = excluded.day,
+           start_time = excluded.start_time,
+           end_time = excluded.end_time,
+           role = excluded.role,
+           department = excluded.department,
+           service = excluded.service,
+           price = excluded.price,
+           availability = excluded.availability,
+           metadata = excluded.metadata,
+           conditions = excluded.conditions,
+           destination = excluded.destination,
+           status = excluded.status,
+           valid_from = excluded.valid_from,
+           valid_until = excluded.valid_until,
+           source = excluded.source,
+           last_synced_at = excluded.last_synced_at,
+           version = excluded.version,
+           updated_at = excluded.updated_at`,
+        [
+          resource.id,
+          business.id,
+          resource.type,
+          resource.name,
+          resource.provider,
+          resource.providerObjectId,
+          resource.location,
+          resource.program,
+          resource.day,
+          resource.startTime,
+          resource.endTime,
+          resource.role,
+          resource.department,
+          resource.service,
+          resource.price === null ? null : String(resource.price),
+          resource.availability,
+          JSON.stringify(resource.metadata),
+          JSON.stringify(resource.conditions),
+          resource.destination ? JSON.stringify(resource.destination) : null,
+          resource.status,
+          resource.validFrom,
+          resource.validUntil,
+          resource.source,
+          resource.lastSyncedAt,
+          resource.version,
+          resource.createdAt,
+          resource.updatedAt,
+        ],
+      );
+    }
+
     await client.query(
-      `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+      `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, proactive_behavior, proactive_frequency, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
        on conflict (business_id) do update set
          assistant_name = excluded.assistant_name,
          welcome_message = excluded.welcome_message,
@@ -1979,10 +2140,13 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
          proactive_delay_seconds = excluded.proactive_delay_seconds,
          proactive_message = excluded.proactive_message,
          proactive_triggers = excluded.proactive_triggers,
+         proactive_behavior = excluded.proactive_behavior,
+         proactive_frequency = excluded.proactive_frequency,
          require_lead_consent = excluded.require_lead_consent,
          privacy_notice_url = excluded.privacy_notice_url,
          retention_days = excluded.retention_days,
          show_ai_disclosure = excluded.show_ai_disclosure,
+         tone_instructions = excluded.tone_instructions,
          updated_at = now()`,
       [
         business.id,
@@ -2006,10 +2170,13 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.agentConfig.proactiveDelaySeconds,
         business.agentConfig.proactiveMessage,
         JSON.stringify(business.agentConfig.proactiveTriggers),
+        business.agentConfig.proactiveBehavior,
+        business.agentConfig.proactiveFrequency,
         business.agentConfig.requireLeadConsent,
         business.agentConfig.privacyNoticeUrl,
         business.agentConfig.retentionDays,
         business.agentConfig.showAiDisclosure,
+        business.agentConfig.customToneInstructions,
       ],
     );
     await client.query("commit");
@@ -2021,6 +2188,21 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     throw error;
   } finally {
     client.release();
+  }
+}
+
+async function loadActionResourceRows(businessId: string): Promise<Record<string, unknown>[]> {
+  if (!pool) return [];
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      "select * from business_action_resources where business_id = $1 order by created_at",
+      [businessId],
+    );
+    return result.rows;
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Action registry table is not available yet");
+    return [];
   }
 }
 
@@ -2041,7 +2223,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   if (!businessResult.rowCount) return null;
   const row = businessResult.rows[0];
   const businessId = String(row.id);
-  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult] = await Promise.all([
+  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult, actionResourceRows] = await Promise.all([
     pool.query<Record<string, unknown>>("select * from business_sources where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from knowledge_chunks where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from conversations where business_id = $1 order by created_at", [businessId]),
@@ -2049,6 +2231,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     pool.query<Record<string, unknown>>("select * from knowledge_gaps where business_id = $1 order by occurrence_count desc", [businessId]),
     pool.query<Record<string, unknown>>("select * from business_actions where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from agent_configs where business_id = $1", [businessId]),
+    loadActionResourceRows(businessId),
   ]);
   const conversationIds = conversationResult.rows.map((item) => String(item.id));
   const messageResult = conversationIds.length
@@ -2143,6 +2326,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         chunkResult.rows.map((chunk) => String(chunk.content ?? "")).join(" "),
         (key) => randomUUID(),
       ),
+    actionResources: actionResourceRows.map(actionResourceFromRow),
     conversations: new Map(conversationResult.rows.map((conversation) => {
       const id = String(conversation.id);
       return [id, {
@@ -2181,6 +2365,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         occurrenceCount: Number(gap.occurrence_count),
         status: gap.status === "resolved" ? "resolved" : "open",
         approvedAnswer: typeof gap.approved_answer === "string" ? gap.approved_answer : null,
+        answerMode: gap.answer_mode === "fixed_response" ? "fixed_response" : "knowledge",
         lastSeenAt: toIso(gap.last_seen_at),
         intent: ["services", "hours", "contact", "pricing", "location", "booking", "reminders", "calendar", "voice", "teams", "permissions", "privacy", "policy", "support", "general", "unsupported"].includes(String(gap.intent))
           ? String(gap.intent) as RetrievalIntent
@@ -2194,6 +2379,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       assistantName: String(config.assistant_name),
       welcomeMessage: String(config.welcome_message),
       tone: ["friendly", "professional", "concise", "custom"].includes(String(config.tone)) ? String(config.tone) as AgentConfig["tone"] : "friendly",
+      customToneInstructions: typeof config.tone_instructions === "string" ? config.tone_instructions.slice(0, 600) : "",
       primaryLanguage: typeof config.primary_language === "string" && config.primary_language.trim() ? config.primary_language.trim() : "English",
       fallbackBehavior: ["contact_form", "human", "unavailable"].includes(String(config.fallback_behavior)) ? String(config.fallback_behavior) as AgentConfig["fallbackBehavior"] : "contact_form",
       humanHandoffEnabled: config.human_handoff_enabled !== false,
@@ -2211,6 +2397,8 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       proactiveDelaySeconds: normalizedProactiveDelay(config.proactive_delay_seconds),
       proactiveMessage: typeof config.proactive_message === "string" && config.proactive_message.trim() ? config.proactive_message.trim() : defaultConfig(String(row.name)).proactiveMessage,
       proactiveTriggers: normalizedProactiveTriggers(config.proactive_triggers),
+      proactiveBehavior: normalizedProactiveBehavior(config.proactive_behavior),
+      proactiveFrequency: normalizedProactiveFrequency(config.proactive_frequency),
       requireLeadConsent: config.require_lead_consent === true,
       privacyNoticeUrl: typeof config.privacy_notice_url === "string" && config.privacy_notice_url.trim() ? config.privacy_notice_url.trim() : null,
       retentionDays: normalizedRetentionDays(config.retention_days),
@@ -2512,15 +2700,16 @@ async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> 
   if (!pool) return;
   try {
     const result = await pool.query<{ occurrence_count: number }>(
-      `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, last_seen_at, intent, reason)
-       values ($1, $2, 1, $3, $4, $5, $6, $7)
+      `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, answer_mode, last_seen_at, intent, reason)
+       values ($1, $2, 1, $3, $4, $5, $6, $7, $8)
        on conflict (business_id, question) do update set
          occurrence_count = knowledge_gaps.occurrence_count + 1,
          last_seen_at = excluded.last_seen_at,
          intent = excluded.intent,
-         reason = excluded.reason
+         reason = excluded.reason,
+         answer_mode = coalesce(knowledge_gaps.answer_mode, excluded.answer_mode)
        returning occurrence_count`,
-      [business.id, gap.question, gap.status, gap.approvedAnswer, gap.lastSeenAt, gap.intent, gap.reason],
+      [business.id, gap.question, gap.status, gap.approvedAnswer, gap.answerMode, gap.lastSeenAt, gap.intent, gap.reason],
     );
     gap.occurrenceCount = Number(result.rows[0].occurrence_count);
     return;
@@ -2552,29 +2741,87 @@ async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> 
   }
 }
 
-async function resolveKnowledgeGap(business: Business, question: string, approvedAnswer: string): Promise<KnowledgeGap> {
+async function replaceKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap): Promise<"queued" | "ready"> {
+  const sourceUrl = `faq:${contentHash(gap.question)}`;
+  const previousSource = business.sources.find((source) => source.url === sourceUrl);
+  const sourceId = previousSource?.id ?? randomUUID();
+  const source: Source = {
+    id: sourceId,
+    url: sourceUrl,
+    canonicalUrl: sourceUrl,
+    title: `FAQ: ${gap.question}`.slice(0, 240),
+    contentType: "faq",
+    pageType: "faq",
+    crawlStatus: "ready",
+    contentHash: contentHash(`${sourceUrl}:${gap.approvedAnswer ?? ""}`),
+    lastCrawledAt: new Date().toISOString(),
+  };
+  const chunk: KnowledgeChunk = {
+    id: randomUUID(),
+    sourceId,
+    content: gap.approvedAnswer ?? "",
+    contentHash: contentHash(`${gap.question}\n${gap.approvedAnswer ?? ""}`),
+    metadata: {
+      sourceType: "knowledge_answer",
+      knowledgeGapQuestion: gap.question,
+      responseMode: gap.answerMode,
+      pageType: "faq",
+    },
+  };
+
+  business.sources = business.sources.filter((candidate) => candidate.id !== previousSource?.id).concat(source);
+  business.chunks = business.chunks.filter((candidate) => candidate.sourceId !== sourceId).concat(chunk);
+  if (!pool) return "ready";
+
+  await pool.query("delete from knowledge_chunks where business_id = $1 and source_id = $2", [business.id, sourceId]);
+  await pool.query("delete from business_sources where business_id = $1 and id = $2", [business.id, sourceId]);
+  await pool.query(
+    `insert into business_sources (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
+     values ($1, $2, $3, $3, $4, 'faq', 'faq', 'ready', $5, now())`,
+    [sourceId, business.id, sourceUrl, source.title, source.contentHash],
+  );
+  await pool.query(
+    `insert into knowledge_chunks (id, business_id, source_id, content, content_hash, metadata)
+     values ($1, $2, $3, $4, $5, $6)`,
+    [chunk.id, business.id, sourceId, chunk.content, chunk.contentHash, JSON.stringify(chunk.metadata)],
+  );
+  return enqueueAndRunEmbeddingJob(business);
+}
+
+async function resolveKnowledgeGap(business: Business, question: string, approvedAnswer: string, answerMode: KnowledgeAnswerMode = "knowledge"): Promise<{ gap: KnowledgeGap; indexingStatus: "queued" | "ready" }> {
   const key = question.toLowerCase().replace(/\s+/g, " ").trim();
   const gap = business.knowledgeGaps.get(key);
   if (!gap) throw httpError(404, "Knowledge gap not found");
   gap.status = "resolved";
   gap.approvedAnswer = approvedAnswer;
+  gap.answerMode = answerMode;
   gap.lastSeenAt = new Date().toISOString();
   if (pool) {
-    await pool.query(
-      `update knowledge_gaps
-       set status = 'resolved', approved_answer = $3, last_seen_at = $4
-       where business_id = $1 and question = $2`,
-      [business.id, gap.question, approvedAnswer, gap.lastSeenAt],
-    );
+    try {
+      await pool.query(
+        `update knowledge_gaps
+         set status = 'resolved', approved_answer = $3, answer_mode = $4, last_seen_at = $5
+         where business_id = $1 and question = $2`,
+        [business.id, gap.question, approvedAnswer, answerMode, gap.lastSeenAt],
+      );
+    } catch (error) {
+      if (!isMissingDatabaseColumn(error)) throw error;
+      await pool.query(
+        `update knowledge_gaps
+         set status = 'resolved', approved_answer = $3, last_seen_at = $4
+         where business_id = $1 and question = $2`,
+        [business.id, gap.question, approvedAnswer, gap.lastSeenAt],
+      );
+    }
   }
-  return gap;
+  return { gap, indexingStatus: await replaceKnowledgeAnswerIndex(business, gap) };
 }
 
 async function persistAgentConfig(business: Business): Promise<void> {
   if (!pool) return;
   await pool.query(
-    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+    `insert into agent_configs (business_id, assistant_name, welcome_message, tone, primary_language, fallback_behavior, human_handoff_enabled, widget_color, collect_leads, show_booking_action, fallback_message, widget_default_mode, widget_allow_expand, widget_quick_actions, widget_logo_url, widget_theme, widget_position, proactive_enabled, proactive_delay_seconds, proactive_message, proactive_triggers, require_lead_consent, privacy_notice_url, retention_days, show_ai_disclosure, tone_instructions)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
      on conflict (business_id) do update set
        assistant_name = excluded.assistant_name,
        welcome_message = excluded.welcome_message,
@@ -2600,8 +2847,9 @@ async function persistAgentConfig(business: Business): Promise<void> {
        privacy_notice_url = excluded.privacy_notice_url,
        retention_days = excluded.retention_days,
        show_ai_disclosure = excluded.show_ai_disclosure,
+       tone_instructions = excluded.tone_instructions,
        updated_at = now()`,
-    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure],
+    [business.id, business.agentConfig.assistantName, business.agentConfig.welcomeMessage, business.agentConfig.tone, business.agentConfig.primaryLanguage, business.agentConfig.fallbackBehavior, business.agentConfig.humanHandoffEnabled, business.agentConfig.widgetColor, business.agentConfig.collectLeads, business.agentConfig.showBookingAction, business.agentConfig.fallbackMessage, business.agentConfig.widgetDefaultMode, business.agentConfig.widgetAllowExpand, JSON.stringify(business.agentConfig.widgetQuickActions), business.agentConfig.widgetLogoUrl, business.agentConfig.widgetTheme, business.agentConfig.widgetPosition, business.agentConfig.proactiveEnabled, business.agentConfig.proactiveDelaySeconds, business.agentConfig.proactiveMessage, JSON.stringify(business.agentConfig.proactiveTriggers), business.agentConfig.requireLeadConsent, business.agentConfig.privacyNoticeUrl, business.agentConfig.retentionDays, business.agentConfig.showAiDisclosure, business.agentConfig.customToneInstructions],
   );
 }
 
@@ -3129,6 +3377,32 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
   };
 }
 
+function normalizedActionResource(input: unknown, businessId: string, existing?: ActionResource): ActionResource {
+  const body = asRecord(input);
+  const source = existing ? { ...existing, ...body } : body;
+  const destination = body.destination ?? body.url ?? (existing?.destination ?? null);
+  const typeValue = body.type ?? existing?.type;
+  const nameValue = body.name ?? existing?.name;
+  if (typeof typeValue !== "string" || !(ACTION_RESOURCE_TYPES as readonly string[]).includes(typeValue)) {
+    throw httpError(400, "Unsupported action resource type");
+  }
+  if (typeof nameValue !== "string" || !nameValue.trim()) throw httpError(400, "Action resource name is required");
+  try {
+    return normalizeActionResource({
+      ...(source as Partial<ActionResource>),
+      businessId,
+      type: typeValue as ActionResourceType,
+      name: nameValue,
+      destination,
+      id: existing?.id ?? randomUUID(),
+      createdAt: existing?.createdAt,
+      updatedAt: new Date().toISOString(),
+    } as ActionResourceInput);
+  } catch (error) {
+    throw httpError(400, error instanceof Error ? error.message : "Invalid action resource");
+  }
+}
+
 async function persistAction(business: Business, action: ActionFlow): Promise<void> {
   if (!pool) return;
   await pool.query(
@@ -3161,6 +3435,72 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
       action.enabled,
       action.createdAt,
       action.updatedAt,
+    ],
+  );
+}
+
+async function persistActionResource(business: Business, resource: ActionResource): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    `insert into business_action_resources
+       (id, business_id, resource_type, name, provider, provider_object_id, location, program, day,
+        start_time, end_time, role, department, service, price, availability, metadata, conditions,
+        destination, status, valid_from, valid_until, source, last_synced_at, version, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+             $20, $21, $22, $23, $24, $25, $26, $27)
+     on conflict (id) do update set
+       resource_type = excluded.resource_type,
+       name = excluded.name,
+       provider = excluded.provider,
+       provider_object_id = excluded.provider_object_id,
+       location = excluded.location,
+       program = excluded.program,
+       day = excluded.day,
+       start_time = excluded.start_time,
+       end_time = excluded.end_time,
+       role = excluded.role,
+       department = excluded.department,
+       service = excluded.service,
+       price = excluded.price,
+       availability = excluded.availability,
+       metadata = excluded.metadata,
+       conditions = excluded.conditions,
+       destination = excluded.destination,
+       status = excluded.status,
+       valid_from = excluded.valid_from,
+       valid_until = excluded.valid_until,
+       source = excluded.source,
+       last_synced_at = excluded.last_synced_at,
+       version = excluded.version,
+       updated_at = excluded.updated_at`,
+    [
+      resource.id,
+      business.id,
+      resource.type,
+      resource.name,
+      resource.provider,
+      resource.providerObjectId,
+      resource.location,
+      resource.program,
+      resource.day,
+      resource.startTime,
+      resource.endTime,
+      resource.role,
+      resource.department,
+      resource.service,
+      resource.price === null ? null : String(resource.price),
+      resource.availability,
+      JSON.stringify(resource.metadata),
+      JSON.stringify(resource.conditions),
+      resource.destination ? JSON.stringify(resource.destination) : null,
+      resource.status,
+      resource.validFrom,
+      resource.validUntil,
+      resource.source,
+      resource.lastSyncedAt,
+      resource.version,
+      resource.createdAt,
+      resource.updatedAt,
     ],
   );
 }
@@ -4273,6 +4613,14 @@ async function embeddingReadinessForBusiness(business: Business) {
   });
 }
 
+function websiteBrandColors(business: Business): string[] {
+  const colors = business.chunks.flatMap((chunk) => {
+    const value = chunk.metadata.brandColors;
+    return Array.isArray(value) ? value.filter((color): color is string => typeof color === "string" && /^#[\da-f]{6}$/i.test(color)) : [];
+  });
+  return [...new Set(colors.map((color) => color.toUpperCase()))].slice(0, 6);
+}
+
 async function workspacePayload(business: Business) {
   const conversations = [...business.conversations.values()];
   const leadCount = business.leads.length;
@@ -4342,6 +4690,10 @@ async function workspacePayload(business: Business) {
       websiteUrl: business.websiteUrl,
     },
     agent: business.agentConfig,
+    branding: {
+      colors: websiteBrandColors(business),
+      source: "website",
+    },
     suggestedQuestions: [
       `What services does ${business.name} offer?`,
       businessTerms.length ? `What should I know about ${businessTerms.join(" ")}?` : "How do I get started?",
@@ -4424,6 +4776,7 @@ async function publicWorkspacePayload(business: Business) {
     status: payload.status,
     business: payload.business,
     agent: payload.agent,
+    branding: payload.branding,
     suggestedQuestions: payload.suggestedQuestions,
     knowledge: payload.knowledge,
     stats: payload.stats,
@@ -4479,7 +4832,7 @@ function rememberGap(business: Business, question: string, intent: RetrievalInte
     existing.reason = reason;
     return existing;
   }
-  const gap: KnowledgeGap = { question, occurrenceCount: 1, status: "open", approvedAnswer: null, lastSeenAt: now, intent, reason };
+  const gap: KnowledgeGap = { question, occurrenceCount: 1, status: "open", approvedAnswer: null, answerMode: "knowledge", lastSeenAt: now, intent, reason };
   business.knowledgeGaps.set(key, gap);
   return gap;
 }
@@ -4618,6 +4971,7 @@ function extractiveAnswer(
   business: Business,
   matches: RetrievalMatch[],
   intent: RetrievalIntent,
+  tone: AnswerTone = business.agentConfig.tone,
 ): string {
   const candidates = matches.flatMap(({ chunk }) => chunk.content
     .replace(/\s+/g, " ")
@@ -4645,7 +4999,7 @@ function extractiveAnswer(
     general: /.+/i,
   };
   const selected = useful.filter((sentence) => answerSignals[intent].test(sentence)).slice(0, 3);
-  const excerpt = (selected.length ? selected : useful).join(" ").slice(0, 460).trim();
+  const excerpt = shapeCustomerAnswer((selected.length ? selected : useful).join(" ").slice(0, 1_200).trim(), tone);
   if (!selected.length && ["pricing", "permissions", "privacy", "support", "policy", "contact", "location", "hours", "calendar", "reminders", "voice", "teams", "unsupported"].includes(intent)) return business.agentConfig.fallbackMessage;
   if (!excerpt) return business.agentConfig.fallbackMessage;
   if (intent === "services" && !/\b(offer|offers|provide|provides|services?|solutions?|products?)\b/i.test(excerpt)) {
@@ -4655,6 +5009,18 @@ function extractiveAnswer(
     return `${excerpt} If you tell me what you’re trying to automate or build, I can point you to the most relevant service.`;
   }
   return excerpt;
+}
+
+function answerWithGettingStartedCta(business: Business, question: string, answer: string): string {
+  if (!answer || !/\b(get started|getting started|start|try it free|sign\s*up|create an account|create a task)\b/i.test(question)) return answer;
+  if (answer.includes(business.websiteUrl) || /https?:\/\//i.test(answer) || answer.trim().split(/\s+/).length > 110) return answer;
+  try {
+    const url = new URL(business.websiteUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return answer;
+    return `${answer}\n\n[Get started with ${business.name}](${url.toString()})`;
+  } catch {
+    return answer;
+  }
 }
 
 const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|feature|features|capabilit|automation|development|application|integration|tool|tools|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team|build|software)\b/i;
@@ -4682,7 +5048,7 @@ async function answerQuestion(business: Business, question: string, options: { r
       modelUsage,
     };
   }
-  if (existingGap?.status === "resolved" && existingGap.approvedAnswer) {
+  if (existingGap?.status === "resolved" && existingGap.approvedAnswer && existingGap.answerMode === "fixed_response") {
     const modelUsage: ModelUsage = {
       route: "tier0",
       model: null,
@@ -4740,7 +5106,15 @@ async function answerQuestion(business: Business, question: string, options: { r
   let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" = "not_run";
   if (materiallyRelevant && match && confidenceBand !== "low" && decision.model) {
     try {
-      generated = await generateGroundedAnswer({ question, context, decision, intent });
+      generated = await generateGroundedAnswer({
+        question,
+        context,
+        decision,
+        intent,
+        tone: business.agentConfig.tone,
+        customToneInstructions: business.agentConfig.customToneInstructions,
+      });
+      if (generated) generated.answer = shapeCustomerAnswer(generated.answer, business.agentConfig.tone);
       generationUsage = generated?.usage ?? null;
       if (generated) {
         const groundingCheck = await verifyGroundedAnswer({ question, answer: generated.answer, context });
@@ -4818,7 +5192,7 @@ async function answerQuestion(business: Business, question: string, options: { r
   }).filter((citation): citation is NonNullable<typeof citation> => Boolean(citation)).filter((citation, index, list) => list.findIndex((item) => item.sourceId === citation.sourceId) === index);
   if (generated) {
     return {
-      answer: generated.answer,
+      answer: answerWithGettingStartedCta(business, question, generated.answer),
       grounded: true,
       citations,
       knowledgeGap: null,
@@ -4830,7 +5204,7 @@ async function answerQuestion(business: Business, question: string, options: { r
   }
 
   return {
-    answer: extractiveAnswer(business, retrieval.matches.slice(0, 4), intent),
+    answer: answerWithGettingStartedCta(business, question, extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone)),
     grounded: true,
     citations,
     knowledgeGap: null,
@@ -4862,6 +5236,7 @@ type ConversationAnswerResult = AnswerResult & {
     nextField?: string;
     linkUrl?: string;
     linkLabel?: string;
+    lookup?: Record<string, unknown>;
     form?: ActionFormSchema;
   };
 };
@@ -4880,6 +5255,11 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
     : nextConversationalField(action, state);
   const showForm = state.status === "active" && (Boolean(state.formShown) || state.captureMode === "form" || workflow?.type === "form");
   const completionUrl = state.completionUrl ?? action.completion.linkUrl;
+  const lookup = Object.fromEntries(Object.entries(state.lookupResults ?? {}).flatMap(([key, value]) => {
+    if (!value || typeof value !== "object" || !Array.isArray((value as Record<string, unknown>).matches)) return [];
+    const record = value as Record<string, unknown>;
+    return [[key, { status: record.status, matches: (record.matches as unknown[]).slice(0, 20) }]];
+  }));
   return {
     id: action.id,
     key: action.key,
@@ -4889,6 +5269,7 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
     ...(state.status === "completed" && completionUrl
       ? { linkUrl: completionUrl, linkLabel: action.completion.linkLabel ?? action.completion.submitLabel ?? "Continue" }
       : {}),
+    ...(Object.keys(lookup).length ? { lookup } : {}),
     ...(showForm ? { form: actionFormSchema(action, state) } : {}),
   };
 }
@@ -4932,13 +5313,105 @@ function actionAnswerWithKnowledge(
 const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
 
 function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): string {
-  if (step.type === "confirm") return step.question ?? "Would you like to continue?";
+  if (step.type === "confirm") return workflowLookupPrompt(state) ?? step.question ?? "Would you like to continue?";
   const field = workflowField(action, step.fieldKey);
   if (field) return fieldPrompt(field);
   return step.question ?? step.label ?? `Let's continue with ${action.name.toLowerCase()}.`;
 }
 
+function actionConfigString(config: Record<string, unknown>, key: string): string | null {
+  const value = config[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function actionConfigValue(config: Record<string, unknown>, state: ConversationActionState, key: string, defaultField: string): string | null {
+  const configuredField = actionConfigString(config, key);
+  const value = state.values[configuredField ?? defaultField];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function workflowLookupResolutions(state: ConversationActionState): Array<{ status?: string; matches: Array<{ id: string; name: string; location: string | null; day: string | null; startTime: string | null; price: string | number | null; availability: number | null; destination?: { url: string } | null }> }> {
+  return Object.values(state.lookupResults ?? {}).filter((value): value is { status?: string; matches: Array<{ id: string; name: string; location: string | null; day: string | null; startTime: string | null; price: string | number | null; availability: number | null; destination?: { url: string } | null }> } => Boolean(value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).matches))) as Array<{ status?: string; matches: Array<{ id: string; name: string; location: string | null; day: string | null; startTime: string | null; price: string | number | null; availability: number | null; destination?: { url: string } | null }> }>;
+}
+
+function workflowLookupPrompt(state: ConversationActionState): string | null {
+  const resolution = workflowLookupResolutions(state).at(-1);
+  if (!resolution) return null;
+  if (!resolution.matches.length) return "I couldn’t find a live option matching those details. Would you like the team to help you find the right option?";
+  if (resolution.matches.length === 1) {
+    const match = resolution.matches[0];
+    const schedule = [match.day, match.startTime].filter(Boolean).join(" at ");
+    return `I found ${match.name}${match.location ? ` in ${match.location}` : ""}${schedule ? `, ${schedule}` : ""}. Shall I prepare the registration link?`;
+  }
+  const options = resolution.matches.slice(0, 5).map((match, index) => {
+    const schedule = [match.day, match.startTime].filter(Boolean).join(" at ");
+    const availability = match.availability === null ? "" : ` (${match.availability} openings)`;
+    return `${index + 1}. ${match.name}${schedule ? ` — ${schedule}` : ""}${availability}`;
+  });
+  return `I found ${resolution.matches.length} matching options. Reply with the number you want:\n${options.join("\n")}`;
+}
+
+async function resolveWorkflowActionResources(
+  business: Business,
+  step: NonNullable<ReturnType<typeof currentWorkflowStep>>,
+  state: ConversationActionState,
+): Promise<ReturnType<typeof resolveAction>> {
+  const config = step.config ?? {};
+  const typeValue = actionConfigString(config, "resourceType") ?? "registration";
+  const type = (ACTION_RESOURCE_TYPES as readonly string[]).includes(typeValue) ? typeValue as ActionResourceType : "registration";
+  const filters: Record<string, unknown> = {};
+  const configuredFilters = config.filters && typeof config.filters === "object" && !Array.isArray(config.filters) ? asRecord(config.filters) : {};
+  Object.assign(filters, configuredFilters);
+  const filterFields: Array<[string, string]> = [
+    ["program", "programField"],
+    ["location", "locationField"],
+    ["day", "dayField"],
+    ["role", "roleField"],
+    ["department", "departmentField"],
+    ["service", "serviceField"],
+  ];
+  for (const [field, configKey] of filterFields) {
+    const constant = actionConfigString(config, field);
+    const fromState = actionConfigValue(config, state, configKey, field);
+    if (constant ?? fromState) filters[field] = constant ?? fromState;
+  }
+  const provider = actionConfigString(config, "provider");
+  if (provider === "jackrabbit") {
+    const program = typeof filters.program === "string" ? filters.program : "";
+    if (!program) return { status: "not_found", matches: [] };
+    try {
+      const credentials = await resolveJackrabbitCredentials(business.id, actionConfigString(config, "integrationId") ?? undefined);
+      const registrationBaseUrl = actionConfigString(config, "registrationBaseUrl");
+      const providerInstance = jackrabbitProviderForToken(credentials.apiToken);
+      const resources = await providerInstance.findRegistrationResources(
+        business.id,
+        {
+          name: program,
+          ...(typeof filters.location === "string" ? { location: filters.location } : {}),
+          ...(typeof filters.day === "string" ? { day: filters.day } : {}),
+        },
+        registrationBaseUrl ? { baseUrl: registrationBaseUrl, classIdParam: actionConfigString(config, "classIdParam") ?? "classId", fieldMappings: {} } : undefined,
+        state.values,
+      );
+      return resolveAction(resources, {
+        type,
+        filters,
+        includeWaitlist: config.includeWaitlist === true,
+      });
+    } catch (error) {
+      app.log.warn({ businessId: business.id, error: error instanceof Error ? error.message : "provider lookup failed" }, "Action provider lookup failed");
+      return { status: "not_found", matches: [] };
+    }
+  }
+  return resolveAction(business.actionResources, {
+    type,
+    filters,
+    includeWaitlist: config.includeWaitlist === true,
+  });
+}
+
 async function advanceWorkflowAutomation(
+  business: Business,
   action: ActionFlow,
   state: ConversationActionState,
 ): Promise<NonNullable<ReturnType<typeof currentWorkflowStep>> | null> {
@@ -4947,8 +5420,18 @@ async function advanceWorkflowAutomation(
   while (step && !visited.has(step.id) && ["lookup", "recommend", "generate_link", "create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type)) {
     visited.add(step.id);
     if (step.type === "lookup" || step.type === "recommend") {
-      const result = step.config?.result;
+      const result = step.config?.provider || step.config?.resourceType || step.config?.filters
+        ? await resolveWorkflowActionResources(business, step, state)
+        : step.config?.result;
       if (result !== undefined) state.lookupResults = { ...(state.lookupResults ?? {}), [step.id]: result };
+    }
+    if (step.type === "generate_link") {
+      const resolutions = workflowLookupResolutions(state);
+      const candidates = resolutions.flatMap((resolution) => resolution.matches);
+      const selected = state.selectedActionResourceId
+        ? candidates.find((match) => match.id === state.selectedActionResourceId)
+        : resolutions.every((resolution) => resolution.matches.length === 1) ? candidates[0] : undefined;
+      if (selected?.destination?.url) state.completionUrl = selected.destination.url;
     }
     const transition = transitionWorkflow(action, state, step.id);
     step = transition.step;
@@ -5013,7 +5496,7 @@ async function continueWorkflowActionConversation(
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
-  let step = await advanceWorkflowAutomation(action, state);
+  let step = await advanceWorkflowAutomation(business, action, state);
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
   state.currentStepId = step.id;
 
@@ -5033,10 +5516,26 @@ async function continueWorkflowActionConversation(
   }
 
   if (step.type === "confirm") {
-    if (!/^(yes|y|sure|ok|okay|please|continue|do it|go ahead)\b/i.test(question.trim())) {
-      return actionAnswer(action, state, "No problem. " + workflowPrompt(action, state, step));
+    const resolution = workflowLookupResolutions(state).at(-1);
+    if (resolution && resolution.matches.length > 1) {
+      const selectedIndex = /^(?:option\s*)?(\d+)$/i.exec(question.trim());
+      if (selectedIndex) {
+        const candidate = resolution.matches[Number(selectedIndex[1]) - 1];
+        if (candidate) {
+          state.selectedActionResourceId = candidate.id;
+          transitionWorkflow(action, state, step.id);
+        } else {
+          return actionAnswer(action, state, "That option is not available. " + workflowPrompt(action, state, step));
+        }
+      } else {
+        return actionAnswer(action, state, workflowPrompt(action, state, step));
+      }
+    } else {
+      if (!/^(yes|y|sure|ok|okay|please|continue|do it|go ahead)\b/i.test(question.trim())) {
+        return actionAnswer(action, state, "No problem. " + workflowPrompt(action, state, step));
+      }
+      transitionWorkflow(action, state, step.id);
     }
-    transitionWorkflow(action, state, step.id);
   } else {
     const field = workflowField(action, step.fieldKey);
     if (!field && !step.fieldKey) {
@@ -5054,7 +5553,7 @@ async function continueWorkflowActionConversation(
     }
   }
 
-  step = await advanceWorkflowAutomation(action, state);
+  step = await advanceWorkflowAutomation(business, action, state);
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
   state.currentStepId = step.id;
   if (step.type === "form") {
@@ -5351,7 +5850,7 @@ async function submitActionForm(
     state.formShown = false;
     const formStep = currentWorkflowStep(action, state);
     if (formStep?.type === "form") transitionWorkflow(action, state, formStep.id);
-    const next = await advanceWorkflowAutomation(action, state);
+    const next = await advanceWorkflowAutomation(business, action, state);
     if (!next || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
     state.currentStepId = next.id;
     if (next.type === "form") {
@@ -8027,14 +8526,45 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   const duplicateBusiness = await pool.query<{ name: string; slug: string }>(
     `select name, slug
      from businesses
-     where organization_id = $1 and (website_url_key = $2 or website_url = $2)
+     where organization_id = $1
+       and coalesce(
+         website_url_key,
+         nullif(
+           regexp_replace(
+             regexp_replace(
+               regexp_replace(website_url, '^https?://', '', 'i'),
+               '^www\\.', '', 'i'
+             ),
+             '/+$', ''
+           ),
+           ''
+         )
+       ) = $2
      limit 1`,
     [organizationResult.rows[0].id, websiteIdentityKey(websiteUrl)],
   );
   if (duplicateBusiness.rowCount) {
     throw httpError(409, `This website is already registered as ${duplicateBusiness.rows[0].name}. Open the existing business instead.`);
   }
-  const businessCount = await pool.query<{ count: string }>("select count(*)::text as count from businesses where organization_id = $1", [organizationResult.rows[0].id]);
+  const businessCount = await pool.query<{ count: string }>(
+    `select count(distinct coalesce(
+       website_url_key,
+       nullif(
+         regexp_replace(
+           regexp_replace(
+             regexp_replace(website_url, '^https?://', '', 'i'),
+             '^www\\.', '', 'i'
+           ),
+           '/+$', ''
+         ),
+         ''
+       ),
+       id::text
+     ))::text as count
+     from businesses
+     where organization_id = $1`,
+    [organizationResult.rows[0].id],
+  );
   if (Number(businessCount.rows[0].count) >= Number(organizationBilling.max_businesses ?? 1)) {
     throw httpError(402, "Your current plan has reached its business limit. Upgrade to add another business.");
   }
@@ -9566,7 +10096,8 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
   const body = asRecord(request.body);
   const question = requiredString(body.question, "question", 1_000);
   const approvedAnswer = requiredString(body.approvedAnswer, "approvedAnswer", 4_000);
-  return { gap: await resolveKnowledgeGap(business, question, approvedAnswer) };
+  const answerMode = body.answerMode === "fixed_response" ? "fixed_response" : "knowledge";
+  return await resolveKnowledgeGap(business, question, approvedAnswer, answerMode);
 });
 
 app.get("/api/v1/demo/:slug/retrieval-diagnostics", async (request) => {
@@ -9659,7 +10190,7 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
-  if (!pool) return { actions: business.actions, templates: ACTION_TEMPLATES, deliveries: [] };
+  if (!pool) return { actions: business.actions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
   let deliveries: Array<Record<string, unknown>> = [];
   try {
     const result = await pool.query<Record<string, unknown>>(
@@ -9677,6 +10208,7 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   }
   return {
     actions: business.actions,
+    resources: business.actionResources,
     templates: ACTION_TEMPLATES,
     deliveries: deliveries.map((row) => ({
       id: String(row.id),
@@ -9753,6 +10285,77 @@ app.delete("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   return { ok: true, actionId };
 });
 
+app.get("/api/v1/demo/:slug/action-resources", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  return { resources: business.actionResources };
+});
+
+app.post("/api/v1/demo/:slug/action-resources/resolve", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  const body = asRecord(request.body);
+  const type = typeof body.type === "string" && (ACTION_RESOURCE_TYPES as readonly string[]).includes(body.type)
+    ? body.type as ActionResourceType
+    : null;
+  if (!type) throw httpError(400, "A supported action resource type is required");
+  return resolveAction(business.actionResources, {
+    type,
+    filters: asRecord(body.filters),
+    includeWaitlist: body.includeWaitlist === true,
+  });
+});
+
+app.post("/api/v1/demo/:slug/action-resources", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const resource = normalizedActionResource(request.body, business.id);
+  if (resource.provider === "manual" && !resource.destination?.url) throw httpError(400, "A manual action resource requires a destination URL");
+  if (business.actionResources.some((candidate) => candidate.id === resource.id)) throw httpError(409, "An action resource with this id already exists");
+  if (resource.providerObjectId && business.actionResources.some((candidate) => candidate.provider === resource.provider && candidate.providerObjectId === resource.providerObjectId)) {
+    throw httpError(409, "An action resource with this provider object already exists");
+  }
+  business.actionResources.push(resource);
+  await persistActionResource(business, resource);
+  return reply.code(201).send({ resource });
+});
+
+app.put("/api/v1/demo/:slug/action-resources/:resourceId", async (request) => {
+  const params = request.params as { slug?: string; resourceId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const index = business.actionResources.findIndex((candidate) => candidate.id === requiredString(params.resourceId, "resourceId", 120));
+  if (index < 0) throw httpError(404, "Action resource not found");
+  const resource = normalizedActionResource(request.body, business.id, business.actionResources[index]);
+  if (resource.provider === "manual" && !resource.destination?.url) throw httpError(400, "A manual action resource requires a destination URL");
+  const duplicate = business.actionResources.find((candidate, candidateIndex) => candidateIndex !== index
+    && resource.providerObjectId
+    && candidate.provider === resource.provider
+    && candidate.providerObjectId === resource.providerObjectId);
+  if (duplicate) throw httpError(409, "An action resource with this provider object already exists");
+  business.actionResources[index] = resource;
+  await persistActionResource(business, resource);
+  return { resource };
+});
+
+app.delete("/api/v1/demo/:slug/action-resources/:resourceId", async (request) => {
+  const params = request.params as { slug?: string; resourceId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const resourceId = requiredString(params.resourceId, "resourceId", 120);
+  const index = business.actionResources.findIndex((candidate) => candidate.id === resourceId);
+  if (index < 0) throw httpError(404, "Action resource not found");
+  business.actionResources.splice(index, 1);
+  if (pool) await pool.query("delete from business_action_resources where business_id = $1 and id = $2", [business.id, resourceId]);
+  return { ok: true, resourceId };
+});
+
 app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -9762,6 +10365,7 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);
   if (["friendly", "professional", "concise", "custom"].includes(String(body.tone))) business.agentConfig.tone = body.tone as AgentConfig["tone"];
+  if (typeof body.customToneInstructions === "string") business.agentConfig.customToneInstructions = body.customToneInstructions.trim().slice(0, 600);
   if (typeof body.primaryLanguage === "string" && body.primaryLanguage.trim()) business.agentConfig.primaryLanguage = body.primaryLanguage.trim().slice(0, 80);
   if (["contact_form", "human", "unavailable"].includes(String(body.fallbackBehavior))) business.agentConfig.fallbackBehavior = body.fallbackBehavior as AgentConfig["fallbackBehavior"];
   if (typeof body.humanHandoffEnabled === "boolean") business.agentConfig.humanHandoffEnabled = body.humanHandoffEnabled;
@@ -9782,6 +10386,8 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   if (body.proactiveDelaySeconds !== undefined) business.agentConfig.proactiveDelaySeconds = normalizedProactiveDelay(body.proactiveDelaySeconds);
   if (typeof body.proactiveMessage === "string" && body.proactiveMessage.trim()) business.agentConfig.proactiveMessage = body.proactiveMessage.trim().slice(0, 240);
   if (Array.isArray(body.proactiveTriggers)) business.agentConfig.proactiveTriggers = normalizedProactiveTriggers(body.proactiveTriggers);
+  if (body.proactiveBehavior !== undefined) business.agentConfig.proactiveBehavior = normalizedProactiveBehavior(body.proactiveBehavior);
+  if (body.proactiveFrequency !== undefined) business.agentConfig.proactiveFrequency = normalizedProactiveFrequency(body.proactiveFrequency);
   if (typeof body.requireLeadConsent === "boolean") business.agentConfig.requireLeadConsent = body.requireLeadConsent;
   if (body.privacyNoticeUrl === null) business.agentConfig.privacyNoticeUrl = null;
   if (typeof body.privacyNoticeUrl === "string") {

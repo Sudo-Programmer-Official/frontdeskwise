@@ -1,3 +1,5 @@
+import { toneInstructions, type AnswerTone } from "./answer-shaping.js";
+
 export type ModelRoute = "tier0" | "tier1" | "tier2";
 
 export type ModelUsage = {
@@ -21,6 +23,8 @@ type GroundedAnswerInput = {
   context: string;
   decision: RouteDecision;
   intent?: string;
+  tone?: AnswerTone;
+  customToneInstructions?: string;
 };
 
 type GroundingCheckInput = {
@@ -102,7 +106,7 @@ export async function generateGroundedAnswer(input: GroundedAnswerInput): Promis
         messages: [
           {
             role: "system",
-            content: "You are the business's customer-facing AI front desk. Answer the user's actual question directly in the first sentence. Use the supplied business knowledge only as evidence. Do not reproduce raw webpage text, headings, navigation, calls to action, or scraped snippets. Prefer concise, natural business language, usually 1-4 short paragraphs unless the customer asks for detail. Use only claims supported by the evidence; never fill gaps from general knowledge and never invent prices, hours, permissions, policies, availability, guarantees, integrations, or services. If the evidence does not adequately answer the question, reply exactly INSUFFICIENT_EVIDENCE. Cite only sources that materially support the answer and do not cite merely adjacent sources.",
+            content: `You are the business's customer-facing AI front desk. Answer the user's actual question directly in the first sentence. Use the supplied business knowledge only as evidence. Knowledge is grounding material, not visitor copy: synthesize it instead of reproducing raw webpage text, headings, navigation, calls to action, or scraped snippets. ${toneInstructions(input.tone ?? "friendly", input.customToneInstructions)} Use only claims supported by the evidence; never fill gaps from general knowledge and never invent prices, hours, permissions, policies, availability, guarantees, integrations, or services. If the evidence does not adequately answer the question, reply exactly INSUFFICIENT_EVIDENCE. Markdown is allowed for compact bold text, links, and lists. Cite only sources that materially support the answer and do not cite merely adjacent sources.`,
           },
           { role: "user", content: `Question:\n${input.question}\n\nQuestion intent: ${input.intent ?? "general"}\n\nBusiness context:\n${input.context}` },
         ],

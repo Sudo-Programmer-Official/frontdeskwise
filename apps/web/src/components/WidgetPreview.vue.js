@@ -1,11 +1,45 @@
-import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ChevronRight, Send } from "@lucide/vue";
-import { getAccessibleTextColor, isHexColor } from "../utils/color";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { createWidgetRenderer, } from "../widget-ui/renderer";
 const { defineProps, defineEmits, withDefaults, } = {};
-const props = withDefaults(defineProps(), { widgetTheme: "auto", widgetPosition: "bottom-right", widgetLogoUrl: "", showLeadCapture: true, mode: "desktop" });
+const props = withDefaults(defineProps(), {
+    widgetTheme: "auto",
+    widgetPosition: "bottom-right",
+    widgetDefaultMode: "compact",
+    widgetAllowExpand: true,
+    widgetLogoUrl: "",
+    proactiveEnabled: false,
+    proactiveMessage: "Looking for the right service? I can help.",
+    proactiveBehavior: "teaser",
+    showLeadCapture: true,
+    requireLeadConsent: false,
+    privacyNoticeUrl: "",
+    showAiDisclosure: true,
+    tone: "friendly",
+    fallbackBehavior: "contact_form",
+    humanHandoffEnabled: true,
+    showScenarioSelector: true,
+    scenario: "conversation",
+    mode: "desktop",
+});
 const emit = defineEmits();
-const safeColor = computed(() => isHexColor(props.widgetColor) ? props.widgetColor : "#2563EB");
-const textColor = computed(() => getAccessibleTextColor(safeColor.value));
+const previewMount = ref(null);
+const previewMode = ref(props.mode);
+const scenario = ref(props.scenario);
+const handoffNoticeDismissed = ref(false);
+const proactiveDismissed = ref(false);
+let renderer = null;
+let handoffNoticeTimer = null;
+const scenarioOptions = [
+    { label: "Default", value: "default" },
+    { label: "Conversation", value: "conversation" },
+    { label: "Quick actions", value: "quick-actions" },
+    { label: "Lead form", value: "lead-form" },
+    { label: "Human handoff", value: "human-handoff" },
+    { label: "Staff joined", value: "staff-joined" },
+    { label: "Safe fallback", value: "safe-fallback" },
+    { label: "Source citation", value: "source-citation" },
+    { label: "Completion action", value: "completion-action" },
+];
 const previewWebsiteUrl = computed(() => {
     const rawUrl = props.websiteUrl.trim();
     if (!rawUrl)
@@ -26,6 +60,22 @@ function clearPreviewTimeout() {
         previewTimeout = null;
     }
 }
+function clearHandoffNoticeTimer() {
+    if (handoffNoticeTimer !== null) {
+        window.clearTimeout(handoffNoticeTimer);
+        handoffNoticeTimer = null;
+    }
+}
+function armHandoffNoticeTimer() {
+    clearHandoffNoticeTimer();
+    if (scenario.value !== "human-handoff")
+        return;
+    handoffNoticeTimer = window.setTimeout(() => {
+        handoffNoticeTimer = null;
+        handoffNoticeDismissed.value = true;
+        syncRenderer();
+    }, 6000);
+}
 function resetWebsitePreview(url) {
     clearPreviewTimeout();
     websitePreviewState.value = url ? "loading" : "empty";
@@ -44,9 +94,139 @@ function markWebsitePreviewError() {
     clearPreviewTimeout();
     websitePreviewState.value = "error";
 }
+function sampleMessages(nextScenario) {
+    const assistantName = props.assistantName || "PlanCraftAI assistant";
+    const businessName = props.businessName || "PlanCraftAI";
+    const welcome = { id: "preview-welcome", role: "assistant", content: props.welcomeMessage || `Hi! I'm the ${assistantName}. I can answer questions, help you choose a service, or get you started.` };
+    const question = { id: "preview-question", role: "user", content: "What services does PlanCraftAI offer?" };
+    const answer = { id: "preview-answer", role: "assistant", content: `${businessName} helps with voice planning, scheduling, reminders, and task intelligence.` };
+    const fallback = { id: "preview-fallback", role: "assistant", content: "I don’t have enough verified information to answer that confidently. I can help you contact the team if you’d like." };
+    if (nextScenario === "default" || nextScenario === "quick-actions" || nextScenario === "lead-form" || nextScenario === "completion-action")
+        return [welcome];
+    if (nextScenario === "safe-fallback")
+        return [welcome, { id: "preview-fallback-question", role: "user", content: "Can you guarantee a result you do not have in your knowledge?" }, fallback];
+    if (nextScenario === "source-citation")
+        return [welcome, question, { ...answer, citations: [{ title: `${businessName} services`, url: previewWebsiteUrl.value || "https://example.com" }] }];
+    return [welcome, question, answer];
+}
+const widgetConfig = computed(() => ({
+    assistantName: props.assistantName || "AI front desk",
+    welcomeMessage: props.welcomeMessage || "Hi! How can I help?",
+    widgetColor: props.widgetColor,
+    widgetTheme: props.widgetTheme,
+    widgetPosition: props.widgetPosition,
+    widgetDefaultMode: props.widgetDefaultMode,
+    widgetAllowExpand: props.widgetAllowExpand,
+    widgetLogoUrl: props.widgetLogoUrl,
+    widgetQuickActions: props.quickActions,
+    showAiDisclosure: props.showAiDisclosure,
+    showPoweredBy: true,
+    showSources: true,
+    showLeadCapture: props.showLeadCapture,
+    requireLeadConsent: props.requireLeadConsent,
+    privacyNoticeUrl: props.privacyNoticeUrl || null,
+    fallbackBehavior: props.fallbackBehavior,
+    humanHandoffEnabled: props.humanHandoffEnabled,
+    tone: props.tone,
+}));
+const widgetState = computed(() => {
+    const nextScenario = scenario.value;
+    const sampleState = {
+        isOpen: true,
+        messages: sampleMessages(nextScenario),
+        quickActions: nextScenario === "default" || nextScenario === "quick-actions" ? props.quickActions : [],
+        leadVisible: nextScenario === "lead-form" || (nextScenario === "safe-fallback" && props.fallbackBehavior === "contact_form"),
+        action: nextScenario === "completion-action" ? {
+            id: "preview-completion-action",
+            status: "active",
+            form: {
+                submitLabel: "Get started",
+                fields: [
+                    { key: "name", label: "Name", type: "text", required: true },
+                    { key: "email", label: "Email", type: "email", required: true },
+                ],
+            },
+        } : null,
+        handoffStatus: nextScenario === "human-handoff" ? "WAITING_FOR_STAFF" : nextScenario === "staff-joined" ? "HUMAN_ACTIVE" : "AI_ACTIVE",
+        handoffNotice: nextScenario === "human-handoff" && !handoffNoticeDismissed.value ? { visible: true, message: "A team member has been notified." } : { visible: false, message: "" },
+        proactive: props.proactiveEnabled && props.proactiveBehavior === "teaser" && nextScenario === "default" && !proactiveDismissed.value ? { visible: true, message: props.proactiveMessage || "Looking for the right service? I can help." } : { visible: false, message: "" },
+    };
+    if (props.state)
+        return { ...sampleState, ...props.state, messages: props.state.messages ?? sampleState.messages, quickActions: props.state.quickActions ?? sampleState.quickActions };
+    return sampleState;
+});
+function syncRenderer() {
+    if (!renderer)
+        return;
+    renderer.update({ config: widgetConfig.value, state: widgetState.value });
+}
+function selectScenario(nextScenario) {
+    scenario.value = nextScenario;
+    handoffNoticeDismissed.value = false;
+    proactiveDismissed.value = false;
+    armHandoffNoticeTimer();
+    emit("change-scenario", nextScenario);
+    syncRenderer();
+}
+function handleAsk(question) {
+    emit("ask", question);
+}
 watch(previewWebsiteUrl, resetWebsitePreview, { immediate: true });
-onBeforeUnmount(clearPreviewTimeout);
-const __VLS_defaults = { widgetTheme: "auto", widgetPosition: "bottom-right", widgetLogoUrl: "", showLeadCapture: true, mode: "desktop" };
+watch(() => props.mode, (nextMode) => { previewMode.value = nextMode; });
+watch(() => props.scenario, (nextScenario) => { if (nextScenario) {
+    scenario.value = nextScenario;
+    handoffNoticeDismissed.value = false;
+    proactiveDismissed.value = false;
+    armHandoffNoticeTimer();
+} });
+watch([widgetConfig, widgetState], syncRenderer, { deep: true });
+onMounted(() => {
+    armHandoffNoticeTimer();
+    if (!previewMount.value)
+        return;
+    renderer = createWidgetRenderer(previewMount.value, {
+        surface: "preview",
+        config: widgetConfig.value,
+        state: widgetState.value,
+        onAsk: handleAsk,
+        onActionSubmit: (values, action) => emit("submit-action", { action, values }),
+        onHandoffDismiss: () => {
+            handoffNoticeDismissed.value = true;
+            clearHandoffNoticeTimer();
+            syncRenderer();
+        },
+        onProactiveDismiss: () => {
+            proactiveDismissed.value = true;
+            syncRenderer();
+        },
+    });
+});
+onBeforeUnmount(() => {
+    clearPreviewTimeout();
+    clearHandoffNoticeTimer();
+    renderer?.destroy();
+    renderer = null;
+});
+const __VLS_defaults = {
+    widgetTheme: "auto",
+    widgetPosition: "bottom-right",
+    widgetDefaultMode: "compact",
+    widgetAllowExpand: true,
+    widgetLogoUrl: "",
+    proactiveEnabled: false,
+    proactiveMessage: "Looking for the right service? I can help.",
+    proactiveBehavior: "teaser",
+    showLeadCapture: true,
+    requireLeadConsent: false,
+    privacyNoticeUrl: "",
+    showAiDisclosure: true,
+    tone: "friendly",
+    fallbackBehavior: "contact_form",
+    humanHandoffEnabled: true,
+    showScenarioSelector: true,
+    scenario: "conversation",
+    mode: "desktop",
+};
 void __VLS_defaults;
 const __VLS_ctx = {
     ...{},
@@ -59,8 +239,23 @@ let __VLS_intrinsics;
 let __VLS_directives;
 void __VLS_ctx, __VLS_components, __VLS_intrinsics, __VLS_directives;
 const __VLS_template = () => {
+    __VLS_withDotValue(previewMode, {});
     __VLS_withDotValue(previewWebsiteUrl, {});
     __VLS_withDotValue(websitePreviewState, {});
+    void {};
+    /** @type {__VLS_StyleScopedClasses['agent-preview-toolbar']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-scenario']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-mode-toggle']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-mode-toggle']} */ ;
+    /** @type {__VLS_StyleScopedClasses['customer-preview']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-bar']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-mobile']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-body']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
+    /** @type {__VLS_StyleScopedClasses['agent-preview-toolbar']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-toolbar-controls']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "agent-preview-shell" },
     });
@@ -76,6 +271,38 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['ds-section-kicker']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        ...{ class: "preview-toolbar-controls" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-toolbar-controls']} */ ;
+    if (__VLS_ctx.showScenarioSelector) {
+        __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({
+            ...{ class: "preview-scenario" },
+        });
+        /** @type {__VLS_StyleScopedClasses['preview-scenario']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
+            ...{ onChange: (...[$event]) => {
+                    void $event;
+                    if (!(__VLS_ctx.showScenarioSelector))
+                        throw 0;
+                    return (selectScenario($event.target.value));
+                    // @ts-ignore
+                    [showScenarioSelector,];
+                } },
+            value: (__VLS_unwrap(scenario, {})),
+            'aria-label': "Preview scenario",
+        });
+        const __VLS_0 = __VLS_tryAsConstant((__VLS_unwrap(scenarioOptions, {})));
+        for (const [option] of __VLS_vFor(__VLS_nonNull(__VLS_0))) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                key: (option.value),
+                value: (option.value),
+            });
+            (option.label);
+            // @ts-ignore
+            [scenario, scenarioOptions,];
+        }
+    }
+    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "preview-mode-toggle" },
     });
     /** @type {__VLS_StyleScopedClasses['preview-mode-toggle']} */ ;
@@ -87,7 +314,7 @@ const __VLS_template = () => {
                 [emit,];
             } },
         type: "button",
-        ...{ class: ({ active: __VLS_ctx.mode === 'desktop' }) },
+        ...{ class: ({ active: previewMode.value === 'desktop' }) },
     });
     /** @type {__VLS_StyleScopedClasses['active']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
@@ -95,16 +322,15 @@ const __VLS_template = () => {
                 void $event;
                 return (__VLS_unwrap(emit, {})('change-mode', 'mobile'));
                 // @ts-ignore
-                [emit, mode,];
+                [emit, previewMode,];
             } },
         type: "button",
-        ...{ class: ({ active: __VLS_ctx.mode === 'mobile' }) },
+        ...{ class: ({ active: previewMode.value === 'mobile' }) },
     });
     /** @type {__VLS_StyleScopedClasses['active']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         'aria-label': "Widget preview",
-        ...{ class: (['customer-preview', `preview-${__VLS_ctx.mode}`, `theme-${__VLS_ctx.widgetTheme}`, `position-${__VLS_ctx.widgetPosition}`]) },
-        ...{ style: ({ '--preview-accent': __VLS_unwrap(safeColor, {}), '--preview-accent-text': __VLS_unwrap(textColor, {}) }) },
+        ...{ class: (['customer-preview', `preview-${previewMode.value}`, `theme-${__VLS_ctx.widgetTheme}`, `position-${__VLS_ctx.widgetPosition}`]) },
     });
     /** @type {__VLS_StyleScopedClasses['customer-preview']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
@@ -190,126 +416,16 @@ const __VLS_template = () => {
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
     }
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-        ...{ class: "preview-chat" },
+        ref: "previewMount",
+        ...{ class: "widget-preview-stage" },
     });
-    /** @type {__VLS_StyleScopedClasses['preview-chat']} */ ;
-    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-        ...{ class: "preview-chat-header" },
-    });
-    /** @type {__VLS_StyleScopedClasses['preview-chat-header']} */ ;
-    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-        ...{ class: "preview-orb" },
-        ...{ style: ({ background: __VLS_unwrap(safeColor, {}), color: __VLS_unwrap(textColor, {}) }) },
-    });
-    /** @type {__VLS_StyleScopedClasses['preview-orb']} */ ;
-    if (__VLS_ctx.widgetLogoUrl) {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.img)({
-            src: (__VLS_ctx.widgetLogoUrl),
-            alt: "",
-        });
-    }
-    else {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.img)({
-            src: "/frontdeskwise-logo-mark.png",
-            alt: "",
-            'aria-hidden': "true",
-        });
-    }
-    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-    (__VLS_ctx.assistantName || 'AI assistant');
-    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-        ...{ class: "online-dot" },
-    });
-    /** @type {__VLS_StyleScopedClasses['online-dot']} */ ;
-    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-        ...{ class: "preview-chat-bubble" },
-    });
-    /** @type {__VLS_StyleScopedClasses['preview-chat-bubble']} */ ;
-    (__VLS_ctx.welcomeMessage || 'Hi! How can I help?');
-    const __VLS_0 = __VLS_tryAsConstant((__VLS_ctx.quickActions.slice(0, 3)));
-    for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_0))) {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-            key: (action.label),
-            ...{ class: "preview-suggested-action" },
-            type: "button",
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-suggested-action']} */ ;
-        (action.label);
-        let __VLS_1;
-        /** @ts-ignore @type { | typeof ChevronRight} */
-        ChevronRight;
-        // @ts-ignore
-        const __VLS_2 = __VLS_asFunctionalComponent1(__VLS_1, new __VLS_1({
-            // @ts-ignore
-            size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
-        }));
-        const __VLS_3 = __VLS_2({
-            size: (14),
-            strokeWidth: (1.8),
-            'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_2));
-        // @ts-ignore
-        [mode, mode, widgetTheme, widgetPosition, safeColor, safeColor, textColor, textColor, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, websiteUrl, websiteUrl, websiteUrl, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, businessName, businessName, widgetLogoUrl, widgetLogoUrl, assistantName, welcomeMessage, quickActions,];
-    }
-    if (__VLS_ctx.showLeadCapture) {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "preview-form-simulation" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-form-simulation']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "preview-required" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-required']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.input)({
-            placeholder: "Your name",
-        });
-        __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "preview-required" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-required']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.input)({
-            placeholder: "you@example.com",
-        });
-        __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "preview-optional" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-optional']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.input)({
-            placeholder: "(555) 555-0123",
-        });
-        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-            type: "button",
-            ...{ style: ({ background: __VLS_unwrap(safeColor, {}), color: __VLS_unwrap(textColor, {}) }) },
-        });
-    }
-    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-        ...{ class: "preview-chat-input" },
-    });
-    /** @type {__VLS_StyleScopedClasses['preview-chat-input']} */ ;
-    let __VLS_6;
-    /** @ts-ignore @type { | typeof Send} */
-    Send;
-    // @ts-ignore
-    const __VLS_7 = __VLS_asFunctionalComponent1(__VLS_6, new __VLS_6({
-        // @ts-ignore
-        size: (14), strokeWidth: (1.8), ...{ style: ({ color: __VLS_unwrap(safeColor, {}) }) }, 'aria-hidden': "true",
-    }));
-    const __VLS_8 = __VLS_7({
-        size: (14),
-        strokeWidth: (1.8),
-        ...{ style: ({ color: __VLS_unwrap(safeColor, {}) }) },
-        'aria-hidden': "true",
-    }, ...__VLS_functionalComponentArgsRest(__VLS_7));
+    /** @type {__VLS_StyleScopedClasses['widget-preview-stage']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
         ...{ class: "preview-note" },
     });
     /** @type {__VLS_StyleScopedClasses['preview-note']} */ ;
     // @ts-ignore
-    [safeColor, safeColor, textColor, showLeadCapture,];
+    [previewMode, previewMode, widgetTheme, widgetPosition, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, websiteUrl, websiteUrl, websiteUrl, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, businessName, businessName,];
     return {};
 };
 void [__VLS_template];

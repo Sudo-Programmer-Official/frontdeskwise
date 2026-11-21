@@ -9,6 +9,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const app = await readFile(resolve(here, "../src/App.vue"), "utf8");
 const agent = await readFile(resolve(here, "../src/AgentExperience.vue"), "utf8");
 const widgetPreview = await readFile(resolve(here, "../src/components/WidgetPreview.vue"), "utf8");
+const widgetRenderer = await readFile(resolve(here, "../src/widget-ui/renderer.ts"), "utf8");
+const markdownRenderer = await readFile(resolve(here, "../src/widget-ui/markdown.ts"), "utf8");
+const widgetEmbed = await readFile(resolve(here, "../src/widget-embed.ts"), "utf8");
 const styles = await readFile(resolve(here, "../src/styles.css"), "utf8");
 const feedback = await readFile(resolve(here, "../src/AppFeedback.vue"), "utf8");
 const widget = await readFile(resolve(here, "../public/widget.js"), "utf8");
@@ -56,7 +59,14 @@ test("owner UI uses the shared product design language", () => {
   assert.match(agent, /aria-label="Widget preview"|Customer view/);
   assert.match(widgetPreview, /class="preview-website-frame"/);
   assert.match(widgetPreview, /@load="markWebsitePreviewReady"/);
-  assert.match(styles, /\.preview-chat \{[^}]*max-height: calc\(100% - 44px\)/);
+  assert.match(widgetRenderer, /Powered by/);
+  assert.match(widgetRenderer, /fdw-status-dot/);
+  assert.match(widgetPreview, /createWidgetRenderer/);
+  assert.match(widgetRenderer, /@container fdw-preview/);
+  assert.match(widgetPreview, /scenarioOptions/);
+  assert.doesNotMatch(widgetPreview, /service-card|pricing-card|get-started|preview-form-simulation|preview-chat/);
+  assert.doesNotMatch(agent, /test-thread|test-action-form|test-composer/);
+  assert.match(markdownRenderer, /markdownToSafeHtml/);
   assert.match(styles, /font-weight: 500; line-height: 1\.35/);
   assert.match(styles, /team-row \.lead-name > span:last-child/);
   assert.match(app, /class="field-label">Name <span class="optional">Optional/);
@@ -102,14 +112,33 @@ test("embedded widget uses the responsive conversation shell", () => {
     "proactiveTriggers",
     "frontdeskwise:visitor:",
     "lead-consent",
+    "Powered by FrontDeskWise",
+    "powered-by",
+    "subtitle-text",
+    "Assistant is typing",
   ]) {
-    assert.ok(widget.includes(feature), `missing widget shell feature: ${feature}`);
+    assert.ok(`${widget}\n${widgetRenderer}\n${widgetEmbed}`.includes(feature), `missing widget shell feature: ${feature}`);
   }
+  assert.match(widgetRenderer, /fdw-typing/);
+  assert.match(widgetRenderer, /fdw-preview-root/);
 });
 
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
-  assert.match(widget, /renderQuickActions\(answer\.quickActions\)/);
-  assert.match(widget, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
+  assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
+  assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
+  assert.match(widgetEmbed, /updateState\(\{ typing: true \}\)/);
+  assert.match(widgetRenderer, /Assistant is typing/);
+});
+
+test("embedded widget handoff notice is temporary, dismissible, and session-scoped", () => {
+  assert.match(widgetRenderer, /fdw-handoff-dismiss/);
+  assert.match(widgetEmbed, /HANDOFF_NOTICE_TIMEOUT_MS = 6000/);
+  assert.match(widgetEmbed, /frontdeskwise:handoff-dismissed:/);
+  assert.match(widgetEmbed, /if \(!handoffWaiting\)/);
+  assert.match(widgetRenderer, /onHandoffDismiss/);
+  assert.match(widgetEmbed, /window\.sessionStorage\.setItem\(key, "1"\)/);
+  assert.match(widgetRenderer, /Connected to the team/);
+  assert.match(widgetEmbed, /hideHandoffNotice\(\);/);
 });
 
 test("Inbox takeover and handoff notifications keep their contracts explicit", () => {
@@ -220,12 +249,12 @@ test("Agent Test keeps conversation loading local to the chat thread", () => {
   assert.match(app, /function conversationFetch\(/);
   assert.match(app, /globalLoading: false/);
   assert.match(app, /testMessages\.value\.push\(\{\s*id: testMessageId\("user"\)/);
-  assert.match(agent, /class="test-thread"/);
-  assert.match(agent, /class="test-typing"/);
+  assert.match(agent, /testWidgetState/);
+  assert.match(agent, /createWidgetRenderer|<WidgetPreview/);
   assert.match(agent, /sessionHasGroundedAnswer/);
   assert.match(agent, /sessionHasCompletedAction/);
   assert.match(agent, /submit-action/);
-  assert.match(agent, /\.test-thread/);
+  assert.match(agent, /@submit-action="submitPreviewAction"/);
 });
 
 test("all Agent tabs keep the Agent shell on direct URLs and refresh", () => {

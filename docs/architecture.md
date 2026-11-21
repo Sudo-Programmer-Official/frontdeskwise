@@ -145,6 +145,8 @@ An action flow may also define a completion connector. The flow persists its lea
 
 Action V2 adds a business-neutral step graph stored in `business_actions.steps`. Steps can capture conversational values, show compact forms, branch on conditions, look up or recommend structured results, confirm an outcome, invoke a connector, hand off to staff, or finish the action. `conversations.action_state` stores the current step, completed steps, lookup results, interruption stack, repeatable participant values, and any generated completion URL. A completion link uses an allowlisted HTTPS base URL and explicit source-to-provider field mappings; FrontDeskWise never infers or forwards legal/payment fields.
 
+Action destinations are now modeled separately from knowledge in `business_action_resources`. A resource has a type (`registration`, `booking`, `job_application`, `payment`, or another business-neutral type), provider identity, structured matching fields, lifecycle status, validity dates, conditions, and a safe destination. `resolveAction` filters inactive, expired, full, and otherwise invalid resources before returning safe results. A workflow lookup can query this registry or a live provider; the Jackrabbit enrollment template resolves class IDs and live availability through the provider adapter instead of searching RAG chunks for a registration URL. Ambiguous matches remain a list so the presentation layer never guesses a destination.
+
 The widget emits `conversion_events` for flow starts, field views/completions/abandonment, form display/submission, action outcomes, CTA clicks, handoff requests, lead capture, booking-link opens, and conversation abandonment. Funnel summaries are derived from those events per business and flow.
 
 ## Owner access boundary
@@ -329,6 +331,8 @@ The current chain is:
 022_widget_shell_preferences.sql
 023_proactive_privacy_preferences.sql
 024_mcp_connections.sql
+025–041 additional platform migrations
+042_action_registry.sql
 ```
 
 The database adapter rejects connection URLs aimed at another database name and normalizes the sibling service's `postgresql+asyncpg` format without copying credentials into FrontDeskWise.
@@ -350,6 +354,7 @@ The database adapter rejects connection URLs aimed at another database name and 
 - HubSpot contact upsert adapter with optional capture-note activity.
 - Stripe sandbox/live checkout, Customer Portal, signed webhook reconciliation, and plan entitlements.
 - Guided MCP connections with encrypted tokens, discovered tool catalogs, and per-business allowlists.
+- Structured action resources with lifecycle/status filtering, owner CRUD, and provider-backed enrollment lookup.
 
 ### Planned next
 

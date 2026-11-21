@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 
-const props = withDefaults(defineProps<{ modelValue: string; swatches?: string[]; label?: string }>(), {
+const props = withDefaults(defineProps<{ modelValue: string; swatches?: string[]; websiteColors?: string[]; websiteLabel?: string; label?: string }>(), {
   swatches: () => ["#2563EB", "#0F766E", "#7C3AED", "#EA580C", "#1E3A8A"],
+  websiteColors: () => [],
+  websiteLabel: "your website",
   label: "Brand color",
 });
 const emit = defineEmits<{ (event: "update:modelValue", value: string): void }>();
@@ -10,6 +12,7 @@ const inputValue = ref(props.modelValue);
 watch(() => props.modelValue, (value) => { inputValue.value = value; });
 const isValid = computed(() => /^#[0-9a-f]{6}$/i.test(inputValue.value));
 const nativeColor = computed(() => isValid.value ? inputValue.value : "#2563EB");
+const websiteColors = computed(() => props.websiteColors.filter((color) => /^#[0-9a-f]{6}$/i.test(color)));
 
 function updateText(value: string) {
   inputValue.value = value;
@@ -27,6 +30,12 @@ function updateNative(event: Event) {
       <div class="ds-hex-input"><span>#</span><input :value="inputValue.replace(/^#/, '')" maxlength="6" :aria-label="label + ' hex value'" @input="updateText('#' + ($event.target as HTMLInputElement).value.replace(/[^0-9a-f]/gi, '').slice(0, 6).toUpperCase())" /></div>
       <input class="ds-native-color" type="color" :value="nativeColor" :aria-label="label + ' picker'" @input="updateNative" />
       <span class="ds-color-preview" :style="{ background: isValid ? inputValue : '#e7edf5' }" aria-hidden="true"></span>
+    </div>
+    <div v-if="websiteColors.length" class="ds-color-recommendations">
+      <div class="ds-color-recommendations-copy"><strong>From your website</strong><span>Colors found in {{ websiteLabel }}. Select one to use it for the widget.</span></div>
+      <div class="ds-color-swatches ds-website-swatches" aria-label="Website color recommendations">
+        <button v-for="swatch in websiteColors" :key="swatch" type="button" :class="{ selected: inputValue.toUpperCase() === swatch.toUpperCase() }" :style="{ background: swatch }" :aria-label="`Use website color ${swatch}`" :title="swatch" @click="updateText(swatch)"></button>
+      </div>
     </div>
     <div class="ds-color-swatches" aria-label="Brand color presets">
       <button v-for="swatch in swatches" :key="swatch" type="button" :class="{ selected: inputValue.toUpperCase() === swatch.toUpperCase() }" :style="{ background: swatch }" :aria-label="`Use ${swatch}`" @click="updateText(swatch)"></button>

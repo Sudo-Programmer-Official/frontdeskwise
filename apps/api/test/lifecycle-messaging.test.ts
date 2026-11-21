@@ -27,6 +27,22 @@ test("missing lifecycle variables render as empty strings", () => {
   assert.equal(interpolateTemplate("{{known}}/{{missing}}", { known: "value" }), "value/");
 });
 
+test("lifecycle emails normalize escaped newlines from legacy templates", () => {
+  const rendered = renderLifecycleEmail({
+    subject: "Handoff requested",
+    previewText: "A visitor is waiting",
+    heading: "Customer waiting for help",
+    body: "Business: PlanCraftAI\\nVisitor: Unknown visitor\\nStatus: WAITING_FOR_STAFF",
+    ctaLabel: "Open conversation",
+    ctaUrl: "https://app.example.test/inbox",
+    footer: "FrontDeskWise operational notification.",
+  }, {});
+
+  assert.match(rendered.text, /Business: PlanCraftAI\nVisitor: Unknown visitor\nStatus: WAITING_FOR_STAFF/);
+  assert.doesNotMatch(rendered.html, /\\n/);
+  assert.match(rendered.html, /Business: PlanCraftAI<\/p><p[^>]*>Visitor: Unknown visitor/);
+});
+
 test("subscription lifecycle emails render branded secondary billing and support links", () => {
   const rendered = renderLifecycleEmail({
     subject: "Welcome {{plan_name}}",

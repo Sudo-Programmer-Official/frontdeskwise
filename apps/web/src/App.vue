@@ -314,6 +314,7 @@ interface KnowledgeGap {
   occurrenceCount: number;
   status: "open" | "resolved";
   approvedAnswer: string | null;
+  answerMode: "knowledge" | "fixed_response";
   lastSeenAt: string;
   intent?: string | null;
   reason?: string | null;
@@ -403,6 +404,7 @@ interface AgentSaveModel {
   assistantName: string;
   welcomeMessage: string;
   tone: "friendly" | "professional" | "concise" | "custom";
+  customToneInstructions: string;
   primaryLanguage: string;
   fallbackBehavior: "contact_form" | "human" | "unavailable";
   humanHandoffEnabled: boolean;
@@ -416,6 +418,12 @@ interface AgentSaveModel {
   showLeadCapture: boolean;
   showBookingAction: boolean;
   showAiDisclosure: boolean;
+  proactiveEnabled: boolean;
+  proactiveDelaySeconds: number;
+  proactiveMessage: string;
+  proactiveTriggers: Array<"delay" | "scroll" | "exit" | "returning">;
+  proactiveBehavior: "teaser" | "open";
+  proactiveFrequency: "session" | "24h" | "visit";
   requireLeadConsent: boolean;
   privacyNoticeUrl: string;
   retentionDays: number;
@@ -461,7 +469,8 @@ interface WorkspacePayload {
   slug: string;
   status: string;
   business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
-  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean };
+  agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; customToneInstructions?: string; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; proactiveBehavior?: "teaser" | "open"; proactiveFrequency?: "session" | "24h" | "visit"; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean };
+  branding?: { colors?: string[]; source?: string };
   suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
@@ -902,9 +911,11 @@ const mobileNavOpen = ref(false);
 let sessionRedirecting = false;
 const businessName = ref("");
 const businessLocation = ref("");
+const websiteBrandColors = ref<string[]>([]);
 const assistantName = ref("AI Front Desk");
 const welcomeMessage = ref("Hi! I can answer questions from this business's website and help you get started.");
 const agentTone = ref<"friendly" | "professional" | "concise" | "custom">("friendly");
+const customToneInstructions = ref("");
 const primaryLanguage = ref("English");
 const fallbackBehavior = ref<"contact_form" | "human" | "unavailable">("contact_form");
 const humanHandoffEnabled = ref(true);
@@ -925,7 +936,9 @@ const widgetQuickActions = ref<WidgetQuickAction[]>([
 const proactiveEnabled = ref(false);
 const proactiveDelaySeconds = ref(20);
 const proactiveMessage = ref("Looking for the right service? I can help.");
-const proactiveTriggers = ref<Array<"delay" | "scroll" | "exit" | "returning">>(["delay", "scroll", "exit"]);
+const proactiveTriggers = ref<Array<"delay" | "scroll" | "exit" | "returning">>(["delay", "scroll", "returning"]);
+const proactiveBehavior = ref<"teaser" | "open">("teaser");
+const proactiveFrequency = ref<"session" | "24h" | "visit">("session");
 const requireLeadConsent = ref(false);
 const privacyNoticeUrl = ref("");
 const retentionDays = ref(90);
@@ -984,6 +997,10 @@ const sourceLibraryOpen = ref(false);
 const knowledgeError = ref("");
 const knowledgeLoading = ref(false);
 const answerDrafts = ref<Record<string, string>>({});
+const knowledgeAnswerSaving = ref(false);
+const knowledgeAnswerStatus = ref("");
+const knowledgeAnswerError = ref("");
+const knowledgeAnswerFailedGap = ref<KnowledgeGap | null>(null);
 const organizationDocuments = ref<OrganizationDocument[]>([]);
 const documentsLoading = ref(false);
 const documentsError = ref("");
@@ -1247,7 +1264,19 @@ const adminDisabledUserCount = computed(() => adminUsers.value.filter((user) => 
 
 const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== "Booked").length);
 const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
-const availableBusinesses = computed(() => activeOrganization.value?.businesses ?? []);
+const availableBusinesses = computed(() => {
+  const seen = new Set<string>();
+  return (activeOrganization.value?.businesses ?? []).filter((business) => {
+    const website = business.websiteUrl?.trim().toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .replace(/\/+$/, "");
+    const key = website || business.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+});
 const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "?").toUpperCase());
 const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
 const inboxUnreadCount = computed(() => inboxConversations.value.reduce((total, conversation) => total + (conversation.unreadCount ?? 0), 0));
@@ -1309,6 +1338,7 @@ const agentModel = computed<AgentSaveModel>(() => ({
   assistantName: assistantName.value,
   welcomeMessage: welcomeMessage.value,
   tone: agentTone.value,
+  customToneInstructions: customToneInstructions.value,
   primaryLanguage: primaryLanguage.value,
   fallbackBehavior: fallbackBehavior.value,
   humanHandoffEnabled: humanHandoffEnabled.value,
@@ -1322,6 +1352,12 @@ const agentModel = computed<AgentSaveModel>(() => ({
   showLeadCapture: showLeadCapture.value,
   showBookingAction: showBookingAction.value,
   showAiDisclosure: showAiDisclosure.value,
+  proactiveEnabled: proactiveEnabled.value,
+  proactiveDelaySeconds: proactiveDelaySeconds.value,
+  proactiveMessage: proactiveMessage.value,
+  proactiveTriggers: proactiveTriggers.value,
+  proactiveBehavior: proactiveBehavior.value,
+  proactiveFrequency: proactiveFrequency.value,
   requireLeadConsent: requireLeadConsent.value,
   privacyNoticeUrl: privacyNoticeUrl.value,
   retentionDays: retentionDays.value,
@@ -1856,9 +1892,11 @@ function clearWorkspaceState() {
   businessName.value = "";
   businessLocation.value = "";
   websiteUrl.value = "";
+  websiteBrandColors.value = [];
   assistantName.value = "AI Front Desk";
   welcomeMessage.value = "Hi! I can answer questions from this business's website and help you get started.";
   agentTone.value = "friendly";
+  customToneInstructions.value = "";
   primaryLanguage.value = "English";
   fallbackBehavior.value = "contact_form";
   humanHandoffEnabled.value = true;
@@ -1876,7 +1914,9 @@ function clearWorkspaceState() {
   proactiveEnabled.value = false;
   proactiveDelaySeconds.value = 20;
   proactiveMessage.value = "Looking for the right service? I can help.";
-  proactiveTriggers.value = ["delay", "scroll", "exit"];
+  proactiveTriggers.value = ["delay", "scroll", "returning"];
+  proactiveBehavior.value = "teaser";
+  proactiveFrequency.value = "session";
   requireLeadConsent.value = false;
   privacyNoticeUrl.value = "";
   retentionDays.value = 90;
@@ -1948,9 +1988,13 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   businessName.value = payload.business?.name ?? "";
   businessLocation.value = payload.business?.location ?? "";
   websiteUrl.value = payload.business?.websiteUrl ?? "";
+  websiteBrandColors.value = Array.isArray(payload.branding?.colors)
+    ? payload.branding.colors.filter((color): color is string => typeof color === "string" && /^#[\da-f]{6}$/i.test(color))
+    : [];
   assistantName.value = payload.agent?.assistantName ?? (businessName.value ? `${businessName.value} Assistant` : "AI Front Desk");
   welcomeMessage.value = payload.agent?.welcomeMessage ?? "Hi! I can answer questions from this business's website and help you get started.";
   agentTone.value = payload.agent?.tone ?? "friendly";
+  customToneInstructions.value = payload.agent?.customToneInstructions ?? "";
   primaryLanguage.value = payload.agent?.primaryLanguage ?? "English";
   fallbackBehavior.value = payload.agent?.fallbackBehavior ?? "contact_form";
   humanHandoffEnabled.value = payload.agent?.humanHandoffEnabled ?? true;
@@ -1969,7 +2013,9 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   proactiveEnabled.value = payload.agent?.proactiveEnabled ?? false;
   proactiveDelaySeconds.value = payload.agent?.proactiveDelaySeconds ?? 20;
   proactiveMessage.value = payload.agent?.proactiveMessage ?? "Looking for the right service? I can help.";
-  proactiveTriggers.value = payload.agent?.proactiveTriggers?.length ? payload.agent.proactiveTriggers : ["delay", "scroll", "exit"];
+  proactiveTriggers.value = payload.agent?.proactiveTriggers?.length ? payload.agent.proactiveTriggers : ["delay", "scroll", "returning"];
+  proactiveBehavior.value = payload.agent?.proactiveBehavior ?? "teaser";
+  proactiveFrequency.value = payload.agent?.proactiveFrequency ?? "session";
   requireLeadConsent.value = payload.agent?.requireLeadConsent ?? false;
   privacyNoticeUrl.value = payload.agent?.privacyNoticeUrl ?? "";
   retentionDays.value = payload.agent?.retentionDays ?? 90;
@@ -2347,6 +2393,7 @@ async function loadKnowledge() {
     retrievalDiagnostics.value = diagnosticsPayload.diagnostics ?? [];
     for (const gap of knowledgeGaps.value) {
       if (answerDrafts.value[gap.question] === undefined) answerDrafts.value[gap.question] = gap.approvedAnswer ?? "";
+      if (!gap.answerMode) gap.answerMode = "knowledge";
     }
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : "Could not load knowledge review.";
@@ -2486,21 +2533,58 @@ async function deleteDocument(documentItem: OrganizationDocument) {
 
 async function resolveKnowledgeGap(gap: KnowledgeGap) {
   const approvedAnswer = answerDrafts.value[gap.question]?.trim();
-  if (!approvedAnswer) return;
-  const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/resolve`), {
-    method: "POST",
-    headers: { "content-type": "application/json", ...ownerHeaders() },
-    body: JSON.stringify({ question: gap.question, approvedAnswer }),
-  });
-  if (!response.ok) {
-    knowledgeError.value = "Could not approve that answer.";
-    return;
+  if (!approvedAnswer || knowledgeAnswerSaving.value) return;
+  knowledgeAnswerSaving.value = true;
+  knowledgeAnswerStatus.value = "Saving…";
+  knowledgeAnswerError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps/resolve`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ question: gap.question, approvedAnswer, answerMode: gap.answerMode || "knowledge" }),
+    });
+    const payload = await response.json() as { gap?: KnowledgeGap; indexingStatus?: "queued" | "ready"; error?: string };
+    if (!response.ok || !payload.gap) throw new Error(payload.error ?? "Could not save that answer.");
+    Object.assign(gap, payload.gap);
+    answerDrafts.value[gap.question] = approvedAnswer;
+    resolvedKnowledgeQuestion.value = gap.question;
+    knowledgeTestContext.value = "answer";
+    knowledgeAnswerStatus.value = payload.indexingStatus === "queued" ? "Updating AI knowledge…" : "Ready ✓";
+    knowledgeAnswerFailedGap.value = null;
+    await refreshWorkspaceSummary(false);
+    if (payload.indexingStatus === "queued") void waitForKnowledgeIndex(gap);
+  } catch (error) {
+    knowledgeAnswerError.value = error instanceof Error ? error.message : "Update failed — Retry";
+    knowledgeAnswerFailedGap.value = gap;
+    knowledgeAnswerStatus.value = "";
+  } finally {
+    knowledgeAnswerSaving.value = false;
   }
-  gap.status = "resolved";
-  gap.approvedAnswer = approvedAnswer;
-  resolvedKnowledgeQuestion.value = gap.question;
-  knowledgeTestContext.value = "answer";
-  await refreshWorkspaceSummary();
+}
+
+async function waitForKnowledgeIndex(gap?: KnowledgeGap): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+    try {
+      const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/embedding-status`), { headers: ownerHeaders() }, { globalLoading: false });
+      const payload = await response.json() as { latestJob?: { status?: string; lastError?: string | null } | null; pendingChunks?: number; configured?: boolean };
+      if (!response.ok) return;
+      if (payload.latestJob?.status === "failed") {
+        knowledgeAnswerStatus.value = "";
+        knowledgeAnswerFailedGap.value = gap ?? null;
+        knowledgeAnswerError.value = payload.latestJob.lastError ? `Update failed — ${payload.latestJob.lastError}` : "Update failed — Retry";
+        return;
+      }
+      if (payload.latestJob?.status === "succeeded" && (payload.pendingChunks ?? 0) === 0) {
+        knowledgeAnswerStatus.value = "Ready ✓";
+        await refreshWorkspaceSummary(false);
+        return;
+      }
+    } catch {
+      // The saved answer remains usable through full-text retrieval while the
+      // optional semantic worker catches up.
+    }
+  }
 }
 
 async function loadWidgetInstall() {
@@ -4635,6 +4719,7 @@ async function saveAgent(...args: Array<AgentSaveModel | Event>) {
       assistantName: nextModel.assistantName,
       welcomeMessage: nextModel.welcomeMessage,
       tone: nextModel.tone,
+      customToneInstructions: nextModel.customToneInstructions,
       primaryLanguage: nextModel.primaryLanguage,
       fallbackBehavior: nextModel.fallbackBehavior,
       humanHandoffEnabled: nextModel.humanHandoffEnabled,
@@ -4647,10 +4732,12 @@ async function saveAgent(...args: Array<AgentSaveModel | Event>) {
       widgetTheme: nextModel.widgetTheme,
       widgetPosition: nextModel.widgetPosition,
       widgetQuickActions: nextModel.widgetQuickActions,
-      proactiveEnabled: proactiveEnabled.value,
-      proactiveDelaySeconds: proactiveDelaySeconds.value,
-      proactiveMessage: proactiveMessage.value,
-      proactiveTriggers: proactiveTriggers.value,
+      proactiveEnabled: nextModel.proactiveEnabled,
+      proactiveDelaySeconds: nextModel.proactiveDelaySeconds,
+      proactiveMessage: nextModel.proactiveMessage,
+      proactiveTriggers: nextModel.proactiveTriggers,
+      proactiveBehavior: nextModel.proactiveBehavior,
+      proactiveFrequency: nextModel.proactiveFrequency,
       requireLeadConsent: nextModel.requireLeadConsent,
       privacyNoticeUrl: nextModel.privacyNoticeUrl || null,
       retentionDays: nextModel.retentionDays,
@@ -5044,6 +5131,7 @@ function startMarketingDemo() {
             :business-key="demoSlug"
             :business-name="businessName"
             :website-url="websiteUrl"
+            :website-brand-colors="websiteBrandColors"
             :model="agentModel"
             :saved-message="savedMessage"
             :auth-ready="Boolean(authSnapshot)"
@@ -5135,7 +5223,8 @@ function startMarketingDemo() {
 
 
         <div v-else-if="view === 'knowledge'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Approve safe answers for questions the front desk could not ground confidently.</p></div><div class="toolbar-actions knowledge-toolbar-actions"><span v-if="embeddingMessage" class="saved-message">✓ {{ embeddingMessage }}</span><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" :title="knowledgeTestAction.disabled ? 'Review sources that need attention before testing.' : undefined" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">{{ knowledgeTestAction.label }}<span v-if="!knowledgeTestAction.disabled"> →</span></button><button v-if="authSnapshot && availableBusinesses.length" class="outline-button small" type="button" :disabled="embeddingLoading" @click="reindexKnowledge">{{ embeddingLoading ? 'Re-indexing…' : 'Re-index' }}</button><button class="outline-button small knowledge-toolbar-more" type="button" aria-label="Refresh knowledge" title="Refresh knowledge" @click="loadKnowledge">⋯</button></div></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Knowledge review</p><h2>Close the answer gaps</h2><p>Save an answer once. FrontDeskWise updates its searchable knowledge automatically.</p></div><div class="toolbar-actions knowledge-toolbar-actions"><span v-if="knowledgeAnswerStatus" class="saved-message">{{ knowledgeAnswerStatus }}</span><button class="primary-button small" type="button" :disabled="knowledgeTestAction.disabled" :title="knowledgeTestAction.disabled ? 'Review sources that need attention before testing.' : undefined" @click="openAgentTest(knowledgeTestContext === 'answer' ? resolvedKnowledgeQuestion : undefined)">{{ knowledgeTestAction.label }}<span v-if="!knowledgeTestAction.disabled"> →</span></button><button class="outline-button small knowledge-toolbar-more" type="button" aria-label="Refresh knowledge" title="Refresh knowledge" @click="loadKnowledge">⋯</button></div></div>
+          <p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p>
           <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
           <article v-if="authSnapshot && !availableBusinesses.length" class="panel workspace-message knowledge-start-panel"><strong>Start your knowledge base</strong><p>Sign-in is complete. Add your first business website and FrontDeskWise will crawl it, index the readable content, and make it available for questions.</p><button class="primary-button small" type="button" @click="openAddBusiness">Add website / domain →</button></article>
           <article v-if="!authSnapshot || availableBusinesses.length" class="panel document-library">
@@ -5149,7 +5238,7 @@ function startMarketingDemo() {
           <article v-if="workspaceKnowledge" class="panel knowledge-health-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge health</p><h2>{{ workspaceKnowledge.status === 'ready' ? 'Ready for grounded questions' : workspaceKnowledge.status === 'indexing' ? 'Indexing in progress' : workspaceKnowledge.status === 'review_recommended' ? 'Review recommended' : 'Add a website source' }}</h2><p>Readiness is based on ready sources, indexed chunks, and unresolved answer gaps.</p></div><strong class="readiness-score">{{ readinessScore }}%</strong></div><div class="knowledge-health-grid"><div><strong>{{ workspaceKnowledge.sourceCount }}</strong><small>ready sources</small></div><div><strong>{{ workspaceKnowledge.chunkCount }}</strong><small>indexed chunks</small></div><div><strong>{{ workspaceKnowledge.openGaps }}</strong><small>open answer gaps</small></div><div><strong>{{ (workspaceKnowledge.pendingSources ?? 0) + (workspaceKnowledge.failedSources ?? 0) }}</strong><small>sources needing attention</small></div></div><p v-if="workspaceKnowledge.pendingSources" class="conversation-status">{{ workspaceKnowledge.pendingSources }} source{{ workspaceKnowledge.pendingSources === 1 ? '' : 's' }} still processing. Refresh after crawling finishes.</p><p v-if="workspaceKnowledge.failedSources" class="form-error">{{ workspaceKnowledge.failedSources }} source{{ workspaceKnowledge.failedSources === 1 ? '' : 's' }} failed to crawl. Review the source or add the information as a private document.</p></article>
           <article v-if="workspaceKnowledge?.sources?.length" class="panel source-library"><div class="panel-heading"><div><p class="eyebrow">Captured website knowledge</p><h2>Website sources</h2><p>{{ workspaceKnowledge.sources.length }} source{{ workspaceKnowledge.sources.length === 1 ? '' : 's' }} currently available to the assistant. The list stays collapsed so the health summary remains easy to scan.</p></div><div class="toolbar-actions"><span v-if="sourceActionMessage" class="saved-message">✓ {{ sourceActionMessage }}</span><button class="outline-button small" type="button" @click="sourceLibraryOpen = !sourceLibraryOpen">{{ sourceLibraryOpen ? 'Hide sources' : `Show ${workspaceKnowledge.sources.length} source${workspaceKnowledge.sources.length === 1 ? '' : 's'}` }}</button><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh</button></div></div><div v-if="sourceLibraryOpen" class="source-list"><div v-for="source in workspaceKnowledge.sources" :key="source.id" class="source-row"><div><strong>{{ source.title }}</strong><small>{{ source.contentType === 'web_page' ? source.pageType : 'Private document' }} · {{ source.url }}</small></div><div class="source-row-actions"><span :class="['status-pill', source.crawlStatus === 'ready' ? 'booked' : source.crawlStatus === 'failed' ? 'new' : 'qualified']">{{ source.crawlStatus }}</span><template v-if="source.contentType === 'web_page'"><button class="text-button" type="button" :disabled="Boolean(sourceActionLoading)" @click="recrawlSource(source)">{{ sourceActionLoading === source.id ? 'Refreshing…' : 'Refresh' }}</button><button class="text-button danger-text" type="button" :disabled="Boolean(sourceActionLoading)" @click="deleteSource(source)">Remove</button></template></div></div></div></article>
           <article v-if="!knowledgeGaps.length && !knowledgeError" class="panel empty-knowledge"><div class="empty-icon"><CircleCheck :size="24" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ knowledgeSourcesNeedAttention ? 'Sources need attention.' : 'Your knowledge looks healthy.' }}</h2><p>{{ knowledgeSourcesNeedAttention ? 'Review the source status above before testing the agent.' : 'Test a few customer questions to make sure the assistant responds the way you expect.' }}</p><button v-if="!knowledgeSourcesNeedAttention" class="primary-button small" type="button" @click="openAgentTest()">Test agent <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article>
-          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Approved' : '! Open gap' }}</span><h3>{{ gap.question }}</h3><small v-if="gap.intent || gap.reason" class="gap-diagnostics">Intent: {{ gap.intent ?? 'general' }} · Reason: {{ (gap.reason ?? 'legacy_unknown').replaceAll('_', ' ') }}</small></div><strong>{{ gap.occurrenceCount }}×</strong></div><textarea v-model="answerDrafts[gap.question]" rows="4" :disabled="gap.status === 'resolved'" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><template v-if="gap.status === 'resolved'"><span class="gap-answer-saved">✓ Answer saved</span><button class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button></template><button v-else class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim()" @click="resolveKnowledgeGap(gap)">Approve answer</button></div></article></div>
+          <div v-else class="knowledge-review-grid"><article v-for="gap in knowledgeGaps" :key="gap.question" class="panel gap-card"><div class="gap-card-heading"><div><span :class="['answer-badge', gap.status === 'resolved' ? 'grounded' : 'fallback']">{{ gap.status === 'resolved' ? '✓ Ready' : '! Open gap' }}</span><h3>{{ gap.question }}</h3><small v-if="gap.intent || gap.reason" class="gap-diagnostics">Intent: {{ gap.intent ?? 'general' }} · Reason: {{ (gap.reason ?? 'legacy_unknown').replaceAll('_', ' ') }}</small></div><strong>{{ gap.occurrenceCount }}×</strong></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="gap.answerMode"><option value="knowledge">Knowledge answer · AI may summarize</option><option value="fixed_response">Fixed response · preserve wording</option></select></label><textarea v-model="answerDrafts[gap.question]" rows="4" placeholder="Write the answer the assistant may use…"></textarea><div class="gap-card-actions"><small>Last seen {{ new Date(gap.lastSeenAt).toLocaleString() }}</small><button v-if="gap.status === 'resolved'" class="text-button" type="button" @click="openAgentTest(gap.question)">Test this question →</button><button class="primary-button small" type="button" :disabled="!answerDrafts[gap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(gap)">{{ knowledgeAnswerSaving ? 'Updating…' : gap.status === 'resolved' ? 'Save answer' : 'Save answer' }}</button></div></article></div>
           <div class="section-toolbar diagnostics-heading"><div><p class="eyebrow">Answer quality</p><h2>Recent answer checks</h2><p>Review confidence and whether each answer was grounded in your knowledge.</p></div></div>
           <article class="panel table-panel diagnostics-panel"><div class="table-heading diagnostics-row"><span>Question</span><span>Confidence</span><span>Outcome</span></div><div v-for="diagnostic in retrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="table-row diagnostics-row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}% · {{ diagnostic.confidenceBand }}</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Needs review' }}<small>{{ diagnostic.retrieval?.candidateCount ?? 0 }} knowledge matches</small></span></div><div v-if="!retrievalDiagnostics.length" class="diagnostics-empty">No answer checks yet.</div></article>
         </div>
@@ -5337,7 +5426,7 @@ function startMarketingDemo() {
             <div v-else-if="billingSnapshot.billing.status === 'cancelled' || billingSnapshot.billing.status === 'paused'" class="billing-alert danger">Billing is {{ billingSnapshot.billing.status }}. Existing data remains visible, but new paid actions and businesses are paused until billing is restored.</div>
             <div class="billing-summary-grid">
               <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next payment: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small></article>
-              <article class="panel billing-status-card"><p class="eyebrow">Business capacity</p><strong class="billing-big-number">{{ activeOrganization?.businesses.length ?? 0 }} <span>/ {{ billingSnapshot.billing.plan.maxBusinesses }}</span></strong><p>Businesses in this organization</p><div class="metric-progress"><span :style="{ width: `${Math.min(100, ((activeOrganization?.businesses.length ?? 0) / billingSnapshot.billing.plan.maxBusinesses) * 100)}%` }"></span></div></article>
+              <article class="panel billing-status-card"><p class="eyebrow">Business capacity</p><strong class="billing-big-number">{{ availableBusinesses.length }} <span>/ {{ billingSnapshot.billing.plan.maxBusinesses }}</span></strong><p>Businesses in this organization</p><div class="metric-progress"><span :style="{ width: `${Math.min(100, (availableBusinesses.length / billingSnapshot.billing.plan.maxBusinesses) * 100)}%` }"></span></div></article>
               <article class="panel billing-status-card"><p class="eyebrow">Last 30 days</p><div class="billing-usage-stats"><span><strong>{{ billingSnapshot.usageLast30Days.conversations }}</strong> conversations</span><span><strong>{{ billingSnapshot.usageLast30Days.leads }}</strong> leads</span><span><strong>{{ billingSnapshot.usageLast30Days.bookings }}</strong> bookings</span></div></article>
             </div>
             <div class="section-toolbar billing-plans-heading"><div><p class="eyebrow">Flexible plans</p><h2>Choose the right operating level</h2><p>Pricing is organization-level. Client-specific founding terms are represented as a plan override, not a special code path.</p></div></div>
