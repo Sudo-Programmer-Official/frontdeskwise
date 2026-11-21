@@ -13,6 +13,7 @@ export type RetrievalIntent =
   | "privacy"
   | "policy"
   | "support"
+  | "getting_started"
   | "general"
   | "unsupported";
 
@@ -32,6 +33,7 @@ export type RankableMatch<TChunk extends { sourceId: string }> = {
 };
 
 const serviceWords = /\b(service|services|solution|solutions|product|products|offer|offers|provide|provides|automation|development|integrat\w*|tool|tools)\b/i;
+const gettingStartedQuestion = /\b(get\s+started|how\s+(?:do\s+i|can\s+i)\s+start|start(?:ing)?\s+(?:using|with)|first\s+steps?|where\s+(?:should|do)\s+i\s+begin|what\s+do\s+i\s+do\s+first|create(?:\s+[a-z0-9-]+){0,3}\s+first\s+task|onboard(?:ing)?|how\s+(?:do\s+i|can\s+i)\s+try|try\s+(?:it|this|the\s+app|[a-z0-9-]+)|how\s+(?:do\s+i|can\s+i)\s+use|how\s+does(?:\s+[a-z0-9-]+){0,3}\s+work)\b/i;
 const unsupportedQuestion = /\b(moonbase|private jet|space launch|lottery numbers|stock price|weather forecast|celebrity gossip)\b/i;
 
 export function classifyQuestionIntent(question: string): RetrievalIntent {
@@ -39,6 +41,7 @@ export function classifyQuestionIntent(question: string): RetrievalIntent {
   if (!value || unsupportedQuestion.test(value)) return "unsupported";
   if (/\b(permission|permissions|access|role|roles|admin|administrator|who can|allowed to|authorization)\b/.test(value)) return "permissions";
   if (/\b(privacy|private|personal data|data usage|data handling|security|secure|stored|sell|share my data|oauth|token)\b/.test(value)) return "privacy";
+  if (gettingStartedQuestion.test(value)) return "getting_started";
   if (/\b(calendars?|google calendar|meetings?|events?|schedule around|sync|synchroni[sz])\b/.test(value)) return "calendar";
   if (/\b(voice|speak|speaking|spoken|talk|audio|transcri|dictat|hands[- ]?free)\b/.test(value)) return "voice";
   if (/\b(remind|reminder|reminders|nudge|nudges|recap|recaps|notification|notifications|alert|alerts|follow[- ]?up)\b/.test(value)) return "reminders";
@@ -73,6 +76,7 @@ export function sourceSemanticType(source: Pick<RetrievalSource, "url" | "title"
   if (/\bprivacy|data[- ]?(deletion|usage|handling)|security|personal data|oauth|token\b/.test(value)) return "privacy";
   if (/\bpermission|access control|role[- ]?based|administrator|admin controls\b/.test(value)) return "permissions";
   if (pageType === "policy" || /\b(terms|cookie|legal|cancellation|refund|agreement|policy|policies)\b/.test(value)) return "policy";
+  if (/\/(?:get[-_]?started|start|signup|sign[-_]?up|register|onboarding)(?:\/|$)/.test(pathname) || /\b(sign\s*up|signup|register|onboarding|get\s+started|free\s+trial)\b/.test(value)) return "signup";
   if (/\/contact(?:\/|$)/.test(pathname)) return "contact";
   if (/\b(support|help[- ]?center|technical help)\b/.test(value)) return "support";
   if (pageType === "location" || /\b(contact|location|hours?|directions|visit us)\b/.test(value)) return "contact";
@@ -111,6 +115,7 @@ const intentWeights: Record<RetrievalIntent, Record<string, number>> = {
   privacy: { privacy: 0.4, permissions: 0.32, policy: 0.24, faq: 0.14, document: 0.05, web_page: 0 },
   policy: { policy: 0.38, privacy: 0.32, permissions: 0.22, faq: 0.14, pricing: 0.08, document: 0.05, web_page: 0 },
   support: { support: 0.38, contact: 0.32, faq: 0.16, homepage: 0.12, about: 0.08, document: 0.05, web_page: 0 },
+  getting_started: { signup: 0.34, product: 0.3, homepage: 0.3, service: 0.26, solution: 0.24, faq: 0.18, pricing: 0.14, reminders: 0.1, voice: 0.1, calendar: 0.1, document: 0.05, web_page: 0 },
   general: { homepage: 0.18, service: 0.16, product: 0.16, faq: 0.12, reminders: 0.08, voice: 0.08, calendar: 0.08, case_study: 0.06, blog: 0.04, document: 0.04, web_page: 0 },
   unsupported: {},
 };
@@ -130,6 +135,7 @@ const intentSourceTypes: Partial<Record<RetrievalIntent, Set<string>>> = {
   privacy: new Set(["privacy", "permissions", "policy", "faq", "document"]),
   policy: new Set(["policy", "privacy", "permissions", "faq", "pricing", "document"]),
   support: new Set(["support", "contact", "homepage", "about", "faq", "document"]),
+  getting_started: new Set(["signup", "product", "homepage", "service", "solution", "faq", "pricing", "reminders", "voice", "calendar", "document"]),
 };
 
 export function sourceBoost(intent: RetrievalIntent, source: RetrievalSource): number {
@@ -206,6 +212,7 @@ export function citationMatches<TChunk extends { sourceId: string }>(
 export type AnswerabilityDecision = {
   answerable: boolean;
   score: number;
+  threshold: number;
   reason: string;
 };
 
@@ -224,6 +231,7 @@ const answerabilityThresholds: Record<RetrievalIntent, number> = {
   privacy: 0.42,
   policy: 0.42,
   support: 0.3,
+  getting_started: 0.34,
   general: 0.52,
   unsupported: 1,
 };
@@ -233,13 +241,20 @@ export function answerabilityDecision<TChunk extends { sourceId: string }>(
   sources: RetrievalSource[],
   intent: RetrievalIntent,
 ): AnswerabilityDecision {
-  if (intent === "unsupported") return { answerable: false, score: 0, reason: "unsupported_intent" };
-  const top = matches[0];
-  if (!top) return { answerable: false, score: 0, reason: "no_candidates" };
-  const source = sources.find((item) => item.id === top.chunk.sourceId);
-  if (source && !sourceAllowedForIntent(intent, source)) return { answerable: false, score: top.evidenceScore, reason: "irrelevant_source_type" };
+  if (intent === "unsupported") return { answerable: false, score: 0, threshold: 1, reason: "unsupported_intent" };
   const threshold = answerabilityThresholds[intent];
-  const score = Math.max(0, Math.min(1, top.evidenceScore));
-  if (score < threshold) return { answerable: false, score, reason: "insufficient_evidence_coverage" };
-  return { answerable: true, score, reason: "relevant_evidence" };
+  const top = matches[0];
+  if (!top) return { answerable: false, score: 0, threshold, reason: "no_candidates" };
+  const source = sources.find((item) => item.id === top.chunk.sourceId);
+  if (source && !sourceAllowedForIntent(intent, source)) return { answerable: false, score: top.evidenceScore, threshold, reason: "irrelevant_source_type" };
+  const eligible = matches.filter((match) => {
+    const candidateSource = sources.find((item) => item.id === match.chunk.sourceId);
+    return !candidateSource || sourceAllowedForIntent(intent, candidateSource);
+  }).slice(0, 4);
+  const distinctSources = new Set(eligible.map((match) => match.chunk.sourceId)).size;
+  const corroboratingEvidence = eligible.slice(1).reduce((total, match, index) => total + Math.max(0, Math.min(1, match.evidenceScore)) * (0.16 / (index + 1)), 0);
+  const sourceCoverageBonus = Math.min(0.12, Math.max(0, distinctSources - 1) * 0.04);
+  const score = Math.max(0, Math.min(1, Math.max(top.evidenceScore, top.evidenceScore + corroboratingEvidence + sourceCoverageBonus)));
+  if (score < threshold) return { answerable: false, score, threshold, reason: "insufficient_evidence_coverage" };
+  return { answerable: true, score, threshold, reason: distinctSources > 1 ? "multi_source_relevant_evidence" : "relevant_evidence" };
 }

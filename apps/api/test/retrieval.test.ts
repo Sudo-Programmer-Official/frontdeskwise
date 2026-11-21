@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseGroundingDecision, routeQuestion } from "../src/model-routing.js";
 import {
+  answerabilityDecision,
   citationMatches,
   classifyQuestionIntent,
   rankMatches,
@@ -24,6 +25,20 @@ test("classifies business service questions as services intent", () => {
   assert.equal(classifyQuestionIntent("Does PlanCraftAI work with calendars?"), "calendar");
   assert.equal(classifyQuestionIntent("Does PlanCraftAI support reminders?"), "reminders");
   assert.equal(classifyQuestionIntent("Can I create tasks using voice?"), "voice");
+});
+
+test("classifies onboarding language as getting_started without exact-string matching", () => {
+  for (const question of [
+    "How do I get started with PlanCraftAI?",
+    "How do I start?",
+    "Where should I begin?",
+    "How can I try PlanCraftAI?",
+    "What do I do first?",
+    "How do I use the app?",
+    "How does PlanCraftAI work?",
+  ]) {
+    assert.equal(classifyQuestionIntent(question), "getting_started", question);
+  }
 });
 
 test("recognizes a homepage and keeps legal pages distinct", () => {
@@ -57,6 +72,19 @@ test("pricing and permissions do not fall back to unrelated web pages", () => {
   const unrelated = { chunk: { sourceId: "voice", content: "Voice reminders help people review unfinished tasks." }, score: 0.95, evidenceScore: 0.9 };
   assert.deepEqual(rankMatches([unrelated], sources, "pricing"), []);
   assert.deepEqual(rankMatches([unrelated], sources, "policy"), []);
+});
+
+test("getting started filters legal pages and combines corroborating product chunks", () => {
+  const matches = [
+    { chunk: { sourceId: "home", content: "Try it free and start with a task." }, score: 0.4, evidenceScore: 0.34 },
+    { chunk: { sourceId: "services", content: "Create tasks naturally and organize your daily plan." }, score: 0.35, evidenceScore: 0.3 },
+    { chunk: { sourceId: "terms", content: "Use of the service is subject to these terms." }, score: 0.9, evidenceScore: 0.95 },
+  ];
+  const ranked = rankMatches(matches, sources, "getting_started");
+  assert.deepEqual(ranked.map((match) => match.chunk.sourceId), ["home", "services"]);
+  const decision = answerabilityDecision(ranked, sources, "getting_started");
+  assert.equal(decision.answerable, true);
+  assert.equal(decision.reason, "multi_source_relevant_evidence");
 });
 
 test("grounding verification fails closed on anything except SUPPORTED", () => {

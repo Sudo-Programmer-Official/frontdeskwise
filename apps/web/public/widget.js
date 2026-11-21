@@ -565,7 +565,7 @@
         if (patch.config)
           config = { ...config, ...patch.config };
         if (patch.state) {
-          if (state.isOpen && state.openedByUser && patch.state.isOpen === false) {
+          if (state.isOpen && patch.state.isOpen === false) {
             const { isOpen: _ignoredIsOpen, ...safeState } = patch.state;
             state = { ...state, ...safeState, isOpen: true };
           } else {
@@ -935,7 +935,7 @@
         }
         addMessage(question, "user");
         updateState({ typing: true });
-        const answer = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question }) });
+        const answer = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, pageUrl: window.location.href }) });
         updateState({ typing: false });
         addMessage(answer.answer, "assistant", answer.citations || []);
         renderConversationStatus(answer.conversation?.status);

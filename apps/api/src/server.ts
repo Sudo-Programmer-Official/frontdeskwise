@@ -55,6 +55,8 @@ import {
   citationMatches,
   classifyQuestionIntent,
   rankMatches,
+  sourceAllowedForIntent,
+  sourceBoost,
   sourceSemanticType,
   type RetrievalIntent,
 } from "./retrieval.js";
@@ -222,6 +224,7 @@ type AgentConfig = {
 };
 
 type KnowledgeAnswerMode = "knowledge" | "fixed_response";
+type KnowledgeIndexStatus = "not_indexed" | "pending" | "ready" | "failed";
 
 type Source = {
   id: string;
@@ -485,6 +488,10 @@ type KnowledgeGap = {
   approvedAnswer: string | null;
   answerMode: KnowledgeAnswerMode;
   lastSeenAt: string;
+  updatedAt: string;
+  indexedAt: string | null;
+  indexStatus: KnowledgeIndexStatus;
+  indexError: string | null;
   intent: RetrievalIntent | null;
   reason: KnowledgeGapReason | "legacy_unknown";
 };
@@ -2367,7 +2374,13 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         approvedAnswer: typeof gap.approved_answer === "string" ? gap.approved_answer : null,
         answerMode: gap.answer_mode === "fixed_response" ? "fixed_response" : "knowledge",
         lastSeenAt: toIso(gap.last_seen_at),
-        intent: ["services", "hours", "contact", "pricing", "location", "booking", "reminders", "calendar", "voice", "teams", "permissions", "privacy", "policy", "support", "general", "unsupported"].includes(String(gap.intent))
+        updatedAt: gap.updated_at ? toIso(gap.updated_at) : toIso(gap.last_seen_at),
+        indexedAt: gap.indexed_at ? toIso(gap.indexed_at) : null,
+        indexStatus: ["not_indexed", "pending", "ready", "failed"].includes(String(gap.index_status))
+          ? String(gap.index_status) as KnowledgeIndexStatus
+          : "not_indexed",
+        indexError: typeof gap.index_error === "string" ? gap.index_error : null,
+        intent: ["services", "hours", "contact", "pricing", "location", "booking", "reminders", "calendar", "voice", "teams", "permissions", "privacy", "policy", "support", "getting_started", "general", "unsupported"].includes(String(gap.intent))
           ? String(gap.intent) as RetrievalIntent
           : null,
         reason: ["no_authoritative_source", "low_confidence_evidence", "answer_generation_failed", "grounding_check_failed"].includes(String(gap.reason))
@@ -2427,6 +2440,14 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     },
     createdAt: toIso(row.created_at),
   };
+  for (const gap of loaded.knowledgeGaps.values()) {
+    if (gap.status !== "resolved" || !gap.approvedAnswer) continue;
+    try {
+      await ensureKnowledgeAnswerIndex(loaded, gap);
+    } catch (error) {
+      app.log.warn({ error, businessId: loaded.id, question: gap.question }, "Resolved knowledge answer index repair deferred");
+    }
+  }
   return loaded;
 }
 
@@ -2700,11 +2721,12 @@ async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> 
   if (!pool) return;
   try {
     const result = await pool.query<{ occurrence_count: number }>(
-      `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, answer_mode, last_seen_at, intent, reason)
-       values ($1, $2, 1, $3, $4, $5, $6, $7, $8)
+      `insert into knowledge_gaps (business_id, question, occurrence_count, status, approved_answer, answer_mode, last_seen_at, intent, reason, updated_at, index_status)
+       values ($1, $2, 1, $3, $4, $5, $6, $7, $8, now(), 'not_indexed')
        on conflict (business_id, question) do update set
          occurrence_count = knowledge_gaps.occurrence_count + 1,
          last_seen_at = excluded.last_seen_at,
+         updated_at = now(),
          intent = excluded.intent,
          reason = excluded.reason,
          answer_mode = coalesce(knowledge_gaps.answer_mode, excluded.answer_mode)
@@ -2741,6 +2763,32 @@ async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> 
   }
 }
 
+async function setKnowledgeIndexState(
+  business: Business,
+  gap: KnowledgeGap,
+  status: KnowledgeIndexStatus,
+  indexedAt: string | null,
+  indexError: string | null = null,
+): Promise<void> {
+  gap.indexStatus = status;
+  gap.indexedAt = indexedAt;
+  gap.indexError = indexError;
+  gap.updatedAt = new Date().toISOString();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `update knowledge_gaps
+       set index_status = $3, indexed_at = $4, index_error = $5, updated_at = now()
+       where business_id = $1 and question = $2`,
+      [business.id, gap.question, status, indexedAt, indexError],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseColumn(error)) throw error;
+    // Older deployments can still serve the answer; the migration will add
+    // the lifecycle fields before the next owner edit.
+  }
+}
+
 async function replaceKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap): Promise<"queued" | "ready"> {
   const sourceUrl = `faq:${contentHash(gap.question)}`;
   const previousSource = business.sources.find((source) => source.url === sourceUrl);
@@ -2769,26 +2817,66 @@ async function replaceKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap
     },
   };
 
-  business.sources = business.sources.filter((candidate) => candidate.id !== previousSource?.id).concat(source);
-  business.chunks = business.chunks.filter((candidate) => candidate.sourceId !== sourceId).concat(chunk);
-  if (!pool) return "ready";
+  try {
+    if (pool) {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        await client.query("delete from knowledge_chunks where business_id = $1 and source_id = $2", [business.id, sourceId]);
+        await client.query("delete from business_sources where business_id = $1 and id = $2", [business.id, sourceId]);
+        await client.query(
+          `insert into business_sources (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
+           values ($1, $2, $3, $3, $4, 'faq', 'faq', 'ready', $5, now())`,
+          [sourceId, business.id, sourceUrl, source.title, source.contentHash],
+        );
+        await client.query(
+          `insert into knowledge_chunks (id, business_id, source_id, content, content_hash, metadata)
+           values ($1, $2, $3, $4, $5, $6)`,
+          [chunk.id, business.id, sourceId, chunk.content, chunk.contentHash, JSON.stringify(chunk.metadata)],
+        );
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback").catch(() => undefined);
+        await setKnowledgeIndexState(business, gap, "failed", null, error instanceof Error ? error.message.slice(0, 500) : "Knowledge answer indexing failed");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
 
-  await pool.query("delete from knowledge_chunks where business_id = $1 and source_id = $2", [business.id, sourceId]);
-  await pool.query("delete from business_sources where business_id = $1 and id = $2", [business.id, sourceId]);
-  await pool.query(
-    `insert into business_sources (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
-     values ($1, $2, $3, $3, $4, 'faq', 'faq', 'ready', $5, now())`,
-    [sourceId, business.id, sourceUrl, source.title, source.contentHash],
-  );
-  await pool.query(
-    `insert into knowledge_chunks (id, business_id, source_id, content, content_hash, metadata)
-     values ($1, $2, $3, $4, $5, $6)`,
-    [chunk.id, business.id, sourceId, chunk.content, chunk.contentHash, JSON.stringify(chunk.metadata)],
-  );
-  return enqueueAndRunEmbeddingJob(business);
+    business.sources = business.sources.filter((candidate) => candidate.id !== previousSource?.id).concat(source);
+    business.chunks = business.chunks.filter((candidate) => candidate.sourceId !== sourceId).concat(chunk);
+    const indexingStatus = pool ? await enqueueAndRunEmbeddingJob(business) : "ready";
+    const indexStatus: KnowledgeIndexStatus = indexingStatus === "queued" || (pool && !embeddingsConfigured()) ? "pending" : "ready";
+    await setKnowledgeIndexState(business, gap, indexStatus, new Date().toISOString());
+    return indexStatus === "pending" ? "queued" : "ready";
+  } catch (error) {
+    if (gap.indexStatus !== "failed") {
+      await setKnowledgeIndexState(business, gap, "failed", gap.indexedAt, error instanceof Error ? error.message.slice(0, 500) : "Knowledge answer indexing failed");
+    }
+    throw error;
+  }
 }
 
-async function resolveKnowledgeGap(business: Business, question: string, approvedAnswer: string, answerMode: KnowledgeAnswerMode = "knowledge"): Promise<{ gap: KnowledgeGap; indexingStatus: "queued" | "ready" }> {
+async function ensureKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap): Promise<void> {
+  if (gap.status !== "resolved" || !gap.approvedAnswer) return;
+  const expectedContentHash = contentHash(`${gap.question}\n${gap.approvedAnswer}`);
+  const indexedChunk = business.chunks.find((chunk) => chunk.metadata.sourceType === "knowledge_answer"
+    && chunk.metadata.knowledgeGapQuestion === gap.question
+    && chunk.contentHash === expectedContentHash);
+  if (!indexedChunk) {
+    await replaceKnowledgeAnswerIndex(business, gap);
+    return;
+  }
+  const embeddingReady = indexedChunk.embeddingModel === embeddingModel() && indexedChunk.embeddingDimensions === embeddingDimensions();
+  const status = !pool || embeddingReady ? "ready" : "pending";
+  if (gap.indexStatus !== status || !gap.indexedAt) {
+    await setKnowledgeIndexState(business, gap, status, gap.indexedAt ?? new Date().toISOString());
+  }
+  if (pool && !embeddingReady) await enqueueAndRunEmbeddingJob(business);
+}
+
+async function resolveKnowledgeGap(business: Business, question: string, approvedAnswer: string, answerMode: KnowledgeAnswerMode = "knowledge"): Promise<{ gap: KnowledgeGap; indexingStatus: "queued" | "ready" | "failed" }> {
   const key = question.toLowerCase().replace(/\s+/g, " ").trim();
   const gap = business.knowledgeGaps.get(key);
   if (!gap) throw httpError(404, "Knowledge gap not found");
@@ -2796,11 +2884,14 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
   gap.approvedAnswer = approvedAnswer;
   gap.answerMode = answerMode;
   gap.lastSeenAt = new Date().toISOString();
+  gap.updatedAt = gap.lastSeenAt;
+  gap.indexStatus = "pending";
+  gap.indexError = null;
   if (pool) {
     try {
       await pool.query(
         `update knowledge_gaps
-         set status = 'resolved', approved_answer = $3, answer_mode = $4, last_seen_at = $5
+         set status = 'resolved', approved_answer = $3, answer_mode = $4, last_seen_at = $5, updated_at = now(), index_status = 'pending', index_error = null
          where business_id = $1 and question = $2`,
         [business.id, gap.question, approvedAnswer, answerMode, gap.lastSeenAt],
       );
@@ -2814,7 +2905,12 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
       );
     }
   }
-  return { gap, indexingStatus: await replaceKnowledgeAnswerIndex(business, gap) };
+  try {
+    return { gap, indexingStatus: await replaceKnowledgeAnswerIndex(business, gap) };
+  } catch (error) {
+    app.log.error({ error, businessId: business.id, question: gap.question }, "Knowledge answer saved but indexing failed");
+    return { gap, indexingStatus: "failed" };
+  }
 }
 
 async function persistAgentConfig(business: Business): Promise<void> {
@@ -4830,17 +4926,98 @@ function rememberGap(business: Business, question: string, intent: RetrievalInte
   if (existing) {
     existing.occurrenceCount += 1;
     existing.lastSeenAt = now;
+    existing.updatedAt = now;
     existing.intent = intent;
     existing.reason = reason;
     return existing;
   }
-  const gap: KnowledgeGap = { question, occurrenceCount: 1, status: "open", approvedAnswer: null, answerMode: "knowledge", lastSeenAt: now, intent, reason };
+  const gap: KnowledgeGap = {
+    question,
+    occurrenceCount: 1,
+    status: "open",
+    approvedAnswer: null,
+    answerMode: "knowledge",
+    lastSeenAt: now,
+    updatedAt: now,
+    indexedAt: null,
+    indexStatus: "not_indexed",
+    indexError: null,
+    intent,
+    reason,
+  };
   business.knowledgeGaps.set(key, gap);
   return gap;
 }
 
-type RetrievalMatch = { chunk: KnowledgeChunk; score: number; evidenceScore: number };
-type RetrievalResult = { matches: RetrievalMatch[]; mode: string; latencyMs: number };
+type RetrievalCandidateDiagnostic = {
+  rank: number;
+  chunkId: string;
+  sourceId: string;
+  source: string;
+  url: string;
+  headingPath: string[];
+  lexicalScore: number | null;
+  vectorScore: number | null;
+  fusionScore: number;
+  evidenceScore: number;
+  sourceType: string;
+  sourceBoost: number;
+  rerankScore: number | null;
+  selected: boolean;
+  rejectionReason: string | null;
+};
+
+type RetrievalMatch = {
+  chunk: KnowledgeChunk;
+  score: number;
+  evidenceScore: number;
+  lexicalScore?: number | null;
+  vectorScore?: number | null;
+  lexicalRank?: number | null;
+  vectorRank?: number | null;
+  fusionScore?: number;
+};
+type RetrievalResult = {
+  matches: RetrievalMatch[];
+  mode: string;
+  latencyMs: number;
+  normalizedQuery: string;
+  expandedQuery: string;
+  candidates: RetrievalCandidateDiagnostic[];
+};
+
+type RetrievalContext = {
+  normalizedQuery: string;
+  expandedQuery: string;
+  intent: RetrievalIntent;
+};
+
+function retrievalContext(
+  business: Business,
+  question: string,
+  conversation?: Conversation,
+  currentPage?: string | null,
+): RetrievalContext {
+  const normalizedQuery = question.trim().replace(/\s+/g, " ");
+  const intent = classifyQuestionIntent(normalizedQuery);
+  const parts = [normalizedQuery];
+  if (intent === "getting_started") {
+    parts.push(`${business.name} onboarding`, "start using the product", "first steps", "create a first task", "try signup free trial");
+  }
+  const recentVisitorContext = conversation?.messages
+    .filter((message) => message.role === "user" && message.content.trim() && message.content.trim() !== question.trim())
+    .slice(-2)
+    .map((message) => message.content.trim().slice(0, 240));
+  if (recentVisitorContext?.length) parts.push(`conversation context ${recentVisitorContext.join(" ")}`);
+  if (currentPage) {
+    try {
+      parts.push(`current page ${new URL(currentPage).pathname}`);
+    } catch {
+      // Ignore an invalid page hint; the visitor's question remains usable.
+    }
+  }
+  return { normalizedQuery, expandedQuery: parts.join(" "), intent };
+}
 
 function retrievalTokens(question: string, intent: RetrievalIntent): string[] {
   const intentTerms: Record<RetrievalIntent, string[]> = {
@@ -4858,6 +5035,7 @@ function retrievalTokens(question: string, intent: RetrievalIntent): string[] {
     calendar: ["calendar", "calendars", "scheduling", "schedule", "sync", "outlook", "google"],
     voice: ["voice", "dictation", "spoken", "speak", "audio"],
     teams: ["team", "teams", "workspace", "collaboration", "collaborate", "users"],
+    getting_started: ["onboarding", "onboard", "start", "started", "begin", "first", "steps", "try", "signup", "sign", "free", "task", "planning", "reminder", "calendar", "feature", "product"],
     unsupported: [],
     general: [],
   };
@@ -4876,23 +5054,49 @@ function contentEvidenceScore(content: string, question: string, intent: Retriev
   return Math.max(0, Math.min(1, lexicalEvidence * 0.45 + Math.max(0, Math.min(1, vectorScore)) * 0.55));
 }
 
-function memoryRetrieval(business: Business, question: string): RetrievalResult {
+function memoryRetrieval(business: Business, question: string, expandedQuery = question, intent = classifyQuestionIntent(question)): RetrievalResult {
   const startedAt = Date.now();
-  const intent = classifyQuestionIntent(question);
-  const tokens = retrievalTokens(question, intent);
+  const tokens = retrievalTokens(expandedQuery, intent);
   const matches = business.chunks.map((chunk) => {
     const lower = chunk.content.toLowerCase();
     const score = tokens.reduce((total, token) => total + (lower.includes(token) ? 1 : 0), 0);
-    return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, question, intent, null, null) };
+    return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, expandedQuery, intent, null, null) };
   }).filter((item) => item.score > 0);
-  return { matches: rankMatches(matches, business.sources, intent), mode: "memory_lexical", latencyMs: Date.now() - startedAt };
+  const ranked = rankMatches(matches, business.sources, intent, 10);
+  return {
+    matches: ranked,
+    mode: "memory_lexical",
+    latencyMs: Date.now() - startedAt,
+    normalizedQuery: question,
+    expandedQuery,
+    candidates: ranked.map((match, index) => {
+      const source = business.sources.find((item) => item.id === match.chunk.sourceId);
+      return {
+        rank: index + 1,
+        chunkId: match.chunk.id,
+        sourceId: match.chunk.sourceId,
+        source: source?.title ?? "Business source",
+        url: source?.url ?? "",
+        headingPath: Array.isArray(match.chunk.metadata.headingPath) ? match.chunk.metadata.headingPath.filter((item): item is string => typeof item === "string") : [],
+        lexicalScore: null,
+        vectorScore: null,
+        fusionScore: match.score,
+        evidenceScore: match.evidenceScore,
+        sourceType: match.sourceType ?? "web_page",
+        sourceBoost: match.sourceBoost ?? 0,
+        rerankScore: match.score,
+        selected: index < 4,
+        rejectionReason: null,
+      };
+    }),
+  };
 }
 
-async function databaseRetrieval(business: Business, question: string): Promise<RetrievalResult | null> {
+async function databaseRetrieval(business: Business, question: string, expandedQuery = question, intent = classifyQuestionIntent(question)): Promise<RetrievalResult | null> {
   if (!pool) return null;
   const startedAt = Date.now();
   try {
-    const lexicalQuery = retrievalTokens(question, classifyQuestionIntent(question)).map((token) => `${token}:*`).join(" | ");
+    const lexicalQuery = retrievalTokens(expandedQuery, intent).map((token) => `${token}:*`).join(" | ");
     const lexicalResult = await pool.query<Record<string, unknown>>(
       `select id, source_id, content, content_hash, metadata,
               ts_rank_cd(search_vector, to_tsquery('simple', $2)) as lexical_score
@@ -4907,7 +5111,7 @@ async function databaseRetrieval(business: Business, question: string): Promise<
     let queryVector: number[] | null = null;
     if (embeddingsConfigured()) {
       try {
-        queryVector = (await embedTexts([question]))?.[0] ?? null;
+        queryVector = (await embedTexts([expandedQuery]))?.[0] ?? null;
       } catch (error) {
         app.log.warn({ error: error instanceof Error ? error.message : "unknown embedding error" }, "Query embedding skipped");
       }
@@ -4940,7 +5144,7 @@ async function databaseRetrieval(business: Business, question: string): Promise<
       else records.set(id, { row, vectorRank: index + 1 });
     });
 
-    const matches = [...records.values()].map(({ row, lexicalRank, vectorRank }) => ({
+    const matches: RetrievalMatch[] = [...records.values()].map(({ row, lexicalRank, vectorRank }) => ({
       chunk: {
         id: String(row.id),
         sourceId: String(row.source_id),
@@ -4949,19 +5153,56 @@ async function databaseRetrieval(business: Business, question: string): Promise<
         metadata: asRecord(row.metadata),
       },
       score: (lexicalRank ? 1 / (60 + lexicalRank) : 0) + (vectorRank ? 1 / (60 + vectorRank) : 0),
+      fusionScore: (lexicalRank ? 1 / (60 + lexicalRank) : 0) + (vectorRank ? 1 / (60 + vectorRank) : 0),
+      lexicalScore: row.lexical_score === undefined || row.lexical_score === null ? null : Number(row.lexical_score),
+      vectorScore: row.vector_score === undefined || row.vector_score === null ? null : Number(row.vector_score),
+      lexicalRank: lexicalRank ?? null,
+      vectorRank: vectorRank ?? null,
       evidenceScore: contentEvidenceScore(
         String(row.content),
-        question,
-        classifyQuestionIntent(question),
+        expandedQuery,
+        intent,
         row.lexical_score === undefined || row.lexical_score === null ? null : Number(row.lexical_score),
         row.vector_score === undefined || row.vector_score === null ? null : Number(row.vector_score),
       ),
     }));
 
+    const ranked = rankMatches(matches, business.sources, intent, 10);
+    const selectedByChunk = new Map(ranked.map((match) => [match.chunk.id, match]));
+    const sourceById = new Map(business.sources.map((source) => [source.id, source]));
+    const candidates = [...records.values()].map(({ row, lexicalRank, vectorRank }) => {
+      const chunkId = String(row.id);
+      const match = matches.find((candidate) => candidate.chunk.id === chunkId);
+      const selected = selectedByChunk.get(chunkId);
+      const source = sourceById.get(String(row.source_id));
+      const metadata = asRecord(row.metadata);
+      const allowed = !source || sourceAllowedForIntent(intent, source);
+      return {
+        rank: 0,
+        chunkId,
+        sourceId: String(row.source_id),
+        source: source?.title ?? "Business source",
+        url: source?.url ?? "",
+        headingPath: Array.isArray(metadata.headingPath) ? metadata.headingPath.filter((item): item is string => typeof item === "string") : [],
+        lexicalScore: row.lexical_score === undefined || row.lexical_score === null ? null : Number(row.lexical_score),
+        vectorScore: row.vector_score === undefined || row.vector_score === null ? null : Number(row.vector_score),
+        fusionScore: match?.score ?? 0,
+        evidenceScore: match?.evidenceScore ?? 0,
+        sourceType: source ? sourceSemanticType(source) : "web_page",
+        sourceBoost: source ? sourceBoost(intent, source) : 0,
+        rerankScore: selected?.score ?? null,
+        selected: Boolean(selected),
+        rejectionReason: !allowed ? "irrelevant_source_type" : selected ? null : "reranked_below_top_10",
+      } satisfies RetrievalCandidateDiagnostic;
+    }).sort((left, right) => right.fusionScore - left.fusionScore || right.evidenceScore - left.evidenceScore)
+      .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
     return {
-      matches: rankMatches(matches, business.sources, classifyQuestionIntent(question)),
+      matches: ranked,
       mode: vectorResult.rowCount ? "hybrid_rrf" : "postgres_full_text",
       latencyMs: Date.now() - startedAt,
+      normalizedQuery: question,
+      expandedQuery,
+      candidates: candidates.slice(0, 10),
     };
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : "unknown retrieval error", businessId: business.id }, "Database retrieval fell back to memory");
@@ -4997,6 +5238,7 @@ function extractiveAnswer(
     calendar: /\b(calendar|scheduling|schedule|sync|outlook|google)\b/i,
     voice: /\b(voice|dictat|spoken|speak|audio)\b/i,
     teams: /\b(team|workspace|collaborat|users|multiple people)\b/i,
+    getting_started: /\b(start|get started|begin|first|try|signup|sign up|task|planning|reminder|calendar|feature|product|voice|use)\b/i,
     unsupported: /$^/i,
     general: /.+/i,
   };
@@ -5027,8 +5269,32 @@ function answerWithGettingStartedCta(business: Business, question: string, answe
 
 const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|feature|features|capabilit|automation|development|application|integration|tool|tools|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team|build|software)\b/i;
 
-async function answerQuestion(business: Business, question: string, options: { recordGap?: boolean } = {}) {
+function resolvedKnowledgeAnswer(business: Business, question: string, intent: RetrievalIntent): KnowledgeGap | null {
+  const normalized = question.toLowerCase().replace(/\s+/g, " ").trim();
+  const exact = business.knowledgeGaps.get(normalized);
+  if (exact?.status === "resolved" && exact.approvedAnswer) return exact;
+  const questionTokens = new Set(tokenise(normalized));
+  if (!questionTokens.size) return null;
+  return [...business.knowledgeGaps.values()]
+    .filter((gap) => gap.status === "resolved" && Boolean(gap.approvedAnswer))
+    .filter((gap) => {
+      const gapIntent = !gap.intent || gap.intent === "general" ? classifyQuestionIntent(gap.question) : gap.intent;
+      if (gapIntent !== intent) return false;
+      const gapTokens = new Set(tokenise(gap.question));
+      const overlap = [...questionTokens].filter((token) => gapTokens.has(token)).length / questionTokens.size;
+      return overlap >= 0.5;
+    })
+    .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))[0] ?? null;
+}
+
+async function answerQuestion(
+  business: Business,
+  question: string,
+  options: { recordGap?: boolean; conversation?: Conversation; currentPage?: string | null } = {},
+) {
+  const initialIntent = classifyQuestionIntent(question);
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
+  const approvedGap = resolvedKnowledgeAnswer(business, question, initialIntent);
   if (/^(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you)\b[.!? ]*$/i.test(question.trim())) {
     const modelUsage: ModelUsage = {
       route: "tier0",
@@ -5050,7 +5316,7 @@ async function answerQuestion(business: Business, question: string, options: { r
       modelUsage,
     };
   }
-  if (existingGap?.status === "resolved" && existingGap.approvedAnswer && existingGap.answerMode === "fixed_response") {
+  if (approvedGap?.approvedAnswer && approvedGap.answerMode === "fixed_response") {
     const modelUsage: ModelUsage = {
       route: "tier0",
       model: null,
@@ -5061,7 +5327,7 @@ async function answerQuestion(business: Business, question: string, options: { r
       latencyMs: 0,
     };
     return {
-      answer: existingGap.approvedAnswer,
+      answer: approvedGap.approvedAnswer,
       grounded: true,
       citations: [],
       knowledgeGap: null,
@@ -5071,8 +5337,10 @@ async function answerQuestion(business: Business, question: string, options: { r
       modelUsage,
     };
   }
-  const intent = classifyQuestionIntent(question);
-  const retrieval = await databaseRetrieval(business, question) ?? memoryRetrieval(business, question);
+  const queryContext = retrievalContext(business, question, options.conversation, options.currentPage);
+  const intent = queryContext.intent;
+  const retrieval = await databaseRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, intent)
+    ?? memoryRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, intent);
   recordRetrieval(retrieval.mode, retrieval.latencyMs);
   const match = retrieval.matches[0];
   const secondMatch = retrieval.matches[1];
@@ -5086,10 +5354,14 @@ async function answerQuestion(business: Business, question: string, options: { r
   const retrievalContract = {
     mode: retrieval.mode,
     latencyMs: retrieval.latencyMs,
+    normalizedQuery: retrieval.normalizedQuery,
+    expandedQuery: retrieval.expandedQuery,
     intent,
     candidateCount: retrieval.matches.length,
     topScore: answerability.score,
+    answerabilityThreshold: answerability.threshold,
     answerability: answerability.reason,
+    candidates: retrieval.candidates,
   };
 
   const decision = routeQuestion({
@@ -6567,7 +6839,7 @@ async function persistConversationExchange(
   return result;
 }
 
-async function recordConversationQuestion(business: Business, conversation: Conversation, question: string) {
+async function recordConversationQuestion(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null } = {}) {
   if (conversation.status === "RESOLVED") {
     conversation.status = "AI_ACTIVE";
     conversation.resolvedAt = null;
@@ -6591,7 +6863,8 @@ async function recordConversationQuestion(business: Business, conversation: Conv
     };
     return persistConversationExchange(business, conversation, question, result);
   }
-  const result: ConversationAnswerResult = await continueActionConversation(business, conversation, question) ?? await answerQuestion(business, question);
+  const result: ConversationAnswerResult = await continueActionConversation(business, conversation, question)
+    ?? await answerQuestion(business, question, { conversation, currentPage: options.currentPage });
   return persistConversationExchange(business, conversation, question, result);
 }
 
@@ -10018,8 +10291,10 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
-  const question = requiredString(asRecord(request.body).question, "question", 1_000);
-  const result = await recordConversationQuestion(business, conversation, question);
+  const body = asRecord(request.body);
+  const question = requiredString(body.question, "question", 1_000);
+  const currentPage = optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000);
+  const result = await recordConversationQuestion(business, conversation, question, { currentPage });
   return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
 });
 

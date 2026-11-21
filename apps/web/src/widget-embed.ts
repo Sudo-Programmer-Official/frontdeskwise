@@ -423,7 +423,7 @@ import {
       }
       addMessage(question, "user");
       updateState({ typing: true });
-      const answer = await api<{ answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; conversation?: { status?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question }) });
+      const answer = await api<{ answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; conversation?: { status?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, pageUrl: window.location.href }) });
       updateState({ typing: false });
       addMessage(answer.answer, "assistant", answer.citations || []);
       renderConversationStatus(answer.conversation?.status);

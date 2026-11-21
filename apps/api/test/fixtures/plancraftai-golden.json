@@ -1,4 +1,12 @@
 [
+  {"id":"getting-started-01","category":"getting_started","question":"How do I get started with PlanCraftAI?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["homepage","product","pricing"]},
+  {"id":"getting-started-02","category":"getting_started","question":"How do I start?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["homepage","product"]},
+  {"id":"getting-started-03","category":"getting_started","question":"Where should I begin?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["homepage","product"]},
+  {"id":"getting-started-04","category":"getting_started","question":"How can I try PlanCraftAI?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["homepage","pricing"]},
+  {"id":"getting-started-05","category":"getting_started","question":"What do I do first?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["homepage","product"]},
+  {"id":"getting-started-06","category":"getting_started","question":"How do I create my first task?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["product","homepage"]},
+  {"id":"getting-started-07","category":"getting_started","question":"How does PlanCraftAI work?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["product","homepage"]},
+  {"id":"getting-started-08","category":"getting_started","question":"How do I start using the app?","expectedIntent":"getting_started","answerable":true,"expectedSourceTypes":["homepage","product"]},
   {"id":"services-01","category":"product_services","question":"What services does PlanCraftAI offer?","expectedIntent":"services","answerable":true,"expectedSourceTypes":["product","service","reminders","voice","calendar"]},
   {"id":"services-02","category":"product_services","question":"What features does PlanCraftAI provide?","expectedIntent":"services","answerable":true,"expectedSourceTypes":["product","service"]},
   {"id":"services-03","category":"product_services","question":"What does PlanCraftAI offer for planning work?","expectedIntent":"services","answerable":true,"expectedSourceTypes":["product","service","calendar"]},
