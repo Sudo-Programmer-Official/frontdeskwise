@@ -28,6 +28,16 @@ export interface WidgetCitation {
   pageType?: string;
 }
 
+export interface WidgetPrimaryCta {
+  actionId: string;
+  key: string;
+  label: string;
+  executionMode: "DIRECT_LINK" | "FORM_FLOW" | "PROVIDER_FLOW" | "PHONE" | "EMAIL" | "HANDOFF" | "API_ACTION";
+  trackingKey: string;
+  url?: string;
+  question?: string;
+}
+
 export interface WidgetMessage {
   id?: string;
   remoteKey?: string;
@@ -95,6 +105,7 @@ export interface WidgetState {
   openedByUser?: boolean;
   messages: WidgetMessage[];
   quickActions: WidgetQuickAction[];
+  primaryCta?: WidgetPrimaryCta | null;
   action?: WidgetAction | null;
   actionStep?: number;
   actionValues?: Record<string, string>;
@@ -123,6 +134,7 @@ export interface WidgetRendererOptions {
   onOpen?: (source: "launcher" | "proactive", userInitiated?: boolean) => void;
   onClose?: () => void;
   onAsk?: (question: string) => void;
+  onPrimaryCtaClick?: (cta: WidgetPrimaryCta) => void;
   onLeadSubmit?: (values: { name: string; email: string; phone: string; consent: boolean }) => void;
   onActionSubmit?: (values: Record<string, string>, action: WidgetAction) => void;
   onActionValuesChange?: (values: Record<string, string>, action: WidgetAction) => void;
@@ -214,6 +226,8 @@ const WIDGET_STYLES = `
   .fdw-title-group strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; letter-spacing: -.01em; }
   .fdw-title-group small { display: flex; align-items: center; gap: 5px; color: currentColor; opacity: .74; font-size: 10px; }
   .fdw-status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #2bd99b; box-shadow: 0 0 0 2px rgba(43,217,155,.14); }
+  .fdw-status-dot.fdw-status-dot-waiting { background: #f6b73c; box-shadow: 0 0 0 2px rgba(246,183,60,.16); }
+  .fdw-status-dot.fdw-status-dot-inactive { background: #a5b4c7; box-shadow: 0 0 0 2px rgba(165,180,199,.16); }
   .fdw-header-actions { display: flex; gap: 4px; }
   .fdw-header-actions button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; color: currentColor; background: transparent; cursor: pointer; font-size: 17px; }
   .fdw-header-actions button:hover, .fdw-header-actions button:focus-visible { background: rgba(255,255,255,.16); outline: none; }
@@ -231,6 +245,8 @@ const WIDGET_STYLES = `
   .fdw-quick-actions:empty { display: none; }
   .fdw-quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
   .fdw-quick-actions button:hover, .fdw-quick-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
+  .fdw-quick-actions .fdw-primary-cta { display: inline-flex; align-items: center; justify-content: center; padding: 9px 13px; border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); font-weight: 800; text-decoration: none; }
+  .fdw-quick-actions .fdw-primary-cta:hover, .fdw-quick-actions .fdw-primary-cta:focus-visible { color: var(--fdw-accent-text, #fff); background: color-mix(in srgb, var(--fdw-accent, #0d6efd) 88%, #000); }
   .fdw-action-form, .fdw-lead { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
   .fdw-action-error { color: #a54b45; font-size: 11px; line-height: 1.4; }
   .fdw-action-form:empty, .fdw-lead[hidden] { display: none; }
@@ -401,6 +417,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   const panel = root.querySelector<HTMLElement>(".fdw-panel")!;
   const title = root.querySelector<HTMLElement>(".fdw-title")!;
   const subtitleText = root.querySelector<HTMLElement>(".fdw-subtitle-text")!;
+  const statusDot = root.querySelector<HTMLElement>(".fdw-status-dot")!;
   const logoSlot = root.querySelector<HTMLElement>(".fdw-orb")!;
   const messages = root.querySelector<HTMLElement>(".fdw-messages")!;
   const systemStatus = root.querySelector<HTMLElement>(".fdw-system-status")!;
@@ -478,6 +495,30 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderQuickActions(): void {
     quickActions.replaceChildren();
+    const primaryCta = state.primaryCta;
+    if (primaryCta?.label) {
+      if (primaryCta.url) {
+        const link = element<HTMLAnchorElement>(documentRef, "a", "fdw-primary-cta");
+        const safeUrl = safeLinkUrl(primaryCta.url);
+        if (safeUrl) {
+          link.href = safeUrl;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = primaryCta.label;
+          link.addEventListener("click", () => options.onPrimaryCtaClick?.(primaryCta));
+          quickActions.appendChild(link);
+        }
+      } else {
+        const button = element<HTMLButtonElement>(documentRef, "button", "fdw-primary-cta");
+        button.type = "button";
+        button.textContent = primaryCta.label;
+        button.addEventListener("click", () => {
+          options.onPrimaryCtaClick?.(primaryCta);
+          if (primaryCta.question) options.onAsk?.(primaryCta.question);
+        });
+        quickActions.appendChild(button);
+      }
+    }
     for (const action of state.quickActions.slice(0, 4)) {
       if (!action?.label) continue;
       const button = element<HTMLButtonElement>(documentRef, "button");
@@ -568,11 +609,15 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderHandoff(): void {
     const status = state.handoffStatus;
-    if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") subtitleText.textContent = "Waiting for a team member";
-    else if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED") subtitleText.textContent = "Connected to the team";
+    const waiting = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+    const inactive = status === "RESOLVED" || status === "EXPIRED";
+    statusDot.classList.toggle("fdw-status-dot-waiting", waiting);
+    statusDot.classList.toggle("fdw-status-dot-inactive", inactive);
+    if (waiting) subtitleText.textContent = "Waiting for a team member";
+    else if (status === "HUMAN_ACTIVE") subtitleText.textContent = "Team member joined";
     else if (status === "RESOLVED") subtitleText.textContent = "Conversation resolved";
     else if (status === "EXPIRED") subtitleText.textContent = "Starting a fresh conversation";
-    else subtitleText.textContent = config.showAiDisclosure === false ? "Here to help" : "Usually replies in a few seconds";
+    else subtitleText.textContent = config.showAiDisclosure === false ? "Here to help" : "AI assistant online";
     const notice = state.handoffNotice;
     handoffCopy.textContent = notice?.message ?? "";
     handoffActions.hidden = notice?.choice !== true;

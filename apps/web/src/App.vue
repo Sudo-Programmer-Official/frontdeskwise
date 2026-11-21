@@ -257,6 +257,7 @@ interface TestConversationMessage {
   grounded: boolean;
   citations: Array<{ title?: string; url?: string; pageType?: string }>;
   quickActions: Array<{ label: string; question: string }>;
+  primaryCta?: { actionId: string; key: string; label: string; executionMode: "DIRECT_LINK" | "FORM_FLOW" | "PROVIDER_FLOW" | "PHONE" | "EMAIL" | "HANDOFF" | "API_ACTION"; trackingKey: string; url?: string; question?: string } | null;
   action: TestConversationAction | null;
   formValues: Record<string, string>;
 }
@@ -270,6 +271,7 @@ type TestAnswerPayload = {
   retrieval?: { mode?: string };
   citations?: Array<{ title?: string; url?: string; pageType?: string }>;
   quickActions?: Array<{ label: string; question: string }>;
+  primaryCta?: TestConversationMessage["primaryCta"];
   action?: TestConversationAction;
 };
 
@@ -282,6 +284,10 @@ interface ActionFlow {
   triggerPhrases: string[];
   triggerIntents: string[];
   captureMode: "auto" | "conversational" | "form" | "hybrid";
+  executionMode?: "DIRECT_LINK" | "FORM_FLOW" | "PROVIDER_FLOW" | "PHONE" | "EMAIL" | "HANDOFF" | "API_ACTION";
+  attachmentPolicy?: "always" | "sales_intent" | "high_intent_only" | "explicit_request_only" | "never_auto";
+  trackingKey?: string;
+  destination?: { url?: string; label?: string } | null;
   fields: ActionField[];
   optionalFields?: string[];
   steps?: Array<Record<string, unknown>>;
@@ -309,6 +315,7 @@ interface ActionFlow {
   version?: number;
   createdAt: string;
   updatedAt: string;
+  isPrimary?: boolean;
 }
 
 interface ActionDelivery {
@@ -1195,6 +1202,8 @@ const actionsError = ref("");
 const actionsMessage = ref("");
 const selectedActionId = ref("");
 const actionDraft = ref<ActionFlow | null>(null);
+const primaryActionFlow = computed(() => actionFlows.value.find((action) => action.isPrimary) ?? null);
+const recommendedPrimaryAction = computed(() => actionFlows.value.find((action) => action.key === "request_demo" || /\b(try|start|see|view|explore)\b.*\b(demo|trial)\b/i.test(action.name)) ?? null);
 const actionConnectorProvider = computed(() => actionDraft.value?.completion.connector?.provider ?? "none");
 const activeActionIntegrations = computed(() => integrations.value.filter((integration) => integration.connectionStatus === "active"
   && ((actionConnectorProvider.value === "generic_webhook" && integration.provider === "webhook")
@@ -4631,6 +4640,48 @@ async function loadActions() {
   }
 }
 
+async function setPrimaryAction(action: ActionFlow) {
+  if (actionsLoading.value) return;
+  actionsLoading.value = true;
+  actionsError.value = "";
+  actionsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/actions/${action.id}/primary`), {
+      method: "POST",
+      headers: ownerHeaders(),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not set the primary conversion goal.");
+    actionsMessage.value = `${action.name} is now the primary conversion goal`;
+    await loadActions();
+  } catch (error) {
+    actionsError.value = error instanceof Error ? error.message : "Could not set the primary conversion goal.";
+  } finally {
+    actionsLoading.value = false;
+  }
+}
+
+async function clearPrimaryAction(action: ActionFlow) {
+  if (actionsLoading.value) return;
+  actionsLoading.value = true;
+  actionsError.value = "";
+  actionsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/actions/${action.id}/primary`), {
+      method: "DELETE",
+      headers: ownerHeaders(),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not clear the primary conversion goal.");
+    actionsMessage.value = "Primary conversion goal cleared";
+    await loadActions();
+  } catch (error) {
+    actionsError.value = error instanceof Error ? error.message : "Could not clear the primary conversion goal.";
+  } finally {
+    actionsLoading.value = false;
+  }
+}
+
 async function retryActionDelivery(delivery: ActionDelivery) {
   if (actionsLoading.value) return;
   actionsLoading.value = true;
@@ -6028,6 +6079,7 @@ function appendTestAssistantMessage(payload: TestAnswerPayload): TestConversatio
     grounded: Boolean(payload.grounded),
     citations: payload.citations ?? [],
     quickActions: payload.quickActions ?? [],
+    primaryCta: payload.primaryCta ?? null,
     action: payload.action ?? null,
     formValues: actionFormValues(payload.action),
   };
@@ -6946,11 +6998,16 @@ function startMarketingDemo() {
           <p v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</p>
 
           <template v-if="!actionDraft">
+            <section class="primary-goal-card">
+              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose what visitors should do next' }}</h2><p>{{ primaryActionFlow ? 'This is the main action the assistant can recommend after relevant answers.' : 'Your assistant can answer questions, but no primary conversion goal is configured yet.' }}</p></div>
+              <div class="primary-goal-actions"><span v-if="primaryActionFlow" class="primary-goal-status">✓ Configured</span><button v-if="primaryActionFlow" class="outline-button small" type="button" @click="selectAction(primaryActionFlow)">Edit goal</button><button v-else-if="recommendedPrimaryAction" class="primary-button small" type="button" :disabled="actionsLoading" @click="setPrimaryAction(recommendedPrimaryAction)">Use {{ recommendedPrimaryAction.name }} as primary</button><button v-else class="primary-button small" type="button" @click="actionTemplateChooserOpen = true">Choose a primary goal</button></div>
+              <div v-if="!primaryActionFlow && recommendedPrimaryAction" class="primary-goal-recommendation"><span>Recommended from your website</span><strong>{{ recommendedPrimaryAction.name }}</strong><small>{{ recommendedPrimaryAction.destination?.url || recommendedPrimaryAction.completion.linkUrl || 'Owner-confirmed action' }}</small></div>
+            </section>
             <section v-if="actionFlows.length" class="action-dashboard-list">
               <div class="action-section-heading"><div><p class="eyebrow">Your actions</p><h3>Conversion flows</h3><p>Give visitors a clear next step and keep the outcome visible to your team.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
               <article v-for="action in actionFlows" :key="action.id" class="action-summary-card">
-                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }}</h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
-                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button class="outline-button small" type="button" @click="runActionTest(action)">Test flow</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
+                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }} <span v-if="action.isPrimary" class="primary-action-label">Primary goal</span></h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span v-if="action.executionMode">{{ action.executionMode }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
+                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button class="outline-button small" type="button" :disabled="actionsLoading" @click="action.isPrimary ? clearPrimaryAction(action) : setPrimaryAction(action)">{{ action.isPrimary ? 'Clear primary' : 'Make primary' }}</button><button class="outline-button small" type="button" @click="runActionTest(action)">Test flow</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
               </article>
             </section>
             <section v-else class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="actionTemplateChooserOpen = true">Create your first action <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
@@ -6995,6 +7052,12 @@ function startMarketingDemo() {
                     <div v-if="!integrations.length" class="action-connection-empty"><strong>No integration connected</strong><span>Connect one in Settings when you need delivery outside FrontDeskWise.</span><button class="outline-button small" type="button" @click="openSettingsTab('integrations')">Connect an integration</button></div>
                     <div v-else class="action-delivery-queue"><div class="panel-heading"><div><p class="eyebrow">Delivery history</p><h3>{{ actionDeliveriesFor(actionDraft).length ? 'Recent deliveries' : 'No deliveries yet' }}</h3></div><button class="text-button" type="button" :disabled="actionsLoading" @click="loadActions">Refresh</button></div><div v-for="delivery in actionDeliveriesFor(actionDraft)" :key="delivery.id" class="action-delivery-row"><span><strong>{{ delivery.provider }}</strong><small>{{ delivery.attempts }} attempt{{ delivery.attempts === 1 ? '' : 's' }} · {{ new Date(delivery.updatedAt).toLocaleString() }}</small></span><span :class="['status-pill', delivery.status === 'succeeded' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span><button v-if="delivery.status === 'failed'" class="text-button" type="button" :disabled="actionsLoading" @click="retryActionDelivery(delivery)">Retry</button></div></div>
                   </template>
+
+                  <section class="action-semantics-card">
+                    <div><p class="eyebrow">Conversion semantics</p><h3>How should this action behave?</h3><p>These settings control the primary CTA and when it appears after an answer.</p></div>
+                    <div class="action-two-column"><label>Execution mode<select v-model="actionDraft.executionMode"><option value="DIRECT_LINK">Direct link</option><option value="FORM_FLOW">Form flow</option><option value="PROVIDER_FLOW">Provider flow</option><option value="PHONE">Phone</option><option value="EMAIL">Email</option><option value="HANDOFF">Internal handoff</option><option value="API_ACTION">API action</option></select></label><label>When should this appear<select v-model="actionDraft.attachmentPolicy"><option value="sales_intent">When relevant to sales intent</option><option value="high_intent_only">Only for high intent</option><option value="explicit_request_only">Only when explicitly requested</option><option value="always">Frequently</option><option value="never_auto">Never automatically</option></select></label></div>
+                    <label>Tracking key<input v-model="actionDraft.trackingKey" type="text" placeholder="try_demo" /></label>
+                  </section>
 
                   <details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced settings <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Internal action key<input v-model="actionDraft.key" type="text" /></label><label>Trigger intents <input :value="actionDraft.triggerIntents.join(', ')" type="text" placeholder="contact, lead" @input="setActionTriggerIntents" /></label><label>Continue link <span class="optional">optional</span><input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://…" /></label><label>Completion mode<select v-model="actionDraft.completion.completionMode" @change="ensureCompletionLinkTemplate"><option value="native_form">FrontDeskWise native</option><option value="external_provider">External provider link</option><option value="booking_connector">Booking connector</option><option value="payment_link">Payment link</option><option value="human_follow_up">Human follow-up</option></select></label><template v-if="(actionDraft.completion.completionMode === 'external_provider' || actionDraft.completion.completionMode === 'payment_link') && actionDraft.completion.linkTemplate"><label>Provider completion URL<input v-model="actionDraft.completion.linkTemplate.baseUrl" type="url" placeholder="https://provider.example/register" @focus="ensureCompletionLinkTemplate" /></label><label>Prefill mappings <span class="optional">one per line · source.path=providerParameter</span><textarea :value="completionLinkMappingsText" rows="4" placeholder="parent_name=MFName&#10;email=MEmail&#10;student.name=S1FName" @input="setCompletionLinkMappingsFromEvent"></textarea></label></template><p class="form-help">Completion links only include fields you explicitly map. Provider-owned waivers, signatures, and payment details stay on the provider.</p></div></details>
                 </div>

@@ -7,6 +7,7 @@ import {
   type WidgetHealthState,
   type WidgetHandoffStatus,
   type WidgetMessage,
+  type WidgetPrimaryCta,
   type WidgetRendererController,
   type WidgetState,
 } from "./widget-ui/renderer";
@@ -67,7 +68,7 @@ type FrontDeskWiseWindow = Window & {
     proactiveFrequency?: "session" | "24h" | "visit";
   };
   type WidgetConfigResponse = { agent?: AgentConfig };
-  type ConversationPayload = { conversation?: { id?: string; status?: string; leadCaptured?: boolean; lastActivityAt?: string; handoffNotificationStatus?: string }; messages?: Array<{ id?: string; role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
+  type ConversationPayload = { conversation?: { id?: string; status?: string; leadCaptured?: boolean; lastActivityAt?: string; updatedAt?: string; handoffNotificationStatus?: string }; messages?: Array<{ id?: string; role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
 
   class WidgetRequestError extends Error {
     readonly retryable: boolean;
@@ -86,9 +87,11 @@ type FrontDeskWiseWindow = Window & {
   let visitorId = "";
   let conversationId: string | null = null;
   let lastQuestion = "";
-  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, consentGiven: false, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" }, healthState: "LOADING", connectionState: "online" };
+  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], primaryCta: null, actionStep: 0, actionValues: {}, consentGiven: false, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" }, healthState: "LOADING", connectionState: "online" };
   let renderer: WidgetRendererController;
   let pollTimer: number | null = null;
+  let statusSyncInFlight = false;
+  let lastConversationUpdatedAt = "";
   let handoffNoticeTimer: number | null = null;
   let handoffWaiting = false;
   let handoffDismissedKey: string | null = null;
@@ -356,6 +359,7 @@ type FrontDeskWiseWindow = Window & {
         resetConversationUi();
         return;
       }
+      lastConversationUpdatedAt = payload.conversation?.updatedAt || payload.conversation?.lastActivityAt || lastConversationUpdatedAt;
       if (payload.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       renderConversationStatus(payload.conversation?.status, { returning: includeHistory, notificationStatus: payload.conversation?.handoffNotificationStatus });
       const remoteMessages = payload.messages || [];
@@ -391,9 +395,35 @@ type FrontDeskWiseWindow = Window & {
     }
   }
 
+  async function syncConversationStatus(): Promise<void> {
+    if (!conversationId || statusSyncInFlight) return;
+    statusSyncInFlight = true;
+    try {
+      const payload = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/status`);
+      const remoteStatus = payload.conversation?.status || "AI_ACTIVE";
+      if (remoteStatus === "RESOLVED" || remoteStatus === "EXPIRED") {
+        conversationId = null;
+        resetConversationUi();
+        return;
+      }
+      if (payload.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
+      const remoteUpdatedAt = payload.conversation?.updatedAt || payload.conversation?.lastActivityAt || "";
+      const statusChanged = remoteStatus !== (state.handoffStatus || "AI_ACTIVE");
+      const conversationChanged = Boolean(remoteUpdatedAt && remoteUpdatedAt !== lastConversationUpdatedAt);
+      lastConversationUpdatedAt = remoteUpdatedAt || lastConversationUpdatedAt;
+      renderConversationStatus(remoteStatus, { notificationStatus: payload.conversation?.handoffNotificationStatus });
+      if (conversationChanged || statusChanged) await syncConversation();
+    } catch {
+      // Status polling is best-effort; the visitor can continue using the assistant.
+    } finally {
+      statusSyncInFlight = false;
+    }
+  }
+
   function startPolling(): void {
-    if (pollTimer !== null || !state.isOpen) return;
-    pollTimer = window.setInterval(() => void syncConversation(), 5000);
+    if (pollTimer !== null || !state.isOpen || !conversationId) return;
+    void syncConversationStatus();
+    pollTimer = window.setInterval(() => void syncConversationStatus(), 5000);
   }
 
   function stopPolling(): void {
@@ -466,7 +496,10 @@ type FrontDeskWiseWindow = Window & {
       statusAction: configFailed ? "retry" : undefined,
     });
     markPerformance("bootstrap_config_completed", { metadata: { source: bootstrap?.config ? "loader" : "shell" } });
-    if (conversationId && state.isOpen) void syncConversation(shouldHydrateHistory);
+    if (conversationId && state.isOpen) {
+      void syncConversation(shouldHydrateHistory);
+      startPolling();
+    }
     if (!bootstrap) armProactiveEngagement(agent);
   }
 
@@ -597,6 +630,7 @@ type FrontDeskWiseWindow = Window & {
 
   function resetConversationUi(preserveMessage?: WidgetMessage): void {
     stopPolling();
+    lastConversationUpdatedAt = "";
     handoffWaiting = false;
     handoffDismissedKey = null;
     if (handoffNoticeTimer !== null) {
@@ -608,6 +642,7 @@ type FrontDeskWiseWindow = Window & {
       ...state,
       messages: preserveMessage ? [preserveMessage] : [],
       quickActions: config?.widgetQuickActions || [],
+      primaryCta: null,
       action: null,
       actionStep: 0,
       actionValues: {},
@@ -647,7 +682,7 @@ type FrontDeskWiseWindow = Window & {
       return;
     }
     markPerformance("user_message_sent");
-    updateState({ quickActions: [], leadVisible: false, typing: false, statusMessage: "", statusAction: undefined });
+    updateState({ quickActions: [], leadVisible: false, primaryCta: null, typing: false, statusMessage: "", statusAction: undefined });
     lastQuestion = question;
     const softTimer = window.setTimeout(() => updateState({ typingMessage: "Still working…" }), MESSAGE_SOFT_TIMEOUT_MS);
     try {
@@ -666,7 +701,7 @@ type FrontDeskWiseWindow = Window & {
       updateState({ typing: true });
       updateState({ typingMessage: "Assistant is thinking…", healthState: "LOADING" });
       const responseStartedAt = performance.now();
-      const answer = await api<{ conversationId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: { status?: string; leadCaptured?: boolean; handoffNotificationStatus?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
+      const answer = await api<{ conversationId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; primaryCta?: WidgetPrimaryCta | null; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: { status?: string; leadCaptured?: boolean; updatedAt?: string; handoffNotificationStatus?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
       const responseCompletedAt = performance.now();
       markPerformance("first_assistant_content_available", {
         durationMs: Math.round(responseCompletedAt - responseStartedAt),
@@ -680,9 +715,22 @@ type FrontDeskWiseWindow = Window & {
         resetConversationUi();
       }
       if (answer.answer?.trim()) addMessage(answer.answer, "assistant", answer.citations || []);
+      lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       renderConversationStatus(answer.conversation?.status, { notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
-      if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
-      updateState({ quickActions: answer.quickActions || [] });
+      if (conversationId && state.isOpen) startPolling();
+      updateState({ quickActions: answer.quickActions || [], primaryCta: answer.primaryCta || null });
+      if (answer.primaryCta) {
+        telemetry("CTA_SHOWN", {
+          flowId: answer.primaryCta.actionId,
+          metadata: {
+            source: "primary-conversion",
+            actionId: answer.primaryCta.actionId,
+            actionKey: answer.primaryCta.key,
+            trackingKey: answer.primaryCta.trackingKey,
+            executionMode: answer.primaryCta.executionMode,
+          },
+        });
+      }
       renderActionForm(answer.action);
       const leadCaptured = state.leadCaptured === true || answer.conversation?.leadCaptured === true;
       if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
@@ -722,12 +770,13 @@ type FrontDeskWiseWindow = Window & {
     const submissionMessageId = addMessage("Submitted your details.", "user", [], undefined, { status: "sending", retryable: false });
     updateState({ actionError: "" });
     try {
-      const answer = await api<{ answer: string; citations?: WidgetMessage["citations"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent, pageUrl: window.location.href }) });
+      const answer = await api<{ answer: string; citations?: WidgetMessage["citations"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean; updatedAt?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent, pageUrl: window.location.href }) });
       updateMessage(submissionMessageId, { status: "sent" });
       addMessage(answer.answer, "assistant", answer.citations || []);
       updateState({ actionError: "", healthState: "READY" });
+      lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       renderConversationStatus(answer.conversation?.status);
-      if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
+      if (conversationId && state.isOpen) startPolling();
       if (answer.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       renderActionForm(answer.action);
     } catch (error) {
@@ -798,6 +847,7 @@ type FrontDeskWiseWindow = Window & {
       clearProactiveEngagement();
       proactiveShown = true;
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
+      startPolling();
       telemetry("CTA_CLICKED", { metadata: { source } });
       requestAnimationFrame(() => {
         markPerformance("full_shell_visible");
@@ -813,6 +863,9 @@ type FrontDeskWiseWindow = Window & {
       if (config) suppressProactive(config.proactiveFrequency || "session", "opened");
     },
     onAsk: (question) => { void ask(question); },
+    onPrimaryCtaClick: (cta) => {
+      telemetry(cta.executionMode === "DIRECT_LINK" ? "DEMO_LINK_OPENED" : "CTA_CLICKED", { flowId: cta.actionId, metadata: { source: "primary-conversion", actionId: cta.actionId, actionKey: cta.key, trackingKey: cta.trackingKey, executionMode: cta.executionMode } });
+    },
     onRetryConfig: () => { void loadConfig(); },
     onRetryMessage: (message) => { void ask(message.content, { messageId: message.id, clientMessageId: message.status === "failed" ? message.clientMessageId : undefined }); },
     onActionSubmit: (values, action) => { void submitAction(values, action); },

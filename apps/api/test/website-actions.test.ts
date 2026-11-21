@@ -37,14 +37,17 @@ test("visitor request classification separates explanation from explicit action"
   assert.equal(classifyVisitorRequest("I need a quote").mode, "transactional");
   assert.equal(classifyVisitorRequest("Book me an appointment").mode, "transactional");
   assert.equal(classifyVisitorRequest("Sign my child up").mode, "transactional");
+  assert.equal(classifyVisitorRequest("Try the demo").mode, "transactional");
   assert.equal(classifyVisitorRequest("I want a demo").actionIntent, "demo");
 });
 
 test("demo actions are created from evidence and do not trigger on explanatory questions", () => {
-  const candidates = extractWebsiteActions('<a href="/start">Request a demo</a>', "https://example.test/");
+  const candidates = extractWebsiteActions('<a href="/start">Try the demo</a>', "https://example.test/");
   const actions = defaultActionFlows("Example SaaS", "website and online booking", (key) => key, candidates);
   const demo = actions.find((action) => action.actionType === "request_demo");
   assert.equal(demo?.destination?.url, "https://example.test/start");
+  assert.equal(demo?.executionMode, "DIRECT_LINK");
+  assert.equal(demo?.attachmentPolicy, "sales_intent");
   assert.equal(demo?.origin, "discovered");
   assert.equal(demo?.lifecycleStatus, "needs_review");
   assert.equal(demo?.enabled, false);

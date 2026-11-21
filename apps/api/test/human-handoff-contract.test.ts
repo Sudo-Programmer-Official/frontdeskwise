@@ -30,3 +30,21 @@ test("takeover and staff replies use explicit state and transaction boundaries",
   assert.match(server, /kind: "message", authorUserId/);
   assert.match(server, /conversation_messages|persistMessage/);
 });
+
+test("returning a conversation to AI clears live takeover state", () => {
+  assert.match(server, /app\.post\("\/api\/v1\/demo\/:slug\/conversations\/:conversationId\/return-to-ai"/);
+  assert.match(server, /set status = 'AI_ACTIVE', assigned_user_id = null, assigned_at = null/);
+  assert.match(server, /handoff_reason = null, handoff_requested_at = null, handoff_notification_status = null/);
+  assert.match(server, /human_joined_at = null/);
+  assert.match(server, /conversation\.status = "AI_ACTIVE"/);
+  assert.match(server, /conversation\.handoffReason = null/);
+  assert.match(server, /conversation\.handoffRequestedAt = null/);
+  assert.match(server, /conversation\.humanJoinedAt = null/);
+  assert.match(server, /conversation_assignments set status = 'released'/);
+});
+
+test("widget status polling has a lightweight canonical status contract", () => {
+  assert.match(server, /conversations\/:conversationId\/status/);
+  assert.match(server, /updatedAt: conversation\.updatedAt/);
+  assert.match(server, /return \{ conversation: conversationStatusPayload\(conversation\) \}/);
+});

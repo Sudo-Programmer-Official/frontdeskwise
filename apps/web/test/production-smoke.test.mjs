@@ -203,8 +203,19 @@ test("embedded widget handoff notice is temporary, dismissible, and session-scop
   assert.match(widgetEmbed, /if \(!handoffWaiting\)/);
   assert.match(widgetRenderer, /onHandoffDismiss/);
   assert.match(widgetEmbed, /window\.sessionStorage\.setItem\(key, "1"\)/);
-  assert.match(widgetRenderer, /Connected to the team/);
+  assert.match(widgetRenderer, /Team member joined/);
   assert.match(widgetEmbed, /hideHandoffNotice\(\);/);
+});
+
+test("widget header and live polling follow the canonical conversation status", () => {
+  const source = `${widgetRenderer}\n${widgetEmbed}\n${widgetShell}`;
+  assert.match(source, /status === "HUMAN_ACTIVE"\) subtitleText\.textContent = "Team member joined"/);
+  assert.match(source, /AI assistant online/);
+  assert.doesNotMatch(source, /status === "HUMAN_ACTIVE" \|\| status === "AI_ASSISTED"/);
+  assert.match(widgetEmbed, /conversations\/\$\{encodeURIComponent\(conversationId\)\}\/status/);
+  assert.match(widgetEmbed, /startPolling\(\);/);
+  assert.match(widgetEmbed, /if \(pollTimer !== null \|\| !state\.isOpen \|\| !conversationId\) return/);
+  assert.match(widgetEmbed, /updatedAt \|\| payload\.conversation\?\.lastActivityAt/);
 });
 
 test("Inbox takeover and handoff notifications keep their contracts explicit", () => {

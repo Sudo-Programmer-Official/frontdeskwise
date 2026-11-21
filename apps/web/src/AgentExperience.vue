@@ -111,6 +111,7 @@ interface TestMessage {
   grounded: boolean;
   citations: Array<{ title?: string; url?: string; pageType?: string }>;
   quickActions: Array<{ label: string; question: string }>;
+  primaryCta?: { actionId: string; key: string; label: string; executionMode: "DIRECT_LINK" | "FORM_FLOW" | "PROVIDER_FLOW" | "PHONE" | "EMAIL" | "HANDOFF" | "API_ACTION"; trackingKey: string; url?: string; question?: string } | null;
   action: TestAction | null;
   formValues: Record<string, string>;
 }
@@ -256,6 +257,7 @@ const testWidgetState = computed<Partial<WidgetState>>(() => {
     isOpen: true,
     messages: [{ id: "test-welcome", role: "assistant", content: agentDraft.value.welcomeMessage || "Hi! How can I help?" }, ...props.test.messages.map((message) => ({ id: message.id, role: message.role, content: message.content, citations: message.citations }))],
     quickActions: latestAssistant?.quickActions ?? [],
+    primaryCta: latestAssistant?.primaryCta ?? null,
     action: widgetAction,
     typing: props.test.isAsking,
     handoffStatus: "AI_ACTIVE",

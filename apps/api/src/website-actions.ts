@@ -44,7 +44,7 @@ const actionRules: Array<{
   fields: string[];
 }> = [
   { type: "call_emergency", pattern: /\b(emergency|urgent|24\s*\/\s*7)\b.*\b(call|phone|tel|now)\b|\b(call|phone|tel)\b.*\b(emergency|urgent|24\s*\/\s*7)\b/i, priority: 1_000, fields: [] },
-  { type: "request_demo", pattern: /\b(request|book|schedule|get|start)\b.{0,24}\bdemo\b|\bdemo\b.{0,24}\b(request|book|schedule|get|start)\b/i, priority: 880, fields: ["name", "email", "business_name"] },
+  { type: "request_demo", pattern: /\b(request|book|schedule|get|start|try|see|view|watch|explore)\b.{0,24}\b(demo|trial)\b|\b(demo|trial)\b.{0,24}\b(request|book|schedule|get|start|try|see|view|watch|explore)\b/i, priority: 880, fields: ["name", "email", "business_name"] },
   { type: "schedule_service", pattern: /\b(schedule|book|request)\b.{0,24}\b(service|repair|maintenance)\b/i, priority: 900, fields: ["service", "name", "email", "phone"] },
   { type: "join_waitlist", pattern: /\b(join|add me to|register for)\b.{0,24}\b(waitlist|waiting list)\b/i, priority: 850, fields: ["name", "email"] },
   { type: "external_booking", pattern: /\b(book|reserve|schedule)\b.{0,32}\b(birthday|party|open play|event|class|lesson)\b|\b(birthday|party|open play|event)\b.{0,32}\b(book|reserve|schedule)\b/i, priority: 840, fields: ["service", "preferred_date", "name", "email"] },

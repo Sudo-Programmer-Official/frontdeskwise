@@ -16,6 +16,8 @@ export const BUSINESS_ACTION_TYPES = [
 
 export type BusinessActionType = typeof BUSINESS_ACTION_TYPES[number];
 export type ActionMode = "transactional";
+export type ActionExecutionMode = "DIRECT_LINK" | "FORM_FLOW" | "PROVIDER_FLOW" | "PHONE" | "EMAIL" | "HANDOFF" | "API_ACTION";
+export type ActionAttachmentPolicy = "always" | "sales_intent" | "high_intent_only" | "explicit_request_only" | "never_auto";
 export type ActionSafetyPolicy = "standard" | "verified_contact" | "healthcare_emergency" | "manual_review";
 export type ActionOrigin = "discovered" | "configured";
 export type ActionLifecycleStatus = "discovered" | "needs_review" | "approved" | "active" | "disabled";
@@ -144,6 +146,9 @@ export type ActionFlow = {
   steps?: ActionStep[];
   completion: ActionCompletion;
   mode: ActionMode;
+  executionMode?: ActionExecutionMode;
+  attachmentPolicy?: ActionAttachmentPolicy;
+  trackingKey?: string;
   destination: { url: string; label?: string } | null;
   provider: string | null;
   priority: number;
@@ -453,6 +458,9 @@ function cloneTemplate(template: ActionTemplate, id: string, now: string): Actio
     ...template,
     actionType: template.actionType ?? actionTypeForKey[template.key] ?? "contact_team",
     mode: template.mode ?? "transactional",
+    executionMode: template.executionMode ?? defaultExecutionMode(template),
+    attachmentPolicy: template.attachmentPolicy ?? defaultAttachmentPolicy(template),
+    trackingKey: template.trackingKey ?? template.key,
     destination: template.destination ?? null,
     provider: template.provider ?? null,
     priority: template.priority ?? 500,
@@ -480,6 +488,23 @@ function cloneTemplate(template: ActionTemplate, id: string, now: string): Actio
     createdAt: now,
     updatedAt: now,
   })) as ActionFlow;
+}
+
+function defaultExecutionMode(template: Pick<ActionFlow, "key" | "completion"> & { actionType?: ActionFlow["actionType"]; destination?: ActionFlow["destination"] }): ActionExecutionMode {
+  if (template.actionType === "call_business" || template.actionType === "call_emergency") return "PHONE";
+  if (template.actionType === "contact_team" && template.completion.requiresStaff) return "HANDOFF";
+  if (template.completion.connector) return "API_ACTION";
+  if (template.destination?.url || template.completion.linkUrl) return "DIRECT_LINK";
+  if (template.completion.completionMode === "external_provider" || template.completion.completionMode === "booking_connector") return "PROVIDER_FLOW";
+  return "FORM_FLOW";
+}
+
+function defaultAttachmentPolicy(template: Pick<ActionFlow, "key"> & { actionType?: ActionFlow["actionType"] }): ActionAttachmentPolicy {
+  if (template.actionType === "call_emergency") return "explicit_request_only";
+  if (template.key === "request_demo" || template.key === "contact_team") return "explicit_request_only";
+  if (template.key === "capture_lead") return "explicit_request_only";
+  if (template.actionType === "external_booking" || template.actionType === "enroll" || template.actionType === "book_appointment") return "high_intent_only";
+  return "sales_intent";
 }
 
 export function actionTemplate(key: string): ActionTemplate | null {
@@ -538,6 +563,10 @@ export function defaultActionFlows(
     return {
       ...action,
       actionType: candidate.actionType,
+      ...(candidate.destination?.url ? { executionMode: "DIRECT_LINK" as const } : {}),
+      ...(candidate.actionType === "request_demo" && /\b(try|start|see|view|explore)\b/i.test(candidate.label)
+        ? { attachmentPolicy: "sales_intent" as const }
+        : {}),
       name: candidate.label || action.name,
       description: candidate.description || action.description,
       destination: candidate.destination,
@@ -584,8 +613,8 @@ export function classifyVisitorRequest(question: string): VisitorRequestClassifi
   const value = normalize(question);
   const informational = /^(how|what|when|where|why|does|is|are|can i|could i|tell me|explain)\b/.test(value)
     || /\bhow does\b|\bwhat happens\b|\bwhat is the process\b/.test(value);
-  const explicitRequest = /^(i want|i d like|id like|i need|please|help me|sign|enroll|register|book|schedule|request|get|call|connect me|send me|take me|let s|lets|join)\b/.test(value)
-    || /\b(sign my child up|sign me up|book an appointment|schedule service|request a demo|book a demo|join the waitlist|call now|call emergency)\b/.test(value);
+  const explicitRequest = /^(i want|i d like|id like|i need|please|help me|sign|enroll|register|book|schedule|request|get|try|see|view|watch|explore|open|call|connect me|send me|take me|let s|lets|join)\b/.test(value)
+    || /\b(sign my child up|sign me up|book an appointment|schedule service|request a demo|book a demo|try the demo|see the demo|open the demo|join the waitlist|call now|call emergency)\b/.test(value);
   const pricingKnowledge = /\b(pricing|price|prices|cost|costs|how much)\b/.test(value)
     && !/\b(request|requesting|get|getting|quote|estimate|book|schedule|appointment)\b/.test(value);
   let actionIntent = "general";

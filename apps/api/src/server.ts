@@ -28,6 +28,8 @@ import {
   nextConversationalField,
   validateFieldValue,
   type ActionFlow,
+  type ActionAttachmentPolicy,
+  type ActionExecutionMode,
   type ActionLifecycleStatus,
   type ActionOrigin,
   type ActionReviewReason,
@@ -466,7 +468,9 @@ type ConversionEventType =
   | "ACTION_SUCCEEDED"
   | "ACTION_FAILED"
   | "FLOW_COMPLETED"
+  | "CTA_SHOWN"
   | "CTA_CLICKED"
+  | "DEMO_LINK_OPENED"
   | "HANDOFF_REQUESTED"
   | "LEAD_CAPTURED"
   | "BOOKING_LINK_OPENED"
@@ -503,7 +507,7 @@ type WidgetPerformanceEvent = {
 const conversionEventTypes = new Set<ConversionEventType>([
   "FLOW_STARTED", "FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED",
   "FORM_DISPLAYED", "FORM_SUBMITTED", "ACTION_STARTED", "ACTION_SUCCEEDED",
-  "ACTION_FAILED", "FLOW_COMPLETED", "CTA_CLICKED", "HANDOFF_REQUESTED",
+  "ACTION_FAILED", "FLOW_COMPLETED", "CTA_SHOWN", "CTA_CLICKED", "DEMO_LINK_OPENED", "HANDOFF_REQUESTED",
   "LEAD_CAPTURED", "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED",
 ]);
 
@@ -1570,6 +1574,13 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
       ...(connector ? { connector } : {}),
     },
     mode: "transactional",
+    executionMode: ["DIRECT_LINK", "FORM_FLOW", "PROVIDER_FLOW", "PHONE", "EMAIL", "HANDOFF", "API_ACTION"].includes(String(row.execution_mode))
+      ? String(row.execution_mode) as ActionExecutionMode
+      : undefined,
+    attachmentPolicy: ["always", "sales_intent", "high_intent_only", "explicit_request_only", "never_auto"].includes(String(row.attachment_policy))
+      ? String(row.attachment_policy) as ActionAttachmentPolicy
+      : undefined,
+    trackingKey: typeof row.tracking_key === "string" && row.tracking_key.trim() ? row.tracking_key : String(row.action_key),
     destination: row.destination && typeof row.destination === "object" ? row.destination as ActionFlow["destination"] : null,
     provider: typeof row.provider === "string" ? row.provider : null,
     priority: Number(row.priority ?? 500),
@@ -2467,8 +2478,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     for (const action of business.actions) {
       await client.query(
         `insert into business_actions
-           (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+           (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
          on conflict (business_id, action_key) do update set
            action_type = excluded.action_type,
            name = excluded.name,
@@ -2480,6 +2491,9 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            steps = excluded.steps,
            completion = excluded.completion,
            mode = excluded.mode,
+           execution_mode = excluded.execution_mode,
+           attachment_policy = excluded.attachment_policy,
+           tracking_key = excluded.tracking_key,
            destination = excluded.destination,
            provider = excluded.provider,
            priority = excluded.priority,
@@ -2515,6 +2529,9 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           JSON.stringify(action.steps ?? []),
           JSON.stringify(action.completion),
           action.mode,
+          action.executionMode ?? "FORM_FLOW",
+          action.attachmentPolicy ?? "explicit_request_only",
+          action.trackingKey ?? action.key,
           action.destination ? JSON.stringify(action.destination) : null,
           action.provider,
           action.priority,
@@ -3975,6 +3992,9 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
       captureMode: "auto",
       fields: [],
       mode: "transactional",
+      executionMode: "FORM_FLOW",
+      attachmentPolicy: "explicit_request_only",
+      trackingKey: key,
       destination: null,
       provider: null,
       priority: 500,
@@ -4160,6 +4180,13 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     ...(steps.length ? { steps } : {}),
     completion,
     mode: "transactional",
+    executionMode: ["DIRECT_LINK", "FORM_FLOW", "PROVIDER_FLOW", "PHONE", "EMAIL", "HANDOFF", "API_ACTION"].includes(String(body.executionMode))
+      ? String(body.executionMode) as ActionExecutionMode
+      : (base.executionMode ?? (destination?.url || completion.linkUrl ? "DIRECT_LINK" : completion.connector ? "API_ACTION" : completion.completionMode === "external_provider" || completion.completionMode === "booking_connector" ? "PROVIDER_FLOW" : "FORM_FLOW")),
+    attachmentPolicy: ["always", "sales_intent", "high_intent_only", "explicit_request_only", "never_auto"].includes(String(body.attachmentPolicy))
+      ? String(body.attachmentPolicy) as ActionAttachmentPolicy
+      : (base.attachmentPolicy ?? (actionType === "call_emergency" || ["request_demo", "contact_team"].includes(String(body.key ?? base.key)) ? "explicit_request_only" : "sales_intent")),
+    trackingKey: optionalString(body.trackingKey, 120) ?? base.trackingKey ?? (optionalString(body.key, 80) ?? base.key),
     destination,
     provider: optionalString(body.provider, 160) ?? (base.provider ?? null),
     priority: Number.isFinite(Number(body.priority ?? base.priority)) ? Math.max(0, Math.min(10_000, Number(body.priority ?? base.priority))) : (base.priority ?? 500),
@@ -4245,8 +4272,8 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
   if (!pool) return;
   await pool.query(
     `insert into business_actions
-       (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+       (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
      on conflict (business_id, action_key) do update set
        action_type = excluded.action_type,
        name = excluded.name,
@@ -4258,6 +4285,9 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
        steps = excluded.steps,
        completion = excluded.completion,
        mode = excluded.mode,
+       execution_mode = excluded.execution_mode,
+       attachment_policy = excluded.attachment_policy,
+       tracking_key = excluded.tracking_key,
        destination = excluded.destination,
        provider = excluded.provider,
        priority = excluded.priority,
@@ -4293,6 +4323,9 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
       JSON.stringify(action.steps ?? []),
       JSON.stringify(action.completion),
       action.mode,
+      action.executionMode ?? "FORM_FLOW",
+      action.attachmentPolicy ?? "explicit_request_only",
+      action.trackingKey ?? action.key,
       action.destination ? JSON.stringify(action.destination) : null,
       action.provider,
       action.priority,
@@ -6351,15 +6384,61 @@ function extractiveAnswer(
 }
 
 function answerWithGettingStartedCta(business: Business, question: string, answer: string): string {
-  if (!answer || !/\b(get started|getting started|start|try it free|sign\s*up|create an account|create a task)\b/i.test(question)) return answer;
-  if (answer.includes(business.websiteUrl) || /https?:\/\//i.test(answer) || answer.trim().split(/\s+/).length > 110) return answer;
-  try {
-    const url = new URL(business.websiteUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return answer;
-    return `${answer}\n\n[Get started with ${business.name}](${url.toString()})`;
-  } catch {
-    return answer;
+  // Conversion destinations are now returned as structured primaryCta data.
+  // Never turn the business homepage into an unverified sales link in answer copy.
+  return answer;
+}
+
+type PrimaryCta = {
+  actionId: string;
+  key: string;
+  label: string;
+  executionMode: ActionFlow["executionMode"];
+  trackingKey: string;
+  url?: string;
+  question?: string;
+};
+
+function primaryActionForBusiness(business: Business): ActionFlow | null {
+  if (!business.primaryActionId) return null;
+  const action = business.actions.find((candidate) => candidate.id === business.primaryActionId) ?? null;
+  if (!action || !action.enabled || !["approved", "active"].includes(action.lifecycleStatus ?? "active")) return null;
+  return action;
+}
+
+function shouldAttachPrimaryCta(
+  action: ActionFlow,
+  question: string,
+  intent: RetrievalIntent,
+): boolean {
+  const policy = action.attachmentPolicy ?? "explicit_request_only";
+  if (policy === "never_auto") return false;
+  if (policy === "always") return true;
+  const visitor = classifyVisitorRequest(question);
+  if (policy === "explicit_request_only") return visitor.mode === "transactional";
+  if (policy === "high_intent_only") {
+    return visitor.mode === "transactional"
+      || ["booking", "getting_started"].includes(intent) && /\b(book|schedule|enroll|register|join|sign|start|begin|try|demo)\b/i.test(question);
   }
+  return ["services", "pricing", "booking", "getting_started", "general"].includes(intent)
+    && !["privacy", "policy", "support", "contact", "permissions"].includes(intent);
+}
+
+function primaryCtaForQuestion(business: Business, question: string, intent: RetrievalIntent): PrimaryCta | null {
+  const action = primaryActionForBusiness(business);
+  if (!action || !shouldAttachPrimaryCta(action, question, intent)) return null;
+  const url = action.completion.linkUrl ?? action.destination?.url ?? undefined;
+  const executionMode = action.executionMode ?? (url ? "DIRECT_LINK" : "FORM_FLOW");
+  if (executionMode === "DIRECT_LINK" && !url) return null;
+  return {
+    actionId: action.id,
+    key: action.key,
+    label: action.completion.linkLabel ?? action.destination?.label ?? action.name,
+    executionMode,
+    trackingKey: action.trackingKey ?? action.key,
+    ...(url ? { url } : {}),
+    ...(!url && action.triggerPhrases[0] ? { question: action.triggerPhrases[0] } : {}),
+  };
 }
 
 const serviceWordsForAnswer = /\b(offer|offers|provide|provides|service|services|solution|solutions|product|products|feature|features|capabilit|automation|development|application|integration|tool|tools|task|reminder|calendar|planning|schedule|voice|workflow|workspace|team|build|software)\b/i;
@@ -6529,6 +6608,7 @@ async function answerQuestion(
         ...modelUsage,
       },
       modelUsage,
+      primaryCta: primaryCtaForQuestion(business, question, initialIntent) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
@@ -6670,6 +6750,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
+      primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
       failure: { kind: "temporary_ai" as const, retryable: true, retrievedEvidence: true },
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
@@ -6693,6 +6774,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
+      primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
@@ -6707,6 +6789,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
+      primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
@@ -6720,6 +6803,7 @@ async function answerQuestion(
     confidenceBand,
     retrieval: enrichedRetrieval,
     modelUsage,
+    primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
     performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
   };
 }
@@ -6733,7 +6817,7 @@ type WidgetAnswerTiming = {
   backendTotalMs: number;
 };
 
-type AnswerResult = Omit<Awaited<ReturnType<typeof answerQuestion>>, "performance"> & { performance?: WidgetAnswerTiming };
+type AnswerResult = Omit<Awaited<ReturnType<typeof answerQuestion>>, "performance"> & { performance?: WidgetAnswerTiming; primaryCta?: PrimaryCta };
 
 type ActionFormSchema = {
   submitLabel: string;
@@ -7484,6 +7568,7 @@ function customerAnswerPayload(result: ConversationAnswerResult) {
     answer: result.answer,
     grounded: result.grounded,
     citations: result.citations,
+    ...(result.primaryCta ? { primaryCta: result.primaryCta } : {}),
     ...(result.quickActions?.length ? { quickActions: result.quickActions } : {}),
     ...(result.handoff ? { handoff: result.handoff } : {}),
     ...(result.failure ? { failure: result.failure } : {}),
@@ -7775,6 +7860,7 @@ function conversationStatusPayload(conversation: Conversation) {
     handoffNotificationStatus: conversation.handoffNotificationStatus,
     unreadCount: conversation.unreadCount,
     lastActivityAt: conversation.lastActivityAt,
+    updatedAt: conversation.updatedAt,
   };
 }
 
@@ -12450,18 +12536,48 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/return-to-ai", async 
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
+  if (conversation.status !== "HUMAN_ACTIVE" && conversation.status !== "AI_ASSISTED") throw httpError(409, "This conversation is not in a staff-assisted state");
   if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") throw httpError(403, "Only the assigned team member can return this conversation to AI");
-  conversation.status = "AI_ASSISTED";
+  const now = new Date().toISOString();
+  if (pool && !actor.legacyDemo) {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const update = await client.query(
+        `update conversations
+         set status = 'AI_ACTIVE', assigned_user_id = null, assigned_at = null,
+             handoff_reason = null, handoff_requested_at = null, handoff_notification_status = null,
+             human_joined_at = null, unread_count = 0, last_activity_at = $3, updated_at = $3
+         where id = $1 and business_id = $2 and status in ('HUMAN_ACTIVE', 'AI_ASSISTED')
+           and (assigned_user_id is null or assigned_user_id = $4 or $5 = true)
+         returning id`,
+        [conversation.id, business.id, now, actor.id, actor.role === "admin" || actor.role === "owner"],
+      );
+      if (!update.rowCount) throw httpError(409, "The conversation changed before it could be returned to AI");
+      await client.query("update conversation_assignments set status = 'released', released_at = $2 where conversation_id = $1 and status = 'active'", [conversation.id, now]);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  conversation.status = "AI_ACTIVE";
   conversation.assignedUserId = null;
   conversation.assignedAt = null;
-  conversation.lastActivityAt = new Date().toISOString();
-  conversation.updatedAt = conversation.lastActivityAt;
+  conversation.handoffReason = null;
+  conversation.handoffRequestedAt = null;
+  conversation.handoffNotificationStatus = null;
+  conversation.humanJoinedAt = null;
+  conversation.unreadCount = 0;
+  conversation.lastActivityAt = now;
+  conversation.updatedAt = now;
   await cancelPendingHandoffReminders(conversation.id);
-  if (pool && !actor.legacyDemo) {
-    await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
+  if (!pool || actor.legacyDemo) {
+    await persistConversation(business, conversation);
   }
   await recordConversationEvent(business, conversation, "RETURNED_TO_AI", "staff", actor.legacyDemo ? null : actor.id);
-  await persistConversation(business, conversation);
   return { conversation: conversationStatusPayload(conversation) };
 });
 
@@ -12712,6 +12828,14 @@ app.get("/api/v1/widget/:siteKey/conversations/:conversationId", async (request)
     conversation: conversationStatusPayload(conversation),
     messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload),
   };
+});
+
+app.get("/api/v1/widget/:siteKey/conversations/:conversationId/status", async (request) => {
+  const params = request.params as { siteKey?: string; conversationId?: string };
+  const business = await getBusinessBySiteKey(params.siteKey);
+  if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
+  const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  return { conversation: conversationStatusPayload(conversation) };
 });
 
 app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionId/submit", async (request) => {
@@ -12981,7 +13105,8 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   // Keep disabled/archived definitions visible to owners so they can restore
   // them; detectAction and the widget runtime still exclude them.
   const configuredActions = business.actions;
-  if (!pool) return { actions: configuredActions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
+  const actions = configuredActions.map((action) => ({ ...action, isPrimary: business.primaryActionId === action.id }));
+  if (!pool) return { actions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
   let deliveries: Array<Record<string, unknown>> = [];
   try {
     const result = await pool.query<Record<string, unknown>>(
@@ -12998,7 +13123,7 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
     if (!isMissingDatabaseTable(error)) throw error;
   }
   return {
-    actions: configuredActions,
+    actions,
     resources: business.actionResources,
     templates: ACTION_TEMPLATES,
     deliveries: deliveries.map((row) => ({
@@ -13061,6 +13186,12 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   if (actionIndex < 0) throw httpError(404, "Action not found");
   const previousAction = business.actions[actionIndex];
   const action = normalizedAction(request.body, previousAction);
+  if (action.origin === "discovered" && action.enabled && action.lifecycleStatus === "needs_review") {
+    if (action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
+    if (action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");
+    action.lifecycleStatus = "active";
+    action.reviewReason = null;
+  }
   const duplicate = business.actions.find((item, index) => index !== actionIndex && item.key === action.key);
   if (duplicate) throw httpError(409, "An action with this key already exists");
   business.actions[actionIndex] = action;
@@ -13079,6 +13210,61 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
     reason: action.reviewReason,
   });
   return { action };
+});
+
+app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
+  const params = request.params as { slug?: string; actionId?: string };
+  const business = await getBusiness(params.slug);
+  const actorUserId = await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const actionId = requiredString(params.actionId, "actionId", 120);
+  const action = business.actions.find((candidate) => candidate.id === actionId);
+  if (!action) throw httpError(404, "Action not found");
+  if (!action.enabled || !["approved", "active"].includes(action.lifecycleStatus ?? "active")) {
+    if (action.origin !== "discovered" || action.confidence < 0.88 || action.safetyPolicy === "manual_review") {
+      throw httpError(400, "Only an enabled, approved action can be the primary conversion goal");
+    }
+    action.enabled = true;
+    action.lifecycleStatus = "active";
+    action.reviewReason = null;
+    await persistAction(business, action);
+  }
+  const previousActionId = business.primaryActionId;
+  business.primaryActionId = action.id;
+  if (pool) await pool.query("update businesses set primary_action_id = $2, updated_at = now() where id = $1", [business.id, action.id]);
+  await recordActionRegistryAudit({
+    businessId: business.id,
+    actionId: action.id,
+    actorUserId,
+    actorType: "owner",
+    eventType: "primary_set",
+    previousValue: { primaryActionId: previousActionId },
+    newValue: { primaryActionId: action.id, trackingKey: action.trackingKey ?? action.key },
+    reason: "owner_override",
+  });
+  return { businessId: business.id, primaryActionId: action.id };
+});
+
+app.delete("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
+  const params = request.params as { slug?: string; actionId?: string };
+  const business = await getBusiness(params.slug);
+  const actorUserId = await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const actionId = requiredString(params.actionId, "actionId", 120);
+  if (business.primaryActionId !== actionId) return { businessId: business.id, primaryActionId: business.primaryActionId };
+  business.primaryActionId = null;
+  if (pool) await pool.query("update businesses set primary_action_id = null, updated_at = now() where id = $1 and primary_action_id = $2", [business.id, actionId]);
+  await recordActionRegistryAudit({
+    businessId: business.id,
+    actionId,
+    actorUserId,
+    actorType: "owner",
+    eventType: "primary_cleared",
+    previousValue: { primaryActionId: actionId },
+    newValue: { primaryActionId: null },
+    reason: "owner_override",
+  });
+  return { businessId: business.id, primaryActionId: null };
 });
 
 app.delete("/api/v1/demo/:slug/actions/:actionId", async (request) => {
