@@ -90,7 +90,12 @@ function widgetPageMatches(patterns: string[], pathname: string): boolean {
 
   const siteKey = script.dataset.site || "";
   if (!siteKey) return;
-  const apiBase = (script.dataset.api || new URL(script.src, window.location.href).origin).replace(/\/$/, "");
+  const scriptUrl = new URL(script.src, window.location.href);
+  const configuredApiOrigin = script.dataset.api?.trim();
+  const fallbackApiOrigin = /(^|\.)frontdeskwise\.com$/i.test(scriptUrl.hostname)
+    ? "https://api.frontdeskwise.com"
+    : scriptUrl.origin;
+  const apiBase = (configuredApiOrigin || fallbackApiOrigin).replace(/\/$/, "");
   const widgetWindow = window as FrontDeskWiseWindow;
   const cacheTtlMs = 60_000;
   const staleWhileRevalidateMs = 5 * 60_000;

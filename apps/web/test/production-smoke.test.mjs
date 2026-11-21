@@ -169,9 +169,12 @@ test("widget installation supports optional path scoping", () => {
   assert.match(widgetLoader, /widgetPageMatches/);
   assert.match(widgetLoader, /script\.dataset\.pages/);
   assert.match(widgetLoader, /window\.location\.pathname/);
+  assert.match(widgetLoader, /api\.frontdeskwise\.com/);
+  assert.match(widgetLoader, /configuredApiOrigin/);
   assert.match(widget, /dataset\.pages/);
   assert.match(apiServer, /data-site=\"\$\{business\.widget\.siteKey\}\"/);
   assert.match(apiServer, /data-shell/);
+  assert.match(apiServer, /https:\/\/api\.frontdeskwise\.com/);
 });
 
 test("active production widget state cannot be closed by stale updates or form rerenders", () => {

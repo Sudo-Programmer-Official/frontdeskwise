@@ -12107,7 +12107,10 @@ app.get("/api/v1/demo/:slug/widget/install", async (request) => {
   await requireAuthenticatedBusinessOwner(business, request);
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
-  const apiOrigin = (process.env.FRONTDESKWISE_PUBLIC_API_ORIGIN ?? `http://localhost:${port}`).replace(/\/$/, "");
+  const apiOrigin = (
+    process.env.FRONTDESKWISE_PUBLIC_API_ORIGIN
+    ?? (process.env.NODE_ENV === "production" ? "https://api.frontdeskwise.com" : `http://localhost:${port}`)
+  ).replace(/\/$/, "");
   const widgetOrigin = process.env.FRONTDESKWISE_WIDGET_ORIGIN ?? process.env.WEB_ORIGIN ?? "http://localhost:5173";
   const scriptUrl = process.env.FRONTDESKWISE_WIDGET_URL ?? `${widgetOrigin.replace(/\/$/, "")}/widget.js`;
   const shellUrl = process.env.FRONTDESKWISE_WIDGET_SHELL_URL ?? scriptUrl.replace(/\/widget\.js(?:\?.*)?$/i, "/widget-shell.js");

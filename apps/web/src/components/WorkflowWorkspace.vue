@@ -744,4 +744,36 @@ onMounted(() => {
   .workflow-step-title svg { display: none; }
   .workflow-step-management .danger-text { margin-left: 0; }
 }
+
+/* Final layout polish */
+.workflow-layout { grid-template-columns: 250px minmax(0, 1fr) minmax(300px, 320px); gap: 24px; }
+.workflow-library, .workflow-builder, .workflow-preview-panel { min-width: 0; }
+.workflow-library .panel-heading { align-items: center; gap: 16px; flex-wrap: nowrap; }
+.workflow-library .panel-heading > div { min-width: 0; flex: 1 1 auto; }
+.workflow-library .panel-heading h3 { white-space: nowrap; }
+.workflow-library .panel-heading .outline-button { flex: 0 0 auto; }
+.workflow-library-item { min-height: 58px; gap: 11px; padding: 11px 10px; }
+.workflow-library-item > span:nth-child(2) { min-width: 0; gap: 3px; }
+.workflow-library-item strong, .workflow-library-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-library-item > svg { flex: 0 0 auto; margin-left: auto; }
+.workflow-builder { width: 100%; gap: 26px; }
+.workflow-assist-card, .workflow-readiness-card, .workflow-step-list, .workflow-provider-summary { width: 100%; min-width: 0; box-sizing: border-box; }
+.workflow-step-list { gap: 14px; }
+.workflow-section-heading { margin: 0 0 2px; }
+.workflow-empty-builder { width: 100%; min-height: 126px; box-sizing: border-box; padding: 22px 20px; }
+.workflow-provider-summary { margin-top: 0; }
+.workflow-preview-panel { width: 100%; box-sizing: border-box; }
+
+@media (max-width: 1260px) {
+  .workflow-layout { grid-template-columns: 240px minmax(0, 1fr) 300px; gap: 20px; }
+}
+@media (max-width: 1100px) {
+  .workflow-layout { grid-template-columns: 230px minmax(0, 1fr); gap: 24px; }
+  .workflow-library { padding: 0; }
+  .workflow-library .panel-heading { padding-bottom: 10px; border-bottom: 0; }
+  .workflow-library-select { display: grid; gap: 6px; margin: 0 0 12px; color: #708096; font-size: 11px; font-weight: 700; }
+  .workflow-library-select select { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid #d5dfeb; border-radius: 9px; background: #fff; color: #304563; font: inherit; }
+  .workflow-library-item { display: none; }
+  .workflow-preview-panel { grid-column: 2; }
+}
 </style>
