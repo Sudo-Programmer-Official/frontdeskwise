@@ -169,6 +169,8 @@ test("active production widget state cannot be closed by stale updates or form r
 
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
+  assert.match(widgetEmbed, /leadCaptured: true, leadVisible: false/);
+  assert.match(widgetEmbed, /if \(!leadCaptured && !answer\.grounded/);
   assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
   assert.match(widgetEmbed, /updateState\(\{ typing: true \}\)/);
   assert.match(widgetRenderer, /Assistant is typing/);

@@ -87,6 +87,7 @@ export interface WidgetState {
   actionStep?: number;
   actionValues?: Record<string, string>;
   actionSubmitting?: boolean;
+  leadCaptured?: boolean;
   leadVisible?: boolean;
   leadSubmitting?: boolean;
   typing?: boolean;

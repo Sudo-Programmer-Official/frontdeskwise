@@ -6430,6 +6430,7 @@ function conversationStatusPayload(conversation: Conversation) {
   return {
     id: conversation.id,
     status: conversation.status,
+    leadCaptured: conversation.leadCaptured,
     assignedUserId: conversation.assignedUserId,
     handoffReason: conversation.handoffReason,
     unreadCount: conversation.unreadCount,

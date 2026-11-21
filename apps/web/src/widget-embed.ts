@@ -34,13 +34,13 @@ import {
     proactiveFrequency?: "session" | "24h" | "visit";
   };
   type WidgetConfigResponse = { agent?: AgentConfig };
-  type ConversationPayload = { conversation?: { status?: string }; messages?: Array<{ role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
+  type ConversationPayload = { conversation?: { status?: string; leadCaptured?: boolean }; messages?: Array<{ role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
 
   let config: AgentConfig | null = null;
   let visitorId = "";
   let conversationId: string | null = null;
   let lastQuestion = "";
-  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
+  let state: WidgetState = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
   let renderer: WidgetRendererController;
   let pollTimer: number | null = null;
   let handoffNoticeTimer: number | null = null;
@@ -95,6 +95,7 @@ import {
         action: state.action && state.action.status !== "completed" ? state.action : null,
         actionStep: state.actionStep || 0,
         actionValues: state.actionValues || {},
+        leadCaptured: state.leadCaptured === true,
       }));
     } catch {
       // Best effort; the live widget state remains authoritative for this mount.
@@ -105,7 +106,7 @@ import {
     try {
       const raw = window.sessionStorage.getItem(interactionStorageKey());
       if (!raw) return;
-      const saved = JSON.parse(raw) as { conversationId?: unknown; action?: unknown; actionStep?: unknown; actionValues?: unknown };
+      const saved = JSON.parse(raw) as { conversationId?: unknown; action?: unknown; actionStep?: unknown; actionValues?: unknown; leadCaptured?: unknown };
       if (typeof saved.conversationId === "string" && saved.conversationId) conversationId = saved.conversationId;
       const action = saved.action && typeof saved.action === "object" ? saved.action as WidgetAction : null;
       const actionValues = saved.actionValues && typeof saved.actionValues === "object" ? saved.actionValues as Record<string, string> : {};
@@ -114,6 +115,7 @@ import {
         action,
         actionStep: typeof saved.actionStep === "number" ? saved.actionStep : 0,
         actionValues,
+        leadCaptured: saved.leadCaptured === true,
       };
     } catch {
       // Ignore malformed or unavailable session state.
@@ -212,6 +214,7 @@ import {
     if (!conversationId) return;
     try {
       const payload = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+      if (payload.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       renderConversationStatus(payload.conversation?.status);
       for (const message of payload.messages || []) {
         if (message.role !== "human" && message.role !== "system") continue;
@@ -417,21 +420,24 @@ import {
         conversationId = started.conversationId;
         if (started.resumed) {
           const history = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+          if (history.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
           for (const message of history.messages || []) addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, message.role === "user" ? "user" : "assistant", message.citations, `${message.createdAt || ""}:history`);
           renderConversationStatus(history.conversation?.status);
         }
       }
       addMessage(question, "user");
       updateState({ typing: true });
-      const answer = await api<{ answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; conversation?: { status?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, pageUrl: window.location.href }) });
+      const answer = await api<{ answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, pageUrl: window.location.href }) });
       updateState({ typing: false });
       addMessage(answer.answer, "assistant", answer.citations || []);
       renderConversationStatus(answer.conversation?.status);
       if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
       updateState({ quickActions: answer.quickActions || [] });
       renderActionForm(answer.action);
+      const leadCaptured = state.leadCaptured === true || answer.conversation?.leadCaptured === true;
+      if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       if (answer.action) updateState({ leadVisible: false });
-      if (!answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
+      if (!leadCaptured && !answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
     } catch (error) {
       updateState({ typing: false });
       addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", "assistant");
@@ -445,10 +451,11 @@ import {
     delete values.consent;
     addMessage("Submitted your details.", "user");
     try {
-      const answer = await api<{ answer: string; citations?: WidgetMessage["citations"]; action?: WidgetAction; conversation?: { status?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent }) });
+      const answer = await api<{ answer: string; citations?: WidgetMessage["citations"]; action?: WidgetAction; conversation?: { status?: string; leadCaptured?: boolean } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(action.id)}/submit`, { method: "POST", body: JSON.stringify({ values, consent }) });
       addMessage(answer.answer, "assistant", answer.citations || []);
       renderConversationStatus(answer.conversation?.status);
       if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
+      if (answer.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       renderActionForm(answer.action);
     } catch (error) {
       addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
@@ -466,7 +473,7 @@ import {
     updateState({ leadSubmitting: true });
     try {
       await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name, email: values.email, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
-      updateState({ leadVisible: false });
+      updateState({ leadCaptured: true, leadVisible: false });
       addMessage("Thanks — the team can follow up with you.", "assistant");
     } catch (error) {
       addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");

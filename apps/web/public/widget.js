@@ -597,7 +597,7 @@
     let visitorId = "";
     let conversationId = null;
     let lastQuestion = "";
-    let state = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
+    let state = { isOpen: false, openedByUser: false, messages: [], quickActions: [], actionStep: 0, actionValues: {}, leadCaptured: false, handoffStatus: "AI_ACTIVE", handoffNotice: { visible: false, message: "" }, proactive: { visible: false, message: "" } };
     let renderer;
     let pollTimer = null;
     let handoffNoticeTimer = null;
@@ -641,7 +641,8 @@
           conversationId,
           action: state.action && state.action.status !== "completed" ? state.action : null,
           actionStep: state.actionStep || 0,
-          actionValues: state.actionValues || {}
+          actionValues: state.actionValues || {},
+          leadCaptured: state.leadCaptured === true
         }));
       } catch {
       }
@@ -658,7 +659,8 @@
           ...state,
           action,
           actionStep: typeof saved.actionStep === "number" ? saved.actionStep : 0,
-          actionValues
+          actionValues,
+          leadCaptured: saved.leadCaptured === true
         };
       } catch {
       }
@@ -745,6 +747,7 @@
       if (!conversationId) return;
       try {
         const payload = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+        if (payload.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
         renderConversationStatus(payload.conversation?.status);
         for (const message of payload.messages || []) {
           if (message.role !== "human" && message.role !== "system") continue;
@@ -929,6 +932,7 @@
           conversationId = started.conversationId;
           if (started.resumed) {
             const history = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+            if (history.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
             for (const message of history.messages || []) addMessage(`${message.authorName ? `${message.authorName}: ` : ""}${message.content || ""}`, message.role === "user" ? "user" : "assistant", message.citations, `${message.createdAt || ""}:history`);
             renderConversationStatus(history.conversation?.status);
           }
@@ -942,8 +946,10 @@
         if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
         updateState({ quickActions: answer.quickActions || [] });
         renderActionForm(answer.action);
+        const leadCaptured = state.leadCaptured === true || answer.conversation?.leadCaptured === true;
+        if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
         if (answer.action) updateState({ leadVisible: false });
-        if (!answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
+        if (!leadCaptured && !answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && config?.showLeadCapture !== false) updateState({ leadVisible: true });
       } catch (error) {
         updateState({ typing: false });
         addMessage(error instanceof Error ? error.message : "The front desk is unavailable.", "assistant");
@@ -960,6 +966,7 @@
         addMessage(answer.answer, "assistant", answer.citations || []);
         renderConversationStatus(answer.conversation?.status);
         if (answer.conversation?.status && answer.conversation.status !== "AI_ACTIVE") startPolling();
+        if (answer.conversation?.leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
         renderActionForm(answer.action);
       } catch (error) {
         addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
@@ -976,7 +983,7 @@
       updateState({ leadSubmitting: true });
       try {
         await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name, email: values.email, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: (/* @__PURE__ */ new Date()).toISOString() }) });
-        updateState({ leadVisible: false });
+        updateState({ leadCaptured: true, leadVisible: false });
         addMessage("Thanks — the team can follow up with you.", "assistant");
       } catch (error) {
         addMessage(error instanceof Error ? error.message : "Could not send your details.", "assistant");
