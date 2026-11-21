@@ -73,6 +73,7 @@ import MarketingPage from "./MarketingPage.vue";
 import LandingVideo from "./components/LandingVideo.vue";
 import SupportCenter, { type SupportCase as SupportCaseRecord, type SupportCaseCategory, type SupportContext } from "./components/SupportCenter.vue";
 import WorkflowWorkspace from "./components/WorkflowWorkspace.vue";
+import type { WorkflowBusinessContext } from "./workflow-generator.js";
 import { getMarketingPageByPath } from "./marketing";
 import {
   demoRoute,
@@ -576,6 +577,7 @@ interface WorkspacePayload {
   publishing?: AgentPublishing;
   publishedAt?: string | null;
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
+  workflowContext?: WorkflowBusinessContext;
   stats?: WorkspaceStats;
 }
 
@@ -1369,6 +1371,7 @@ const messagingTestLoading = ref(false);
 const messagingTab = ref<"templates" | "automations" | "delivery" | "settings">("templates");
 const workspaceStats = ref<WorkspaceStats | null>(null);
 const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
+const workflowContext = ref<WorkflowBusinessContext | null>(null);
 const workspaceReadiness = ref(0);
 const workspaceLoading = ref(false);
 const workspaceError = ref("");
@@ -2673,6 +2676,7 @@ function clearWorkspaceState() {
   fallbackContactUrl.value = "";
   workspaceStats.value = null;
   workspaceKnowledge.value = null;
+  workflowContext.value = null;
   workspaceReadiness.value = 0;
   supportCases.value = [];
   supportContext.value = null;
@@ -2818,6 +2822,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   };
   workspaceStats.value = payload.stats ?? null;
   workspaceKnowledge.value = payload.knowledge ?? null;
+  workflowContext.value = payload.workflowContext ?? null;
   workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
   conversationId.value = "";
   testMessages.value = [];
@@ -2852,6 +2857,7 @@ async function refreshWorkspaceSummary(globalLoading = true) {
     if (!response.ok) return;
     workspaceStats.value = payload.stats ?? null;
     workspaceKnowledge.value = payload.knowledge ?? null;
+    workflowContext.value = payload.workflowContext ?? null;
     workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
   } catch {
     // The mutation already succeeded; the next view load will reconcile the summary.
@@ -7261,7 +7267,7 @@ function startMarketingDemo() {
           </div>
         </div>
 
-        <WorkflowWorkspace v-else-if="view === 'workflows'" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" @refresh="loadActions" @open-action="openWorkflowAction" />
+        <WorkflowWorkspace v-else-if="view === 'workflows'" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @open-action="openWorkflowAction" />
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
           <div class="actions-page-header">

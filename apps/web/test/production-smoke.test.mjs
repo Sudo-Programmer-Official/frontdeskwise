@@ -10,6 +10,7 @@ const app = await readFile(resolve(here, "../src/App.vue"), "utf8");
 const agent = await readFile(resolve(here, "../src/AgentExperience.vue"), "utf8");
 const widgetPreview = await readFile(resolve(here, "../src/components/WidgetPreview.vue"), "utf8");
 const workflowWorkspace = await readFile(resolve(here, "../src/components/WorkflowWorkspace.vue"), "utf8");
+const workflowGenerator = await readFile(resolve(here, "../src/workflow-generator.ts"), "utf8");
 const widgetRenderer = await readFile(resolve(here, "../src/widget-ui/renderer.ts"), "utf8");
 const markdownRenderer = await readFile(resolve(here, "../src/widget-ui/markdown.ts"), "utf8");
 const widgetEmbed = await readFile(resolve(here, "../src/widget-embed.ts"), "utf8");
@@ -484,8 +485,24 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
     "Condition in plain English",
     "Workflow preview",
     "Runtime will use the updated steps",
+    "Configuration complete",
+    "Needs testing",
   ]) {
     assert.ok(workflowWorkspace.includes(marker), `missing workflow builder marker: ${marker}`);
+  }
+  for (const marker of [
+    "WorkflowBusinessContext",
+    "plan_selection",
+    "usage_type",
+    "answer_and_resume",
+    "verified_business_knowledge",
+    "reviewStatus",
+    "provider_backed",
+    "child_age",
+    "preferred_days",
+    "redirect",
+  ]) {
+    assert.ok(workflowGenerator.includes(marker), `missing grounded workflow generation marker: ${marker}`);
   }
   assert.match(app, /Replay workflow/);
   assert.match(app, /replayAdminWorkflow/);

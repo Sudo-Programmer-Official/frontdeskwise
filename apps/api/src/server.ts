@@ -121,7 +121,12 @@ import {
   renderLifecycleEmail,
   type LifecycleEventType,
 } from "./lifecycle-messaging.js";
-import { isExplicitHumanRequest } from "./handoff-policy.js";
+import { decideConversationRoute } from "./conversation-orchestrator.js";
+import {
+  providerTrace,
+  snapshotConversationWorkflowState,
+  workflowFieldChanges,
+} from "./conversation-decision-trace.js";
 import {
   createActionConnector,
   type ActionConnectorProvider,
@@ -168,6 +173,8 @@ import {
   type BusinessFactKind,
   type BusinessFactSourceType,
 } from "./business-knowledge.js";
+import { buildWorkflowContext } from "./workflow-context.js";
+import { buildCanonicalBusinessModel, createBusinessContextSnapshot, type BusinessContextSnapshot } from "./business-context.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
 await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
@@ -382,7 +389,8 @@ type ConversationEventType =
   | "CONVERSATION_EXPIRED"
   | "VISITOR_REPLIED"
   | "INTERNAL_NOTE_ADDED"
-  | "AI_RESPONSE_SENT";
+  | "AI_RESPONSE_SENT"
+  | "CONVERSATION_DECISION_TRACE";
 
 type Message = {
   id?: string;
@@ -695,6 +703,7 @@ type Business = {
   internalNotes: InternalNote[];
   leads: Lead[];
   knowledgeGaps: Map<string, KnowledgeGap>;
+  businessContextSnapshot?: BusinessContextSnapshot | null;
   agentConfig: AgentConfig;
   publishedAgentConfig: AgentConfig | null;
   publishedAgentConfigHash: string | null;
@@ -2781,6 +2790,29 @@ async function loadBusinessFactRows(businessId: string): Promise<Record<string, 
   }
 }
 
+async function loadBusinessContextSnapshot(businessId: string): Promise<BusinessContextSnapshot | null> {
+  if (!pool) return null;
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      "select version, material_fingerprint, summary, generated_at, status from business_context_snapshots where business_id = $1",
+      [businessId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      version: Math.max(1, Number(row.version ?? 1)),
+      materialFingerprint: String(row.material_fingerprint ?? ""),
+      summary: String(row.summary ?? ""),
+      generatedAt: toIso(row.generated_at),
+      status: row.status === "stale" ? "stale" : "current",
+    };
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Business context snapshot table is not available yet");
+    return null;
+  }
+}
+
 async function loadBusinessFromDatabase(slug: string): Promise<Business | null> {
   if (!pool) return null;
   const businessResult = await pool.query<Record<string, unknown>>(
@@ -2798,6 +2830,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   if (!businessResult.rowCount) return null;
   const row = businessResult.rows[0];
   const businessId = String(row.id);
+  const contextSnapshot = await loadBusinessContextSnapshot(businessId);
   const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult, actionResourceRows, businessFactRows, actionSubmissionRows] = await Promise.all([
     pool.query<Record<string, unknown>>("select * from business_sources where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from knowledge_chunks where business_id = $1 order by created_at", [businessId]),
@@ -2955,6 +2988,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     notifications: [],
     internalNotes: [],
     leads: leadResult.rows.map(leadFromRow),
+    businessContextSnapshot: contextSnapshot,
     knowledgeGaps: new Map(gapResult.rows.map((gap) => [
       String(gap.question).toLowerCase().replace(/\s+/g, " ").trim(),
       {
@@ -4592,6 +4626,30 @@ async function persistBusinessFact(business: Business, fact: BusinessFact): Prom
   );
 }
 
+async function persistBusinessContextSnapshot(business: Business, snapshot: BusinessContextSnapshot, model: ReturnType<typeof buildCanonicalBusinessModel>): Promise<void> {
+  business.businessContextSnapshot = snapshot;
+  if (!pool) return;
+  try {
+    await pool.query(
+      `insert into business_context_snapshots
+         (business_id, version, material_fingerprint, summary, model, generated_at, status, updated_at)
+       values ($1, $2, $3, $4, $5::jsonb, $6, $7, now())
+       on conflict (business_id) do update set
+         version = excluded.version,
+         material_fingerprint = excluded.material_fingerprint,
+         summary = excluded.summary,
+         model = excluded.model,
+         generated_at = excluded.generated_at,
+         status = excluded.status,
+         updated_at = now()`,
+      [business.id, snapshot.version, snapshot.materialFingerprint, snapshot.summary, JSON.stringify(model), snapshot.generatedAt, snapshot.status],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: business.id }, "Business context snapshot persistence deferred until the latest schema is available");
+  }
+}
+
 function requireVerifiedBusiness(business: Business): void {
   if (business.billing.isDemo && business.billing.mode === "sandbox") return;
   if (business.ownershipStatus !== "verified") {
@@ -5852,6 +5910,29 @@ async function workspacePayload(business: Business) {
     : contentQualityIssue
       ? "review_recommended"
       : semantic.status;
+  const businessContextInput = {
+    businessId: business.id,
+    businessName: business.name,
+    businessType: business.vertical,
+    location: business.location,
+    primaryAction: business.actions.find((action) => action.id === business.primaryActionId) ?? null,
+    actions: business.actions,
+    actionResources: business.actionResources,
+    facts: business.facts,
+    chunks: business.chunks,
+    sources: business.sources.map((source) => ({ id: source.id, title: source.title, url: source.url, crawlStatus: source.crawlStatus, lastCrawledAt: source.lastCrawledAt })),
+    knowledgeGaps: gapList,
+    conversationQuestions: conversations.flatMap((conversation) => conversation.messages.filter((message) => message.role === "user").map((message) => message.content)),
+    privacyNoticeUrl: business.agentConfig.privacyNoticeUrl,
+  };
+  const businessModel = buildCanonicalBusinessModel(businessContextInput);
+  const contextSnapshot = createBusinessContextSnapshot(businessModel, business.businessContextSnapshot);
+  if (!business.businessContextSnapshot || business.businessContextSnapshot.materialFingerprint !== contextSnapshot.materialFingerprint) {
+    await persistBusinessContextSnapshot(business, contextSnapshot, businessModel);
+  } else {
+    business.businessContextSnapshot = contextSnapshot;
+  }
+  const workflowContext = buildWorkflowContext(businessContextInput);
   const setupSteps = [
     { id: "domain_verified", label: "Verify website", complete: business.ownershipStatus === "verified" },
     { id: "knowledge_ready", label: "Review knowledge", complete: sourceCount > 0 && meaningfulChunkCount > 0 && pendingSourceCount === 0 && failedSourceCount === 0 },
@@ -5970,6 +6051,21 @@ async function workspacePayload(business: Business) {
         pendingSources: pendingSourceCount,
         failedSources: failedSourceCount,
       },
+    },
+    workflowContext,
+    businessContext: {
+      schemaVersion: businessModel.schemaVersion,
+      summary: contextSnapshot.summary,
+      version: contextSnapshot.version,
+      generatedAt: contextSnapshot.generatedAt,
+      materialFingerprint: contextSnapshot.materialFingerprint,
+      status: contextSnapshot.status,
+      factStatusCounts: businessModel.knowledge.facts.reduce<Record<string, number>>((counts, fact) => {
+        counts[fact.status] = (counts[fact.status] ?? 0) + 1;
+        return counts;
+      }, {}),
+      conflictCount: businessModel.conflicts.length,
+      openKnowledgeGaps: businessModel.knowledge.gaps.length,
     },
     stats: {
       conversations: conversations.length,
@@ -6855,6 +6951,18 @@ type ConversationAnswerResult = Omit<AnswerResult, "failure"> & {
   };
 };
 
+type ConversationDecisionTraceContext = {
+  turnId: string;
+  startedAt: number;
+  orchestration: ReturnType<typeof decideConversationRoute>;
+  actionBefore: ActionFlow | null;
+  stateBefore: ConversationActionState | null;
+};
+
+function cloneConversationActionState(state: ConversationActionState | null | undefined): ConversationActionState | null {
+  return state ? JSON.parse(JSON.stringify(state)) as ConversationActionState : null;
+}
+
 function temporaryConversationAnswer(
   question: string,
   kind: "temporary_ai" | "retrieval" | "backend" = "backend",
@@ -7199,7 +7307,6 @@ async function continueWorkflowActionConversation(
   const repeatable = repeatableWorkflowConfig(action);
   if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
 
-  const requestClassification = classifyVisitorRequest(question);
   // A visitor can answer several questions in one sentence, or correct an
   // earlier answer while the workflow is waiting on a different field. Apply
   // only values declared by the action; the cursor still advances
@@ -7219,12 +7326,14 @@ async function continueWorkflowActionConversation(
     });
   }
   const currentAfterExtraction = currentWorkflowStep(action, state);
-  const questionLike = /^(how|what|when|where|why|who|is|are|can|could|does|do|tell me|explain)\b/i.test(question.trim());
-  const isSideQuestion = actionKnowledgeIntents.has(classifyQuestionIntent(question))
-    || (requestClassification.mode === "informational" && questionLike && !Object.keys(extractedValues).length);
+  const orchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state });
+  const isSideQuestion = orchestration.route === "INTERRUPTION";
+  if (orchestration.route === "EXPLICIT_ACTION") {
+    return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction) : "What would you like to do?"}`);
+  }
   if (isSideQuestion) {
     pushWorkflowInterruption(state, {
-      intent: classifyQuestionIntent(question),
+      intent: orchestration.interruptionIntent ?? classifyQuestionIntent(question),
       question,
       returnStepId: currentAfterExtraction?.id ?? state.currentStepId ?? null,
     });
@@ -8054,7 +8163,9 @@ async function recordConversationEvent(
       [event.id, business.id, conversation.id, event.eventType, actorUserId, actorType, JSON.stringify(metadata), event.createdAt],
     );
   } catch (error) {
-    if (!isMissingDatabaseTable(error)) throw error;
+    const errorCode = asRecord(error).code;
+    const rollingTraceSchema = eventType === "CONVERSATION_DECISION_TRACE" && errorCode === "23514";
+    if (!isMissingDatabaseTable(error) && !rollingTraceSchema) throw error;
     app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error" }, "Conversation event table is not available yet");
   }
 }
@@ -8463,12 +8574,69 @@ async function purgeExpiredCustomerData(): Promise<void> {
   }
 }
 
+async function recordConversationDecisionTrace(
+  business: Business,
+  conversation: Conversation,
+  context: ConversationDecisionTraceContext,
+  result: ConversationAnswerResult,
+): Promise<void> {
+  const actionAfter = conversation.actionState
+    ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
+    : null;
+  const stateAfter = conversation.actionState ?? null;
+  const provider = providerTrace(actionAfter ?? context.actionBefore, stateAfter, result.actionDelivery);
+  const ctaActionSelected = result.primaryCta
+    ? {
+        actionId: result.primaryCta.actionId,
+        key: result.primaryCta.key,
+        label: result.primaryCta.label,
+        executionMode: result.primaryCta.executionMode,
+        trackingKey: result.primaryCta.trackingKey,
+        url: result.primaryCta.url ?? null,
+      }
+    : result.action
+      ? { actionId: result.action.id, key: result.action.key, status: result.action.status }
+      : null;
+  await recordConversationEvent(business, conversation, "CONVERSATION_DECISION_TRACE", "system", null, {
+    trace_version: 1,
+    turn_id: context.turnId,
+    route: context.orchestration.route,
+    confidence: context.orchestration.confidence,
+    conversational_intent: context.orchestration.conversationalIntent,
+    action_intent: context.orchestration.actionIntent,
+    request_mode: context.orchestration.requestMode,
+    reason: context.orchestration.reason,
+    business_context_version: business.businessContextSnapshot?.version ?? null,
+    workflow_action_before: context.actionBefore ? { id: context.actionBefore.id, key: context.actionBefore.key, version: context.actionBefore.version ?? 1 } : null,
+    workflow_action_after: actionAfter ? { id: actionAfter.id, key: actionAfter.key, version: actionAfter.version ?? 1 } : null,
+    workflow_state_before: snapshotConversationWorkflowState(context.stateBefore),
+    extracted_fields: workflowFieldChanges(context.stateBefore, stateAfter),
+    next_best_action: result.action?.workflow?.nextBestAction ?? context.orchestration.nextBestAction,
+    provider_call: provider
+      ? { provider: provider.provider, operations: provider.operations, lookup_steps: provider.lookupSteps.map((lookup) => lookup.stepId), action_delivery_provider: provider.actionDelivery?.provider ?? null }
+      : null,
+    provider_result: provider
+      ? { lookup_steps: provider.lookupSteps, action_delivery: provider.actionDelivery }
+      : null,
+    workflow_state_after: snapshotConversationWorkflowState(stateAfter),
+    cta_action_selected: ctaActionSelected,
+    response: {
+      grounded: result.grounded,
+      confidence_band: result.confidenceBand,
+      handoff: result.handoff?.status ?? null,
+      action_delivery: result.actionDelivery?.status ?? null,
+    },
+    latency_ms: Math.max(0, Math.round(performance.now() - context.startedAt)),
+  });
+}
+
 async function persistConversationExchange(
   business: Business,
   conversation: Conversation,
   userContent: string,
   result: ConversationAnswerResult,
   clientMessageId?: string,
+  traceContext?: ConversationDecisionTraceContext,
 ): Promise<ConversationAnswerResult> {
   recordAnswer(result.modelUsage.latencyMs);
   if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer") recordLowConfidenceFallback();
@@ -8507,6 +8675,15 @@ async function persistConversationExchange(
   if (!result.handoff && conversation.status === "AI_ACTIVE") {
     await recordConversationEvent(business, conversation, "AI_RESPONSE_SENT", "ai", null, { grounded: result.grounded });
   }
+  if (traceContext) {
+    try {
+      await recordConversationDecisionTrace(business, conversation, traceContext, result);
+    } catch (error) {
+      // Decision traces are diagnostic metadata. They must never turn a
+      // successful customer response into a failed request.
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown trace error", businessId: business.id, conversationId: conversation.id }, "Conversation decision trace failed");
+    }
+  }
   await recordOrganizationUsage(business, "llm_requests");
   await recordModelUsage(business, result.modelUsage);
   if (result.knowledgeGap) {
@@ -8535,9 +8712,26 @@ async function persistConversationExchange(
 
 async function recordConversationQuestion(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null; clientMessageId?: string } = {}) {
   if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
-  if (isExplicitHumanRequest(question) && !["HUMAN_ACTIVE", "WAITING_FOR_STAFF", "HANDOFF_REQUESTED"].includes(conversation.status)) {
+  const activeAction = conversation.actionState ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null : null;
+  const orchestration = decideConversationRoute({ message: question, activeAction, actionState: conversation.actionState });
+  const traceContext: ConversationDecisionTraceContext = {
+    turnId: options.clientMessageId ?? randomUUID(),
+    startedAt: performance.now(),
+    orchestration,
+    actionBefore: activeAction,
+    stateBefore: cloneConversationActionState(conversation.actionState),
+  };
+  const persistTurn = (result: ConversationAnswerResult) => persistConversationExchange(
+    business,
+    conversation,
+    question,
+    result,
+    options.clientMessageId,
+    traceContext,
+  );
+  if (orchestration.route === "HUMAN_HANDOFF" && !["HUMAN_ACTIVE", "WAITING_FOR_STAFF", "HANDOFF_REQUESTED"].includes(conversation.status)) {
     const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member", question);
-    return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
+    return persistTurn(result);
   }
   if (conversation.status === "HUMAN_ACTIVE") {
     // The initial handoff response is emitted by requestHandoff. Follow-up
@@ -8548,7 +8742,7 @@ async function recordConversationQuestion(business: Business, conversation: Conv
       silent: true,
       handoff: { status: "HUMAN_ACTIVE" as const, reason: "Human takeover is active" },
     };
-    return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
+    return persistTurn(result);
   }
   if (conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED") {
     const requestedAction = detectAction(business.actions, question, business.primaryActionId);
@@ -8568,7 +8762,7 @@ async function recordConversationQuestion(business: Business, conversation: Conv
         answer: "",
         silent: true,
       };
-      return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
+      return persistTurn(result);
     }
   }
   let result: ConversationAnswerResult;
@@ -8579,7 +8773,7 @@ async function recordConversationQuestion(business: Business, conversation: Conv
     app.log.warn({ error: error instanceof Error ? error.message : "unknown widget answer failure", businessId: business.id, conversationId: conversation.id }, "Widget answer degraded after backend failure");
     result = temporaryConversationAnswer(question, "backend");
   }
-  return persistConversationExchange(business, conversation, question, result, options.clientMessageId);
+  return persistTurn(result);
 }
 
 async function recordActionFormSubmission(
@@ -8589,6 +8783,19 @@ async function recordActionFormSubmission(
   values: Record<string, unknown>,
   sourcePage: string | null = null,
 ) {
+  const actionBefore = business.actions.find((candidate) => candidate.id === actionId) ?? null;
+  const stateBefore = cloneConversationActionState(conversation.actionState);
+  const traceContext: ConversationDecisionTraceContext = {
+    turnId: randomUUID(),
+    startedAt: performance.now(),
+    orchestration: decideConversationRoute({
+      message: "Submitted action details.",
+      activeAction: actionBefore,
+      actionState: conversation.actionState,
+    }),
+    actionBefore,
+    stateBefore,
+  };
   if (conversation.actionState?.actionId === actionId && sourcePage) conversation.actionState.sourcePage = sourcePage;
   const result = await submitActionForm(business, conversation, actionId, values);
   const action = business.actions.find((candidate) => candidate.id === actionId);
@@ -8597,6 +8804,8 @@ async function recordActionFormSubmission(
     conversation,
     action ? "Submitted " + action.name + " details." : "Submitted action details.",
     result,
+    undefined,
+    traceContext,
   );
 }
 
@@ -10739,6 +10948,41 @@ app.post("/api/v1/admin/workflow-replay", async (request) => {
     stateAfter: simulatedState,
     nextBestActionAfter: workflowNextBestAction(action, afterStep),
   };
+});
+
+app.get("/api/v1/admin/businesses/:businessId/conversations/:conversationId/decision-traces", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Admin access requires PostgreSQL storage");
+  const params = request.params as { businessId?: string; conversationId?: string };
+  const businessId = requiredString(params.businessId, "businessId", 80);
+  const conversationId = requiredString(params.conversationId, "conversationId", 80);
+  const conversation = await pool.query(
+    "select id from conversations where id = $1 and business_id = $2",
+    [conversationId, businessId],
+  );
+  if (!conversation.rowCount) throw httpError(404, "Conversation not found");
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      `select id, created_at, metadata
+       from conversation_events
+       where business_id = $1 and conversation_id = $2 and event_type = 'CONVERSATION_DECISION_TRACE'
+       order by created_at desc
+       limit 200`,
+      [businessId, conversationId],
+    );
+    return {
+      businessId,
+      conversationId,
+      traces: result.rows.map((row) => ({
+        id: String(row.id),
+        createdAt: toIso(row.created_at),
+        trace: asRecord(row.metadata),
+      })),
+    };
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    return { businessId, conversationId, traces: [] };
+  }
 });
 
 app.post("/api/v1/admin/businesses/:businessId/verification/approve", async (request) => {

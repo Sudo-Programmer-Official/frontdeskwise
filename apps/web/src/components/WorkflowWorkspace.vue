@@ -1,29 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, Trash2, X } from "@lucide/vue";
+import { generateWorkflow, templateSteps, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
 
-interface WorkflowStep {
-  id?: string;
-  type?: string;
-  label?: string;
-  fieldKey?: string;
-  question?: string;
-  required?: boolean;
-  options?: string[];
-  condition?: string;
-  nextStepId?: string;
-  branches?: Record<string, string>;
-  config?: Record<string, unknown>;
-}
+type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
 
 interface WorkflowAction {
   id: string;
   key: string;
   name: string;
   description?: string;
+  actionType?: string;
   executionMode?: string;
   provider?: string | null;
-  fields?: Array<{ key?: string; label?: string; type?: string; question?: string }>;
+  fields?: Array<WorkflowFieldDraft & { id?: string; visibility?: string }>;
   steps?: Array<Record<string, unknown>>;
   completion?: Record<string, unknown>;
   readiness?: { ready?: boolean; reason?: string };
@@ -41,6 +31,7 @@ const props = defineProps<{
   apiUrl: (path: string) => string;
   ownerHeaders: () => Record<string, string>;
   businessName?: string;
+  businessContext?: WorkflowBusinessContext | null;
 }>();
 
 const emit = defineEmits<{
@@ -73,6 +64,7 @@ const stepTypes = [
   { value: "select", label: "Let visitor select" },
   { value: "confirm", label: "Confirm selection" },
   { value: "generate_link", label: "Generate registration link" },
+  { value: "redirect", label: "Show a call to action" },
   { value: "create_lead", label: "Save a lead" },
   { value: "book", label: "Book" },
   { value: "notify", label: "Notify staff" },
@@ -121,7 +113,7 @@ const providerConnected = computed(() => {
 });
 const readiness = computed(() => {
   const hasQuestions = draftSteps.value.some((step) => Boolean(step.question?.trim() || step.fieldKey?.trim() || step.type === "form"));
-  const hasCompletion = draftSteps.value.some((step) => ["complete", "generate_link", "book", "handoff"].includes(step.type ?? ""));
+  const hasCompletion = draftSteps.value.some((step) => ["complete", "generate_link", "redirect", "book", "handoff"].includes(step.type ?? ""));
   const hasFailurePath = draftSteps.value.some((step) => ["handoff", "notify"].includes(step.type ?? "") || Boolean(stepConfigValue(step, "failureBehavior")));
   const providerReady = !workflowProvider.value || providerConnected.value;
   return [
@@ -135,6 +127,8 @@ const readiness = computed(() => {
 const readinessPercent = computed(() => Math.round((readiness.value.filter((item) => item.complete).length / readiness.value.length) * 100));
 const readinessComplete = computed(() => readiness.value.filter((item) => item.complete));
 const readinessRemaining = computed(() => readiness.value.filter((item) => !item.complete).slice(0, 3));
+const configurationComplete = computed(() => readinessRemaining.value.length === 0);
+const configurationLabel = computed(() => configurationComplete.value ? "Configuration complete" : `${readinessPercent.value}% configured`);
 const providerStep = computed(() => draftSteps.value.find((step) => step.type === "lookup" || step.type === "generate_link") ?? null);
 const providerFailureBehavior = computed(() => providerStep.value ? stepConfigValue(providerStep.value, "failureBehavior") : "capture_lead");
 
@@ -228,7 +222,7 @@ function addWorkflowStep(type = "capture") {
     question: type === "capture" || type === "ask" ? "What should we know?" : undefined,
     required: type === "capture" || type === "ask",
     config: type === "lookup" ? { provider: workflowProvider.value || "jackrabbit", operation: "find_classes", failureBehavior: "handoff", searchFields: "location, schedule, age" } : {},
-  } as Record<string, unknown>);
+  } as WorkflowStep);
   selectedStepIndex.value = draftSteps.value.length - 1;
   markDirty();
 }
@@ -250,7 +244,7 @@ function moveWorkflowStep(index: number, direction: -1 | 1) {
   markDirty();
 }
 
-function templateSteps(key: string): WorkflowStep[] {
+function legacyTemplateSteps(key: string): WorkflowStep[] {
   const field = (id: string, label: string, fieldKey: string, question: string): WorkflowStep => ({ id, type: "capture", label, fieldKey, question, required: true, config: {} });
   if (key === "enrollment") {
     return [
@@ -289,15 +283,26 @@ function applyTemplate(key: string) {
 }
 
 function generateStarter() {
-  const text = workflowDescription.value.toLowerCase();
-  const key = text.includes("enroll") || text.includes("class") || text.includes("student") ? "enrollment"
-    : text.includes("tour") ? "tour"
-      : text.includes("book") || text.includes("schedule") ? "booking"
-        : text.includes("quote") || text.includes("estimate") ? "quote"
-          : text.includes("support") || text.includes("service") ? "service"
-            : text.includes("demo") ? "demo" : "lead";
-  applyTemplate(key);
-  workflowSaveMessage.value = `Starter ${formatLabel(key)} workflow generated. Review the steps before saving.`;
+  if (!workflowDraft.value) return;
+  const result = generateWorkflow(workflowDescription.value, (workflowDraft.value.fields ?? []) as WorkflowFieldDraft[], {
+    actionType: workflowDraft.value.actionType,
+    actionName: workflowDraft.value.name,
+    actionDescription: workflowDraft.value.description,
+    availableActionTypes: allActions.value.map((action) => action.actionType || action.key),
+    availableProviders: props.integrations.filter((integration) => (integration as IntegrationLike).connectionStatus === "active").map((integration) => String((integration as IntegrationLike).provider ?? "")).filter(Boolean),
+    knownBusinessKnowledge: props.businessContext?.knowledgeSummary?.map((item) => item.value) ?? [],
+    completionGoal: String(workflowDraft.value.completion?.message ?? workflowDraft.value.completion?.linkLabel ?? ""),
+    businessContext: props.businessContext ?? undefined,
+  });
+  workflowDraft.value.name = result.name;
+  workflowDraft.value.description = result.description;
+  workflowDraft.value.steps = result.steps as unknown as Array<Record<string, unknown>>;
+  workflowDraft.value.fields = result.fields as unknown as WorkflowAction["fields"];
+  if (result.executionMode) workflowDraft.value.executionMode = result.executionMode;
+  if (result.provider) workflowDraft.value.provider = result.provider;
+  selectedStepIndex.value = 0;
+  markDirty();
+  workflowSaveMessage.value = `${formatLabel(result.intent)} workflow generated from the owner goal. Review suggested steps and provenance before saving.`;
 }
 
 async function saveWorkflow() {
@@ -395,11 +400,11 @@ onMounted(() => {
       </aside>
 
       <main v-if="workflowDraft" class="workflow-builder">
-        <div class="workflow-builder-heading"><div><p class="eyebrow">Action: {{ workflowDraft.name }} · Workflow</p><h2>{{ workflowDraft.name }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><span :class="['status-pill', readinessPercent === 100 ? 'booked' : 'qualified']">{{ readinessPercent }}% ready</span></div></div>
+        <div class="workflow-builder-heading"><div><p class="eyebrow">Action: {{ workflowDraft.name }} · Workflow</p><h2>{{ workflowDraft.name }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><span :class="['status-pill', configurationComplete ? 'booked' : 'qualified']">{{ configurationLabel }}</span><span class="status-pill new">Needs testing</span></div></div>
 
         <div class="workflow-assist-card"><div class="workflow-assist-icon"><Sparkles :size="18" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-assist-copy"><p class="eyebrow">What should this workflow accomplish?</p><h3>Describe it in plain English</h3><p>FrontDeskWise will suggest the steps. You’ll review everything before it can run.</p></div><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="2" placeholder="Example: We ask the child’s age, swimming ability, location, and preferred days, then show available classes." @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><button class="primary-button small" type="button" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="14" :stroke-width="1.8" aria-hidden="true" />Generate steps</button></div>
 
-        <div class="workflow-readiness-card"><div><p class="eyebrow">Workflow readiness</p><h3>{{ readinessRemaining.length ? 'Finish these next' : 'Ready to publish' }}</h3></div><div class="workflow-readiness-list"><span v-for="item in readinessComplete.slice(0, 1)" :key="item.label" class="complete"><Check :size="14" :stroke-width="2" aria-hidden="true" />{{ item.label.replace('Workflow ', '') }}</span><span v-for="item in readinessRemaining" :key="item.label"><i aria-hidden="true">○</i>{{ item.label.replace('Questions and capture fields are defined', 'Add at least one step').replace('Completion path is defined', 'Add completion behavior').replace('Failure and handoff path is defined', 'Choose what happens if unavailable') }}</span></div><button v-if="readinessRemaining.length" class="text-button" type="button" @click="continueSetup">Continue setup <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
+        <div class="workflow-readiness-card"><div><p class="eyebrow">Workflow setup</p><h3>{{ readinessRemaining.length ? 'Finish these next' : 'Setup complete' }}</h3></div><div class="workflow-readiness-list"><span v-if="configurationComplete" class="complete"><Check :size="14" :stroke-width="2" aria-hidden="true" />Configuration complete</span><span class="workflow-test-status"><i aria-hidden="true">○</i>Needs testing before publishing</span><span v-for="item in readinessRemaining" :key="item.label"><i aria-hidden="true">○</i>{{ item.label.replace('Questions and capture fields are defined', 'Add at least one step').replace('Completion path is defined', 'Add completion behavior').replace('Failure and handoff path is defined', 'Choose what happens if unavailable') }}</span></div><button v-if="readinessRemaining.length" class="text-button" type="button" @click="continueSetup">Continue setup <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
 
         <div class="workflow-provider-summary"><div class="workflow-provider-summary-heading"><div><p class="eyebrow">Provider</p><h3>{{ providerStep ? formatLabel(stepConfigValue(providerStep, 'provider') || workflowProvider || 'Provider') : 'No provider configured' }}</h3></div><span :class="['status-pill', providerStep && providerConnected ? 'booked' : 'new']">{{ providerStep ? (providerConnected ? 'Connected' : 'Needs connection') : 'Optional' }}</span></div><div v-if="providerStep" class="workflow-provider-summary-detail"><span>If unavailable</span><select :value="providerFailureBehavior" @change="setStepConfigFromEvent(providerStep, 'failureBehavior', $event)"><option value="capture_lead">Capture the request and notify the team</option><option value="handoff">Hand off to staff</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></div><div v-else class="workflow-provider-summary-detail"><span>Use a provider when this workflow needs availability, booking, or CRM actions.</span><button class="outline-button small" type="button" @click="configureProvider">Add provider step</button></div></div>
 
@@ -409,7 +414,7 @@ onMounted(() => {
             <div class="workflow-step-rail"><span>{{ index + 1 }}</span><i v-if="index < draftSteps.length - 1"></i></div>
             <div class="workflow-step-body">
               <div class="workflow-step-toolbar"><div class="workflow-step-title"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-if="selectedStepIndex === index" v-model="step.label" type="text" aria-label="Workflow step label" @input="markDirty" /><strong v-else>{{ step.label || stepTypeLabel(step.type) }}</strong><span class="status-pill qualified">{{ stepTypeLabel(step.type) }}</span></div><div class="workflow-step-actions"><button class="workflow-edit-button" type="button" @click.stop="selectedStepIndex = selectedStepIndex === index ? -1 : index">{{ selectedStepIndex === index ? 'Done' : 'Edit' }}</button><button type="button" aria-label="Move step up" :disabled="index === 0" @click.stop="moveWorkflowStep(index, -1)">↑</button><button type="button" aria-label="Move step down" :disabled="index === draftSteps.length - 1" @click.stop="moveWorkflowStep(index, 1)">↓</button><button type="button" aria-label="Delete step" @click.stop="removeWorkflowStep(index)"><Trash2 :size="15" :stroke-width="1.8" aria-hidden="true" /></button></div></div>
-              <div v-if="selectedStepIndex !== index" class="workflow-step-summary"><span>{{ step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span></div>
+              <div v-if="selectedStepIndex !== index" class="workflow-step-summary"><span>{{ step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
               <div v-else>
                 <div class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="markDirty"><option v-for="type in stepTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
@@ -423,7 +428,7 @@ onMounted(() => {
         </div>
       </main>
 
-      <aside v-if="workflowDraft" class="workflow-preview-panel panel"><div class="workflow-preview-heading"><div><p class="eyebrow">Workflow preview</p><h3>{{ previewStep ? 'What customers will see' : 'Preview the experience' }}</h3></div><span class="preview-live-dot">Live</span></div><div class="workflow-preview-window"><div class="workflow-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>AI front desk</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div v-if="previewStep" class="workflow-preview-thread"><div class="workflow-preview-bubble">Hi! I can help you take the next step.</div><div class="workflow-preview-bubble visitor">I’m ready to get started.</div><div class="workflow-preview-bubble">{{ previewStep.question || `Next: ${previewStep.label || stepTypeLabel(previewStep.type)}` }}</div><div v-if="previewStep.options?.length" class="workflow-preview-options"><button v-for="option in previewStep.options" :key="option" type="button">{{ option }}</button></div><div v-if="previewStep.type === 'lookup'" class="workflow-preview-lookup"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" />Searching {{ formatLabel(stepConfigValue(previewStep, 'provider') || 'provider') }} for the best matches…</div></div><div v-else class="workflow-preview-empty"><Sparkles :size="20" :stroke-width="1.8" aria-hidden="true" /><strong>Add or select a step</strong><p>Choose a step to see what the customer experiences.</p></div><div v-if="previewStep" class="workflow-preview-input">Reply to the assistant… <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">{{ previewStep ? `Previewing step ${selectedStepIndex + 1} of ${draftSteps.length}.` : 'Add or select a step to see the customer experience.' }}</p><div class="workflow-preview-meta"><span>{{ draftSteps.length }} steps</span><span>{{ workflowProvider ? formatLabel(workflowProvider) : 'No provider' }}</span><span>{{ readinessPercent }}% ready</span></div></aside>
+      <aside v-if="workflowDraft" class="workflow-preview-panel panel"><div class="workflow-preview-heading"><div><p class="eyebrow">Workflow preview</p><h3>{{ previewStep ? 'What customers will see' : 'Preview the experience' }}</h3></div><span class="preview-live-dot">Live</span></div><div class="workflow-preview-window"><div class="workflow-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>AI front desk</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div v-if="previewStep" class="workflow-preview-thread"><div class="workflow-preview-bubble">Hi! I can help you take the next step.</div><div class="workflow-preview-bubble visitor">I’m ready to get started.</div><div class="workflow-preview-bubble">{{ previewStep.question || `Next: ${previewStep.label || stepTypeLabel(previewStep.type)}` }}</div><div v-if="previewStep.options?.length" class="workflow-preview-options"><button v-for="option in previewStep.options" :key="option" type="button">{{ option }}</button></div><div v-if="previewStep.type === 'lookup'" class="workflow-preview-lookup"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" />Searching {{ formatLabel(stepConfigValue(previewStep, 'provider') || 'provider') }} for the best matches…</div><div v-if="previewStep.type === 'redirect'" class="workflow-preview-cta"><button class="primary-button small" type="button">{{ stepConfigValue(previewStep, 'buttonLabel') || previewStep.label || 'Continue' }}</button></div></div><div v-else class="workflow-preview-empty"><Sparkles :size="20" :stroke-width="1.8" aria-hidden="true" /><strong>Add or select a step</strong><p>Choose a step to see what the customer experiences.</p></div><div v-if="previewStep" class="workflow-preview-input">Reply to the assistant… <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">{{ previewStep ? `Previewing step ${selectedStepIndex + 1} of ${draftSteps.length}.` : 'Add or select a step to see the customer experience.' }}</p><div class="workflow-preview-meta"><span>{{ draftSteps.length }} steps</span><span>{{ workflowProvider ? formatLabel(workflowProvider) : 'No provider' }}</span><span>{{ configurationLabel }}</span><span>Needs testing</span></div></aside>
     </div>
 
     <p v-if="workflowSaveError" class="form-error">{{ workflowSaveError }}</p><p v-if="workflowSaveMessage" class="saved-message">✓ {{ workflowSaveMessage }}</p><div v-if="workflowDraft && workflowDraft.readiness?.ready === false" class="workflow-save-note"><X :size="15" :stroke-width="1.8" aria-hidden="true" /> This workflow is still in setup. Review the readiness checklist before making the action primary.</div>
@@ -554,6 +559,8 @@ onMounted(() => {
 .workflow-step-summary { display: flex; align-items: center; gap: 7px; min-height: 28px; margin-top: 5px; color: #64758a; font-size: 12px; }
 .workflow-step-summary > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-summary-tag { flex: 0 0 auto; padding: 4px 6px; border-radius: 5px; background: #f1f5fa; color: #728197; font-size: 10px; }
+.workflow-test-status { color: #8b5b18 !important; }
+.workflow-preview-cta { display: flex; justify-content: flex-end; padding-top: 4px; }
 .workflow-edit-button { width: auto !important; padding: 0 8px !important; color: #315ba9 !important; font-size: 10px; font-weight: 800; }
 .workflow-advanced-settings { margin-top: 11px; padding-top: 10px; border-top: 1px solid #edf1f5; color: #65758a; font-size: 11px; }
 .workflow-advanced-settings > summary { cursor: pointer; list-style: none; color: #315ba9; font-weight: 800; }
