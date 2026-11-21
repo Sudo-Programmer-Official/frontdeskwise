@@ -1,4 +1,4 @@
-import { classifyVisitorRequest, type ActionFlow, type ConversationActionState } from "./action-flows.js";
+import { classifyVisitorRequest, isPlanSelectionWorkflow, type ActionFlow, type ConversationActionState } from "./action-flows.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { classifyQuestionIntent, type RetrievalIntent } from "./retrieval.js";
 import { currentWorkflowStep, workflowNextBestAction, type WorkflowNextBestAction } from "./workflow-engine.js";
@@ -41,6 +41,7 @@ function hasActiveWorkflow(action?: ActionFlow | null, state?: ConversationActio
 
 function workflowMatchesActionIntent(action: ActionFlow, actionIntent: string): boolean {
   const haystack = `${action.key} ${action.actionType} ${action.name}`.toLowerCase();
+  if (actionIntent === "plan_selection") return isPlanSelectionWorkflow(action);
   if (actionIntent === "enrollment") return /enroll|registration|student|lesson/.test(haystack);
   if (actionIntent === "booking") return /book|appointment|schedule|tour/.test(haystack);
   if (actionIntent === "quote") return /quote|estimate/.test(haystack);

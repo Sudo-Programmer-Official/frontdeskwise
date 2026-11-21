@@ -504,9 +504,25 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
     "child_age",
     "preferred_days",
     "redirect",
+    "business_fit",
+    "workflow_generation_context",
   ]) {
     assert.ok(workflowGenerator.includes(marker), `missing grounded workflow generation marker: ${marker}`);
   }
+  for (const marker of [
+    "actionsLoadGeneration",
+    "integrationsLoadGeneration",
+    "workspaceLoadGeneration",
+    "workflowContext?.businessId",
+    "workflowContext?.organizationId",
+    "workflowContext?.contextVersion",
+  ]) {
+    assert.ok(app.includes(marker), `missing tenant isolation marker: ${marker}`);
+  }
+  assert.match(workflowWorkspace, /workflow-isolation-warning/);
+  assert.match(workflowWorkspace, /overflow-wrap: anywhere/);
+  assert.match(apiServer, /validateWorkflowTenantIsolation/);
+  assert.match(apiServer, /workflowContextBusinessId/);
   assert.match(app, /Replay workflow/);
   assert.match(app, /replayAdminWorkflow/);
   assert.match(apiServer, /app\.post\("\/api\/v1\/admin\/workflow-replay/);

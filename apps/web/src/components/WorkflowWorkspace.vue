@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, Trash2, X } from "@lucide/vue";
-import { generateWorkflow, templateSteps, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
+import { generateWorkflow, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
 
 type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
 
 interface WorkflowAction {
   id: string;
   key: string;
+  businessId?: string;
   name: string;
   description?: string;
   actionType?: string;
@@ -17,6 +18,7 @@ interface WorkflowAction {
   steps?: Array<Record<string, unknown>>;
   completion?: Record<string, unknown>;
   readiness?: { ready?: boolean; reason?: string };
+  workflowSafety?: { status?: string; code?: string; identifier?: string };
 }
 
 interface IntegrationLike {
@@ -28,6 +30,7 @@ const props = defineProps<{
   actions: unknown[];
   integrations: unknown[];
   demoSlug: string;
+  organizationId?: string | null;
   apiUrl: (path: string) => string;
   ownerHeaders: () => Record<string, string>;
   businessName?: string;
@@ -52,6 +55,7 @@ const showTemplatePicker = ref(false);
 const workflowAssistInput = ref<HTMLTextAreaElement | null>(null);
 const workflowStepList = ref<HTMLElement | null>(null);
 const draftIsDirty = ref(false);
+const workflowGenerationKey = ref("");
 let draftSourceId = "";
 
 const stepTypes = [
@@ -92,7 +96,7 @@ function asWorkflowAction(value: unknown): WorkflowAction | null {
 const allActions = computed(() => props.actions.map(asWorkflowAction).filter((action): action is WorkflowAction => Boolean(action)));
 const workflowActions = computed(() => allActions.value.filter((action) => {
   const stepCount = Array.isArray(action.steps) ? action.steps.length : 0;
-  return stepCount > 1 || action.executionMode === "PROVIDER_FLOW" || (action.fields?.length ?? 0) > 2;
+  return action.workflowSafety?.status === "blocked" || stepCount > 1 || action.executionMode === "PROVIDER_FLOW" || (action.fields?.length ?? 0) > 2;
 }));
 const selectedWorkflow = computed(() => workflowActions.value.find((action) => action.id === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
 const draftSteps = computed(() => (workflowDraft.value?.steps ?? []) as unknown as WorkflowStep[]);
@@ -148,6 +152,22 @@ function syncDraft(force = false) {
   draftSourceId = selected.id;
   draftIsDirty.value = false;
   selectedStepIndex.value = -1;
+  if (selected.workflowSafety?.status === "blocked") {
+    const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "Business";
+    workflowDraft.value.name = `${businessName} workflow`;
+    workflowDraft.value.description = defaultBusinessWorkflowDescription();
+    workflowDescription.value = workflowDraft.value.description;
+  } else {
+    workflowDescription.value = selected.description ?? "";
+  }
+}
+
+function defaultBusinessWorkflowDescription(): string {
+  const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "this business";
+  const businessType = props.businessContext?.businessType?.trim() && props.businessContext.businessType !== "Unknown"
+    ? props.businessContext.businessType.trim().toLowerCase()
+    : "business";
+  return `Help visitors understand whether ${businessName} is a good fit. First ask what kind of ${businessType} they run and what they are mainly trying to improve. Match verified capabilities, explain the fit briefly, show verified pricing when relevant, and use the approved primary conversion action. Offer a demo request only when explicitly requested and hand off account or human-help questions.`;
 }
 
 watch(workflowActions, () => {
@@ -292,16 +312,24 @@ function applyTemplate(key: string) {
 
 function generateStarter() {
   if (!workflowDraft.value) return;
-  const result = generateWorkflow(workflowDescription.value, (workflowDraft.value.fields ?? []) as WorkflowFieldDraft[], {
+  const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "";
+  const generationContext = {
+    organizationId: props.organizationId ?? props.businessContext?.organizationId,
+    businessId: props.businessContext?.businessId,
+    workflowId: workflowDraft.value.id,
+    actionId: workflowDraft.value.id,
+    contextVersion: props.businessContext?.contextVersion,
     actionType: workflowDraft.value.actionType,
-    actionName: workflowDraft.value.name,
-    actionDescription: workflowDraft.value.description,
+    actionName: businessName ? `${businessName} workflow` : workflowDraft.value.name,
+    actionDescription: businessName ? defaultBusinessWorkflowDescription() : workflowDraft.value.description,
     availableActionTypes: allActions.value.map((action) => action.actionType || action.key),
     availableProviders: props.integrations.filter((integration) => (integration as IntegrationLike).connectionStatus === "active").map((integration) => String((integration as IntegrationLike).provider ?? "")).filter(Boolean),
     knownBusinessKnowledge: props.businessContext?.knowledgeSummary?.map((item) => item.value) ?? [],
     completionGoal: String(workflowDraft.value.completion?.message ?? workflowDraft.value.completion?.linkLabel ?? ""),
     businessContext: props.businessContext ?? undefined,
-  });
+  };
+  workflowGenerationKey.value = workflowGenerationCacheKey(generationContext);
+  const result = generateWorkflow(workflowDescription.value || defaultBusinessWorkflowDescription(), [], generationContext);
   workflowDraft.value.name = result.name;
   workflowDraft.value.description = result.description;
   workflowDraft.value.steps = result.steps as unknown as Array<Record<string, unknown>>;
@@ -322,7 +350,11 @@ async function saveWorkflow() {
     const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(workflowDraft.value.id)}`), {
       method: "PUT",
       headers: { "content-type": "application/json", ...props.ownerHeaders() },
-      body: JSON.stringify(workflowDraft.value),
+      body: JSON.stringify({
+        ...workflowDraft.value,
+        ...(props.businessContext?.businessId ? { businessId: props.businessContext.businessId, workflowContextBusinessId: props.businessContext.businessId } : {}),
+        ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
+      }),
     });
     const payload = await response.json() as { error?: string; action?: WorkflowAction };
     if (!response.ok) throw new Error(payload.error ?? "Could not save this workflow.");
@@ -380,7 +412,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="view-content workflow-workspace">
+  <div class="view-content workflow-workspace" :data-workflow-generation-key="workflowGenerationKey || undefined">
     <div class="workflow-page-header">
       <div>
         <p class="eyebrow">AI front desk</p>
@@ -408,7 +440,7 @@ onMounted(() => {
       </aside>
 
       <main v-if="workflowDraft" class="workflow-builder">
-        <div class="workflow-builder-heading"><div><p class="eyebrow">Workflow</p><h2>{{ workflowDraft.name }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><div class="workflow-status-group"><span class="workflow-mode-label">{{ formatLabel(workflowDraft.executionMode || 'FORM_FLOW') }}</span><span class="status-pill new">Needs testing</span></div></div></div>
+        <div class="workflow-builder-heading"><div><p class="eyebrow">Workflow</p><h2>{{ workflowDraft.name }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p><div v-if="workflowDraft.workflowSafety?.status === 'blocked'" class="workflow-isolation-warning" role="alert"><strong>Previous draft blocked for safety.</strong><span>It referenced a different business context. Regenerate from the active Business Brain before saving.</span></div></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><div class="workflow-status-group"><span class="workflow-mode-label">{{ formatLabel(workflowDraft.executionMode || 'FORM_FLOW') }}</span><span class="status-pill new">Needs testing</span></div></div></div>
 
         <section class="workflow-assist-card" aria-labelledby="workflow-assist-heading"><div class="workflow-assist-heading"><div class="workflow-assist-icon"><Sparkles :size="18" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-assist-copy"><p class="eyebrow">Start here</p><h3 id="workflow-assist-heading">What should this workflow accomplish?</h3><p>Describe the customer outcome in plain English. FrontDeskWise will suggest the steps for you to review.</p></div></div><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="4" placeholder="Example: Ask the child’s age, swimming ability, location, and preferred days, then show available classes." @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><div class="workflow-assist-footer"><span>Tip: include what the customer needs and what should happen next.</span><button class="primary-button" type="button" aria-label="Generate steps" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="15" :stroke-width="1.8" aria-hidden="true" />Generate workflow</button></div><div class="workflow-template-flow"><button class="text-button workflow-template-trigger" type="button" @click="showTemplatePicker = !showTemplatePicker">Start with a template <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="showTemplatePicker" class="workflow-template-picker"><p>Choose a starting point</p><button v-for="template in workflowTemplates" :key="template.key" type="button" @click="applyTemplate(template.key)"><strong>{{ template.label }}</strong><small>{{ template.description }}</small></button></div></div></section>
 
@@ -763,6 +795,20 @@ onMounted(() => {
 .workflow-empty-builder { width: 100%; min-height: 126px; box-sizing: border-box; padding: 22px 20px; }
 .workflow-provider-summary { margin-top: 0; }
 .workflow-preview-panel { width: 100%; box-sizing: border-box; }
+.workflow-builder-heading > div:first-child,
+.workflow-builder-heading p:not(.eyebrow),
+.workflow-step-title,
+.workflow-step-body,
+.workflow-preview-top > div { min-width: 0; }
+.workflow-builder-heading p:not(.eyebrow) { max-width: 68ch; max-height: 8.4em; overflow: auto; overflow-wrap: anywhere; word-break: break-word; }
+.workflow-step-title { flex-wrap: wrap; }
+.workflow-step-title strong, .workflow-step-title input { min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.workflow-step-title .status-pill { flex: 0 0 auto; }
+.workflow-step-summary { align-items: flex-start; flex-wrap: wrap; }
+.workflow-step-summary > span:first-child { min-width: 0; flex: 1 1 220px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.workflow-preview-bubble, .workflow-preview-lookup, .workflow-preview-top strong, .workflow-preview-top small { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.workflow-isolation-warning { display: grid; gap: 3px; max-width: 68ch; padding: 10px 12px; margin-top: 12px; border: 1px solid #f2d49d; border-radius: 9px; background: #fff9ed; color: #805b19; font-size: 11px; line-height: 1.4; }
+.workflow-isolation-warning strong { color: #67470e; }
 
 @media (max-width: 1260px) {
   .workflow-layout { grid-template-columns: 240px minmax(0, 1fr) 300px; gap: 20px; }

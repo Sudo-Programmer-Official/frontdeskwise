@@ -30,6 +30,7 @@ export type WorkflowNextBestAction =
   | "BOOK"
   | "NOTIFY_STAFF"
   | "HANDOFF"
+  | "CONTINUE_WORKFLOW"
   | "COMPLETED";
 
 export type WorkflowSummary = {
@@ -153,6 +154,7 @@ export function workflowNextBestAction(action: ActionFlow, step: ActionStep | nu
   if (step.type === "book") return "BOOK";
   if (step.type === "notify") return "NOTIFY_STAFF";
   if (step.type === "handoff") return "HANDOFF";
+  if (step.type === "redirect") return "CONTINUE_WORKFLOW";
   if (step.type === "form") return "CAPTURE_DETAILS";
   if (step.fieldKey) return "ASK_FIELD";
   return "CAPTURE_DETAILS";
@@ -247,7 +249,7 @@ export function migrateWorkflowState(action: ActionFlow, state: ConversationActi
 }
 
 function lookupDependencyKeys(step: ActionStep): Set<string> {
-  const dependencies = new Set(["customer_type", "child_age", "ability", "goal", "location", "program", "schedule_preference", "service", "preferred_date", "preferred_time"]);
+  const dependencies = new Set(["customer_type", "child_age", "ability", "goal", "location", "program", "schedule_preference", "service", "preferred_date", "preferred_time", "usage_type", "main_goal", "usage_level"]);
   const config = step.config ?? {};
   for (const [key, value] of Object.entries(config)) {
     if (key.endsWith("Field") && typeof value === "string") dependencies.add(value);
@@ -314,7 +316,9 @@ function optionForField(field: ActionField, input: string): string | null {
   const value = normalizedPhrase(input);
   const exact = field.options?.find((option) => normalizedPhrase(option) === value);
   if (exact) return exact;
-  const partial = field.options?.find((option) => normalizedPhrase(option).includes(value) || value.includes(normalizedPhrase(option)));
+  const partial = !["usage_type", "main_goal", "usage_level"].includes(field.key)
+    ? field.options?.find((option) => normalizedPhrase(option).includes(value) || value.includes(normalizedPhrase(option)))
+    : undefined;
   if (partial) return partial;
   if (field.key === "customer_type") {
     if (/\b(new|first|not enrolled|never)\b/.test(value)) return "New student";
@@ -330,6 +334,31 @@ function optionForField(field: ActionField, input: string): string | null {
     if (/\b(safety|safe|survival)\b/.test(value)) return "Water safety";
     if (/\b(technique|stroke|improve|competitive)\b/.test(value)) return "Improve technique";
     if (/\b(fun|confidence|activity)\b/.test(value)) return "Have fun";
+  }
+  if (field.key === "usage_type" || fieldLooksLike(field, "usage type", "audience", "team size")) {
+    if (/\b(just for me|only me|by myself|myself|individual|solo|personal use|one person|single user)\b/.test(value)) return field.options?.find((option) => /solo|individual|personal|one person/i.test(option)) ?? "Solo";
+    if (/\b(team|teams|coworkers?|colleagues?|multiple users?|small group|we[' ]?ll use|use it together)\b/.test(value)) return field.options?.find((option) => /team|group|multiple/i.test(option)) ?? "Team";
+  }
+  if (field.key === "main_goal" || fieldLooksLike(field, "main goal", "goal", "objective")) {
+    const planning = /\b(plan|planning|organize|priorit|daily)\w*/.test(value);
+    const reminders = /\b(reminder|reminders|nudge|recap|alert|notifications?)\b/.test(value);
+    if (planning && reminders) {
+      return field.options?.find((option) => {
+        const candidate = normalizedPhrase(option);
+        return candidate.includes("planning") && candidate.includes("reminder");
+      })
+        ?? field.options?.find((option) => /planning/i.test(option))
+        ?? "Planning";
+    }
+    if (planning) return field.options?.find((option) => /planning|organ|priorit/i.test(option)) ?? "Planning";
+    if (reminders) return field.options?.find((option) => /reminder|nudge|recap/i.test(option)) ?? "Reminders";
+    if (/\b(task breakdown|break down tasks|tasks? into steps)\b/.test(value)) return field.options?.find((option) => /task/i.test(option)) ?? "AI task breakdown";
+    if (/\b(team|collaborat|shared|workspace)\b/.test(value)) return field.options?.find((option) => /team|coordination|workspace/i.test(option)) ?? "Team coordination";
+  }
+  if (field.key === "usage_level" || fieldLooksLike(field, "usage level", "frequency", "often")) {
+    if (/\b(every day|each day|daily|day to day|all the time)\b/.test(value)) return field.options?.find((option) => /every day|daily|heavy|frequent/i.test(option)) ?? "Every day";
+    if (/\b(regularly|regular|most days|several times|often)\b/.test(value)) return field.options?.find((option) => /regular|often/i.test(option)) ?? "Regular";
+    if (/\b(occasionally|occasional|sometimes|once in a while|rarely)\b/.test(value)) return field.options?.find((option) => /occasional|sometimes/i.test(option)) ?? "Occasional";
   }
   return null;
 }

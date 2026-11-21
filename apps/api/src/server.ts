@@ -26,6 +26,7 @@ import {
   detectAction,
   fieldPrompt,
   formFields,
+  isPlanSelectionWorkflow,
   nextActionField,
   nextConversationalField,
   normalizeCanonicalEnrollmentWorkflow,
@@ -70,6 +71,7 @@ import {
   workflowNextBestAction,
   workflowSummary,
 } from "./workflow-engine.js";
+import { planRecommendationMessage, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
 import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
 import {
   answerabilityDecision,
@@ -174,6 +176,7 @@ import {
   type BusinessFactSourceType,
 } from "./business-knowledge.js";
 import { buildWorkflowContext } from "./workflow-context.js";
+import { validateWorkflowTenantIsolation, workflowIsolationMessage, type WorkflowIsolationResult } from "./workflow-isolation.js";
 import { buildCanonicalBusinessModel, createBusinessContextSnapshot, type BusinessContextSnapshot } from "./business-context.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
@@ -677,6 +680,7 @@ type EvaluationResult = {
 
 type Business = {
   id: string;
+  organizationId?: string | null;
   name: string;
   slug: string;
   vertical: string;
@@ -2775,6 +2779,16 @@ async function loadActionSubmissionRows(businessId: string): Promise<Record<stri
   }
 }
 
+function actionProviderNames(action: ActionFlow): string[] {
+  const providers = new Set<string>();
+  if (action.provider?.trim()) providers.add(action.provider.trim().toLowerCase());
+  for (const step of action.steps ?? []) {
+    const provider = step.config?.provider;
+    if (typeof provider === "string" && provider.trim()) providers.add(provider.trim().toLowerCase());
+  }
+  return [...providers];
+}
+
 async function loadBusinessFactRows(businessId: string): Promise<Record<string, unknown>[]> {
   if (!pool) return [];
   try {
@@ -2894,6 +2908,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   const config = configResult.rows[0];
   const loaded: Business = {
     id: businessId,
+    organizationId: typeof row.organization_id === "string" ? row.organization_id : null,
     name: String(row.name),
     slug: String(row.slug),
     vertical: String(row.vertical),
@@ -5932,7 +5947,12 @@ async function workspacePayload(business: Business) {
   } else {
     business.businessContextSnapshot = contextSnapshot;
   }
-  const workflowContext = buildWorkflowContext(businessContextInput);
+  const workflowContext = {
+    ...buildWorkflowContext(businessContextInput),
+    organizationId: business.organizationId ?? undefined,
+    businessId: business.id,
+    contextVersion: contextSnapshot.version,
+  };
   const setupSteps = [
     { id: "domain_verified", label: "Verify website", complete: business.ownershipStatus === "verified" },
     { id: "knowledge_ready", label: "Review knowledge", complete: sourceCount > 0 && meaningfulChunkCount > 0 && pendingSourceCount === 0 && failedSourceCount === 0 },
@@ -6235,11 +6255,62 @@ type RetrievalContext = {
   intent: RetrievalIntent;
 };
 
+type ActiveWorkflowAnswerContext = {
+  action: ActionFlow;
+  state: ConversationActionState;
+};
+
+function workflowAudienceTerms(workflow?: ActiveWorkflowAnswerContext): { target: RegExp; competing: RegExp } | null {
+  if (!workflow || !isPlanSelectionWorkflow(workflow.action)) return null;
+  const usageType = workflow.state.values.usage_type?.toLowerCase() ?? "";
+  if (/team|group|multiple/.test(usageType)) {
+    return {
+      target: /\b(team|teams|workspace|workspaces|seat|seats|business|organization|multiple users?)\b/i,
+      competing: /\b(solo|individual|personal|single user|one user)\b/i,
+    };
+  }
+  if (/solo|individual|personal|one/.test(usageType)) {
+    return {
+      target: /\b(solo|individual|personal|single user|one user)\b/i,
+      competing: /\b(team|teams|workspace|workspaces|seat|seats|business|organization|multiple users?)\b/i,
+    };
+  }
+  return null;
+}
+
+function workflowScopedFacts(business: Business, workflow?: ActiveWorkflowAnswerContext): BusinessFact[] {
+  const audience = workflowAudienceTerms(workflow);
+  if (!audience) return business.facts;
+  return business.facts.filter((fact) => {
+    if (fact.kind !== "pricing") return true;
+    const text = `${fact.subject} ${fact.predicate} ${fact.valueText}`;
+    return !(audience.competing.test(text) && !audience.target.test(text));
+  });
+}
+
+function workflowScopedMatches(matches: RetrievalMatch[], workflow: ActiveWorkflowAnswerContext | undefined, intent: RetrievalIntent): RetrievalMatch[] {
+  const audience = workflowAudienceTerms(workflow);
+  if (!audience || intent !== "pricing") return matches;
+  return matches.filter(({ chunk }) => {
+    const text = chunk.content;
+    return !(audience.competing.test(text) && !audience.target.test(text));
+  });
+}
+
+function workflowContextTerms(workflow?: ActiveWorkflowAnswerContext): string[] {
+  if (!workflow) return [];
+  const values = Object.entries(workflow.state.values)
+    .filter(([key, value]) => value && !/email|phone|name|address|token|secret/i.test(key))
+    .map(([key, value]) => `${key.replace(/[_-]+/g, " ")}: ${value}`);
+  return [`active workflow ${workflow.action.name}`, ...values].slice(0, 12);
+}
+
 function retrievalContext(
   business: Business,
   question: string,
   conversation?: Conversation,
   currentPage?: string | null,
+  workflow?: ActiveWorkflowAnswerContext,
 ): RetrievalContext {
   const normalizedQuery = question.trim().replace(/\s+/g, " ");
   const intent = classifyQuestionIntent(normalizedQuery);
@@ -6259,6 +6330,8 @@ function retrievalContext(
       // Ignore an invalid page hint; the visitor's question remains usable.
     }
   }
+  const workflowTerms = workflowContextTerms(workflow);
+  if (workflowTerms.length) parts.push(`workflow context ${workflowTerms.join(" ")}`);
   return { normalizedQuery, expandedQuery: parts.join(" "), intent };
 }
 
@@ -6554,7 +6627,12 @@ function resolvedKnowledgeAnswer(business: Business, question: string, intent: R
     .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))[0] ?? null;
 }
 
-function structuredFactAnswer(business: Business, question: string, intent: RetrievalIntent): {
+function structuredFactAnswer(
+  business: Business,
+  question: string,
+  intent: RetrievalIntent,
+  facts = business.facts,
+): {
   answer: string;
   fact: BusinessFact;
   confidenceScore: number;
@@ -6570,7 +6648,7 @@ function structuredFactAnswer(business: Business, question: string, intent: Retr
     services: "service",
   };
   const kind = kindByIntent[intent];
-  if (!kind || !business.facts.length) return null;
+  if (!kind || !facts.length) return null;
   const queryAliases: Record<string, string[]> = {
     hours: ["hour", "hours", "open", "opening", "close", "closing"],
     location: ["location", "located", "address", "direction"],
@@ -6579,7 +6657,7 @@ function structuredFactAnswer(business: Business, question: string, intent: Retr
     policy: ["policy", "policies", "cancel", "refund"],
     services: ["service", "services", "offer", "offers"],
   };
-  const resolution = resolveBusinessFacts(business.facts, {
+  const resolution = resolveBusinessFacts(facts, {
     kind,
     terms: [...tokenise(question), ...(queryAliases[intent] ?? [])],
   });
@@ -6614,7 +6692,7 @@ function structuredFactAnswer(business: Business, question: string, intent: Retr
 async function answerQuestion(
   business: Business,
   question: string,
-  options: { recordGap?: boolean; conversation?: Conversation; currentPage?: string | null } = {},
+  options: { recordGap?: boolean; conversation?: Conversation; currentPage?: string | null; workflow?: ActiveWorkflowAnswerContext } = {},
 ) {
   const answerStartedAt = performance.now();
   const performanceTiming = {
@@ -6671,7 +6749,9 @@ async function answerQuestion(
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
-  const structured = structuredFactAnswer(business, question, initialIntent);
+  const scopedFacts = workflowScopedFacts(business, options.workflow);
+  const primaryCtaForAnswer = options.workflow ? null : primaryCtaForQuestion(business, question, initialIntent);
+  const structured = structuredFactAnswer(business, question, initialIntent, scopedFacts);
   if (structured) {
     const modelUsage: ModelUsage = {
       route: "tier0",
@@ -6682,9 +6762,8 @@ async function answerQuestion(
       estimatedCostUsd: 0,
       latencyMs: 0,
     };
-    const primaryCta = primaryCtaForQuestion(business, question, initialIntent);
     return {
-      answer: answerWithGettingStartedCta(structured.answer, initialIntent, primaryCta),
+      answer: answerWithGettingStartedCta(structured.answer, initialIntent, primaryCtaForAnswer),
       grounded: true,
       citations: structured.citations,
       knowledgeGap: null,
@@ -6702,14 +6781,15 @@ async function answerQuestion(
         ...modelUsage,
       },
       modelUsage,
-      primaryCta: primaryCta ?? undefined,
+      primaryCta: primaryCtaForAnswer ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
-  const queryContext = retrievalContext(business, question, options.conversation, options.currentPage);
+  const queryContext = retrievalContext(business, question, options.conversation, options.currentPage, options.workflow);
   const intent = queryContext.intent;
   const retrieval = await databaseRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, intent)
     ?? memoryRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, intent);
+  retrieval.matches = workflowScopedMatches(retrieval.matches, options.workflow, intent);
   performanceTiming.retrievalMs = retrieval.latencyMs;
   performanceTiming.rerankMs = retrieval.rerankLatencyMs;
   recordRetrieval(retrieval.mode, retrieval.latencyMs);
@@ -6844,7 +6924,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
+      primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
       failure: { kind: "temporary_ai" as const, retryable: true, retrievedEvidence: true },
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
@@ -6868,15 +6948,14 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: primaryCtaForQuestion(business, question, intent) ?? undefined,
+      primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
   if (generated) {
-    const primaryCta = primaryCtaForQuestion(business, question, intent);
     return {
-      answer: answerWithGettingStartedCta(generated.answer, intent, primaryCta),
+      answer: answerWithGettingStartedCta(generated.answer, intent, options.workflow ? null : primaryCtaForQuestion(business, question, intent)),
       grounded: true,
       citations,
       knowledgeGap: null,
@@ -6884,14 +6963,13 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: primaryCta ?? undefined,
+      primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
-  const primaryCta = primaryCtaForQuestion(business, question, intent);
   return {
-    answer: answerWithGettingStartedCta(extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone), intent, primaryCta),
+    answer: answerWithGettingStartedCta(extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone), intent, options.workflow ? null : primaryCtaForQuestion(business, question, intent)),
     grounded: true,
     citations,
     knowledgeGap: null,
@@ -6899,7 +6977,7 @@ async function answerQuestion(
     confidenceBand,
     retrieval: enrichedRetrieval,
     modelUsage,
-    primaryCta: primaryCta ?? undefined,
+    primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
     performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
   };
 }
@@ -7034,7 +7112,7 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
   };
 }
 
-function actionAnswer(action: ActionFlow, state: ConversationActionState, answer: string): ConversationAnswerResult {
+function actionAnswer(action: ActionFlow, state: ConversationActionState, answer: string, primaryCta?: PrimaryCta | null): ConversationAnswerResult {
   const modelUsage: ModelUsage = {
     route: "tier0",
     model: null,
@@ -7054,6 +7132,7 @@ function actionAnswer(action: ActionFlow, state: ConversationActionState, answer
     retrieval: { mode: "action_flow", candidateCount: 0, topScore: 1, ...modelUsage },
     modelUsage,
     action: actionStatePayload(action, state),
+    ...(primaryCta ? { primaryCta } : {}),
   };
 }
 
@@ -7063,9 +7142,12 @@ function actionAnswerWithKnowledge(
   state: ConversationActionState,
   prompt: string,
 ): ConversationAnswerResult {
+  // An interruption is still inside the active journey. Knowledge answers
+  // must not smuggle the global primary CTA or a generic lead form into it.
+  const { primaryCta: _primaryCta, quickActions: _quickActions, ...knowledgeAnswer } = result;
   return {
-    ...result,
-    answer: result.answer + "\n\n" + prompt,
+    ...knowledgeAnswer,
+    answer: `${result.answer}\n\nBack to ${isPlanSelectionWorkflow(action) ? "your plan" : "the workflow"}: ${prompt}`,
     action: actionStatePayload(action, state),
   };
 }
@@ -7173,6 +7255,38 @@ function workflowLookupPrompt(state: ConversationActionState): string | null {
   return `I found ${resolution.matches.length} matching options. Reply with the number you want:\n${options.join("\n")}`;
 }
 
+function verifiedPlanFactsForWorkflow(business: Business) {
+  return business.facts
+    .filter((fact) => fact.active)
+    .map((fact) => ({
+      subject: fact.subject,
+      predicate: fact.predicate,
+      valueText: fact.valueText,
+      verified: fact.sourceType === "owner_structured"
+        || fact.sourceType === "live_system"
+        || fact.authority === "owner_verified"
+        || fact.authority === "system_of_record",
+    }));
+}
+
+function planRecommendationFromState(business: Business, action: ActionFlow, state: ConversationActionState): PlanRecommendation | null {
+  if (!isPlanSelectionWorkflow(action)) return null;
+  return recommendPlan(state.values, verifiedPlanFactsForWorkflow(business));
+}
+
+function planRecommendationInState(state: ConversationActionState): PlanRecommendation | null {
+  const result = state.lookupResults?.["recommend-plan"];
+  if (!result || typeof result !== "object") return null;
+  const recommendation = (result as Record<string, unknown>).recommendation;
+  return recommendation && typeof recommendation === "object" ? recommendation as PlanRecommendation : null;
+}
+
+function workflowCtaForStep(business: Business, action: ActionFlow, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): PrimaryCta | null {
+  if (step.type !== "redirect") return null;
+  const configured = primaryActionForBusiness(business);
+  return primaryCtaForAction(configured ?? action);
+}
+
 async function resolveWorkflowActionResources(
   business: Business,
   action: ActionFlow,
@@ -7246,10 +7360,16 @@ async function advanceWorkflowAutomation(
         const cachedResult = state.lookupResults?.[step.id];
         const result = cachedResult !== undefined
           ? cachedResult
+          : step.type === "recommend" && isPlanSelectionWorkflow(action)
+            ? (() => {
+              const recommendation = planRecommendationFromState(business, action, state);
+              return recommendation ? { status: "matched", matches: [], recommendation } : undefined;
+            })()
           : step.config?.provider || step.config?.resourceType || step.config?.filters || configuredActionProvider(action)
             ? await resolveWorkflowActionResources(business, action, step, state)
             : step.config?.result;
       if (result !== undefined) state.lookupResults = { ...(state.lookupResults ?? {}), [step.id]: result };
+      if (step.type === "recommend" && isPlanSelectionWorkflow(action) && result === undefined) break;
     }
     if (step.type === "generate_link") {
       const resolutions = workflowLookupResolutions(state);
@@ -7307,11 +7427,19 @@ async function continueWorkflowActionConversation(
   const repeatable = repeatableWorkflowConfig(action);
   if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
 
+  // Decide whether this is a side question before extracting values. A pricing
+  // question can mention a competing audience (for example, "what does the
+  // team plan cost?") without being an answer to the paused field.
+  const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state });
+  const preserveWorkflowState = initialOrchestration.route === "INTERRUPTION"
+    || initialOrchestration.route === "EXPLICIT_ACTION"
+    || initialOrchestration.route === "HUMAN_HANDOFF";
+
   // A visitor can answer several questions in one sentence, or correct an
   // earlier answer while the workflow is waiting on a different field. Apply
   // only values declared by the action; the cursor still advances
   // deterministically from the current step.
-  const extractedValues = extractWorkflowValues(action, question);
+  const extractedValues = preserveWorkflowState ? {} : extractWorkflowValues(action, question);
   const extracted = applyWorkflowValues(action, state, extractedValues);
   invalidateWorkflowLookups(action, state, extracted.updated);
   for (const fieldKey of extracted.updated) {
@@ -7326,7 +7454,9 @@ async function continueWorkflowActionConversation(
     });
   }
   const currentAfterExtraction = currentWorkflowStep(action, state);
-  const orchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state });
+  const orchestration = preserveWorkflowState
+    ? initialOrchestration
+    : decideConversationRoute({ message: question, activeAction: action, actionState: state });
   const isSideQuestion = orchestration.route === "INTERRUPTION";
   if (orchestration.route === "EXPLICIT_ACTION") {
     return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction) : "What would you like to do?"}`);
@@ -7337,7 +7467,7 @@ async function continueWorkflowActionConversation(
       question,
       returnStepId: currentAfterExtraction?.id ?? state.currentStepId ?? null,
     });
-    const knowledge = await answerQuestion(business, question);
+    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
     return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction) : "The workflow is ready to continue.");
   }
 
@@ -7345,14 +7475,14 @@ async function continueWorkflowActionConversation(
     return actionAnswer(action, state, `Absolutely — let’s add another ${repeatable.entityLabel}. ${workflowPrompt(action, state, currentWorkflowStep(action, state) ?? action.steps![0])}`);
   }
 
-  if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
+  if (!extracted.updated.length && actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
     const current = currentWorkflowStep(action, state);
     pushWorkflowInterruption(state, {
       intent: classifyQuestionIntent(question),
       question,
       returnStepId: current?.id ?? state.currentStepId ?? null,
     });
-    const knowledge = await answerQuestion(business, question);
+    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
     return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current) : "The workflow is ready to continue.");
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
@@ -7360,6 +7490,25 @@ async function continueWorkflowActionConversation(
   let step = await advanceWorkflowAutomation(business, action, state);
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
   state.currentStepId = step.id;
+
+  if (isPlanSelectionWorkflow(action)) {
+    const recommendation = planRecommendationInState(state);
+    if (step.id === "recommend-plan" && !recommendation) {
+      return actionAnswer(action, state, "I have your answers. I’m still waiting for verified plan information before I recommend a plan.");
+    }
+    if (recommendation && (step.id === "explain-plan" || step.id === "get-started")) {
+      if (step.id === "explain-plan") {
+        transitionWorkflow(action, state, step.id);
+        const pricingStep = currentWorkflowStep(action, state);
+        if (pricingStep?.id === "show-pricing") transitionWorkflow(action, state, pricingStep.id);
+        step = currentWorkflowStep(action, state);
+        if (step) state.currentStepId = step.id;
+      }
+      const readyStep = currentWorkflowStep(action, state);
+      const cta = readyStep ? workflowCtaForStep(business, action, readyStep) : null;
+      return actionAnswer(action, state, `${planRecommendationMessage(recommendation)}\n\nReady to get started?`, cta);
+    }
+  }
 
   if (starting) {
     if (step.type === "form") {
@@ -13598,6 +13747,67 @@ app.delete("/api/v1/demo/:slug/leads/:leadId", async (request) => {
   return { ok: true, leadId: lead.id };
 });
 
+async function workflowIsolationForAction(
+  business: Business,
+  action: ActionFlow,
+  rawBody?: Record<string, unknown>,
+): Promise<WorkflowIsolationResult> {
+  const context = asRecord(rawBody?.workflowContext);
+  const requestedContextBusinessId = optionalString(rawBody?.workflowContextBusinessId, 120)
+    ?? optionalString(context.businessId, 120)
+    ?? null;
+  const contextVersionValue = rawBody?.workflowContextVersion ?? context.contextVersion;
+  const requestedContextVersion = contextVersionValue === null || contextVersionValue === undefined || contextVersionValue === ""
+    ? null
+    : Number(contextVersionValue);
+  const requestedBusinessId = optionalString(rawBody?.businessId, 120);
+  const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
+  const currentProviders = business.actions
+    .filter((candidate) => candidate.id !== action.id)
+    .flatMap(actionProviderNames);
+  currentProviders.push(...business.actionResources.map((resource) => resource.provider));
+
+  let foreignBusinessNames: string[] = [];
+  let foreignActionIdentifiers: string[] = [];
+  let foreignProviders: string[] = [];
+  if (pool && organizationId) {
+    try {
+      const result = await pool.query<{ business_name: string; action_key: string | null; action_name: string | null; provider: string | null; steps: unknown }>(
+        `select b.name as business_name, ba.action_key, ba.name as action_name, ba.provider, ba.steps
+         from businesses b
+         left join business_actions ba on ba.business_id = b.id
+         where b.organization_id = $1 and b.id <> $2`,
+        [organizationId, business.id],
+      );
+      foreignBusinessNames = [...new Set(result.rows.map((row) => row.business_name).filter(Boolean))];
+      foreignActionIdentifiers = [...new Set(result.rows.flatMap((row) => [row.action_key, row.action_name].filter((value): value is string => Boolean(value?.trim()))))];
+      foreignProviders = [...new Set(result.rows.flatMap((row) => {
+        const providers = row.provider ? [row.provider] : [];
+        const steps = Array.isArray(row.steps) ? row.steps : [];
+        return [...providers, ...steps.flatMap((step) => {
+          const config = asRecord(asRecord(step).config);
+          return typeof config.provider === "string" ? [config.provider] : [];
+        })];
+      }))];
+    } catch (error) {
+      if (!isMissingDatabaseTable(error)) throw error;
+      app.log.warn({ businessId: business.id }, "Workflow isolation lookup deferred until the action schema is available");
+    }
+  }
+  return validateWorkflowTenantIsolation(action, {
+    businessId: business.id,
+    businessName: business.name,
+    currentProviders,
+    foreignBusinessNames,
+    foreignActionIdentifiers,
+    foreignProviders,
+    requestedBusinessId,
+    requestedContextBusinessId,
+    requestedContextVersion: Number.isFinite(requestedContextVersion) ? requestedContextVersion : null,
+    currentContextVersion: business.businessContextSnapshot?.version ?? null,
+  });
+}
+
 app.get("/api/v1/demo/:slug/actions", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -13607,10 +13817,28 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   const configuredActions = business.actions;
   const actions = await Promise.all(configuredActions.map(async (action) => {
     const readiness = await actionReadinessForBusiness(business, action);
+    const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action) : { ok: true } as const;
     return {
       ...action,
       readiness,
       isPrimary: business.primaryActionId === action.id && readiness.ready,
+      ...(workflowIsolation.ok
+        ? {}
+        : {
+          workflowSafety: { status: "blocked", code: workflowIsolation.code, identifier: workflowIsolation.identifier },
+          // Do not expose a known-contaminated workflow. Owners can regenerate
+          // it from the active business context and save the clean definition.
+          name: `${business.name} workflow`,
+          description: "This workflow was blocked because it referenced a different business context. Regenerate it from the active Business Brain.",
+          triggerPhrases: [],
+          triggerIntents: [],
+          provider: null,
+          destination: null,
+          steps: [],
+          fields: [],
+          completion: { createLead: false, leadStatus: "new", message: "Regenerate this workflow from the active business context.", notifyStaff: false },
+          executionMode: "FORM_FLOW",
+        }),
     };
   }));
   if (!pool) return { actions, resources: business.actionResources, templates: ACTION_TEMPLATES, deliveries: [] };
@@ -13669,7 +13897,10 @@ app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
   const business = await getBusiness(params.slug);
   const actorUserId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
-  const action = normalizedAction(request.body);
+  const body = asRecord(request.body);
+  const action = normalizedAction(body);
+  const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
+  if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
   if (business.actions.some((item) => item.key === action.key)) throw httpError(409, "An action with this key already exists");
   business.actions.push(action);
   await persistAction(business, action);
@@ -13692,7 +13923,10 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   const actionIndex = business.actions.findIndex((item) => item.id === requiredString(params.actionId, "actionId", 120));
   if (actionIndex < 0) throw httpError(404, "Action not found");
   const previousAction = business.actions[actionIndex];
-  const action = normalizedAction(request.body, previousAction);
+  const body = asRecord(request.body);
+  const action = normalizedAction(body, previousAction);
+  const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
+  if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
   if (action.origin === "discovered" && action.enabled && action.lifecycleStatus === "needs_review") {
     if (action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
     if (action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");

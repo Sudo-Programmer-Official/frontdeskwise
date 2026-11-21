@@ -1,6 +1,6 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, X } from "@lucide/vue";
-import { generateWorkflow, templateSteps } from "../workflow-generator.js";
+import { generateWorkflow, templateSteps, workflowGenerationCacheKey } from "../workflow-generator.js";
 const { defineProps, defineEmits, } = {};
 const props = defineProps();
 const emit = defineEmits();
@@ -17,6 +17,7 @@ const showTemplatePicker = ref(false);
 const workflowAssistInput = ref(null);
 const workflowStepList = ref(null);
 const draftIsDirty = ref(false);
+const workflowGenerationKey = ref("");
 let draftSourceId = "";
 const stepTypes = [
     { value: "capture", label: "Capture details" },
@@ -55,7 +56,7 @@ function asWorkflowAction(value) {
 const allActions = computed(() => props.actions.map(asWorkflowAction).filter((action) => Boolean(action)));
 const workflowActions = computed(() => allActions.value.filter((action) => {
     const stepCount = Array.isArray(action.steps) ? action.steps.length : 0;
-    return stepCount > 1 || action.executionMode === "PROVIDER_FLOW" || (action.fields?.length ?? 0) > 2;
+    return action.workflowSafety?.status === "blocked" || stepCount > 1 || action.executionMode === "PROVIDER_FLOW" || (action.fields?.length ?? 0) > 2;
 }));
 const selectedWorkflow = computed(() => workflowActions.value.find((action) => action.id === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
 const draftSteps = computed(() => (workflowDraft.value?.steps ?? []));
@@ -112,6 +113,22 @@ function syncDraft(force = false) {
     draftSourceId = selected.id;
     draftIsDirty.value = false;
     selectedStepIndex.value = -1;
+    if (selected.workflowSafety?.status === "blocked") {
+        const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "Business";
+        workflowDraft.value.name = `${businessName} workflow`;
+        workflowDraft.value.description = defaultBusinessWorkflowDescription();
+        workflowDescription.value = workflowDraft.value.description;
+    }
+    else {
+        workflowDescription.value = selected.description ?? "";
+    }
+}
+function defaultBusinessWorkflowDescription() {
+    const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "this business";
+    const businessType = props.businessContext?.businessType?.trim() && props.businessContext.businessType !== "Unknown"
+        ? props.businessContext.businessType.trim().toLowerCase()
+        : "business";
+    return `Help visitors understand whether ${businessName} is a good fit. First ask what kind of ${businessType} they run and what they are mainly trying to improve. Match verified capabilities, explain the fit briefly, show verified pricing when relevant, and use the approved primary conversion action. Offer a demo request only when explicitly requested and hand off account or human-help questions.`;
 }
 watch(workflowActions, () => {
     if (!workflowActions.value.some((action) => action.id === selectedWorkflowId.value)) {
@@ -250,16 +267,24 @@ function applyTemplate(key) {
 function generateStarter() {
     if (!workflowDraft.value)
         return;
-    const result = generateWorkflow(workflowDescription.value, (workflowDraft.value.fields ?? []), {
+    const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "";
+    const generationContext = {
+        organizationId: props.organizationId ?? props.businessContext?.organizationId,
+        businessId: props.businessContext?.businessId,
+        workflowId: workflowDraft.value.id,
+        actionId: workflowDraft.value.id,
+        contextVersion: props.businessContext?.contextVersion,
         actionType: workflowDraft.value.actionType,
-        actionName: workflowDraft.value.name,
-        actionDescription: workflowDraft.value.description,
+        actionName: businessName ? `${businessName} workflow` : workflowDraft.value.name,
+        actionDescription: businessName ? defaultBusinessWorkflowDescription() : workflowDraft.value.description,
         availableActionTypes: allActions.value.map((action) => action.actionType || action.key),
         availableProviders: props.integrations.filter((integration) => integration.connectionStatus === "active").map((integration) => String(integration.provider ?? "")).filter(Boolean),
         knownBusinessKnowledge: props.businessContext?.knowledgeSummary?.map((item) => item.value) ?? [],
         completionGoal: String(workflowDraft.value.completion?.message ?? workflowDraft.value.completion?.linkLabel ?? ""),
         businessContext: props.businessContext ?? undefined,
-    });
+    };
+    workflowGenerationKey.value = workflowGenerationCacheKey(generationContext);
+    const result = generateWorkflow(workflowDescription.value || defaultBusinessWorkflowDescription(), [], generationContext);
     workflowDraft.value.name = result.name;
     workflowDraft.value.description = result.description;
     workflowDraft.value.steps = result.steps;
@@ -282,7 +307,11 @@ async function saveWorkflow() {
         const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(workflowDraft.value.id)}`), {
             method: "PUT",
             headers: { "content-type": "application/json", ...props.ownerHeaders() },
-            body: JSON.stringify(workflowDraft.value),
+            body: JSON.stringify({
+                ...workflowDraft.value,
+                ...(props.businessContext?.businessId ? { businessId: props.businessContext.businessId, workflowContextBusinessId: props.businessContext.businessId } : {}),
+                ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
+            }),
         });
         const payload = await response.json();
         if (!response.ok)
@@ -351,6 +380,7 @@ let __VLS_intrinsics;
 let __VLS_directives;
 void __VLS_ctx, __VLS_components, __VLS_intrinsics, __VLS_directives;
 const __VLS_template = () => {
+    __VLS_withDotValue(workflowGenerationKey, {});
     __VLS_withDotValue(draftIsDirty, {});
     __VLS_withDotValue(workflowDraft, {});
     __VLS_withDotValue(workflowSaveLoading, {});
@@ -710,6 +740,26 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-empty-builder']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-body']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
+    /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-bubble']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-lookup']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-isolation-warning']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
@@ -721,6 +771,7 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "view-content workflow-workspace" },
+        'data-workflow-generation-key': (workflowGenerationKey.value || undefined),
     });
     /** @type {__VLS_StyleScopedClasses['view-content']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
@@ -745,7 +796,7 @@ const __VLS_template = () => {
                 void $event;
                 return (__VLS_unwrap(emit, {})('refresh'));
                 // @ts-ignore
-                [emit,];
+                [workflowGenerationKey, emit,];
             } },
         ...{ class: "text-button" },
         type: "button",
@@ -996,6 +1047,15 @@ const __VLS_template = () => {
         (workflowDraft.value.name);
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
         (workflowDraft.value.description || 'Describe the customer outcome this workflow owns.');
+        if (workflowDraft.value.workflowSafety?.status === 'blocked') {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-isolation-warning" },
+                role: "alert",
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-isolation-warning']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        }
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ...{ class: "workflow-builder-actions" },
         });
@@ -1104,7 +1164,7 @@ const __VLS_template = () => {
                         throw 0;
                     return (showTemplatePicker.value = !showTemplatePicker.value);
                     // @ts-ignore
-                    [workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDescription, workflowDescription, showTemplatePicker, showTemplatePicker,];
+                    [workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDescription, workflowDescription, showTemplatePicker, showTemplatePicker,];
                 } },
             ...{ class: "text-button workflow-template-trigger" },
             type: "button",

@@ -1375,6 +1375,9 @@ const workflowContext = ref<WorkflowBusinessContext | null>(null);
 const workspaceReadiness = ref(0);
 const workspaceLoading = ref(false);
 const workspaceError = ref("");
+let workspaceLoadGeneration = 0;
+let actionsLoadGeneration = 0;
+let integrationsLoadGeneration = 0;
 let stopFirebaseObserver: (() => void) | null = null;
 let landingHeroTimer: number | null = null;
 
@@ -2829,6 +2832,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
 }
 
 async function loadBusinessWorkspace(slug: string, publicOnly = false) {
+  const loadGeneration = ++workspaceLoadGeneration;
   workspaceLoading.value = true;
   publicDemoMode.value = publicOnly;
   workspaceError.value = "";
@@ -2838,23 +2842,27 @@ async function loadBusinessWorkspace(slug: string, publicOnly = false) {
     const response = await trackedFetch(apiUrl(endpoint), { headers: ownerHeaders() });
     const payload = await response.json() as WorkspacePayload & { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load this workspace.");
+    if (loadGeneration !== workspaceLoadGeneration || demoSlug.value !== slug) return;
     applyWorkspacePayload(payload);
     if (!publicOnly) {
       await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadMcpConnections(), loadActions(), loadDocuments(), loadOwnershipVerification(), loadNotifications()]);
     }
   } catch (error) {
+    if (loadGeneration !== workspaceLoadGeneration || demoSlug.value !== slug) return;
     workspaceError.value = error instanceof Error ? error.message : "Could not load this workspace.";
   } finally {
-    workspaceLoading.value = false;
+    if (loadGeneration === workspaceLoadGeneration && demoSlug.value === slug) workspaceLoading.value = false;
   }
 }
 
 async function refreshWorkspaceSummary(globalLoading = true) {
   if (!demoSlug.value || (!firebaseToken.value && !demoAccessToken.value)) return;
+  const slug = demoSlug.value;
   try {
-    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}`), { headers: ownerHeaders() }, { globalLoading });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${slug}`), { headers: ownerHeaders() }, { globalLoading });
     const payload = await response.json() as WorkspacePayload;
     if (!response.ok) return;
+    if (demoSlug.value !== slug) return;
     workspaceStats.value = payload.stats ?? null;
     workspaceKnowledge.value = payload.knowledge ?? null;
     workflowContext.value = payload.workflowContext ?? null;
@@ -2884,6 +2892,8 @@ async function selectBusiness(slug: string) {
   const nextView = view.value;
   publicDemoMode.value = false;
   showAllBusinesses.value = false;
+  actionsLoadGeneration += 1;
+  integrationsLoadGeneration += 1;
   demoSlug.value = slug;
   // Keep control-plane and onboarding deep links stable while the session
   // hydrates. Workspace selection should only rewrite a workspace route.
@@ -4473,17 +4483,21 @@ async function reindexKnowledge() {
 
 async function loadIntegrations() {
   if (!firebaseToken.value && !demoAccessToken.value) return;
+  const slug = demoSlug.value;
+  const loadGeneration = ++integrationsLoadGeneration;
   integrationLoading.value = true;
   integrationError.value = "";
   try {
-    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/integrations`), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${slug}/integrations`), { headers: ownerHeaders() });
     const payload = await response.json() as { integrations?: Integration[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load integrations.");
+    if (loadGeneration !== integrationsLoadGeneration || demoSlug.value !== slug) return;
     integrations.value = payload.integrations ?? [];
   } catch (error) {
+    if (loadGeneration !== integrationsLoadGeneration || demoSlug.value !== slug) return;
     integrationError.value = error instanceof Error ? error.message : "Could not load integrations.";
   } finally {
-    integrationLoading.value = false;
+    if (loadGeneration === integrationsLoadGeneration && demoSlug.value === slug) integrationLoading.value = false;
   }
 }
 
@@ -4794,21 +4808,25 @@ function setActionConnectorIntegrationFromEvent(event: Event) {
 
 async function loadActions() {
   if (!firebaseToken.value && !demoAccessToken.value) return;
+  const slug = demoSlug.value;
+  const loadGeneration = ++actionsLoadGeneration;
   actionsLoading.value = true;
   actionsError.value = "";
   try {
-    const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions"), { headers: ownerHeaders() });
+    const response = await trackedFetch(apiUrl("/api/v1/demo/" + slug + "/actions"), { headers: ownerHeaders() });
     const payload = await response.json() as { actions?: ActionFlow[]; templates?: ActionTemplate[]; deliveries?: ActionDelivery[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load conversation flows.");
+    if (loadGeneration !== actionsLoadGeneration || demoSlug.value !== slug) return;
     actionFlows.value = payload.actions ?? [];
     actionTemplates.value = payload.templates ?? [];
     actionDeliveries.value = payload.deliveries ?? [];
     const selected = actionFlows.value.find((action) => action.id === selectedActionId.value) ?? null;
     selectAction(selected, selected ? actionEditorEntry.value : "actions");
   } catch (error) {
+    if (loadGeneration !== actionsLoadGeneration || demoSlug.value !== slug) return;
     actionsError.value = error instanceof Error ? error.message : "Could not load conversation flows.";
   } finally {
-    actionsLoading.value = false;
+    if (loadGeneration === actionsLoadGeneration && demoSlug.value === slug) actionsLoading.value = false;
   }
 }
 
@@ -7267,7 +7285,7 @@ function startMarketingDemo() {
           </div>
         </div>
 
-        <WorkflowWorkspace v-else-if="view === 'workflows'" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @open-action="openWorkflowAction" />
+        <WorkflowWorkspace v-else-if="view === 'workflows'" :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @open-action="openWorkflowAction" />
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
           <div class="actions-page-header">

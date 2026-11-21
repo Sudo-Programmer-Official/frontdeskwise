@@ -778,7 +778,8 @@ export function classifyVisitorRequest(question: string): VisitorRequestClassifi
   const pricingKnowledge = /\b(pricing|price|prices|cost|costs|how much)\b/.test(value)
     && !/\b(request|requesting|get|getting|quote|estimate|book|schedule|appointment)\b/.test(value);
   let actionIntent = "general";
-  if (/demo/.test(value)) actionIntent = "demo";
+  if (/\b(choose|choosing|recommend|right|best)\b.{0,32}\bplans?\b|\bplans?\b.{0,32}\b(choose|recommend|right|best)\b|\bsolo\b|\bteam\b.{0,24}\bplans?\b/.test(value)) actionIntent = "plan_selection";
+  else if (/demo/.test(value)) actionIntent = "demo";
   else if (/sign my child up|sign me up|enroll|register|registration|new student|current student/.test(value)) actionIntent = "enrollment";
   else if (/book|appointment|schedule|reserve|birthday|open play/.test(value)) actionIntent = "booking";
   else if (/quote|estimate|how much|cost|pricing/.test(value)) actionIntent = "quote";
@@ -807,14 +808,28 @@ export function detectAction(actions: ActionFlow[], question: string, primaryAct
       action,
       phraseScore: action.triggerPhrases.reduce((score, phrase) => value.includes(normalize(phrase)) ? score + normalize(phrase).length + 10 : score, 0),
       intentScore: action.triggerIntents.some((item) => normalize(item) === intent) ? 4 : 0,
+      workflowScore: intent === "plan_selection" && isPlanSelectionWorkflow(action) ? 10_000 : 0,
       primaryScore: primaryActionId && action.id === primaryActionId ? 100_000 : 0,
     }))
     .filter((item) => !(item.action.executionMode === "DIRECT_LINK"
       && (item.action.actionType === "request_demo" || item.action.key === "open_link")
       && /\b(demo|trial)\b/i.test(`${item.action.name} ${item.action.completion.linkLabel ?? ""}`)
       && /\b(book|schedule)\b.{0,24}\b(demo|trial)\b/i.test(question)))
-    .filter((item) => item.phraseScore > 0 || item.intentScore > 0)
-    .sort((left, right) => right.primaryScore + right.phraseScore + right.intentScore - left.primaryScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
+    .filter((item) => item.phraseScore > 0 || item.intentScore > 0 || item.workflowScore > 0)
+    .sort((left, right) => right.primaryScore + right.workflowScore + right.phraseScore + right.intentScore - left.primaryScore - left.workflowScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
+}
+
+/**
+ * Generated workflows may be saved on top of a generic lead action, so their
+ * original trigger phrases are not a reliable routing contract. Keep the
+ * shape-based fallback deliberately narrow and business-neutral.
+ */
+export function isPlanSelectionWorkflow(action: Pick<ActionFlow, "key" | "name" | "description" | "fields" | "steps">): boolean {
+  const fieldKeys = new Set(action.fields.map((field) => field.key));
+  const stepText = (action.steps ?? []).map((step) => `${step.id} ${step.label ?? ""} ${step.question ?? ""}`).join(" ");
+  const text = `${action.key} ${action.name} ${action.description} ${stepText}`.toLowerCase();
+  return fieldKeys.has("usage_type") && fieldKeys.has("main_goal") && fieldKeys.has("usage_level")
+    || /recommend-plan|plan-selection|choose the right .* plan/.test(text);
 }
 
 export function isContactField(field: ActionField): boolean {
@@ -868,7 +883,10 @@ export function validateFieldValue(field: ActionField, rawValue: string): { valu
   if (field.type === "number" && !/^\d+(?:\.\d+)?$/.test(value)) return { value: null, error: "Please share a number for " + field.label.toLowerCase() + "." };
   if (field.type === "date" && Number.isNaN(Date.parse(value))) return { value: null, error: "Please share a date for " + field.label.toLowerCase() + "." };
   if (field.type === "select" && field.options?.length) {
-    const choice = field.options.find((option) => normalize(option) === normalize(value) || normalize(option).includes(normalize(value)) || normalize(value).includes(normalize(option)));
+    const exact = field.options.find((option) => normalize(option) === normalize(value));
+    const choice = exact ?? (!["usage_type", "main_goal", "usage_level"].includes(field.key)
+      ? field.options.find((option) => normalize(option).includes(normalize(value)) || normalize(value).includes(normalize(option)))
+      : undefined);
     if (!choice) return { value: null, error: "Please choose one of: " + field.options.join(", ") + "." };
     return { value: choice };
   }

@@ -119,6 +119,41 @@ test("workflow extraction accepts corrections and future answers without moving 
   assert.equal(extractWorkflowValues(enrollment, "Yes, but she can't really swim yet.").ability, "Beginner");
 });
 
+test("plan selection extracts natural solo, paired-goal, daily, and correction language", () => {
+  const plan: ActionFlow = {
+    ...flow,
+    id: "plan-selection",
+    key: "choose_plan",
+    name: "Choose the right plan",
+    fields: [
+      { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?", options: ["Solo", "Team"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?", options: ["Planning", "Reminders", "Planning + reminders"] },
+      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasional", "Regularly", "Every day"] },
+    ],
+    steps: [
+      { id: "usage-type", type: "capture", fieldKey: "usage_type" },
+      { id: "main-goal", type: "capture", fieldKey: "main_goal" },
+      { id: "usage-level", type: "capture", fieldKey: "usage_level" },
+      { id: "recommend-plan", type: "recommend" },
+    ],
+  };
+  const state = createActionState(plan);
+  const first = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "It's just for me and I mainly need planning and reminders"));
+  assert.deepEqual(first.updated, ["usage_type", "main_goal"]);
+  assert.equal(state.values.usage_type, "Solo");
+  assert.equal(state.values.main_goal, "Planning + reminders");
+  assert.equal(currentWorkflowStep(plan, state)?.id, "usage-level");
+
+  const daily = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "I'll probably use it every day."));
+  assert.deepEqual(daily.updated, ["usage_level"]);
+  assert.equal(state.values.usage_level, "Every day");
+  assert.equal(currentWorkflowStep(plan, state)?.id, "recommend-plan");
+
+  const correction = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "Actually I may use it with a small team."));
+  assert.deepEqual(correction.updated, ["usage_type"]);
+  assert.equal(state.values.usage_type, "Team");
+});
+
 test("workflow summary exposes a deterministic next-best action and progress", () => {
   const action: ActionFlow = {
     ...flow,

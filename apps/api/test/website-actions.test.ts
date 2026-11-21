@@ -43,6 +43,46 @@ test("visitor request classification separates explanation from explicit action"
   assert.equal(classifyVisitorRequest("I want a demo").actionIntent, "demo");
 });
 
+test("plan-selection requests route to a generated workflow before the primary lead action", () => {
+  const planWorkflow = {
+    id: "plan-workflow",
+    key: "choose_plan",
+    actionType: "contact_team",
+    name: "Choose the right plan",
+    description: "Help visitors choose a plan.",
+    triggerPhrases: ["choose a plan"],
+    triggerIntents: [],
+    captureMode: "conversational",
+    fields: [
+      { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?" },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?" },
+      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?" },
+    ],
+    steps: [{ id: "usage-type", type: "capture", fieldKey: "usage_type" }],
+    completion: { createLead: true, leadStatus: "new", message: "", notifyStaff: true },
+    mode: "transactional",
+    executionMode: "FORM_FLOW",
+    attachmentPolicy: "explicit_request_only",
+    trackingKey: "choose_plan",
+    destination: null,
+    provider: null,
+    priority: 1,
+    requiredFields: ["usage_type", "main_goal", "usage_level"],
+    conditions: [],
+    safetyPolicy: "standard",
+    sourceUrl: null,
+    evidence: [],
+    confidence: 1,
+    enabled: true,
+    lifecycleStatus: "active",
+    createdAt: "2026-11-21T00:00:00.000Z",
+    updatedAt: "2026-11-21T00:00:00.000Z",
+  } as unknown as ActionFlow;
+  const lead = { ...planWorkflow, id: "lead", key: "capture_lead", name: "Capture a lead", fields: [], steps: undefined, triggerPhrases: ["contact me"], requiredFields: [] } as ActionFlow;
+  assert.equal(classifyVisitorRequest("I need help choosing a plan").actionIntent, "plan_selection");
+  assert.equal(detectAction([lead, planWorkflow], "I need help choosing a plan", lead.id)?.id, planWorkflow.id);
+});
+
 test("demo actions are created from evidence and do not trigger on explanatory questions", () => {
   const candidates = extractWebsiteActions('<a href="/start">Try the demo</a>', "https://example.test/");
   const actions = defaultActionFlows("Example SaaS", "website and online booking", (key) => key, candidates);

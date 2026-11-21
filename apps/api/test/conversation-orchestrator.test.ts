@@ -43,6 +43,15 @@ test("side questions interrupt without losing the active workflow cursor", () =>
   assert.equal(decision.nextBestAction, "ASK_FIELD");
 });
 
+test("audience words in a pricing interruption do not turn it into a workflow answer", () => {
+  const state = createActionState(action);
+  const decision = decideConversationRoute({ message: "What does the team plan cost?", activeAction: action, actionState: state });
+
+  assert.equal(decision.route, "INTERRUPTION");
+  assert.equal(decision.interruptionIntent, "pricing");
+  assert.equal(decision.currentStepId, "preferred-days");
+});
+
 test("workflow answers stay on the journey while explicit handoff takes priority", () => {
   const state = createActionState(action);
   const continuation = decideConversationRoute({ message: "Saturday mornings", activeAction: action, actionState: state });

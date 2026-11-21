@@ -20,6 +20,11 @@ export type WorkflowStepDraft = {
 };
 
 export type WorkflowGenerationContext = {
+  organizationId?: string;
+  businessId?: string;
+  workflowId?: string;
+  actionId?: string;
+  contextVersion?: number;
   actionType?: string;
   actionName?: string;
   actionDescription?: string;
@@ -38,6 +43,9 @@ export type WorkflowContextProvenance = {
 };
 
 export type WorkflowBusinessContext = {
+  organizationId?: string;
+  businessId?: string;
+  contextVersion?: number;
   businessName?: string;
   businessType?: string;
   summary?: string;
@@ -57,7 +65,7 @@ export type WorkflowBusinessContext = {
   existingWorkflows?: Array<{ key: string; name: string; actionType: string; provider: string | null; executionMode: string | null; version: number; stepTypes: string[]; fieldKeys: string[] }>;
 };
 
-export type WorkflowIntent = "plan_selection" | "enrollment" | "tour" | "booking" | "quote" | "service" | "demo" | "lead";
+export type WorkflowIntent = "plan_selection" | "enrollment" | "business_fit" | "tour" | "booking" | "quote" | "service" | "demo" | "lead";
 
 export type WorkflowGenerationResult = {
   intent: WorkflowIntent;
@@ -68,6 +76,17 @@ export type WorkflowGenerationResult = {
   executionMode?: string;
   provider?: string;
 };
+
+export function workflowGenerationCacheKey(context: Pick<WorkflowGenerationContext, "organizationId" | "businessId" | "workflowId" | "actionId" | "contextVersion">): string {
+  return [
+    "workflow_generation_context",
+    context.organizationId || "unknown-organization",
+    context.businessId || "unknown-business",
+    context.workflowId || "unknown-workflow",
+    context.actionId || "unknown-action",
+    String(context.contextVersion ?? 0),
+  ].join(":");
+}
 
 const interruptionConfig = {
   interruptionPolicy: "answer_and_resume",
@@ -109,12 +128,12 @@ function capture(
   };
 }
 
-function generatedFields(intent: WorkflowIntent): WorkflowFieldDraft[] {
+function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationContext = {}): WorkflowFieldDraft[] {
   if (intent === "plan_selection") {
     return [
       field("usage_type", "Usage type", "select", "Are you planning to use PlanCraftAI by yourself or with a team?", true, ["Solo", "Team"]),
-      field("main_goal", "Main goal", "select", "What would you mainly like PlanCraftAI to help you with?", true, ["Planning", "Reminders", "AI task breakdown", "Team coordination", "Other"]),
-      field("usage_level", "Usage level", "select", "How often do you expect to use PlanCraftAI?", true, ["Occasional", "Regular", "Heavy"]),
+      field("main_goal", "Main goal", "select", "What would you mainly like PlanCraftAI to help you with?", true, ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
+      field("usage_level", "Usage level", "select", "How often do you expect to use PlanCraftAI?", true, ["Occasional", "Regularly", "Every day"]),
     ];
   }
   if (intent === "enrollment") {
@@ -126,14 +145,23 @@ function generatedFields(intent: WorkflowIntent): WorkflowFieldDraft[] {
       field("preferred_days", "Preferred days", "text", "Which days usually work best?"),
     ];
   }
+  if (intent === "business_fit") {
+    const businessType = context.businessContext?.businessType?.trim() && context.businessContext.businessType !== "Unknown"
+      ? context.businessContext.businessType.trim().toLowerCase()
+      : "business";
+    return [
+      field("business_type", "Business type", "select", `What kind of ${businessType} do you run?`, true, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
+      field("main_goal", "Main goal", "select", "What are you mainly trying to improve?", true, ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
+    ];
+  }
   return [];
 }
 
 function planSelectionSteps(): WorkflowStepDraft[] {
   return [
     capture("usage-type", "Usage type", "usage_type", "Are you planning to use PlanCraftAI by yourself or with a team?", ["Solo", "Team"]),
-    capture("main-goal", "Main goal", "main_goal", "What would you mainly like PlanCraftAI to help you with?", ["Planning", "Reminders", "AI task breakdown", "Team coordination", "Other"]),
-    capture("usage-level", "Usage level", "usage_level", "How often do you expect to use PlanCraftAI?", ["Occasional", "Regular", "Heavy"]),
+    capture("main-goal", "Main goal", "main_goal", "What would you mainly like PlanCraftAI to help you with?", ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
+    capture("usage-level", "Usage level", "usage_level", "How often do you expect to use PlanCraftAI?", ["Occasional", "Regularly", "Every day"]),
     {
       id: "recommend-plan",
       type: "recommend",
@@ -235,6 +263,65 @@ function enrollmentSteps(): WorkflowStepDraft[] {
   ];
 }
 
+function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft[] {
+  const business = context.businessContext;
+  const businessName = business?.businessName?.trim() || context.actionName?.trim() || "this business";
+  const businessType = business?.businessType?.trim() && business.businessType !== "Unknown"
+    ? business.businessType.trim()
+    : "business";
+  const primaryCta = business?.discoveredCtas?.find((cta) => cta.url && /try|demo|book|start/i.test(`${cta.label} ${cta.url}`))
+    ?? business?.discoveredCtas?.find((cta) => Boolean(cta.url));
+  const primaryLabel = primaryCta?.label?.trim() || "Try the demo";
+  const hasRequestDemoAction = business?.approvedActions?.some((action) => /request.?demo|demo/i.test(`${action.key} ${action.name}`))
+    || business?.discoveredCtas?.some((cta) => /request.?demo/i.test(cta.label));
+  return [
+    capture("business-type", "Business type", "business_type", `What kind of ${businessType.toLowerCase()} do you run?`, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
+    capture("main-goal", "Main goal", "main_goal", "What are you mainly trying to improve?", ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
+    {
+      id: "relevant-capabilities",
+      type: "recommend",
+      label: "Relevant capabilities",
+      question: `Match verified ${businessName} features to the visitor’s needs.`,
+      config: { ...interruptionConfig, reviewStatus: "verified", dataSource: "verified_business_knowledge", requiresVerifiedData: true, basedOn: ["business_type", "main_goal"] },
+    },
+    {
+      id: "fit-explanation",
+      type: "ask",
+      label: "Fit explanation",
+      question: `Briefly explain why ${businessName} may be a good fit based on the visitor’s needs.`,
+      config: { ...interruptionConfig, reviewStatus: "suggested", messageType: "fit_explanation", dataSource: "verified_business_knowledge" },
+    },
+    {
+      id: "pricing",
+      type: "ask",
+      label: "Pricing",
+      question: "Show only verified pricing when it is relevant to the visitor’s question.",
+      config: { ...interruptionConfig, reviewStatus: business?.pricing?.verified ? "verified" : "needs_owner_confirmation", messageType: "verified_pricing", dataSource: "verified_business_knowledge", requiresVerifiedData: true },
+    },
+    {
+      id: "try-demo",
+      type: "redirect",
+      label: primaryLabel,
+      question: `Ready to see how ${businessName} can help?`,
+      config: { ...interruptionConfig, buttonLabel: primaryLabel, destinationSource: "approved_action", ...(primaryCta?.url ? { destinationUrl: primaryCta.url } : {}) },
+    },
+    ...(hasRequestDemoAction ? [{
+      id: "request-demo",
+      type: "redirect",
+      label: "Request a demo",
+      question: "If you would like the team to walk you through it, request a demo.",
+      config: { ...interruptionConfig, buttonLabel: "Request a demo", destinationSource: "approved_action", explicitRequestOnly: true },
+    } satisfies WorkflowStepDraft] : []),
+    {
+      id: "support-handoff",
+      type: "handoff",
+      label: "Support / handoff",
+      question: "If you need account help or a person, I’ll connect you with the team.",
+      config: { ...interruptionConfig, trigger: "explicit_support_or_human_request", failureBehavior: "handoff" },
+    },
+  ];
+}
+
 function mergeFields(baseFields: WorkflowFieldDraft[], generated: WorkflowFieldDraft[]): WorkflowFieldDraft[] {
   const generatedKeys = new Set(generated.map((item) => item.key));
   const optionalContext = baseFields
@@ -249,6 +336,7 @@ export function inferWorkflowIntent(description: string, context: WorkflowGenera
 
   // Owner-authored intent is deliberately checked before action metadata. The
   // action template is useful context, but must never override the goal.
+  if (context.businessContext && /good fit|relevant capabilit|business type|try the demo|primary conversion|salon|beauty/i.test(ownerGoal)) return "business_fit";
   if (/\b(plan|plans|pricing|solo|team|usage|recommend|right fit|best fit)\b/.test(ownerGoal)
     && !/swim|lesson|child|student|jackrabbit/.test(ownerGoal)) return "plan_selection";
   if (/swim|lesson|child|student|jackrabbit|class/.test(ownerGoal)) return "enrollment";
@@ -272,6 +360,8 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
     ? planSelectionSteps()
     : intent === "enrollment"
       ? enrollmentSteps()
+      : intent === "business_fit"
+        ? businessFitSteps(context)
       : intent === "booking" || intent === "tour"
         ? [
           capture("service", "Service", "service", "What would you like to book?"),
@@ -297,7 +387,7 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
             { id: "notify", type: "notify", label: "Notify the team", config: { ...interruptionConfig } },
             { id: "complete", type: "complete", label: "Confirm follow-up", config: { ...interruptionConfig } },
           ];
-  const generated = generatedFields(intent);
+  const generated = generatedFields(intent, context);
   const businessName = context.businessContext?.businessName?.trim() || (context.actionName && /plan/i.test(context.actionName) ? context.actionName.trim() : "");
   const pricingVerified = context.businessContext?.pricing?.verified === true;
   const providers = context.availableProviders !== undefined
@@ -352,13 +442,18 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
     ? businessName ? `Choose the right ${businessName} plan` : "Choose the right plan"
     : intent === "enrollment"
       ? "Find the right swim lesson"
+      : intent === "business_fit"
+        ? businessName ? `Help visitors find the right ${businessName} fit` : "Help visitors find the right fit"
       : context.actionName ?? "Workflow";
   return {
     intent,
     name: defaultName,
     description: normalizedDescription,
     steps,
-    fields: mergeFields(baseFields, generated),
+    // Business-fit journeys are rebuilt from the active Business Brain. Do not
+    // merge fields from the previous draft because that is the exact path by
+    // which a previous tenant's qualification questions can survive a switch.
+    fields: mergeFields(intent === "business_fit" ? [] : baseFields, generated),
     ...(intent === "enrollment" ? { executionMode: "PROVIDER_FLOW", provider: "jackrabbit" } : {}),
   };
 }

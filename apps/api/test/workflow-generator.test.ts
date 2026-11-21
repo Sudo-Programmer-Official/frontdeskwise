@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { generateWorkflow } from "../../web/src/workflow-generator.ts";
+import { generateWorkflow, workflowGenerationCacheKey } from "../../web/src/workflow-generator.ts";
 
 const planPrompt = "Help visitors choose the right PlanCraftAI plan. Ask whether they are using it solo or with a team, what they mainly want help with, and roughly how they plan to use it. Based on their answers, recommend the most suitable plan, explain the reason briefly, then show the Get started button. If they ask a side question like pricing, features, cancellation, or privacy, answer it and continue the workflow without losing progress.";
 const davePrompt = "Help parents find the right swim lesson for their child. Ask the child’s age, swimming ability, goal, location or ZIP code, and preferred days. Then use Jackrabbit to find matching classes, show available options and pricing, and generate the registration link. If no class is available, offer the waitlist or team handoff. If the parent asks a side question, answer it and continue from where the workflow left off.";
+const salonPrompt = "Help salon owners understand whether SalonFlow is a good fit. First, understand what kind of salon or beauty business they run and what they are mainly trying to improve, such as online booking, client management, reminders, staff management, payments, reviews, loyalty, or more bookings. Match verified SalonFlow capabilities, answer side questions while preserving workflow progress, explain why SalonFlow may fit, show verified pricing when relevant, use Try the demo for sales intent, use Request a demo only when explicitly requested, and hand off account help to a person.";
 
 test("PlanCraftAI prompt takes priority over Capture a lead", () => {
   const result = generateWorkflow(planPrompt, [
@@ -48,4 +49,46 @@ test("Dave swim prompt creates a provider-backed enrollment journey", () => {
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.type, "generate_link");
   assert.ok(result.fields.some((field) => field.key === "child_age"));
   assert.equal(result.steps.some((step) => step.fieldKey === "name" || step.fieldKey === "email"), false);
+});
+
+test("SalonFlow prompt is generated from the active business context", () => {
+  const result = generateWorkflow(salonPrompt, [
+    { key: "usage_type", label: "Usage type", type: "select", required: true, question: "Are you planning to use PlanCraftAI by yourself or with a team?" },
+    { key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often do you expect to use PlanCraftAI?" },
+  ], {
+    actionName: "Choose the right SalonFlow plan",
+    businessContext: {
+      businessId: "salonflow-business",
+      contextVersion: 4,
+      businessName: "SalonFlow",
+      businessType: "Salon and beauty business",
+      approvedActions: [
+        { key: "try_demo", name: "Try the demo", actionType: "open_link" },
+        { key: "request_demo", name: "Request a demo", actionType: "request_demo" },
+      ],
+      discoveredCtas: [{ label: "Try the demo", url: "https://www.salonflow.studio/start" }],
+      pricing: { verified: false, summary: [] },
+    },
+  });
+
+  assert.equal(result.intent, "business_fit");
+  assert.deepEqual(result.steps.slice(0, 5).map((step) => step.label), ["Business type", "Main goal", "Relevant capabilities", "Fit explanation", "Pricing"]);
+  assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.destinationUrl, "https://www.salonflow.studio/start");
+  assert.equal(result.steps.some((step) => JSON.stringify(step).includes("PlanCraftAI")), false);
+  assert.equal(result.fields.some((field) => field.question.includes("PlanCraftAI")), false);
+  assert.equal(result.fields.some((field) => field.key === "usage_type"), false);
+  assert.equal(result.steps.some((step) => step.id === "request-demo"), true);
+});
+
+test("workflow generation cache keys are tenant, workflow, action, and context scoped", () => {
+  assert.equal(
+    workflowGenerationCacheKey({
+      organizationId: "org-1",
+      businessId: "business-2",
+      workflowId: "workflow-3",
+      actionId: "action-4",
+      contextVersion: 5,
+    }),
+    "workflow_generation_context:org-1:business-2:workflow-3:action-4:5",
+  );
 });
