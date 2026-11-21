@@ -102,12 +102,34 @@ type FrontDeskWiseWindow = Window & {
   let lastRequestId = "";
   const renderedRemoteMessages: Record<string, boolean> = {};
   const HANDOFF_NOTICE_TIMEOUT_MS = 6000;
+  const MESSAGE_CONTEXT_TIMEOUT_MS = 4_000;
   const MESSAGE_SOFT_TIMEOUT_MS = 8_000;
   const MESSAGE_TIMEOUT_MS = 15_000;
   const STATUS_NOTICE_TIMEOUT_MS = 5_000;
   let online = typeof navigator === "undefined" ? true : navigator.onLine !== false;
   let restoredStatusTimer: number | null = null;
   let statusNoticeTimer: number | null = null;
+
+  type TypingContext = "normal" | "knowledge" | "classes" | "availability";
+
+  function typingContextForQuestion(question: string): TypingContext {
+    const normalized = question.toLowerCase();
+    if (/\b(class|classes|program|session|enroll|enrollment|registration|register|waitlist|lesson)\b/.test(normalized)) return "classes";
+    if (/\b(book|booking|appointment|appointments|reserve|reservation|tour|schedule|scheduling|availability|available|time|times)\b/.test(normalized)) return "availability";
+    if (/\b(price|pricing|cost|fee|fees|hours|open|location|address|policy|policies|service|services|offer|offers|contact)\b/.test(normalized)) return "knowledge";
+    return "normal";
+  }
+
+  function typingMessageFor(context: TypingContext, elapsedMs: number): string {
+    if (elapsedMs >= MESSAGE_SOFT_TIMEOUT_MS) return "Still working…";
+    if (elapsedMs >= MESSAGE_CONTEXT_TIMEOUT_MS) {
+      if (context === "classes") return "Checking available classes…";
+      if (context === "availability") return "Looking for available times…";
+      if (context === "knowledge") return "Checking that for you…";
+      return "Working on that…";
+    }
+    return "Thinking…";
+  }
 
   function accessibleTextColor(hex: string): string {
     const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
@@ -779,9 +801,13 @@ type FrontDeskWiseWindow = Window & {
       return;
     }
     markPerformance("user_message_sent");
-    updateState({ quickActions: [], leadVisible: false, primaryCta: null, typing: false, statusMessage: "", statusAction: undefined });
+    const typingContext = typingContextForQuestion(question);
+    const typingStartedAt = performance.now();
+    const updateTypingMessage = (): void => updateState({ typingMessage: typingMessageFor(typingContext, performance.now() - typingStartedAt) });
+    const contextTimer = window.setTimeout(updateTypingMessage, MESSAGE_CONTEXT_TIMEOUT_MS);
+    const softTimer = window.setTimeout(updateTypingMessage, MESSAGE_SOFT_TIMEOUT_MS);
+    updateState({ quickActions: [], leadVisible: false, primaryCta: null, typing: true, typingMessage: "Thinking…", healthState: "LOADING", statusMessage: "", statusAction: undefined });
     lastQuestion = question;
-    const softTimer = window.setTimeout(() => updateState({ typingMessage: "Still working…" }), MESSAGE_SOFT_TIMEOUT_MS);
     try {
       const started = await api<{ conversationId: string; resumed?: boolean }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations`, {
         method: "POST",
@@ -795,8 +821,7 @@ type FrontDeskWiseWindow = Window & {
       }
       if (started.resumed && (conversationChanged || state.messages.length <= 1)) await syncConversation(true);
       updateMessage(messageId, { status: "sending" });
-      updateState({ typing: true });
-      updateState({ typingMessage: "Assistant is thinking…", healthState: "LOADING" });
+      updateState({ typing: true, typingMessage: typingMessageFor(typingContext, performance.now() - typingStartedAt), healthState: "LOADING" });
       const responseStartedAt = performance.now();
       const answer = await api<{ conversationId?: string; messageId?: string; assistantMessageId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; primaryCta?: WidgetPrimaryCta | null; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: { status?: string; leadCaptured?: boolean; updatedAt?: string; handoffNotificationStatus?: string } }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
       const responseCompletedAt = performance.now();
@@ -873,6 +898,7 @@ type FrontDeskWiseWindow = Window & {
       markPerformance("response_error", { requestId: lastRequestId, metadata: { retryable: true, timedOut: error instanceof WidgetRequestError && error.timedOut } });
       flushPerformance();
     } finally {
+      window.clearTimeout(contextTimer);
       window.clearTimeout(softTimer);
     }
   }

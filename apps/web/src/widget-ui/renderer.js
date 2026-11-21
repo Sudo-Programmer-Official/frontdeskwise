@@ -151,11 +151,15 @@ const WIDGET_STYLES = `
   .fdw-panel.fdw-theme-dark .fdw-powered-by { color: #a5b5cc; background: #182a43; }
   .fdw-panel.fdw-theme-dark .fdw-powered-by::before, .fdw-panel.fdw-theme-dark .fdw-powered-by::after { background: #385578; }
   .fdw-panel.fdw-theme-dark .fdw-powered-by .fdw-brand-symbol, .fdw-panel.fdw-theme-dark .fdw-powered-by strong { color: #eef5ff; }
-  .fdw-typing { display: inline-flex; gap: 4px; width: max-content; padding: 11px 13px; border-radius: 6px 14px 14px 14px; background: #fff; }
-  .fdw-typing span { width: 5px; height: 5px; border-radius: 50%; background: #7f91aa; animation: fdw-typing-bounce 1s infinite ease-in-out; }
-  .fdw-typing span:nth-child(2) { animation-delay: .14s; }
-  .fdw-typing span:nth-child(3) { animation-delay: .28s; }
-  .fdw-typing small { margin-left: 4px; color: #7f91aa; font-size: 10px; font-weight: 650; }
+  .fdw-typing { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; width: max-content; max-width: min(300px, 86%); padding: 9px 13px 9px 10px; border: 1px solid #e1e9f5; border-radius: 14px 14px 14px 6px; color: #3f5574; background: #fbfdff; box-shadow: 0 6px 18px rgba(50, 82, 130, .08); }
+  .fdw-typing-mark { display: grid; width: 23px; height: 23px; flex: 0 0 23px; place-items: center; border-radius: 50%; color: var(--fdw-accent, #0d6efd); background: #eef4ff; font-size: 16px; line-height: 1; }
+  .fdw-typing-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 700; letter-spacing: -.01em; }
+  .fdw-typing-dots { display: inline-flex; gap: 4px; align-items: center; margin-left: 1px; }
+  .fdw-typing-dot { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: var(--fdw-accent, #0d6efd); animation: fdw-typing-bounce 1s infinite ease-in-out; }
+  .fdw-typing-dot:nth-child(2) { animation-delay: .14s; }
+  .fdw-typing-dot:nth-child(3) { animation-delay: .28s; }
+  .fdw-panel.fdw-theme-dark .fdw-typing { border-color: #385578; color: #dbe8f8; background: #213756; box-shadow: none; }
+  .fdw-panel.fdw-theme-dark .fdw-typing-mark { background: #2b466b; }
   @keyframes fdw-typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
   .fdw-preview-root { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
   .fdw-preview-root .fdw-launcher, .fdw-preview-root .fdw-proactive-teaser, .fdw-preview-root .fdw-panel { position: absolute; pointer-events: auto; }
@@ -170,6 +174,8 @@ const WIDGET_STYLES = `
     .fdw-panel.fdw-theme-auto .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
     .fdw-panel.fdw-theme-auto .fdw-composer { background: #182a43; border-color: #2f4768; }
     .fdw-panel.fdw-theme-auto .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
+    .fdw-panel.fdw-theme-auto .fdw-typing { border-color: #385578; color: #dbe8f8; background: #213756; box-shadow: none; }
+    .fdw-panel.fdw-theme-auto .fdw-typing-mark { background: #2b466b; }
     .fdw-panel.fdw-theme-auto .fdw-powered-by { color: #a5b5cc; background: #182a43; }
     .fdw-panel.fdw-theme-auto .fdw-powered-by::before, .fdw-panel.fdw-theme-auto .fdw-powered-by::after { background: #385578; }
     .fdw-panel.fdw-theme-auto .fdw-powered-by .fdw-brand-symbol, .fdw-panel.fdw-theme-auto .fdw-powered-by strong { color: #eef5ff; }
@@ -341,8 +347,18 @@ export function createWidgetRenderer(mount, options) {
         if (state.typing) {
             const typing = element(documentRef, "div", "fdw-typing");
             typing.setAttribute("role", "status");
-            typing.setAttribute("aria-label", state.typingMessage || "Assistant is typing");
-            typing.innerHTML = `<span></span><span></span><span></span>${state.typingMessage ? `<small>${state.typingMessage}</small>` : ""}`;
+            const typingMessage = state.typingMessage || "Thinking…";
+            typing.setAttribute("aria-label", typingMessage);
+            const mark = element(documentRef, "span", "fdw-typing-mark");
+            mark.setAttribute("aria-hidden", "true");
+            mark.textContent = "✦";
+            const copy = element(documentRef, "span", "fdw-typing-copy");
+            copy.textContent = typingMessage;
+            const dots = element(documentRef, "span", "fdw-typing-dots");
+            dots.setAttribute("aria-hidden", "true");
+            for (let index = 0; index < 3; index += 1)
+                dots.appendChild(element(documentRef, "span", "fdw-typing-dot"));
+            typing.append(mark, copy, dots);
             messages.appendChild(typing);
         }
         const lastMessage = state.messages.at(-1);

@@ -123,7 +123,8 @@ test("embedded widget uses the responsive conversation shell", () => {
     "Powered by FrontDeskWise",
     "powered-by",
     "subtitle-text",
-    "Assistant is typing",
+    "Thinking…",
+    "fdw-typing-dot",
   ]) {
     assert.ok(`${widget}\n${widgetRenderer}\n${widgetEmbed}`.includes(feature), `missing widget shell feature: ${feature}`);
   }
@@ -207,8 +208,11 @@ test("embedded widget keeps knowledge gaps optional and exposes contact action",
   assert.match(widgetEmbed, /leadCaptured: true, leadVisible: false/);
   assert.match(widgetEmbed, /if \(!leadCaptured && !answer\.grounded/);
   assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
-  assert.match(widgetEmbed, /updateState\(\{ typing: true \}\)/);
-  assert.match(widgetRenderer, /Assistant is typing/);
+  assert.match(widgetEmbed, /updateState\(\{[^}]*typing: true/);
+  assert.match(widgetEmbed, /MESSAGE_CONTEXT_TIMEOUT_MS = 4_000/);
+  assert.match(widgetEmbed, /Working on that…/);
+  assert.match(widgetEmbed, /Still working…/);
+  assert.match(widgetRenderer, /typingMessage = state\.typingMessage \|\| "Thinking…"/);
 });
 
 test("embedded widget handoff notice is temporary, dismissible, and session-scoped", () => {
@@ -474,11 +478,11 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(app, /Open workflow/);
   for (const marker of [
     "Actions are what · Workflows are how",
-    "Generate a starter workflow",
-    "Failure and handoff path is defined",
-    "Deterministic provider step",
-    "Plain-English condition",
-    "Live customer preview",
+    "Generate steps",
+    "Choose what happens if unavailable",
+    "Provider",
+    "Condition in plain English",
+    "Workflow preview",
     "Runtime will use the updated steps",
   ]) {
     assert.ok(workflowWorkspace.includes(marker), `missing workflow builder marker: ${marker}`);
