@@ -162,9 +162,18 @@ Use a policy layer, not model names scattered through route handlers.
 ### Routing tiers
 
 - Tier 0: no LLM. Handle greeting, consent, widget state, lead form, booking CTA, and deterministic FAQ matches.
-- Tier 1: economical model. Standard grounded answer generation, query classification, short summaries, and knowledge-gap labeling.
-- Tier 2: stronger model. Only for multi-part questions, ambiguous retrieval, cross-page synthesis, or low-confidence recovery.
+- Tier 1: `fast` capability for high-volume grounded answers and lightweight runtime work.
+- Tier 2: `balanced` capability for multi-part questions, ambiguous retrieval, cross-page synthesis, or low-confidence recovery.
+- Reasoning capability: reserved for workflow generation/repair, Business Brain synthesis, and offline certification; never make it the default visitor path.
 - Embeddings: one configurable embedding model with a version recorded on each knowledge build.
+
+Use `FRONTDESKWISE_MODEL_FAST`, `FRONTDESKWISE_MODEL_BALANCED`, and
+`FRONTDESKWISE_MODEL_REASONING` for model IDs. The older tier-specific variables
+remain supported as a rolling-deploy compatibility path. Runtime state
+transitions, field extraction, provider calls, and action execution stay in
+deterministic code. Realtime voice and translation are future modality adapters
+that should enter this same orchestrator rather than create a second workflow
+engine.
 
 ### Cost controls
 
@@ -176,6 +185,10 @@ Use a policy layer, not model names scattered through route handlers.
 - never silently fall back from a paid/live model to an unapproved provider;
 - allow staging to use sandbox/test credentials only;
 - use batch/background work for crawl embedding and analytics.
+
+Model routing must never change workflow semantics. Models can interpret or
+extract language, but deterministic platform code remains authoritative for
+state transitions, authorization, provider selection, and external actions.
 
 The MVP should optimize for trustworthy answers per dollar, not maximum model sophistication.
 

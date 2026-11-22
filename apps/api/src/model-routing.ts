@@ -2,6 +2,20 @@ import { toneInstructions, type AnswerTone } from "./answer-shaping.js";
 
 export type ModelRoute = "tier0" | "tier1" | "tier2";
 
+/**
+ * Capabilities are the stable policy names used by application code. Model
+ * IDs belong in environment configuration so a provider/model change does not
+ * require touching the orchestrator or answer paths.
+ */
+export type ModelCapability = "fast" | "balanced" | "reasoning";
+
+export type ModelPurpose =
+  | "runtime"
+  | "workflow_generation"
+  | "workflow_repair"
+  | "business_brain"
+  | "offline_certification";
+
 export type ModelUsage = {
   route: ModelRoute;
   model: string | null;
@@ -40,6 +54,28 @@ type ChatCompletionResponse = {
 
 const defaultTier1Model = "gpt-4o-mini";
 const defaultTier2Model = "gpt-4o";
+const defaultReasoningModel = defaultTier2Model;
+
+const capabilityEnvironment: Record<ModelCapability, string> = {
+  fast: "FRONTDESKWISE_MODEL_FAST",
+  balanced: "FRONTDESKWISE_MODEL_BALANCED",
+  reasoning: "FRONTDESKWISE_MODEL_REASONING",
+};
+
+const capabilityCostEnvironment: Record<ModelCapability, { input: string; output: string }> = {
+  fast: {
+    input: "FRONTDESKWISE_MODEL_FAST_INPUT_COST_PER_MILLION_USD",
+    output: "FRONTDESKWISE_MODEL_FAST_OUTPUT_COST_PER_MILLION_USD",
+  },
+  balanced: {
+    input: "FRONTDESKWISE_MODEL_BALANCED_INPUT_COST_PER_MILLION_USD",
+    output: "FRONTDESKWISE_MODEL_BALANCED_OUTPUT_COST_PER_MILLION_USD",
+  },
+  reasoning: {
+    input: "FRONTDESKWISE_MODEL_REASONING_INPUT_COST_PER_MILLION_USD",
+    output: "FRONTDESKWISE_MODEL_REASONING_OUTPUT_COST_PER_MILLION_USD",
+  },
+};
 
 function numberEnv(name: string): number | null {
   const value = Number(process.env[name]);
@@ -70,8 +106,41 @@ export function routeQuestion(input: { question: string; hasMatch: boolean; conf
 
 export function modelForRoute(route: ModelRoute): string | null {
   if (route === "tier0" || !llmConfigured()) return null;
-  return process.env[route === "tier1" ? "FRONTDESKWISE_LLM_MODEL_TIER1" : "FRONTDESKWISE_LLM_MODEL_TIER2"]?.trim()
-    || (route === "tier1" ? defaultTier1Model : defaultTier2Model);
+  return modelForCapability(route === "tier1" ? "fast" : "balanced");
+}
+
+export function capabilityForRoute(route: ModelRoute): ModelCapability | null {
+  if (route === "tier0") return null;
+  return route === "tier1" ? "fast" : "balanced";
+}
+
+export function capabilityForPurpose(purpose: ModelPurpose): ModelCapability {
+  if (purpose === "runtime") return "fast";
+  return "reasoning";
+}
+
+export function modelForPurpose(purpose: ModelPurpose): string | null {
+  return modelForCapability(capabilityForPurpose(purpose));
+}
+
+/**
+ * Resolve a model by capability, with legacy tier variables retained as a
+ * migration path. The reasoning capability is intentionally not selected by
+ * the hot-path answer router yet; it is reserved for workflow generation,
+ * Business Brain synthesis, repair, and offline certification.
+ */
+export function modelForCapability(capability: ModelCapability): string | null {
+  if (!llmConfigured()) return null;
+  const configured = process.env[capabilityEnvironment[capability]]?.trim();
+  if (configured) return configured;
+
+  if (capability === "fast") {
+    return process.env.FRONTDESKWISE_LLM_MODEL_TIER1?.trim() || defaultTier1Model;
+  }
+  if (capability === "balanced") {
+    return process.env.FRONTDESKWISE_LLM_MODEL_TIER2?.trim() || defaultTier2Model;
+  }
+  return process.env.FRONTDESKWISE_LLM_MODEL_TIER2?.trim() || defaultReasoningModel;
 }
 
 export function parseGroundingDecision(value: string): boolean {
@@ -109,9 +178,12 @@ export function hasDirectSensitiveEvidence(question: string, context: string): b
 
 function estimateCostUsd(route: ModelRoute, inputTokens: number, outputTokens: number): number | null {
   if (route === "tier0") return 0;
-  const prefix = route === "tier1" ? "FRONTDESKWISE_LLM_TIER1" : "FRONTDESKWISE_LLM_TIER2";
-  const inputRate = numberEnv(`${prefix}_INPUT_COST_PER_MILLION_USD`);
-  const outputRate = numberEnv(`${prefix}_OUTPUT_COST_PER_MILLION_USD`);
+  const capability = capabilityForRoute(route);
+  if (!capability) return 0;
+  const configuredRates = capabilityCostEnvironment[capability];
+  const legacyPrefix = route === "tier1" ? "FRONTDESKWISE_LLM_TIER1" : "FRONTDESKWISE_LLM_TIER2";
+  const inputRate = numberEnv(configuredRates.input) ?? numberEnv(`${legacyPrefix}_INPUT_COST_PER_MILLION_USD`);
+  const outputRate = numberEnv(configuredRates.output) ?? numberEnv(`${legacyPrefix}_OUTPUT_COST_PER_MILLION_USD`);
   if (inputRate === null || outputRate === null) return null;
   return Number(((inputTokens / 1_000_000) * inputRate + (outputTokens / 1_000_000) * outputRate).toFixed(8));
 }

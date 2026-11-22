@@ -263,10 +263,34 @@ The current worker runs in the API process but uses durable `embedding_jobs` row
 After retrieval, the API applies a three-tier policy before answering a visitor question:
 
 - `tier0`: greetings and approved knowledge-gap answers are deterministic and do not call a model.
-- `tier1`: ordinary grounded questions use the economical configured model (`FRONTDESKWISE_LLM_MODEL_TIER1`, default `gpt-4o-mini`).
-- `tier2`: ambiguous, multi-part, or weakly evidenced questions are eligible for the stronger configured model (`FRONTDESKWISE_LLM_MODEL_TIER2`, default `gpt-4o`).
+- `tier1`: ordinary grounded questions use the `fast` capability (`FRONTDESKWISE_MODEL_FAST`, default `gpt-4o-mini`).
+- `tier2`: ambiguous, multi-part, or weakly evidenced questions use the `balanced` capability (`FRONTDESKWISE_MODEL_BALANCED`, default `gpt-4o`).
+
+The capability names are the application contract; model IDs and per-million-token
+rates are deployment configuration. The legacy `FRONTDESKWISE_LLM_MODEL_TIER1`
+and `FRONTDESKWISE_LLM_MODEL_TIER2` variables remain valid during migration. A
+third `reasoning` capability (`FRONTDESKWISE_MODEL_REASONING`) is reserved for
+low-frequency, high-impact work such as workflow generation/repair, Business
+Brain synthesis, and offline certification. It is not placed on the visitor
+hot path. Runtime workflow field extraction, next-best-action selection, and
+provider/action execution remain deterministic.
 
 Answers are constrained to retrieved business context. If model generation is unavailable or fails, FrontDeskWise falls back to the existing extractive answer or the configured knowledge-gap response. Route, model, token counts, latency, and optional estimated cost are persisted with the assistant message, while token totals roll up into organization usage. This makes the knowledge loop usable with only PostgreSQL full-text retrieval and progressively better when the OpenAI configuration is present.
+
+Voice and live translation are intentionally separate future channels. When they
+are introduced, realtime audio, transcription, and translation model IDs should
+be configured independently and feed the same deterministic conversation and
+workflow orchestrator; the current website widget does not invoke realtime
+audio models.
+
+### Workflow-semantics invariant
+
+Model routing must never change workflow semantics. Models may extract or
+interpret visitor language, but authorization, state transitions, provider
+selection, and external actions remain platform-controlled. Changing the model
+behind `fast`, `balanced`, or `reasoning` may improve language quality, but it
+must not change whether a registration, booking, lead, or provider write is
+allowed to execute.
 
 ## Widget installation
 

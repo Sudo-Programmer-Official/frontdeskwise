@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasDirectSensitiveEvidence, parseGroundingDecision, routeQuestion } from "../src/model-routing.js";
+import { capabilityForPurpose, capabilityForRoute, hasDirectSensitiveEvidence, modelForCapability, modelForPurpose, parseGroundingDecision, routeQuestion } from "../src/model-routing.js";
 import {
   answerabilityDecision,
   citationMatches,
@@ -122,4 +122,47 @@ test("sensitive claims require direct evidence for the requested qualifier", () 
 test("model routing keeps clear FAQs cheap and sends lead qualification to tier 2", () => {
   assert.equal(routeQuestion({ question: "What are your hours?", hasMatch: true, confidenceScore: 0.9, candidateCount: 8 }).route, "tier1");
   assert.equal(routeQuestion({ question: "We need help automating our intake workflow", hasMatch: true, confidenceScore: 0.9, candidateCount: 2 }).reason, "lead_qualification");
+});
+
+test("model capabilities keep provider IDs out of routing policy", () => {
+  assert.equal(capabilityForRoute("tier0"), null);
+  assert.equal(capabilityForRoute("tier1"), "fast");
+  assert.equal(capabilityForRoute("tier2"), "balanced");
+  assert.equal(capabilityForPurpose("runtime"), "fast");
+  assert.equal(capabilityForPurpose("workflow_generation"), "reasoning");
+
+  const keys = [
+    "OPENAI_API_KEY",
+    "FRONTDESKWISE_LLM_ENABLED",
+    "FRONTDESKWISE_MODEL_FAST",
+    "FRONTDESKWISE_MODEL_BALANCED",
+    "FRONTDESKWISE_MODEL_REASONING",
+    "FRONTDESKWISE_LLM_MODEL_TIER1",
+    "FRONTDESKWISE_LLM_MODEL_TIER2",
+  ];
+  const previous = new Map(keys.map((key) => [key, process.env[key]]));
+  try {
+    process.env.OPENAI_API_KEY = "test-key";
+    delete process.env.FRONTDESKWISE_LLM_ENABLED;
+    process.env.FRONTDESKWISE_MODEL_FAST = "fast-test-model";
+    process.env.FRONTDESKWISE_MODEL_BALANCED = "balanced-test-model";
+    process.env.FRONTDESKWISE_MODEL_REASONING = "reasoning-test-model";
+    delete process.env.FRONTDESKWISE_LLM_MODEL_TIER1;
+    delete process.env.FRONTDESKWISE_LLM_MODEL_TIER2;
+
+    assert.equal(modelForCapability("fast"), "fast-test-model");
+    assert.equal(modelForCapability("balanced"), "balanced-test-model");
+    assert.equal(modelForCapability("reasoning"), "reasoning-test-model");
+    assert.equal(modelForPurpose("runtime"), "fast-test-model");
+    assert.equal(modelForPurpose("workflow_repair"), "reasoning-test-model");
+
+    delete process.env.FRONTDESKWISE_MODEL_FAST;
+    process.env.FRONTDESKWISE_LLM_MODEL_TIER1 = "legacy-fast-model";
+    assert.equal(modelForCapability("fast"), "legacy-fast-model");
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
