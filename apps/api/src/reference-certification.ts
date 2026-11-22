@@ -299,7 +299,7 @@ function advanceSyntheticSteps(business: ReferenceBusiness, state: ConversationA
     step = currentWorkflowStep(business.workflow, state);
   }
 
-  if (step?.type === "recommend") {
+  if (step?.type === "recommend" && !step.config?.sourceStepId) {
     const recommendation = business.planFacts
       ? recommendPlan(state.values, business.planFacts)
       : { plan: "Relevant capabilities", price: null, usageType: "", usageLevel: "", reason: "Verified capabilities match the stated business goals." };
@@ -330,6 +330,26 @@ function advanceSyntheticSteps(business: ReferenceBusiness, state: ConversationA
     transitionWorkflow(business.workflow, state, step.id);
     step = currentWorkflowStep(business.workflow, state);
     responseClass = "provider_result";
+  }
+
+  if (step?.type === "recommend" || step?.type === "select") {
+    const resolution = Object.values(state.lookupResults ?? {}).find((value) => value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).matches)) as { matches?: Array<{ id: string }> } | undefined;
+    const selectedIndex = /^(?:option\s*)?(\d+)\s*(?:,?\s*(?:please|thanks?))?$/i.exec(message.trim())
+      ?? /\boption\s*(\d+)\b/i.exec(message.trim());
+    if (resolution?.matches?.length && selectedIndex) {
+      const selected = resolution.matches[Number(selectedIndex[1]) - 1];
+      if (selected) {
+        state.selectedActionResourceId = selected.id;
+        transitionWorkflow(business.workflow, state, step.id);
+        const selectionStep = currentWorkflowStep(business.workflow, state);
+        if (step.type === "recommend" && selectionStep?.type === "select") transitionWorkflow(business.workflow, state, selectionStep.id);
+        step = currentWorkflowStep(business.workflow, state);
+        while (step?.type === "form" && workflowFormFields(business.workflow, state).length === 0) {
+          transitionWorkflow(business.workflow, state, step.id);
+          step = currentWorkflowStep(business.workflow, state);
+        }
+      }
+    }
   }
 
   if (step?.type === "confirm") {

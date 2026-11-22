@@ -47,7 +47,9 @@ test("Jackrabbit provider verifies the organization, merges classes with live li
   ]);
   assert.equal(options[0].waitlistAvailable, true);
   assert.equal(options[1].registrationUrl, "https://register.example/wed");
-  assert.equal(requests.filter((item) => item.url.includes("Classes?")).length, 1);
+  const broadOptions = await provider.findClassOptions({ location: "Largo" });
+  assert.deepEqual(broadOptions.map((item) => item.id), ["class-sun", "class-wed"]);
+  assert.equal(requests.filter((item) => item.url.includes("Classes?")).length, 2);
   assert.equal(requests.every((item) => item.headers.get("authorization") === "Bearer test-token"), true);
   assert.equal(requests.every((item) => item.headers.get("x-org-id") === "org-123"), true);
 });

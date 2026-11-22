@@ -45,6 +45,31 @@ export type CrawledPage = {
   actionCandidates?: WebsiteActionCandidate[];
 };
 
+export type WebsiteEmbedPolicy = {
+  xFrameOptions: string | null;
+  frameAncestors: string | null;
+};
+
+/**
+ * Read the response directives that browsers use to decide whether a page may
+ * be rendered in an iframe. The crawler can still read/index a page when these
+ * directives reject embedding, so this is intentionally separate from crawl
+ * success.
+ */
+export function inspectWebsiteEmbedPolicy(headers: Headers): WebsiteEmbedPolicy {
+  const contentSecurityPolicy = headers.get("content-security-policy") ?? "";
+  const frameAncestors = contentSecurityPolicy
+    .split(";")
+    .map((directive) => directive.trim())
+    .find((directive) => /^frame-ancestors(?:\s|$)/i.test(directive))
+    ?.replace(/^frame-ancestors\s*/i, "")
+    .trim() || null;
+  return {
+    xFrameOptions: headers.get("x-frame-options")?.trim() || null,
+    frameAncestors,
+  };
+}
+
 export type CrawlRejection = {
   url: string;
   reason: string;

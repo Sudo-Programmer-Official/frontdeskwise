@@ -22,6 +22,22 @@ test("swim school enrollment uses progressive capture", () => {
   assert.equal(action?.key, "enroll_child");
   assert.equal(action?.name, "Find the right swim lesson");
   assert.match(action?.description ?? "", /verified registration/i);
+  assert.deepEqual(action?.steps?.map((step) => step.id), [
+    "customer-type",
+    "student-age",
+    "student-ability",
+    "student-goal",
+    "student-location",
+    "student-schedule",
+    "registration-options",
+    "class-recommendations",
+    "class-selection",
+    "parent-contact",
+    "enrollment-confirm",
+    "registration-link",
+    "enrollment-complete",
+  ]);
+  assert.equal(action?.steps?.find((step) => step.id === "class-selection")?.type, "select");
   assert.equal(action?.executionMode, "PROVIDER_FLOW");
   assert.equal(action?.provider, "jackrabbit");
   assert.equal(action?.attachmentPolicy, "high_intent_only");

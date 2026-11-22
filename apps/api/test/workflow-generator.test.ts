@@ -44,12 +44,13 @@ test("Dave swim prompt creates a provider-backed enrollment journey", () => {
   });
 
   assert.equal(result.intent, "enrollment");
-  assert.deepEqual(result.steps.slice(0, 5).map((step) => step.fieldKey), ["child_age", "ability", "goal", "location", "preferred_days"]);
+  assert.deepEqual(result.steps.slice(0, 6).map((step) => step.fieldKey), ["customer_type", "child_age", "ability", "goal", "location", "schedule_preference"]);
   assert.equal(result.steps.find((step) => step.id === "find-classes")?.config?.provider, "jackrabbit");
   assert.equal(result.steps.find((step) => step.id === "find-classes")?.config?.reviewStatus, "provider_backed");
-  assert.equal(result.steps.find((step) => step.id === "show-options")?.config?.reviewStatus, "provider_backed");
+  assert.equal(result.steps.find((step) => step.id === "class-recommendations")?.config?.reviewStatus, "provider_backed");
+  assert.equal(result.steps.find((step) => step.id === "class-selection")?.type, "select");
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.config?.reviewStatus, "provider_backed");
-  assert.match(result.steps.find((step) => step.id === "show-options")?.label ?? "", /pricing/i);
+  assert.match(result.steps.find((step) => step.id === "class-recommendations")?.label ?? "", /matching classes/i);
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.type, "generate_link");
   assert.ok(result.fields.some((field) => field.key === "child_age"));
   assert.equal(result.steps.some((step) => step.fieldKey === "name" || step.fieldKey === "email"), false);

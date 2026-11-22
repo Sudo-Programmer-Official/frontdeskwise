@@ -17,6 +17,8 @@ const props = withDefaults(defineProps<{
   welcomeMessage: string;
   businessName: string;
   websiteUrl: string;
+  websitePreviewEndpoint?: string;
+  websitePreviewToken?: string;
   widgetColor: string;
   widgetTheme?: "light" | "dark" | "auto";
   widgetPosition?: "bottom-right" | "bottom-left";
@@ -99,7 +101,9 @@ const previewWebsiteUrl = computed(() => {
   }
 });
 const websitePreviewState = ref<"empty" | "loading" | "ready" | "error">("empty");
+const websitePreviewErrorReason = ref<"security_policy" | "unavailable" | null>(null);
 let previewTimeout: number | null = null;
+let previewProbeVersion = 0;
 
 function clearPreviewTimeout(): void {
   if (previewTimeout !== null) {
@@ -127,6 +131,7 @@ function armHandoffNoticeTimer(): void {
 
 function resetWebsitePreview(url: string): void {
   clearPreviewTimeout();
+  websitePreviewErrorReason.value = null;
   websitePreviewState.value = url ? "loading" : "empty";
   if (url) {
     previewTimeout = window.setTimeout(() => {
@@ -135,13 +140,56 @@ function resetWebsitePreview(url: string): void {
   }
 }
 
+async function checkWebsitePreview(url: string): Promise<void> {
+  const version = ++previewProbeVersion;
+  clearPreviewTimeout();
+  websitePreviewErrorReason.value = null;
+  websitePreviewState.value = url ? "loading" : "empty";
+  if (!url) return;
+
+  const endpoint = props.websitePreviewEndpoint?.trim();
+  if (!endpoint) {
+    resetWebsitePreview(url);
+    return;
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      headers: props.websitePreviewToken?.trim() ? { authorization: `Bearer ${props.websitePreviewToken.trim()}` } : {},
+      credentials: "same-origin",
+    });
+    if (version !== previewProbeVersion) return;
+    if (response.ok) {
+      const payload = await response.json() as { embeddable?: boolean; reason?: "security_policy" | "unavailable" | null };
+      if (payload.embeddable === false) {
+        websitePreviewErrorReason.value = payload.reason === "security_policy" ? "security_policy" : "unavailable";
+        websitePreviewState.value = "error";
+        return;
+      }
+    }
+  } catch {
+    // If the probe is unavailable, retain the direct iframe attempt. The
+    // timeout/error state below still gives the owner a useful fallback.
+  }
+  if (version !== previewProbeVersion) return;
+  websitePreviewState.value = "loading";
+  previewTimeout = window.setTimeout(() => {
+    if (websitePreviewState.value === "loading") {
+      websitePreviewErrorReason.value = "unavailable";
+      websitePreviewState.value = "error";
+    }
+  }, 8000);
+}
+
 function markWebsitePreviewReady(): void {
   clearPreviewTimeout();
+  websitePreviewErrorReason.value = null;
   websitePreviewState.value = "ready";
 }
 
 function markWebsitePreviewError(): void {
   clearPreviewTimeout();
+  websitePreviewErrorReason.value = "unavailable";
   websitePreviewState.value = "error";
 }
 
@@ -227,7 +275,7 @@ function handleAsk(question: string): void {
   emit("ask", question);
 }
 
-watch(previewWebsiteUrl, resetWebsitePreview, { immediate: true });
+watch([previewWebsiteUrl, () => props.websitePreviewEndpoint, () => props.websitePreviewToken], ([url]) => { void checkWebsitePreview(url); }, { immediate: true });
 watch(() => props.mode, (nextMode) => { previewMode.value = nextMode; });
 watch(() => props.scenario, (nextScenario) => { if (nextScenario) { scenario.value = nextScenario; handoffNoticeDismissed.value = false; proactiveDismissed.value = false; armHandoffNoticeTimer(); } });
 watch([widgetConfig, widgetState], syncRenderer, { deep: true });
@@ -283,7 +331,7 @@ onBeforeUnmount(() => {
       <div class="preview-site-body" :class="{ 'preview-site-body-fallback': websitePreviewState === 'error' || websitePreviewState === 'empty' }">
         <iframe v-if="previewWebsiteUrl && websitePreviewState !== 'error'" :key="previewWebsiteUrl" class="preview-website-frame" :src="previewWebsiteUrl" :title="`Website preview for ${businessName || 'your business'}`" loading="eager" referrerpolicy="strict-origin-when-cross-origin" @load="markWebsitePreviewReady" @error="markWebsitePreviewError"></iframe>
         <div v-if="websitePreviewState === 'loading'" class="preview-site-state" aria-live="polite"><span class="preview-site-state-dot"></span>Loading your website…</div>
-        <div v-else-if="websitePreviewState === 'error'" class="preview-site-error"><p class="ds-section-kicker">Website preview unavailable</p><strong>{{ previewWebsiteUrl || websiteUrl }}</strong><p>This website does not allow embedded previews here. Open it in a new tab to view the live page.</p><a :href="previewWebsiteUrl || websiteUrl" target="_blank" rel="noreferrer">Open website in a new tab</a></div>
+        <div v-else-if="websitePreviewState === 'error'" class="preview-site-error"><p class="ds-section-kicker">Website preview unavailable</p><strong>{{ previewWebsiteUrl || websiteUrl }}</strong><p>{{ websitePreviewErrorReason === 'security_policy' ? 'This website is connected to knowledge, but its security policy does not allow a live embedded preview here.' : 'This website could not be loaded in the live preview right now.' }} Open it in a new tab to view the live page.</p><a :href="previewWebsiteUrl || websiteUrl" target="_blank" rel="noreferrer">Open website in a new tab</a></div>
         <div v-else-if="websitePreviewState === 'empty'" class="preview-site-error"><p class="ds-section-kicker">Add a website to preview</p><strong>{{ businessName || 'Your business' }}</strong><p>Once a public website is connected, the live page will appear behind the assistant.</p></div>
         <div ref="previewMount" class="widget-preview-stage"></div>
       </div>

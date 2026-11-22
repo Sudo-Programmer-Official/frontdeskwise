@@ -90,6 +90,8 @@ export function preserveWorkflowGoal(value: string): string | null {
   return value.trim() ? value : null;
 }
 
+export const ENROLLMENT_WORKFLOW_GOAL = "Help parents find the right British Swim School lesson for their child and move them toward registration. Ask only the minimum useful questions about the swimmer's age, ability, goals, preferred location, and schedule. Answer side questions from verified British Swim School knowledge and resume the workflow. Use Jackrabbit for live class availability and waitlist information. Show only verified options, let the parent choose a class, then provide the verified registration link. If no suitable class is available or Jackrabbit fails, offer waitlist/help or handoff to the team. Never invent availability, pricing, program levels, or registration URLs.";
+
 export function workflowGenerationCacheKey(context: Pick<WorkflowGenerationContext, "organizationId" | "businessId" | "workflowId" | "actionId" | "contextVersion">): string {
   return [
     "workflow_generation_context",
@@ -156,11 +158,15 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
   }
   if (intent === "enrollment") {
     return [
+      field("customer_type", "Customer type", "select", "Is this for a new student or someone already enrolled?", true, ["New student", "Current student"]),
       field("child_age", "Child’s age", "number", "How old is your child?"),
       field("ability", "Swimming ability", "select", "How comfortable is your child in the water?", true, ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]),
-      field("goal", "Lesson goal", "select", "What would you like your child to work toward?", true, ["Learn to swim", "Water safety", "Improve technique", "Have fun"]),
+      field("goal", "Lesson goal", "select", "What would you like your child to work toward?", true, ["Learn to swim", "Water safety", "Build water confidence", "Improve technique", "Have fun"]),
       field("location", "Location or ZIP code", "text", "What location or ZIP code should I use to find classes?"),
-      field("preferred_days", "Preferred days", "text", "Which days usually work best?"),
+      field("schedule_preference", "Schedule preference", "text", "Which days or schedule usually work best?"),
+      field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?"),
+      field("email", "Email", "email", "What email address should we use?"),
+      field("phone", "Phone", "phone", "What’s the best phone number?", false),
     ];
   }
   if (intent === "business_fit") {
@@ -250,11 +256,12 @@ function planSelectionSteps(): WorkflowStepDraft[] {
 
 function enrollmentSteps(): WorkflowStepDraft[] {
   return [
+    capture("customer-type", "Customer type", "customer_type", "Is this for a new student or someone already enrolled?", ["New student", "Current student"]),
     capture("child-age", "Child’s age", "child_age", "How old is your child?"),
     capture("swimming-ability", "Swimming ability", "ability", "How comfortable is your child in the water?", ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]),
-    capture("lesson-goal", "Lesson goal", "goal", "What would you like your child to work toward?", ["Learn to swim", "Water safety", "Improve technique", "Have fun"]),
+    capture("lesson-goal", "Lesson goal", "goal", "What would you like your child to work toward?", ["Learn to swim", "Water safety", "Build water confidence", "Improve technique", "Have fun"]),
     capture("location", "Location or ZIP code", "location", "What location or ZIP code should I use to find classes?"),
-    capture("preferred-days", "Preferred days", "preferred_days", "Which days usually work best?"),
+    capture("schedule-preference", "Schedule preference", "schedule_preference", "Which days or schedule usually work best?"),
     {
       id: "find-classes",
       type: "lookup",
@@ -266,26 +273,38 @@ function enrollmentSteps(): WorkflowStepDraft[] {
         provider: "jackrabbit",
         operation: "find_classes",
         resourceType: "registration",
-        programField: "goal",
         locationField: "location",
-        dayField: "preferred_days",
-        searchFields: "child_age, ability, goal, location, preferred_days",
+        dayField: "schedule_preference",
+        searchFields: "child_age, ability, goal, location, schedule_preference",
         includeWaitlist: true,
         failureBehavior: "handoff",
       },
     },
     {
-      id: "show-options",
+      id: "class-recommendations",
       type: "recommend",
-      label: "Show available class options and pricing",
-      question: "Here are the available classes and current pricing that best match those details.",
-      config: { ...interruptionConfig, maxResults: "3", showPricing: true },
+      label: "Present matching classes",
+      question: "I found these matching classes. Which one would you like to consider?",
+      config: { ...interruptionConfig, sourceStepId: "find-classes", maxResults: 5 },
     },
     {
-      id: "choose-class",
+      id: "class-selection",
+      type: "select",
+      label: "Let visitor select a class",
+      question: "Reply with the number of the class you want.",
+      config: { ...interruptionConfig, sourceStepId: "find-classes", maxResults: 5 },
+    },
+    {
+      id: "parent-contact",
+      type: "form",
+      label: "Parent contact details",
+      config: { ...interruptionConfig, fieldKeys: ["parent_name", "email", "phone"] },
+    },
+    {
+      id: "registration-confirm",
       type: "confirm",
-      label: "Confirm a class",
-      question: "Which class would you like to continue with?",
+      label: "Confirm registration path",
+      question: "I have the class details. Shall I prepare the registration link?",
       required: true,
       config: { ...interruptionConfig },
     },
@@ -435,7 +454,9 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
   const providers = context.availableProviders !== undefined
     ? context.availableProviders.map((provider) => provider.toLowerCase())
     : context.businessContext?.providers?.map((provider) => provider.value.toLowerCase()) ?? [];
-  const normalizedDescription = description;
+  const normalizedDescription = intent === "enrollment" && /enroll today|discovered on other page/i.test(description)
+    ? ENROLLMENT_WORKFLOW_GOAL
+    : description;
   if (intent === "plan_selection") {
     const planRecommendation = steps.find((step) => step.id === "recommend-plan");
     if (planRecommendation) {
@@ -463,12 +484,20 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
         ...(providers.includes("jackrabbit") ? {} : { reviewReason: "Connect Jackrabbit before relying on live class availability." }),
       };
     }
-    const optionsStep = steps.find((step) => step.id === "show-options");
+    const optionsStep = steps.find((step) => step.id === "class-recommendations");
     if (optionsStep) {
       optionsStep.config = {
         ...(optionsStep.config ?? {}),
         reviewStatus: providers.includes("jackrabbit") ? "provider_backed" : "suggested",
         ...(providers.includes("jackrabbit") ? {} : { reviewReason: "Connect Jackrabbit before presenting live class options." }),
+      };
+    }
+    const selectionStep = steps.find((step) => step.id === "class-selection");
+    if (selectionStep) {
+      selectionStep.config = {
+        ...(selectionStep.config ?? {}),
+        reviewStatus: providers.includes("jackrabbit") ? "provider_backed" : "suggested",
+        ...(providers.includes("jackrabbit") ? {} : { reviewReason: "Connect Jackrabbit before allowing class selection." }),
       };
     }
     const linkStep = steps.find((step) => step.id === "registration-link");

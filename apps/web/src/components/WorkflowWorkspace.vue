@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, Trash2, X } from "@lucide/vue";
-import { generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
+import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
 import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 
 type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
@@ -234,6 +234,7 @@ function syncWorkflowGoalEditor(): void {
 
 function defaultBusinessWorkflowDescription(): string {
   const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "this business";
+  if (/swim|lesson/i.test(businessName)) return ENROLLMENT_WORKFLOW_GOAL;
   const businessType = props.businessContext?.businessType?.trim() && props.businessContext.businessType !== "Unknown"
     ? props.businessContext.businessType.trim().toLowerCase()
     : "business";
@@ -819,7 +820,9 @@ function generateStarter() {
     businessContext: props.businessContext ?? undefined,
   };
   workflowGenerationKey.value = workflowGenerationCacheKey(generationContext);
-  const ownerGoal = preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
+  const ownerGoal = workflowDraft.value.key === "enroll_child"
+    ? ENROLLMENT_WORKFLOW_GOAL
+    : preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
   const result = generateWorkflow(ownerGoal, [], generationContext);
   workflowDraft.value.description = result.description;
   workflowDraft.value.steps = result.steps as unknown as Array<Record<string, unknown>>;

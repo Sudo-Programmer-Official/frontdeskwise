@@ -1,6 +1,6 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, X } from "@lucide/vue";
-import { generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey } from "../workflow-generator.js";
+import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey } from "../workflow-generator.js";
 import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 const { defineProps, defineEmits, } = {};
 const props = defineProps();
@@ -186,6 +186,8 @@ function syncWorkflowGoalEditor() {
 }
 function defaultBusinessWorkflowDescription() {
     const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "this business";
+    if (/swim|lesson/i.test(businessName))
+        return ENROLLMENT_WORKFLOW_GOAL;
     const businessType = props.businessContext?.businessType?.trim() && props.businessContext.businessType !== "Unknown"
         ? props.businessContext.businessType.trim().toLowerCase()
         : "business";
@@ -761,7 +763,9 @@ function generateStarter() {
         businessContext: props.businessContext ?? undefined,
     };
     workflowGenerationKey.value = workflowGenerationCacheKey(generationContext);
-    const ownerGoal = preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
+    const ownerGoal = workflowDraft.value.key === "enroll_child"
+        ? ENROLLMENT_WORKFLOW_GOAL
+        : preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
     const result = generateWorkflow(ownerGoal, [], generationContext);
     workflowDraft.value.description = result.description;
     workflowDraft.value.steps = result.steps;

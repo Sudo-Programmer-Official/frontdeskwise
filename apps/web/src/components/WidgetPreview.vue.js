@@ -54,7 +54,9 @@ const previewWebsiteUrl = computed(() => {
     }
 });
 const websitePreviewState = ref("empty");
+const websitePreviewErrorReason = ref(null);
 let previewTimeout = null;
+let previewProbeVersion = 0;
 function clearPreviewTimeout() {
     if (previewTimeout !== null) {
         window.clearTimeout(previewTimeout);
@@ -79,6 +81,7 @@ function armHandoffNoticeTimer() {
 }
 function resetWebsitePreview(url) {
     clearPreviewTimeout();
+    websitePreviewErrorReason.value = null;
     websitePreviewState.value = url ? "loading" : "empty";
     if (url) {
         previewTimeout = window.setTimeout(() => {
@@ -87,12 +90,56 @@ function resetWebsitePreview(url) {
         }, 8000);
     }
 }
+async function checkWebsitePreview(url) {
+    const version = ++previewProbeVersion;
+    clearPreviewTimeout();
+    websitePreviewErrorReason.value = null;
+    websitePreviewState.value = url ? "loading" : "empty";
+    if (!url)
+        return;
+    const endpoint = props.websitePreviewEndpoint?.trim();
+    if (!endpoint) {
+        resetWebsitePreview(url);
+        return;
+    }
+    try {
+        const response = await fetch(endpoint, {
+            headers: props.websitePreviewToken?.trim() ? { authorization: `Bearer ${props.websitePreviewToken.trim()}` } : {},
+            credentials: "same-origin",
+        });
+        if (version !== previewProbeVersion)
+            return;
+        if (response.ok) {
+            const payload = await response.json();
+            if (payload.embeddable === false) {
+                websitePreviewErrorReason.value = payload.reason === "security_policy" ? "security_policy" : "unavailable";
+                websitePreviewState.value = "error";
+                return;
+            }
+        }
+    }
+    catch {
+        // If the probe is unavailable, retain the direct iframe attempt. The
+        // timeout/error state below still gives the owner a useful fallback.
+    }
+    if (version !== previewProbeVersion)
+        return;
+    websitePreviewState.value = "loading";
+    previewTimeout = window.setTimeout(() => {
+        if (websitePreviewState.value === "loading") {
+            websitePreviewErrorReason.value = "unavailable";
+            websitePreviewState.value = "error";
+        }
+    }, 8000);
+}
 function markWebsitePreviewReady() {
     clearPreviewTimeout();
+    websitePreviewErrorReason.value = null;
     websitePreviewState.value = "ready";
 }
 function markWebsitePreviewError() {
     clearPreviewTimeout();
+    websitePreviewErrorReason.value = "unavailable";
     websitePreviewState.value = "error";
 }
 function sampleMessages(nextScenario) {
@@ -176,7 +223,7 @@ function selectScenario(nextScenario) {
 function handleAsk(question) {
     emit("ask", question);
 }
-watch(previewWebsiteUrl, resetWebsitePreview, { immediate: true });
+watch([previewWebsiteUrl, () => props.websitePreviewEndpoint, () => props.websitePreviewToken], ([url]) => { void checkWebsitePreview(url); }, { immediate: true });
 watch(() => props.mode, (nextMode) => { previewMode.value = nextMode; });
 watch(() => props.scenario, (nextScenario) => { if (nextScenario) {
     scenario.value = nextScenario;
@@ -256,6 +303,7 @@ const __VLS_template = () => {
     __VLS_withDotValue(previewMode, {});
     __VLS_withDotValue(previewWebsiteUrl, {});
     __VLS_withDotValue(websitePreviewState, {});
+    __VLS_withDotValue(websitePreviewErrorReason, {});
     void {};
     /** @type {__VLS_StyleScopedClasses['agent-preview-toolbar']} */ ;
     /** @type {__VLS_StyleScopedClasses['preview-scenario']} */ ;
@@ -410,6 +458,7 @@ const __VLS_template = () => {
         __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
         (previewWebsiteUrl.value || __VLS_ctx.websiteUrl);
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
+        (websitePreviewErrorReason.value === 'security_policy' ? 'This website is connected to knowledge, but its security policy does not allow a live embedded preview here.' : 'This website could not be loaded in the live preview right now.');
         __VLS_asFunctionalElement1(__VLS_intrinsics.a, __VLS_intrinsics.a)({
             href: (previewWebsiteUrl.value || __VLS_ctx.websiteUrl),
             target: "_blank",
@@ -439,7 +488,7 @@ const __VLS_template = () => {
     });
     /** @type {__VLS_StyleScopedClasses['preview-note']} */ ;
     // @ts-ignore
-    [previewMode, previewMode, widgetTheme, widgetPosition, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, websiteUrl, websiteUrl, websiteUrl, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, businessName, businessName,];
+    [previewMode, previewMode, widgetTheme, widgetPosition, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, websiteUrl, websiteUrl, websiteUrl, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, businessName, businessName, websitePreviewErrorReason,];
     return {};
 };
 void [__VLS_template];

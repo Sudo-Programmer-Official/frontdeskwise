@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
-import { CrawlError, detectSpaIndicators, extractBrandColors, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
+import { CrawlError, detectSpaIndicators, extractBrandColors, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
 import { PAGE_TYPES } from "../src/page-classification.ts";
 
 test("normalisePublicUrl adds https to a bare domain", () => {
@@ -41,6 +41,15 @@ test("detectSpaIndicators identifies an empty client-rendered app shell", () => 
     <body><div id="app"></div></body></html>
   `);
   assert.deepEqual(indicators, ["low_visible_text", "app_mount_point", "module_script"]);
+});
+
+test("inspectWebsiteEmbedPolicy separates iframe restrictions from crawlability", () => {
+  const policy = inspectWebsiteEmbedPolicy(new Headers({
+    "x-frame-options": "SAMEORIGIN",
+    "content-security-policy": "default-src 'self'; frame-ancestors 'self' https://app.frontdeskwise.com",
+  }));
+  assert.equal(policy.xFrameOptions, "SAMEORIGIN");
+  assert.equal(policy.frameAncestors, "'self' https://app.frontdeskwise.com");
 });
 
 test("database source page types stay aligned with the crawler taxonomy", async () => {

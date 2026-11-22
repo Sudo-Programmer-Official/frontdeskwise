@@ -6,7 +6,7 @@ import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import { createPoolFromEnv } from "./database.js";
-import { CrawlError, crawlWebsite, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
+import { CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
 import { createRenderedPageAdapter } from "./rendered-crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
@@ -214,6 +214,83 @@ const renderedPageAdapter = createRenderedPageAdapter();
 
 function crawlConfiguredWebsite(websiteUrl: string) {
   return crawlWebsite(websiteUrl, { renderPage: renderedPageAdapter });
+}
+
+type WebsitePreviewProbe = {
+  url: string;
+  finalUrl: string | null;
+  status: number | null;
+  embeddable: boolean;
+  reason: "security_policy" | "unavailable" | null;
+};
+
+function frameAncestorAllowsOrigin(frameAncestors: string | null, websiteOrigin: string, previewOrigin: string | null): boolean {
+  if (!frameAncestors) return true;
+  const sources = frameAncestors.split(/\s+/).filter(Boolean).map((source) => source.toLowerCase());
+  if (sources.includes("*")) return true;
+  if (sources.includes("'none'")) return false;
+  if (!previewOrigin) return false;
+  if (sources.includes("'self'") && previewOrigin === websiteOrigin) return true;
+  if (sources.includes("https:") && previewOrigin.startsWith("https:")) return true;
+  return sources.some((source) => {
+    try {
+      if (!source.includes("://")) return false;
+      return new URL(source).origin === previewOrigin;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function websitePreviewPolicy(
+  response: Response,
+  requestedUrl: string,
+  previewOrigin: string | null,
+): { embeddable: boolean; reason: WebsitePreviewProbe["reason"] } {
+  const finalUrl = response.url || requestedUrl;
+  let websiteOrigin: string;
+  try {
+    websiteOrigin = new URL(finalUrl).origin;
+  } catch {
+    return { embeddable: false, reason: "unavailable" };
+  }
+  const policy = inspectWebsiteEmbedPolicy(response.headers);
+  const xFrameOptions = policy.xFrameOptions?.toLowerCase().replace(/\s+/g, " ") ?? "";
+  if (xFrameOptions === "deny") return { embeddable: false, reason: "security_policy" };
+  if (xFrameOptions === "sameorigin" && previewOrigin !== websiteOrigin) return { embeddable: false, reason: "security_policy" };
+  if (xFrameOptions.startsWith("allow-from") && !xFrameOptions.includes(previewOrigin?.toLowerCase() ?? "__missing_preview_origin__")) {
+    return { embeddable: false, reason: "security_policy" };
+  }
+  if (!frameAncestorAllowsOrigin(policy.frameAncestors, websiteOrigin, previewOrigin)) return { embeddable: false, reason: "security_policy" };
+  return { embeddable: true, reason: null };
+}
+
+async function probeWebsitePreview(websiteUrl: string, previewOrigin: string | null): Promise<WebsitePreviewProbe> {
+  const url = normalisePublicUrl(websiteUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "user-agent": "FrontDeskWise-PreviewProbe/1.0", accept: "text/html,application/xhtml+xml" },
+      redirect: "follow",
+    });
+    const policy = response.ok
+      ? websitePreviewPolicy(response, url, previewOrigin)
+      : { embeddable: false, reason: "unavailable" as const };
+    const result = {
+      url,
+      finalUrl: response.url || url,
+      status: response.status,
+      ...policy,
+    };
+    await response.body?.cancel().catch(() => undefined);
+    return result;
+  } catch {
+    return { url, finalUrl: null, status: null, embeddable: false, reason: "unavailable" };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function firstCrawledPageOrError(crawled: { pages: CrawledPage[] }): CrawledPage {
@@ -7419,6 +7496,10 @@ function directLinkCustomerMessage(business: Business, action: ActionFlow): stri
 const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
 
 function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>, business?: Business): string {
+  if (step.type === "recommend" || step.type === "select") {
+    const prompt = workflowLookupPrompt(state) ?? step.question ?? "Which option would you like to choose?";
+    return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
+  }
   if (step.type === "confirm") {
     const prompt = workflowLookupPrompt(state) ?? step.question ?? "Would you like to continue?";
     return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
@@ -7579,7 +7660,6 @@ async function resolveWorkflowActionResources(
   const provider = actionConfigString(config, "provider") ?? configuredActionProvider(action);
   if (provider === "jackrabbit") {
     const program = typeof filters.program === "string" ? filters.program : "";
-    if (!program) return { status: "not_found", matches: [] };
     try {
       const credentials = await resolveJackrabbitCredentials(business.id, actionConfigString(config, "integrationId") ?? undefined);
       const registrationBaseUrl = actionConfigString(config, "registrationBaseUrl");
@@ -7587,7 +7667,7 @@ async function resolveWorkflowActionResources(
       const resources = await providerInstance.findRegistrationResources(
         business.id,
         {
-          name: program,
+          ...(program ? { name: program } : {}),
           ...(typeof filters.location === "string" ? { location: filters.location } : {}),
           ...(typeof filters.day === "string" ? { day: filters.day } : {}),
         },
@@ -7618,7 +7698,8 @@ async function advanceWorkflowAutomation(
 ): Promise<NonNullable<ReturnType<typeof currentWorkflowStep>> | null> {
   let step = currentWorkflowStep(action, state);
   const visited = new Set<string>();
-  while (step && !visited.has(step.id) && ["lookup", "recommend", "generate_link", "create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type)) {
+  while (step && !visited.has(step.id) && ["lookup", "recommend", "generate_link", "create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type)
+    && (step.type !== "recommend" || isPlanSelectionWorkflow(action) || !step.config?.sourceStepId)) {
     visited.add(step.id);
     if (step.type === "lookup" || step.type === "recommend") {
         const cachedResult = state.lookupResults?.[step.id];
@@ -7826,6 +7907,30 @@ async function continueWorkflowActionConversation(
   if (state.formShown || step.type === "form") {
     state.formShown = true;
     return actionAnswer(action, state, "Please complete the details below to continue.");
+  }
+
+  if (step.type === "recommend" || step.type === "select") {
+    const resolution = workflowLookupResolutions(state).at(-1);
+    if (!resolution) return actionAnswer(action, state, workflowPrompt(action, state, step, business));
+    if (!resolution.matches.length) return actionAnswer(action, state, workflowPrompt(action, state, step, business));
+    const selectedIndex = /^(?:option\s*)?(\d+)\s*(?:,?\s*(?:please|thanks?))?$/i.exec(question.trim())
+      ?? /\boption\s*(\d+)\b/i.exec(question.trim());
+    if (!selectedIndex) return actionAnswer(action, state, workflowPrompt(action, state, step, business));
+    const candidate = resolution.matches[Number(selectedIndex[1]) - 1];
+    if (!candidate) return actionAnswer(action, state, "That option is not available. " + workflowPrompt(action, state, step, business));
+    state.selectedActionResourceId = candidate.id;
+    transitionWorkflow(action, state, step.id);
+    const selectionStep = currentWorkflowStep(action, state);
+    if (step.type === "recommend" && selectionStep?.type === "select") transitionWorkflow(action, state, selectionStep.id);
+    const next = await advanceWorkflowAutomation(business, action, state);
+    if (!next || state.status === "completed") return completeActionConversation(business, conversation, action, state);
+    state.currentStepId = next.id;
+    if (next.type === "form") {
+      state.formShown = true;
+      await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+      return actionAnswer(action, state, "Great choice — just add the parent contact details below.");
+    }
+    return actionAnswer(action, state, workflowPrompt(action, state, next, business));
   }
 
   if (step.type === "confirm") {
@@ -12233,6 +12338,16 @@ app.get("/api/v1/demo/:slug", async (request) => {
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
   return workspacePayload(business);
+});
+
+app.get("/api/v1/demo/:slug/website-preview", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  const requestOrigin = typeof request.headers.origin === "string" && request.headers.origin.trim()
+    ? request.headers.origin.trim().replace(/\/$/, "")
+    : null;
+  return probeWebsitePreview(business.websiteUrl, requestOrigin);
 });
 
 app.post("/api/v1/demo/:slug/evaluation", async (request) => {

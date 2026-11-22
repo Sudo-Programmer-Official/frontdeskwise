@@ -206,9 +206,9 @@
           "expected": {
             "route": "WORKFLOW_CONTINUATION",
             "extractedFields": ["customer_type", "child_age", "ability", "goal"],
-            "stateAfter": {"workflowCursor": "enrollment-details", "values": {"customer_type": "New student", "child_age": "7", "ability": "Beginner", "goal": "Learn to swim"}},
+            "stateAfter": {"workflowCursor": "student-location", "values": {"customer_type": "New student", "child_age": "7", "ability": "Beginner", "goal": "Learn to swim"}},
             "providerCall": null,
-            "nextBestAction": "CAPTURE_DETAILS",
+            "nextBestAction": "ASK_FIELD",
             "cta": null,
             "handoffState": "AI_ACTIVE",
             "responseClass": "workflow_prompt"
@@ -220,9 +220,9 @@
           "expected": {
             "route": "WORKFLOW_CONTINUATION",
             "extractedFields": ["location", "program", "schedule_preference", "parent_name", "email", "phone"],
-            "stateAfter": {"workflowCursor": "enrollment-confirm", "values": {"location": "Largo", "program": "Turtle 2", "schedule_preference": "Saturdays", "parent_name": "Jamie Rivera", "email": "jamie@example.com", "phone": "727-555-0199"}},
+            "stateAfter": {"workflowCursor": "class-recommendations", "values": {"location": "Largo", "program": "Turtle 2", "schedule_preference": "Saturdays", "parent_name": "Jamie Rivera", "email": "jamie@example.com", "phone": "727-555-0199"}},
             "providerCall": {"provider": "jackrabbit", "operation": "lookup", "status": "succeeded"},
-            "nextBestAction": "CONFIRM_SELECTION",
+            "nextBestAction": "RECOMMEND_OPTION",
             "cta": null,
             "handoffState": "AI_ACTIVE",
             "responseClass": "provider_result"

@@ -269,6 +269,26 @@ const completion = (message: string, leadStatus: ActionCompletion["leadStatus"] 
   notifyTargets: ["business_team"],
 });
 
+const canonicalEnrollmentGoal = "Help parents find the right British Swim School lesson for their child and move them toward registration. Ask only the minimum useful questions about the swimmer's age, ability, goals, preferred location, and schedule. Answer side questions from verified British Swim School knowledge and resume the workflow. Use Jackrabbit for live class availability and waitlist information. Show only verified options, let the parent choose a class, then provide the verified registration link. If no suitable class is available or Jackrabbit fails, offer waitlist/help or handoff to the team. Never invent availability, pricing, program levels, or registration URLs.";
+
+function canonicalEnrollmentSteps(): ActionStep[] {
+  return [
+    { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
+    { id: "student-age", type: "capture", fieldKey: "child_age" },
+    { id: "student-ability", type: "capture", fieldKey: "ability" },
+    { id: "student-goal", type: "capture", fieldKey: "goal" },
+    { id: "student-location", type: "capture", fieldKey: "location" },
+    { id: "student-schedule", type: "capture", fieldKey: "schedule_preference" },
+    { id: "registration-options", type: "lookup", label: "Find matching classes", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", searchFields: "child_age, ability, goal, location, schedule_preference", includeWaitlist: true } },
+    { id: "class-recommendations", type: "recommend", label: "Present matching classes", question: "I found these matching classes. Which one would you like to consider?", config: { sourceStepId: "registration-options", maxResults: 5 } },
+    { id: "class-selection", type: "select", label: "Let visitor select a class", question: "Reply with the number of the class you want.", config: { sourceStepId: "registration-options", maxResults: 5 } },
+    { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"] } },
+    { id: "enrollment-confirm", type: "confirm", question: "I have the class details. Shall I prepare the registration link?" },
+    { id: "registration-link", type: "generate_link", label: "Generate registration link", config: { provider: "jackrabbit", completion: "external_provider" } },
+    { id: "enrollment-complete", type: "complete", label: "Complete workflow" },
+  ];
+}
+
 export const ACTION_TEMPLATES: ActionTemplate[] = [
   {
     key: "open_link",
@@ -347,8 +367,8 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
   },
   {
     key: "enroll_child",
-    name: "Find a lesson / Enroll",
-    description: "Find a suitable lesson, check live availability, and continue to Jackrabbit registration.",
+    name: "Find the right swim lesson",
+    description: canonicalEnrollmentGoal,
     triggerPhrases: ["find a lesson", "find swimming lessons", "swimming lessons for my child", "sign me up", "enroll", "register my child", "register my student", "start enrollment"],
     triggerIntents: ["enrollment", "registration", "lead"],
     captureMode: "hybrid",
@@ -356,10 +376,10 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
       field("customer_type", "Customer type", "select", "Is this for a new student or someone already enrolled?", true, ["New student", "Current student"]),
       field("child_age", "Child’s age", "number", "How old is the student?"),
       field("ability", "Swimming ability", "select", "How comfortable is the student in the water?", true, ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]),
-      field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Improve technique", "Have fun"]),
-      field("location", "Preferred location", "text", "Which location would you prefer?"),
+      field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Build water confidence", "Improve technique", "Have fun"]),
+      field("location", "Preferred location or ZIP code", "text", "Which British Swim School location or ZIP code is most convenient?"),
       field("program", "Program", "text", "Which program are you interested in?", false),
-      field("schedule_preference", "Schedule preference", "text", "Do you have a preferred day or schedule?", false),
+      field("schedule_preference", "Schedule preference", "text", "Which days or schedule usually work best?", false),
       field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?"),
       field("email", "Email", "email", "What email address should we use?"),
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
@@ -367,17 +387,7 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
     executionMode: "PROVIDER_FLOW",
     attachmentPolicy: "high_intent_only",
     provider: "jackrabbit",
-    steps: [
-      { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
-      { id: "student-age", type: "capture", fieldKey: "child_age" },
-      { id: "student-ability", type: "capture", fieldKey: "ability" },
-      { id: "student-goal", type: "capture", fieldKey: "goal" },
-      { id: "enrollment-details", type: "form", config: { fieldKeys: ["location", "program", "schedule_preference", "parent_name", "email", "phone"] } },
-      { id: "registration-options", type: "lookup", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", includeWaitlist: true } },
-      { id: "enrollment-confirm", type: "confirm", question: "I have the details I need. Shall I prepare the registration link?" },
-      { id: "registration-link", type: "generate_link", config: { completion: "external_provider" } },
-      { id: "enrollment-complete", type: "complete" },
-    ],
+    steps: canonicalEnrollmentSteps(),
     completion: {
       ...completion("Thanks — your registration request is ready for the team.", "qualified", "Continue registration"),
       completionMode: "external_provider",
@@ -534,7 +544,7 @@ function cloneTemplate(template: ActionTemplate, id: string, now: string): Actio
       : template.completion.notifyStaff
         ? { mode: "notify_staff" }
         : { mode: "none" },
-    version: 1,
+    version: template.key === "enroll_child" ? 2 : 1,
     id,
     createdAt: now,
     updatedAt: now,
@@ -603,37 +613,23 @@ export function normalizeCanonicalEnrollmentWorkflow(action: ActionFlow): Action
     fields.splice(index >= 0 ? index + 1 : fields.length, 0, field);
   };
   addField(field("ability", "Swimming ability", "select", "How comfortable is the student in the water?", true, ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]), "child_age");
-  addField(field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Improve technique", "Have fun"]), "ability");
-  const existingSteps = action.steps ?? [];
-  const steps = existingSteps.length ? [...existingSteps] : [
-    { id: "customer-type", type: "capture" as const, fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
-    { id: "student-age", type: "capture" as const, fieldKey: "child_age" },
-    { id: "student-ability", type: "capture" as const, fieldKey: "ability" },
-    { id: "student-goal", type: "capture" as const, fieldKey: "goal" },
-    { id: "enrollment-details", type: "form" as const, config: { fieldKeys: ["location", "program", "schedule_preference", "parent_name", "email", "phone"] } },
-    { id: "registration-options", type: "lookup" as const, config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", includeWaitlist: true } },
-    { id: "enrollment-confirm", type: "confirm" as const, question: "I have the details I need. Shall I prepare the registration link?" },
-    { id: "registration-link", type: "generate_link" as const, config: { completion: "external_provider" } },
-    { id: "enrollment-complete", type: "complete" as const },
-  ];
-  if (steps.length && steps.some((step) => step.id === "enrollment-details") && !steps.some((step) => step.id === "student-ability")) {
-    const index = steps.findIndex((step) => step.id === "enrollment-details");
-    steps.splice(index, 0,
-      { id: "student-ability", type: "capture", fieldKey: "ability" },
-      { id: "student-goal", type: "capture", fieldKey: "goal" },
-    );
-  }
+  addField(field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Build water confidence", "Improve technique", "Have fun"]), "ability");
+  const steps = action.origin === "discovered" || !action.steps?.length
+    ? canonicalEnrollmentSteps()
+    : action.steps.map((step) => ({ ...step, config: step.config ? { ...step.config } : undefined }));
   const firstStep = steps[0];
   if (firstStep?.config?.repeatableEntity === true) {
     firstStep.config = { ...firstStep.config, participantFieldKeys: ["customer_type", "child_age", "ability", "goal"] };
   }
   return {
     ...action,
+    ...(action.origin === "discovered" ? { name: "Find the right swim lesson", description: canonicalEnrollmentGoal } : {}),
     fields,
     steps,
     requiredFields: fields.filter((item) => item.required && item.visibility !== "hidden").map((item) => item.key),
     optionalFields: fields.filter((item) => !item.required && item.visibility !== "hidden").map((item) => item.key),
     completion: { ...action.completion, completionMode: action.completion.completionMode ?? "external_provider" },
+    version: Math.max(action.version ?? 1, action.origin === "discovered" ? 2 : 1),
   };
 }
 

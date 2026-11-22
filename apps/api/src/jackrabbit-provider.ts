@@ -34,7 +34,8 @@ export type JackrabbitClassOption = {
 };
 
 export type JackrabbitClassSearch = {
-  name: string;
+  /** Optional broad search. Location/day filters can narrow the full class list. */
+  name?: string;
   location?: string;
   day?: string;
 };
@@ -354,7 +355,6 @@ export class JackrabbitProvider {
   }
 
   async findClassOptions(search: JackrabbitClassSearch): Promise<JackrabbitClassOption[]> {
-    if (!search.name.trim()) throw new Error("A class name is required");
     const [classes, listings] = await Promise.all([this.listClasses(), this.listClassListings()]);
     const byId = new Map<string, JackrabbitClassOption>();
     const add = (record: JsonRecord, source: JackrabbitClassOption["source"]) => {
@@ -366,13 +366,13 @@ export class JackrabbitProvider {
     classes.forEach((record) => add(record, "classes"));
     listings.forEach((record) => add(record, "class_listings"));
 
-    const name = normalizeText(search.name);
+    const name = normalizeText(search.name ?? "");
     const location = search.location ? normalizeText(search.location) : null;
     const day = search.day ? dayName(search.day) : null;
     return [...byId.values()]
       .filter((option) => {
         const normalizedName = normalizeText(option.name);
-        const nameMatches = normalizedName === name || normalizedName.includes(name);
+        const nameMatches = !name || normalizedName === name || normalizedName.includes(name);
         const locationMatches = !location || (option.location ? normalizeText(option.location).includes(location) : false);
         const dayMatches = !day || option.days.includes(day);
         return nameMatches && locationMatches && dayMatches;

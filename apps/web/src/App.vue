@@ -1906,6 +1906,11 @@ function ownerHeaders(): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
+const websitePreviewEndpoint = computed(() => demoSlug.value
+  ? apiUrl(`/api/v1/demo/${encodeURIComponent(demoSlug.value)}/website-preview`)
+  : "");
+const websitePreviewToken = computed(() => ownerHeaders().authorization?.replace(/^Bearer\s+/i, "") ?? "");
+
 function workspaceSlugForRoute(): string {
   return demoSlug.value || activeOrganization.value?.businesses[0]?.slug || "workspace";
 }
@@ -7087,6 +7092,8 @@ function startMarketingDemo() {
             :business-key="demoSlug"
             :business-name="businessName"
             :website-url="websiteUrl"
+            :website-preview-endpoint="websitePreviewEndpoint"
+            :website-preview-token="websitePreviewToken"
             :website-brand-colors="websiteBrandColors"
             :model="agentModel"
             :saved-message="savedMessage"

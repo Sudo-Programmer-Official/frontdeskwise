@@ -48,14 +48,18 @@ test("British Swim School certification uses the canonical reference workflow", 
     "student-age",
     "student-ability",
     "student-goal",
-    "enrollment-details",
+    "student-location",
+    "student-schedule",
     "registration-options",
+    "class-recommendations",
+    "class-selection",
+    "parent-contact",
     "enrollment-confirm",
     "registration-link",
     "enrollment-complete",
   ]);
   assert.equal(enrollment.provider, "jackrabbit");
-  assert.equal(enrollment.version, 1);
+  assert.equal(enrollment.version, 2);
 });
 
 const goldenTurns: Array<{
@@ -70,14 +74,14 @@ const goldenTurns: Array<{
     input: "New student, age 7, beginner, learn to swim, at Largo, Saturdays.",
     state: createActionState(enrollment),
     expectedUpdated: ["customer_type", "child_age", "ability", "goal", "location", "schedule_preference"],
-    expectedCurrent: "enrollment-details",
+    expectedCurrent: "registration-options",
   },
   {
     name: "captures contact fields together when the visitor volunteers them",
     input: "My name is Jamie Rivera, jamie@example.com, 727-555-0199.",
-    state: stateAt("enrollment-details", { customer_type: "New student", child_age: "8", ability: "Beginner", goal: "Learn to swim" }, stepIdsThrough("student-goal")),
+    state: stateAt("parent-contact", { customer_type: "New student", child_age: "8", ability: "Beginner", goal: "Learn to swim", location: "Largo", schedule_preference: "Saturdays" }, stepIdsThrough("class-selection")),
     expectedUpdated: ["parent_name", "email", "phone"],
-    expectedCurrent: "enrollment-details",
+    expectedCurrent: "parent-contact",
   },
   {
     name: "accepts a future age answer without moving past the current step blindly",
@@ -105,28 +109,28 @@ const goldenTurns: Array<{
     input: "Actually, the goal is water safety.",
     state: stateAt("student-goal", { customer_type: "New student", child_age: "7", ability: "Beginner", goal: "Learn to swim" }, stepIdsThrough("student-ability")),
     expectedUpdated: ["goal"],
-    expectedCurrent: "enrollment-details",
+    expectedCurrent: "student-location",
   },
   {
     name: "extracts a named program for a provider search",
     input: "We are looking for the Turtle 2 program.",
-    state: stateAt("enrollment-details"),
+    state: stateAt("parent-contact", { customer_type: "New student", child_age: "7", ability: "Beginner", goal: "Learn to swim", location: "Largo", schedule_preference: "Saturdays" }, stepIdsThrough("class-selection")),
     expectedUpdated: ["program"],
-    expectedCurrent: "enrollment-details",
+    expectedCurrent: "registration-options",
   },
   {
     name: "rejects an invalid email instead of storing it",
     input: "My email is parent-at-example.",
-    state: stateAt("enrollment-details"),
+    state: stateAt("parent-contact", { customer_type: "New student", child_age: "7", ability: "Beginner", goal: "Learn to swim", location: "Largo", schedule_preference: "Saturdays" }, stepIdsThrough("class-selection")),
     expectedUpdated: [],
-    expectedCurrent: "enrollment-details",
+    expectedCurrent: "parent-contact",
   },
   {
     name: "captures a phone number without changing the workflow cursor",
     input: "You can reach me at +1 (727) 555-0199.",
-    state: stateAt("enrollment-details"),
+    state: stateAt("parent-contact", { customer_type: "New student", child_age: "7", ability: "Beginner", goal: "Learn to swim", location: "Largo", schedule_preference: "Saturdays" }, stepIdsThrough("class-selection")),
     expectedUpdated: ["phone"],
-    expectedCurrent: "enrollment-details",
+    expectedCurrent: "parent-contact",
   },
   {
     name: "captures a location correction after lookup has started",
@@ -184,10 +188,10 @@ test("stale workflow versions preserve values and move a removed cursor safely",
   state.workflowVersion = 0;
   const migration = migrateWorkflowState(enrollment, state);
   assert.equal(migration.migrated, true);
-  assert.equal(migration.toVersion, 1);
+  assert.equal(migration.toVersion, 2);
   assert.equal(state.values.child_age, "7");
   assert.equal(state.currentStepId, "student-ability");
-  assert.equal(state.workflowVersion, 1);
+  assert.equal(state.workflowVersion, 2);
 });
 
 test("a returned conversation survives serialization with its cursor intact", () => {
@@ -278,7 +282,7 @@ test("repeatable participants keep each student's qualification independent", ()
 });
 
 test("workflow summary exposes provider lookup as the next best action", () => {
-  const state = stateAt("registration-options", { customer_type: "New student", child_age: "7", ability: "Beginner", goal: "Learn to swim" }, stepIdsThrough("enrollment-details"));
+  const state = stateAt("registration-options", { customer_type: "New student", child_age: "7", ability: "Beginner", goal: "Learn to swim", location: "Largo", schedule_preference: "Saturdays" }, stepIdsThrough("student-schedule"));
   const summary = workflowSummary(enrollment, state);
   assert.equal(summary.nextBestAction, "LOOKUP_CLASSES");
   assert.equal(summary.provider, "jackrabbit");

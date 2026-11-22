@@ -68,6 +68,10 @@ test("owner UI uses the shared product design language", () => {
   assert.match(agent, /aria-label="Widget preview"|Customer view/);
   assert.match(widgetPreview, /class="preview-website-frame"/);
   assert.match(widgetPreview, /@load="markWebsitePreviewReady"/);
+  assert.match(widgetPreview, /websitePreviewEndpoint/);
+  assert.match(widgetPreview, /connected to knowledge/);
+  assert.match(apiServer, /\/website-preview/);
+  assert.match(apiServer, /inspectWebsiteEmbedPolicy/);
   assert.match(widgetRenderer, /Powered by/);
   assert.match(widgetRenderer, /fdw-status-dot/);
   assert.match(widgetPreview, /createWidgetRenderer/);
@@ -528,7 +532,7 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
     "reviewStatus",
     "provider_backed",
     "child_age",
-    "preferred_days",
+    "schedule_preference",
     "redirect",
     "business_fit",
     "workflow_generation_context",
