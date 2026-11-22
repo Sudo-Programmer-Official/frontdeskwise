@@ -355,13 +355,6 @@ function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft
       config: { ...interruptionConfig, reviewStatus: "verified", dataSource: "verified_business_knowledge", requiresVerifiedData: true, basedOn: ["business_type", "main_goal"] },
     },
     {
-      id: "fit-explanation",
-      type: "ask",
-      label: "Fit explanation",
-      question: "Does that sound like the kind of workflow you want to improve?",
-      config: { ...interruptionConfig, reviewStatus: "suggested", messageType: "fit_explanation", dataSource: "verified_business_knowledge" },
-    },
-    {
       id: "pricing",
       type: "ask",
       label: "Pricing",

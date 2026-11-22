@@ -7659,6 +7659,7 @@ function actionAnswerWithKnowledge(
   state: ConversationActionState,
   prompt: string,
   question?: string,
+  primaryCta?: PrimaryCta | null,
 ): ConversationAnswerResult {
   // An interruption is still inside the active journey. Knowledge answers
   // must not smuggle the global primary CTA or a generic lead form into it.
@@ -7670,6 +7671,7 @@ function actionAnswerWithKnowledge(
     ...knowledgeAnswer,
     answer: `${conciseAnswer}\n\n${prompt}`,
     action: actionStatePayload(action, state),
+    ...(primaryCta ? { primaryCta } : {}),
   };
 }
 
@@ -7759,11 +7761,17 @@ function workflowResumePrompt(
 ): string {
   const step = plan.step;
   const context = workflowCapturedContext(action, state);
-  if (step?.type === "redirect" && plan.skippedStepIds.length && context) {
+  if (step?.type === "redirect" && context) {
     const brand = assistantBrandName(business);
-    return `Based on what you’ve told me — ${context} — ${brand} may be a good fit. Would you like to see how ${brand} handles that workflow?`;
+    return `Based on what you’ve told me — ${context} — ${brand} may be a good fit. Ready to see how ${brand} works?`;
   }
   return step ? workflowPrompt(action, state, step, business) : "The workflow is ready to continue.";
+}
+
+function workflowRequiredFieldsCaptured(action: ActionFlow, state: ConversationActionState): boolean {
+  return action.fields
+    .filter((field) => field.required && field.visibility !== "hidden")
+    .every((field) => typeof state.values[field.key] === "string" && state.values[field.key].trim());
 }
 
 function actionConfigString(config: Record<string, unknown>, key: string): string | null {
@@ -8097,7 +8105,10 @@ async function continueWorkflowActionConversation(
       returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question);
+    const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
+      ? workflowCtaForStep(business, action, resumePlan.step)
+      : null;
+    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question, resumeCta);
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
@@ -8112,12 +8123,17 @@ async function continueWorkflowActionConversation(
       returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question);
+    const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
+      ? workflowCtaForStep(business, action, resumePlan.step)
+      : null;
+    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question, resumeCta);
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
   let step = await advanceWorkflowAutomation(business, action, state);
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
+  const initialResumePlan = recomputeWorkflowResume(action, state);
+  step = initialResumePlan.step ?? step;
   state.currentStepId = step.id;
 
   if (isPlanSelectionWorkflow(action)) {
@@ -8151,9 +8167,12 @@ async function continueWorkflowActionConversation(
   }
 
   if (step.type === "redirect") {
-    const prompt = workflowPrompt(action, state, step, business);
+    const prompt = initialResumePlan.skippedStepIds.length
+      ? workflowResumePrompt(action, state, initialResumePlan, business)
+      : workflowPrompt(action, state, step, business);
     const cta = workflowCtaForStep(business, action, step);
-    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, explicitConversionRequest ? cta : null);
+    const showCta = explicitConversionRequest || (step.config?.normalConversionEndpoint === true && workflowRequiredFieldsCaptured(action, state));
+    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, showCta ? cta : null);
   }
 
   if (starting) {
@@ -8241,11 +8260,16 @@ async function continueWorkflowActionConversation(
 
   step = await advanceWorkflowAutomation(business, action, state);
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
+  const finalResumePlan = recomputeWorkflowResume(action, state);
+  step = finalResumePlan.step ?? step;
   state.currentStepId = step.id;
   if (step.type === "redirect") {
-    const prompt = workflowPrompt(action, state, step, business);
+    const prompt = finalResumePlan.skippedStepIds.length
+      ? workflowResumePrompt(action, state, finalResumePlan, business)
+      : workflowPrompt(action, state, step, business);
     const cta = workflowCtaForStep(business, action, step);
-    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, explicitConversionRequest ? cta : null);
+    const showCta = explicitConversionRequest || (step.config?.normalConversionEndpoint === true && workflowRequiredFieldsCaptured(action, state));
+    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, showCta ? cta : null);
   }
   if (step.type === "form") {
     state.formShown = true;

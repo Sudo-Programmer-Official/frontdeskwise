@@ -6,6 +6,7 @@ import {
   applyWorkflowValues,
   currentWorkflowStep,
   extractWorkflowValues,
+  normalizeWorkflowFieldValue,
   invalidateWorkflowLookups,
   pushWorkflowInterruption,
   resumeWorkflowInterruption,
@@ -240,6 +241,21 @@ test("SalonFlow captures a small salon and a composite booking/reminders goal", 
   const applied = applyWorkflowValues(salon, state, values);
   assert.deepEqual(applied.updated, ["business_type", "main_goal"]);
   assert.equal(state.values.main_goal, "Online booking + reminders");
+});
+
+test("workflow software capture stores the product name instead of the whole sentence", () => {
+  const field = { id: "current_software", key: "current_software", label: "Current software", type: "text", required: true, question: "Are you using any salon software today?" } as const;
+  assert.equal(normalizeWorkflowFieldValue(field, "We use Mindbody right now."), "Mindbody");
+
+  const action: ActionFlow = {
+    ...flow,
+    fields: [field],
+    steps: [{ id: "current-software", type: "capture", fieldKey: "current_software" }],
+  };
+  const state = createActionState(action);
+  const result = applyWorkflowInput(action, state, "We use Mindbody right now.");
+  assert.equal(result.ok, true);
+  assert.equal(state.values.current_software, "Mindbody");
 });
 
 test("plan selection accepts a literal option and advances past the current step", () => {

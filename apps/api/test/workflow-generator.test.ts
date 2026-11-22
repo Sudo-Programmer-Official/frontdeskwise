@@ -79,11 +79,12 @@ test("SalonFlow prompt is generated from the active business context", () => {
   });
 
   assert.equal(result.intent, "business_fit");
-  assert.deepEqual(result.steps.slice(0, 6).map((step) => step.label), ["Business type", "Main goal", "Current software", "Relevant capabilities", "Fit explanation", "Pricing"]);
+  assert.deepEqual(result.steps.slice(0, 5).map((step) => step.label), ["Business type", "Main goal", "Current software", "Relevant capabilities", "Pricing"]);
   assert.equal(result.steps[0].question, "What kind of salon or beauty business do you run?");
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.destinationUrl, "https://www.salonflow.studio/start");
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.reviewStatus, "needs_owner_confirmation");
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.requiresVerifiedData, true);
+  assert.equal(result.steps.some((step) => step.id === "fit-explanation"), false);
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.normalConversionEndpoint, true);
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.actionKey, "try_demo");
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.trigger, undefined);

@@ -425,6 +425,20 @@ function fieldLooksLike(field: ActionField, ...terms: string[]): boolean {
 }
 
 /**
+ * Turn conversational software answers into a useful stored value. The
+ * workflow needs the product name for context and resume copy, not the full
+ * sentence the visitor used to provide it.
+ */
+export function normalizeWorkflowFieldValue(field: ActionField, rawValue: string): string {
+  let value = rawValue.trim();
+  if (!fieldLooksLike(field, "software", "platform")) return value;
+  value = value.replace(/[.!?]+$/, "").trim();
+  value = value.replace(/^(?:(?:we(?:'re| are)?|i(?:'m| am)?|our|my)\s+)?(?:currently\s+)?(?:using|use)\s+/i, "");
+  value = value.replace(/\s+(?:right\s+now|currently|at\s+the\s+moment)$/i, "").trim();
+  return value || rawValue.trim();
+}
+
+/**
  * Extracts safe, typed values without giving the language model authority over
  * workflow transitions. This intentionally returns only fields defined by the
  * action; unknown text remains available to the current step as a fallback.
@@ -482,7 +496,7 @@ export function applyWorkflowValues(
   for (const field of action.fields) {
     const raw = values[field.key];
     if (raw === undefined) continue;
-    const validation = validateFieldValue(field, raw);
+    const validation = validateFieldValue(field, normalizeWorkflowFieldValue(field, raw));
     if (!validation.value) continue;
     if (state.values[field.key] !== validation.value) {
       state.values[field.key] = validation.value;
@@ -522,7 +536,9 @@ export function applyWorkflowInput(
   const step = currentWorkflowStep(action, state);
   if (!step) return { ok: false, error: "This workflow is already complete.", transition: { step: null, state } };
   const field = workflowField(action, step.fieldKey);
-  const validation = field ? validateFieldValue(field, rawValue) : { value: rawValue.trim() };
+  const validation = field
+    ? validateFieldValue(field, normalizeWorkflowFieldValue(field, rawValue))
+    : { value: rawValue.trim() };
   if (!validation.value) return { ok: false, error: validation.error, transition: { step, state } };
   if (field) state.values[field.key] = validation.value;
   else if (step.fieldKey) state.values[step.fieldKey] = validation.value;
