@@ -148,8 +148,19 @@ type FrontDeskWiseWindow = Window & {
     updateState({ healthState, statusMessage, ...patch });
   }
 
-  function reconcileRemoteConversation(conversation: ConversationPayload["conversation"]): void {
+  function reconcileRemoteConversation(
+    conversation: ConversationPayload["conversation"],
+    options: { preservePresentation?: boolean } = {},
+  ): void {
     if (!conversation) return;
+    // The status endpoint intentionally returns only conversation metadata. It
+    // does not include the answer-level CTA or form schema, so it must not
+    // replace presentation state that was just rendered for the visitor.
+    if (options.preservePresentation) {
+      if (conversation.leadCaptured === true) updateState({ leadCaptured: true, leadVisible: false });
+      else if (state.leadCaptured) updateState({ leadCaptured: false });
+      return;
+    }
     const remoteAction = conversation.action;
     const staleAction = !remoteAction
       || remoteAction.status === "completed"
@@ -544,7 +555,7 @@ type FrontDeskWiseWindow = Window & {
         resetConversationUi();
         return;
       }
-      reconcileRemoteConversation(payload.conversation);
+      reconcileRemoteConversation(payload.conversation, { preservePresentation: true });
       const remoteUpdatedAt = payload.conversation?.updatedAt || payload.conversation?.lastActivityAt || "";
       const statusChanged = remoteStatus !== (state.handoffStatus || "AI_ACTIVE");
       const conversationChanged = Boolean(remoteUpdatedAt && remoteUpdatedAt !== lastConversationUpdatedAt);
