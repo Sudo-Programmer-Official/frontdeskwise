@@ -73,6 +73,7 @@ import {
   workflowNextBestAction,
   workflowSummary,
 } from "./workflow-engine.js";
+import { recomputeWorkflowResume, type WorkflowResumePlan } from "./workflow-resume.js";
 import { planRecommendationMessage, planRecommendationPayload, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
 import { nextTenantPublicationVersion, tenantPublicationHash } from "./tenant-publication.js";
 import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
@@ -7708,6 +7709,63 @@ function workflowPrompt(action: ActionFlow, state: ConversationActionState, step
   return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
 }
 
+function joinWorkflowContext(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}`;
+}
+
+function workflowCapturedContext(action: ActionFlow, state: ConversationActionState): string {
+  const valueFor = (keys: string[]): string => {
+    const field = action.fields.find((candidate) => keys.includes(candidate.key));
+    const value = field ? state.values[field.key] : undefined;
+    return typeof value === "string" ? value.trim() : "";
+  };
+  const businessType = valueFor(["business_type", "business_type_or_size"]);
+  const software = valueFor(["current_software", "software", "platform"]);
+  const goal = valueFor(["main_goal", "goal", "primary_goal"]);
+  const parts: string[] = [];
+  if (businessType) parts.push(`a ${businessType.toLowerCase()}`);
+  if (software) parts.push(`using ${software}`);
+  if (goal) parts.push(`wanting ${/^better\b/i.test(goal) ? "" : "better "}${goal.toLowerCase()}`.replace(/\s+/g, " "));
+  if (parts.length) return joinWorkflowContext(parts);
+
+  return action.fields
+    .filter((field) => !/email|phone|name|address|token|secret/i.test(field.key))
+    .map((field) => {
+      const value = state.values[field.key];
+      return typeof value === "string" && value.trim() ? `${field.label.toLowerCase()}: ${value.trim()}` : "";
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(", ");
+}
+
+async function workflowResumePlanForConversation(
+  business: Business,
+  action: ActionFlow,
+  state: ConversationActionState,
+): Promise<WorkflowResumePlan> {
+  const plan = recomputeWorkflowResume(action, state);
+  const automatedStep = await advanceWorkflowAutomation(business, action, state);
+  return { ...plan, step: automatedStep ?? currentWorkflowStep(action, state) };
+}
+
+function workflowResumePrompt(
+  action: ActionFlow,
+  state: ConversationActionState,
+  plan: WorkflowResumePlan,
+  business: Business,
+): string {
+  const step = plan.step;
+  const context = workflowCapturedContext(action, state);
+  if (step?.type === "redirect" && plan.skippedStepIds.length && context) {
+    const brand = assistantBrandName(business);
+    return `Based on what you’ve told me — ${context} — ${brand} may be a good fit. Would you like to see how ${brand} handles that workflow?`;
+  }
+  return step ? workflowPrompt(action, state, step, business) : "The workflow is ready to continue.";
+}
+
 function actionConfigString(config: Record<string, unknown>, key: string): string | null {
   const value = config[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -8032,13 +8090,14 @@ async function continueWorkflowActionConversation(
     return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "What would you like to do?"}`);
   }
   if (isSideQuestion) {
+    const resumePlan = await workflowResumePlanForConversation(business, action, state);
     pushWorkflowInterruption(state, {
       intent: orchestration.interruptionIntent ?? classifyQuestionIntent(question),
       question,
-      returnStepId: currentAfterExtraction?.id ?? state.currentStepId ?? null,
+      returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "The workflow is ready to continue.", question);
+    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question);
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
@@ -8046,14 +8105,14 @@ async function continueWorkflowActionConversation(
   }
 
   if (!extracted.updated.length && actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
-    const current = currentWorkflowStep(action, state);
+    const resumePlan = await workflowResumePlanForConversation(business, action, state);
     pushWorkflowInterruption(state, {
       intent: classifyQuestionIntent(question),
       question,
-      returnStepId: current?.id ?? state.currentStepId ?? null,
+      returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current, business) : "The workflow is ready to continue.", question);
+    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question);
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
@@ -13908,6 +13967,23 @@ app.post("/api/v1/demo/:slug/notifications/:notificationId/read", async (request
   const notification = business.notifications.find((item) => item.id === notificationId);
   if (notification) notification.readAt = notification.readAt ?? new Date().toISOString();
   return { ok: true };
+});
+
+app.post("/api/v1/demo/:slug/notifications/read-all", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  const readAt = new Date().toISOString();
+  if (pool && !actor.legacyDemo) {
+    await pool.query(
+      "update notifications set read_at = coalesce(read_at, $3) where business_id = $1 and user_id = $2 and read_at is null",
+      [business.id, actor.id, readAt],
+    );
+  }
+  business.notifications
+    .filter((notification) => (!notification.userId || notification.userId === actor.id) && !notification.readAt)
+    .forEach((notification) => { notification.readAt = readAt; });
+  return { ok: true, readAt };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (request) => {

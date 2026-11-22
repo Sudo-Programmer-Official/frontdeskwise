@@ -259,7 +259,9 @@ const testWidgetState = computed<Partial<WidgetState>>(() => {
     } : undefined,
   } : null;
   return {
-    isOpen: true,
+    // Start QA previews collapsed so the website state is visible first.
+    // Visitors can still open the production renderer through the launcher.
+    isOpen: false,
     messages: [{ id: "test-welcome", role: "assistant", content: agentDraft.value.welcomeMessage || "Hi! How can I help?" }, ...props.test.messages.map((message) => ({ id: message.id, role: message.role, content: message.content, citations: message.citations }))],
     quickActions: latestAssistant?.quickActions ?? [],
     primaryCta: latestAssistant?.primaryCta ?? null,
