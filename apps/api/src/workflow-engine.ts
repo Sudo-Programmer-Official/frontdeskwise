@@ -433,13 +433,50 @@ function fieldLooksLike(field: ActionField, ...terms: string[]): boolean {
 }
 
 /**
+ * Fields that describe an existing system can be answered incidentally while
+ * the visitor is asking a compatibility question. Keep this classification
+ * narrow enough that an arbitrary product mention does not populate a random
+ * text field in the workflow.
+ */
+export function isSoftwareContextField(field: ActionField): boolean {
+  return fieldLooksLike(field, "software", "platform", "pos", "accounting", "crm", "system");
+}
+
+const knownSoftwareProviders = [
+  "QuickBooks Online",
+  "GlossGenius",
+  "Mindbody",
+  "Jackrabbit",
+  "QuickBooks",
+  "HubSpot",
+  "Booksy",
+  "Fresha",
+  "Zenoti",
+  "Vagaro",
+  "Square",
+  "Toast",
+  "Clover",
+  "Shopify",
+  "Acuity",
+] as const;
+
+/** Return a canonical provider name when the visitor mentions a known system. */
+export function knownSoftwareProvider(input: string): string | null {
+  for (const provider of knownSoftwareProviders) {
+    const pattern = new RegExp(`\\b${provider.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b`, "i");
+    if (pattern.test(input)) return provider;
+  }
+  return null;
+}
+
+/**
  * Turn conversational software answers into a useful stored value. The
  * workflow needs the product name for context and resume copy, not the full
  * sentence the visitor used to provide it.
  */
 export function normalizeWorkflowFieldValue(field: ActionField, rawValue: string): string {
   let value = rawValue.trim();
-  if (!fieldLooksLike(field, "software", "platform")) return value;
+  if (!isSoftwareContextField(field)) return value;
   value = value.replace(/[.!?]+$/, "").trim();
   value = value.replace(/^(?:(?:we(?:'re| are)?|i(?:'m| am)?|our|my)\s+)?(?:currently\s+)?(?:using|use)\s+/i, "");
   value = value.replace(/\s+(?:right\s+now|currently|at\s+the\s+moment)$/i, "").trim();
@@ -469,9 +506,11 @@ export function extractWorkflowValues(action: ActionFlow, input: string): Record
   const program = value.match(/\b(?:program|class)\s*(?:is|:)\s*([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim()
     ?? value.match(/\b(?:program|class)\s+([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim();
   const name = value.match(/\b(?:my name is|i am|i'm|parent(?:'s)? name is|guardian(?:'s)? name is)\s+([a-z][a-z .'-]{1,80})/i)?.[1]?.trim();
+  const softwareProvider = knownSoftwareProvider(value);
 
   for (const field of action.fields) {
     if (field.visibility === "hidden") continue;
+    if (softwareProvider && isSoftwareContextField(field)) extracted[field.key] = softwareProvider;
     if (field.type === "email" && email) extracted[field.key] = email;
     else if (field.type === "phone" && phone) extracted[field.key] = phone;
     else if (field.type === "number" && age && fieldLooksLike(field, "age", "year", "student", "child")) extracted[field.key] = age;

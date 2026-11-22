@@ -74,6 +74,8 @@ import {
   workflowFormFields,
   workflowNextBestAction,
   workflowSummary,
+  isSoftwareContextField,
+  knownSoftwareProvider,
 } from "./workflow-engine.js";
 import { recomputeWorkflowResume, type WorkflowResumePlan } from "./workflow-resume.js";
 import { planRecommendationMessage, planRecommendationPayload, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
@@ -7710,15 +7712,17 @@ function actionAnswerWithKnowledge(
   prompt: string,
   question?: string,
   primaryCta?: PrimaryCta | null,
+  answerOverride?: string,
 ): ConversationAnswerResult {
   // An interruption is still inside the active journey. Knowledge answers
   // must not smuggle a global primary CTA or a generic lead form into it.
   // The workflow-owned CTA is different: once conversion is available it is
   // part of the saved conversation state and should survive side questions.
   const { primaryCta: _primaryCta, quickActions: _quickActions, ...knowledgeAnswer } = result;
-  const conciseAnswer = question && classifyQuestionIntent(question) === "pricing" && result.knowledgeGap && !result.grounded
-    ? "I don't have verified pricing information yet."
-    : result.answer;
+  const conciseAnswer = answerOverride
+    ?? (question && classifyQuestionIntent(question) === "pricing" && result.knowledgeGap && !result.grounded
+      ? "I don't have verified pricing information yet."
+      : result.answer);
   if (primaryCta) state.conversionAvailable = true;
   return {
     ...knowledgeAnswer,
@@ -7818,6 +7822,29 @@ function workflowCapturedContext(action: ActionFlow, state: ConversationActionSt
     .filter(Boolean)
     .slice(0, 3)
     .join(", ");
+}
+
+function providerCompatibilityQuestion(question: string): boolean {
+  return /\b(?:work with|integrat(?:e|ion)|import|migrat(?:e|ion)|alongside|switch|replace|support(?:ed)?|connect|sync|pull|compatible)\b/i.test(question);
+}
+
+function workflowProviderQuestionContext(
+  action: ActionFlow,
+  state: ConversationActionState,
+  question: string,
+  candidateValues: Record<string, string>,
+  pendingStep: ReturnType<typeof currentWorkflowStep>,
+): { provider: string; fieldKey: string } | null {
+  const provider = knownSoftwareProvider(question);
+  if (!provider) return null;
+  const pendingField = pendingStep?.fieldKey
+    ? action.fields.find((candidate) => (candidate.key === pendingStep.fieldKey || candidate.id === pendingStep.fieldKey)
+      && isSoftwareContextField(candidate)
+      && candidateValues[candidate.key] === provider)
+    : undefined;
+  const field = pendingField ?? action.fields.find((candidate) => isSoftwareContextField(candidate) && candidateValues[candidate.key] === provider);
+  if (!field) return null;
+  return { provider: state.values[field.key]?.trim() || provider, fieldKey: field.key };
 }
 
 async function workflowResumePlanForConversation(
@@ -8220,7 +8247,15 @@ async function continueWorkflowActionConversation(
     state.workflowTrigger = "explicit_support_or_human_request";
     state.currentStepId = action.steps.find((step) => step.config?.trigger === "explicit_support_or_human_request")?.id ?? state.currentStepId;
   }
-  const preserveWorkflowState = initialOrchestration.route === "INTERRUPTION"
+  // A provider compatibility question can also answer the pending software
+  // field ("Does it work with Mindbody?" is both a question and a workflow
+  // value). Extract that value before deciding whether to preserve the cursor.
+  const candidateWorkflowValues = initialOrchestration.route === "INTERRUPTION"
+    ? extractWorkflowValues(action, question)
+    : {};
+  const providerQuestionContext = workflowProviderQuestionContext(action, state, question, candidateWorkflowValues, currentStepBeforeConversion);
+  const multiIntentWorkflowAnswer = Boolean(providerQuestionContext);
+  const preserveWorkflowState = initialOrchestration.route === "INTERRUPTION" && !multiIntentWorkflowAnswer
     || initialOrchestration.route === "EXPLICIT_ACTION"
     || initialOrchestration.route === "HUMAN_HANDOFF";
 
@@ -8228,7 +8263,11 @@ async function continueWorkflowActionConversation(
   // earlier answer while the workflow is waiting on a different field. Apply
   // only values declared by the action; the cursor still advances
   // deterministically from the current step.
-  const extractedValues = preserveWorkflowState ? {} : extractWorkflowValues(action, question);
+  const extractedValues = preserveWorkflowState
+    ? {}
+    : providerQuestionContext
+      ? { [providerQuestionContext.fieldKey]: candidateWorkflowValues[providerQuestionContext.fieldKey] }
+      : (Object.keys(candidateWorkflowValues).length ? candidateWorkflowValues : extractWorkflowValues(action, question));
   const extracted = applyWorkflowValues(action, state, extractedValues);
   invalidateWorkflowLookups(action, state, extracted.updated);
   for (const fieldKey of extracted.updated) {
@@ -8262,10 +8301,18 @@ async function continueWorkflowActionConversation(
     const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
       ? workflowCtaForStep(business, action, resumePlan.step)
       : null;
-    const resumePrompt = waitingForStaff(conversation) && resumePlan.step && staffSensitiveWorkflowStep(action, resumePlan.step)
+    const defaultResumePrompt = waitingForStaff(conversation) && resumePlan.step && staffSensitiveWorkflowStep(action, resumePlan.step)
       ? waitingActionHoldAnswer(action, state)
       : workflowResumePrompt(action, state, resumePlan, business, question);
-    return actionAnswerWithKnowledge(knowledge, action, state, resumePrompt, question, resumeCta);
+    const resumePrompt = providerQuestionContext && providerCompatibilityQuestion(question) && resumePlan.step?.type === "redirect"
+      ? `Are you mainly looking to replace ${providerQuestionContext.provider}, or use ${assistantBrandName(business)} alongside it?`
+      : defaultResumePrompt;
+    const answerOverride = providerQuestionContext && providerCompatibilityQuestion(question)
+      ? knowledge.grounded
+        ? `I’ll note that you’re using ${providerQuestionContext.provider} today. ${knowledge.answer}`
+        : `I’ll note that you’re using ${providerQuestionContext.provider} today. I don’t have verified information yet on whether ${assistantBrandName(business)} integrates directly with ${providerQuestionContext.provider}.`
+      : undefined;
+    return actionAnswerWithKnowledge(knowledge, action, state, resumePrompt, question, resumeCta, answerOverride);
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {

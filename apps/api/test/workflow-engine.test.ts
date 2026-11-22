@@ -6,6 +6,7 @@ import {
   applyWorkflowValues,
   currentWorkflowStep,
   extractWorkflowValues,
+  knownSoftwareProvider,
   normalizeWorkflowFieldValue,
   invalidateWorkflowLookups,
   pushWorkflowInterruption,
@@ -279,6 +280,24 @@ test("workflow software capture stores the product name instead of the whole sen
   const result = applyWorkflowInput(action, state, "We use Mindbody right now.");
   assert.equal(result.ok, true);
   assert.equal(state.values.current_software, "Mindbody");
+});
+
+test("compatibility questions also capture a known provider for the pending software field", () => {
+  const action: ActionFlow = {
+    ...flow,
+    fields: [{ id: "current_software", key: "current_software", label: "Current software", type: "text", required: true, question: "Are you using any salon software today?" }],
+    steps: [{ id: "current-software", type: "capture", fieldKey: "current_software" }],
+  };
+
+  const extracted = extractWorkflowValues(action, "Does it work with Mindbody?");
+  assert.equal(extracted.current_software, "Mindbody");
+
+  const state = createActionState(action);
+  const applied = applyWorkflowValues(action, state, extracted);
+  assert.deepEqual(applied.updated, ["current_software"]);
+  assert.equal(state.values.current_software, "Mindbody");
+  assert.equal(knownSoftwareProvider("Can you import from QuickBooks Online?"), "QuickBooks Online");
+  assert.equal(knownSoftwareProvider("Would I need to switch from HubSpot?"), "HubSpot");
 });
 
 test("plan selection accepts a literal option and advances past the current step", () => {
