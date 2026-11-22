@@ -84,6 +84,26 @@ test("workflow answers containing knowledge keywords are not misrouted as interr
   assert.equal(decision.interruptionIntent, null);
 });
 
+test("transactional wording can still be an answer to the active qualification workflow", () => {
+  const salonAction: ActionFlow = {
+    ...planAction,
+    id: "salon-fit",
+    key: "business_fit",
+    fields: [
+      { id: "business_type", key: "business_type", label: "Business type", type: "select", required: true, question: "What kind of business do you run?", options: ["Small salon", "Salon"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What are you mainly trying to improve?", options: ["Online booking", "Online booking + reminders", "Reminders"] },
+    ],
+  };
+  const decision = decideConversationRoute({
+    message: "I mainly need better online booking and reminders.",
+    activeAction: salonAction,
+    actionState: createActionState(salonAction),
+  });
+
+  assert.equal(decision.route, "WORKFLOW_CONTINUATION");
+  assert.equal(decision.preserveWorkflowState, true);
+});
+
 test("normal conversion and guided demo requests stay inside the active workflow", () => {
   const salonWorkflow = {
     ...action,

@@ -179,6 +179,29 @@ test("plan selection extracts natural solo, paired-goal, daily, and correction l
   assert.equal(state.values.usage_type, "Team");
 });
 
+test("SalonFlow captures a small salon and a composite booking/reminders goal", () => {
+  const salon: ActionFlow = {
+    ...flow,
+    id: "salon-fit",
+    key: "business_fit",
+    fields: [
+      { id: "business_type", key: "business_type", label: "Business type", type: "select", required: true, question: "What kind of business do you run?", options: ["Small salon", "Salon", "Spa"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What are you trying to improve?", options: ["Online booking", "Online booking + reminders", "Reminders"] },
+    ],
+    steps: [
+      { id: "business-type", type: "capture", fieldKey: "business_type" },
+      { id: "main-goal", type: "capture", fieldKey: "main_goal" },
+    ],
+  };
+  const state = createActionState(salon);
+  const values = extractWorkflowValues(salon, "I run a small salon and mainly need better online booking and reminders.");
+  assert.equal(values.business_type, "Small salon");
+  assert.equal(values.main_goal, "Online booking + reminders");
+  const applied = applyWorkflowValues(salon, state, values);
+  assert.deepEqual(applied.updated, ["business_type", "main_goal"]);
+  assert.equal(state.values.main_goal, "Online booking + reminders");
+});
+
 test("plan selection accepts a literal option and advances past the current step", () => {
   const plan: ActionFlow = {
     ...flow,

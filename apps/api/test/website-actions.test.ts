@@ -83,6 +83,70 @@ test("plan-selection requests route to a generated workflow before the primary l
   assert.equal(detectAction([lead, planWorkflow], "I need help choosing a plan", lead.id)?.id, planWorkflow.id);
 });
 
+test("business-fit statements start the workflow and guided demos outrank Try the demo", () => {
+  const businessFit = {
+    id: "business-fit",
+    key: "business_fit",
+    actionType: "contact_team",
+    name: "SalonFlow fit",
+    description: "Help visitors understand fit.",
+    triggerPhrases: [],
+    triggerIntents: [],
+    captureMode: "conversational",
+    fields: [
+      { id: "business_type", key: "business_type", label: "Business type", type: "select", required: true, question: "What kind of business do you run?", options: ["Small salon", "Salon", "Spa"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What are you trying to improve?", options: ["Online booking", "Online booking + reminders", "Reminders"] },
+    ],
+    steps: [{ id: "business-type", type: "capture", fieldKey: "business_type" }],
+    completion: { createLead: true, leadStatus: "new", message: "", notifyStaff: true },
+    mode: "transactional",
+    executionMode: "FORM_FLOW",
+    attachmentPolicy: "explicit_request_only",
+    trackingKey: "business_fit",
+    destination: null,
+    provider: null,
+    priority: 1,
+    requiredFields: ["business_type", "main_goal"],
+    conditions: [],
+    safetyPolicy: "standard",
+    sourceUrl: null,
+    evidence: [],
+    confidence: 1,
+    enabled: true,
+    lifecycleStatus: "active",
+    createdAt: "2026-11-21T00:00:00.000Z",
+    updatedAt: "2026-11-21T00:00:00.000Z",
+  } as unknown as ActionFlow;
+  const lead = { ...businessFit, id: "lead", key: "capture_lead", name: "Capture a lead", fields: [], steps: undefined, triggerPhrases: ["contact me"], requiredFields: [] } as ActionFlow;
+  assert.equal(detectAction([lead, businessFit], "I run a small salon and I'm looking for software", lead.id)?.id, businessFit.id);
+
+  const tryDemo = {
+    ...lead,
+    id: "try-demo",
+    key: "try_demo",
+    name: "Try the demo",
+    actionType: "open_link",
+    triggerPhrases: ["try the demo"],
+    triggerIntents: ["demo"],
+    executionMode: "DIRECT_LINK",
+    completion: { ...lead.completion, createLead: false, linkUrl: "https://example.test/start", linkLabel: "Try the demo" },
+    destination: { url: "https://example.test/start", label: "Try the demo" },
+  } as unknown as ActionFlow;
+  const requestDemo = {
+    ...tryDemo,
+    id: "request-demo",
+    key: "request_demo",
+    name: "Request a demo",
+    actionType: "request_demo",
+    triggerPhrases: ["request a demo"],
+    executionMode: "FORM_FLOW",
+    fields: [{ id: "email", key: "email", label: "Email", type: "email", required: true, question: "What email should we use?" }],
+    completion: { ...lead.completion, createLead: true, linkUrl: undefined, linkLabel: undefined },
+    destination: null,
+  } as unknown as ActionFlow;
+  assert.equal(detectAction([tryDemo, requestDemo], "Can someone give me a demo and walk me through it?", tryDemo.id)?.id, requestDemo.id);
+});
+
 test("demo actions are created from evidence and do not trigger on explanatory questions", () => {
   const candidates = extractWebsiteActions('<a href="/start">Try the demo</a>', "https://example.test/");
   const actions = defaultActionFlows("Example SaaS", "website and online booking", (key) => key, candidates);

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, Trash2, X } from "@lucide/vue";
 import { generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
+import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 
 type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
 
@@ -9,6 +10,7 @@ interface WorkflowAction {
   id: string;
   key: string;
   businessId?: string;
+  organizationId?: string;
   name: string;
   description?: string;
   actionType?: string;
@@ -33,6 +35,9 @@ const props = defineProps<{
   actions: unknown[];
   integrations: unknown[];
   demoSlug: string;
+  selectedBusinessId?: string | null;
+  workspaceBusinessId?: string | null;
+  workspaceOrganizationId?: string | null;
   organizationId?: string | null;
   apiUrl: (path: string) => string;
   ownerHeaders: () => Record<string, string>;
@@ -42,6 +47,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "refresh"): void;
+  (event: "refresh-workspace"): void;
   (event: "open-action", actionId: string): void;
 }>();
 
@@ -296,6 +302,7 @@ function workflowGenerationContext(action: WorkflowAction) {
     workflowId: action.id,
     actionId: action.id,
     contextVersion: props.businessContext?.contextVersion,
+    summaryVersion: props.businessContext?.summaryVersion,
     actionType: action.actionType,
     actionName: action.name,
     actionDescription: action.description,
@@ -306,6 +313,26 @@ function workflowGenerationContext(action: WorkflowAction) {
     businessContext: props.businessContext ?? undefined,
     businessName,
   };
+}
+
+function workflowTenantContext(action: WorkflowAction, createWorkflowBusinessId: string | null, createWorkflowOrganizationId: string | null) {
+  return validateWorkflowTenantContext({
+    selectedBusinessId: props.selectedBusinessId,
+    selectedActionBusinessId: action.businessId,
+    workspaceBusinessId: props.workspaceBusinessId,
+    businessContextBusinessId: props.businessContext?.businessId,
+    createWorkflowBusinessId,
+    selectedOrganizationId: props.organizationId,
+    actionOrganizationId: action.organizationId,
+    workspaceOrganizationId: props.workspaceOrganizationId,
+    businessContextOrganizationId: props.businessContext?.organizationId,
+    createWorkflowOrganizationId,
+  });
+}
+
+function refreshWorkflowContext(): void {
+  createWorkflowError.value = WORKFLOW_CONTEXT_REFRESH_MESSAGE;
+  emit("refresh-workspace");
 }
 
 function generatedWorkflowFor(action: WorkflowAction): { name: string; description: string; steps: WorkflowStep[]; fields: Array<WorkflowFieldDraft & { id?: string; visibility?: string }>; executionMode?: string; provider?: string } {
@@ -395,6 +422,13 @@ async function createWorkflow(): Promise<void> {
     createWorkflowOpen.value = false;
     return;
   }
+  const createWorkflowBusinessId = props.selectedBusinessId ?? null;
+  const createWorkflowOrganizationId = props.organizationId ?? props.businessContext?.organizationId ?? null;
+  const tenantContext = workflowTenantContext(action, createWorkflowBusinessId, createWorkflowOrganizationId);
+  if (!tenantContext.ok) {
+    refreshWorkflowContext();
+    return;
+  }
   createWorkflowLoading.value = true;
   createWorkflowError.value = "";
   try {
@@ -406,16 +440,38 @@ async function createWorkflow(): Promise<void> {
     setWorkflowMetadata(nextAction, generated.name);
     if (generated.executionMode) nextAction.executionMode = generated.executionMode;
     if (generated.provider) nextAction.provider = generated.provider;
+    const workflowContextPayload = {
+      businessId: createWorkflowBusinessId,
+      organizationId: createWorkflowOrganizationId,
+      contextVersion: props.businessContext?.contextVersion,
+      summaryVersion: props.businessContext?.summaryVersion,
+    };
+    const createWorkflowPayload = {
+      ...nextAction,
+      businessId: createWorkflowBusinessId,
+      organizationId: createWorkflowOrganizationId,
+      workflowContext: workflowContextPayload,
+      businessContext: workflowContextPayload,
+      workflowContextBusinessId: createWorkflowBusinessId,
+      workflowContextOrganizationId: createWorkflowOrganizationId,
+      ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
+      ...(props.businessContext?.summaryVersion !== undefined ? { workflowContextSummaryVersion: props.businessContext.summaryVersion } : {}),
+    };
+    const requestTenantContext = workflowTenantContext(action, createWorkflowPayload.businessId, createWorkflowPayload.organizationId);
+    if (!requestTenantContext.ok) {
+      refreshWorkflowContext();
+      return;
+    }
     const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(action.id)}`), {
       method: "PUT",
       headers: { "content-type": "application/json", ...props.ownerHeaders() },
-      body: JSON.stringify({
-        ...nextAction,
-        ...(props.businessContext?.businessId ? { businessId: props.businessContext.businessId, workflowContextBusinessId: props.businessContext.businessId } : {}),
-        ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
-      }),
+      body: JSON.stringify(createWorkflowPayload),
     });
     const payload = await response.json() as { error?: string; action?: WorkflowAction };
+    if (!response.ok && response.status === 409 && /different workflow context|organization mismatch|context changed/i.test(payload.error ?? "")) {
+      refreshWorkflowContext();
+      return;
+    }
     if (!response.ok || !payload.action) throw new Error(payload.error ?? "Could not create this workflow.");
     const savedWorkflow = payload.action;
     locallyCreatedAction.value = savedWorkflow;

@@ -301,6 +301,8 @@ interface ActionFlow {
   key: string;
   actionType?: string;
   name: string;
+  businessId?: string;
+  organizationId?: string;
   description: string;
   triggerPhrases: string[];
   triggerIntents: string[];
@@ -570,7 +572,7 @@ interface AgentPublishing {
 interface WorkspacePayload {
   slug: string;
   status: string;
-  business?: { id?: string; name?: string; location?: string; websiteUrl?: string };
+  business?: { id?: string; organizationId?: string | null; name?: string; location?: string; websiteUrl?: string };
   agent?: { assistantName?: string; welcomeMessage?: string; tone?: "friendly" | "professional" | "concise" | "custom"; customToneInstructions?: string; primaryLanguage?: string; fallbackBehavior?: "contact_form" | "human" | "unavailable"; humanHandoffEnabled?: boolean; widgetColor?: string; collectLeads?: boolean; showBookingAction?: boolean; widgetDefaultMode?: "compact" | "expanded" | "fullscreen"; widgetAllowExpand?: boolean; widgetQuickActions?: WidgetQuickAction[]; widgetLogoUrl?: string | null; widgetTheme?: "light" | "dark" | "auto"; widgetPosition?: "bottom-right" | "bottom-left"; proactiveEnabled?: boolean; proactiveDelaySeconds?: number; proactiveMessage?: string; proactiveTriggers?: Array<"delay" | "scroll" | "exit" | "returning">; proactiveBehavior?: "teaser" | "open"; proactiveFrequency?: "session" | "24h" | "visit"; requireLeadConsent?: boolean; privacyNoticeUrl?: string | null; retentionDays?: number; showAiDisclosure?: boolean; citationVisibility?: "always" | "contextual" | "hidden"; fallbackContacts?: { phone?: string | null; email?: string | null; url?: string | null } };
   branding?: { colors?: string[]; source?: string };
   suggestedQuestions?: string[];
@@ -1284,7 +1286,6 @@ const profileMenuOpen = ref(false);
 const sidebarAccountMenuOpen = ref(false);
 const setupDismissed = ref(false);
 const setupProgressOpen = ref(false);
-const showAllBusinesses = ref(false);
 const addBusinessOpen = ref(false);
 const addBusinessUrl = ref("");
 const addBusinessLoading = ref(false);
@@ -1373,6 +1374,9 @@ const messagingTab = ref<"templates" | "automations" | "delivery" | "settings">(
 const workspaceStats = ref<WorkspaceStats | null>(null);
 const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
 const workflowContext = ref<WorkflowBusinessContext | null>(null);
+const workspaceBusinessId = ref<string | null>(null);
+const workspaceOrganizationId = ref<string | null>(null);
+const workflowContextRefreshMessage = ref("");
 const workspaceReadiness = ref(0);
 const workspaceLoading = ref(false);
 const workspaceError = ref("");
@@ -1852,14 +1856,8 @@ const workspaceAttention = computed(() => {
   return null;
 });
 const workspaceSelection = computed({
-  get: () => showAllBusinesses.value ? "__all__" : demoSlug.value,
+  get: () => demoSlug.value,
   set: (value: string) => {
-    if (value === "__all__") {
-      showAllBusinesses.value = true;
-      view.value = "businesses";
-      return;
-    }
-    showAllBusinesses.value = false;
     void selectBusiness(value);
   },
 });
@@ -2071,7 +2069,6 @@ async function applyRouteState(nextRoute: AppRoute) {
     }
     const needsReload = demoSlug.value !== nextSlug || publicDemoMode.value !== isPublic || !workspaceStats.value;
     publicDemoMode.value = isPublic;
-    showAllBusinesses.value = false;
     demoSlug.value = nextSlug;
     if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
     if (needsReload) await loadBusinessWorkspace(nextSlug, isPublic);
@@ -2681,6 +2678,8 @@ function clearWorkspaceState() {
   workspaceStats.value = null;
   workspaceKnowledge.value = null;
   workflowContext.value = null;
+  workspaceBusinessId.value = null;
+  workspaceOrganizationId.value = null;
   workspaceReadiness.value = 0;
   supportCases.value = [];
   supportContext.value = null;
@@ -2778,6 +2777,8 @@ function clearWorkspaceState() {
 }
 
 function applyWorkspacePayload(payload: WorkspacePayload) {
+  workspaceBusinessId.value = payload.business?.id ?? null;
+  workspaceOrganizationId.value = payload.business?.organizationId ?? null;
   businessName.value = payload.business?.name ?? "";
   businessLocation.value = payload.business?.location ?? "";
   websiteUrl.value = payload.business?.websiteUrl ?? "";
@@ -2864,12 +2865,25 @@ async function refreshWorkspaceSummary(globalLoading = true) {
     const payload = await response.json() as WorkspacePayload;
     if (!response.ok) return;
     if (demoSlug.value !== slug) return;
+    workspaceBusinessId.value = payload.business?.id ?? workspaceBusinessId.value;
+    workspaceOrganizationId.value = payload.business?.organizationId ?? workspaceOrganizationId.value;
     workspaceStats.value = payload.stats ?? null;
     workspaceKnowledge.value = payload.knowledge ?? null;
     workflowContext.value = payload.workflowContext ?? null;
     workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
   } catch {
     // The mutation already succeeded; the next view load will reconcile the summary.
+  }
+}
+
+async function refreshWorkflowWorkspace(): Promise<void> {
+  workflowContextRefreshMessage.value = "Business context changed. Refreshing business data…";
+  const refreshSlug = demoSlug.value;
+  await loadBusinessWorkspace(refreshSlug, publicDemoMode.value);
+  if (demoSlug.value === refreshSlug && !workspaceError.value && typeof window !== "undefined") {
+    window.setTimeout(() => {
+      if (demoSlug.value === refreshSlug) workflowContextRefreshMessage.value = "";
+    }, 2_400);
   }
 }
 
@@ -2888,11 +2902,11 @@ async function refreshAuthenticatedSnapshot() {
   }
 }
 
-async function selectBusiness(slug: string) {
+async function selectBusiness(slug: string, nextViewOverride?: View) {
   if (!slug) return;
-  const nextView = view.value;
+  const nextView = nextViewOverride ?? view.value;
   publicDemoMode.value = false;
-  showAllBusinesses.value = false;
+  workflowContextRefreshMessage.value = "";
   actionsLoadGeneration += 1;
   integrationsLoadGeneration += 1;
   demoSlug.value = slug;
@@ -2920,6 +2934,11 @@ async function selectBusiness(slug: string) {
   }
 }
 
+function openBusinessWorkspace(slug: string) {
+  if (!slug) return;
+  void selectBusiness(slug, "overview");
+}
+
 async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolean> {
   const organization = snapshot.organizations.find((item) => item.id === snapshot.activeOrganizationId) ?? snapshot.organizations[0];
   const requestedSlug = route.value.kind === "workspace" ? route.value.businessSlug : demoSlug.value;
@@ -2931,7 +2950,6 @@ async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolea
     await selectBusiness(preferred.slug);
     return true;
   } else {
-    showAllBusinesses.value = false;
     clearWorkspaceState();
     return false;
   }
@@ -3300,6 +3318,8 @@ function changeKnowledgeQualityPage(page: number) {
 function selectedBusinessId(): string | null {
   return activeOrganization.value?.businesses.find((business) => business.slug === demoSlug.value)?.id ?? null;
 }
+
+const workflowSelectedBusinessId = computed(() => selectedBusinessId() ?? (!authSnapshot.value ? workspaceBusinessId.value : null));
 
 function formatKnowledgeRelativeTime(value: string | null): string {
   if (!value) return "—";
@@ -7004,7 +7024,7 @@ function startMarketingDemo() {
           <button class="mobile-drawer-close" type="button" aria-label="Close navigation" @click="closeMobileNav"><X :size="20" :stroke-width="1.9" aria-hidden="true" /></button>
         </div>
         <div v-if="adminSurfaceMode" class="admin-identity-card"><span class="admin-identity-mark">SP</span><span><strong>Operations</strong><small>Super-admin access</small></span><span class="admin-identity-check"><BadgeCheck :size="16" :stroke-width="1.8" aria-hidden="true" /></span></div>
-        <div v-else class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-if="availableBusinesses.length > 1" value="__all__">All businesses</option><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" title="Add business" @click="openAddBusiness"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" /></button><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div>
+        <div v-else class="workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><button v-if="authSnapshot" class="workspace-add" type="button" aria-label="Add business" title="Add business" @click="openAddBusiness"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" /></button><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div>
         <nav v-if="adminSurfaceMode" class="sidebar-nav admin-sidebar-nav" aria-label="Super-admin navigation">
           <button v-for="item in adminNavItems" :key="item.id" type="button" :class="['nav-item', { active: view === 'admin' && adminSection === item.id }]" @click="adminSection = item.id; view = 'admin'"><span class="nav-icon"><component :is="item.icon" :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>{{ item.label }}</span></button>
         </nav>
@@ -7048,7 +7068,7 @@ function startMarketingDemo() {
           </div>
         </header>
         <div v-if="notificationMenuOpen && authSnapshot" class="notification-menu mobile-notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div>
-        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${showAllBusinesses ? 'All businesses' : (businessName || 'Workspace')} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
+        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${businessName || 'Workspace'} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading"><strong>Notifications</strong><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" class="notification-row" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && supportViewMode" class="trial-banner warning support-view-banner"><span><strong>You are viewing {{ businessName || 'this business' }} as support.</strong><small>Read-only support view · case {{ supportViewCaseId || 'linked case' }} · access expires automatically and this session is audited.</small></span><button class="primary-button small" type="button" @click="exitSupportView">Exit support view</button></div>
         <div v-else-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
@@ -7286,7 +7306,10 @@ function startMarketingDemo() {
           </div>
         </div>
 
-        <WorkflowWorkspace v-else-if="view === 'workflows'" :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @open-action="openWorkflowAction" />
+        <div v-else-if="view === 'workflows'" class="workflow-workspace-shell">
+          <p v-if="workflowContextRefreshMessage" class="form-error workflow-context-refresh-message" role="status">{{ workflowContextRefreshMessage }}</p>
+          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" />
+        </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
           <div class="actions-page-header">
@@ -7451,7 +7474,7 @@ function startMarketingDemo() {
         </div>
 
         <div v-else-if="view === 'analytics'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ showAllBusinesses ? 'all businesses' : (businessName || 'this business') }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh data</button></div>
+          <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ businessName || 'this business' }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh data</button></div>
           <div class="metric-grid"><article class="metric-card blue-tint"><strong>{{ workspaceStats?.conversations ?? 0 }}</strong><span>Conversations</span><em>Recorded conversations</em></article><article class="metric-card green-tint"><strong>{{ workspaceStats?.leads ?? 0 }}</strong><span>Leads captured</span><em>Durable FrontDeskWise records</em></article><article class="metric-card orange-tint"><strong>{{ workspaceStats?.handoffs ?? 0 }}</strong><span>Human handoffs</span><em>{{ workspaceStats?.humanActive ?? 0 }} active with staff</em></article><article class="metric-card purple-tint"><strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong><span>Widget loads</span><em>Verified public installs</em></article></div>
           <article class="panel chart-panel analytics-chart"><div class="panel-heading"><div><h2>Activity by day</h2><p>Last 30 days · live records</p></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Analytics activity by day"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
           <article class="panel funnel-panel"><div class="panel-heading"><div><h2>Conversion funnels</h2><p>Flow starts, form progress, connector outcomes, and completion.</p></div></div><div v-if="workspaceStats?.conversionFunnels?.length" class="funnel-list"><div v-for="funnel in workspaceStats.conversionFunnels" :key="funnel.flowId" class="funnel-card"><div class="setup-row"><strong>{{ funnel.name }}</strong><span class="status-pill" :class="funnel.completionRate >= 60 ? 'booked' : funnel.completionRate >= 30 ? 'qualified' : 'new'">{{ funnel.completionRate }}% complete</span></div><div class="funnel-steps"><span>{{ funnel.started }} started</span><span>{{ funnel.formDisplayed }} reached form</span><span>{{ funnel.submitted }} submitted</span><span>{{ funnel.actionSucceeded }} action succeeded</span><span>{{ funnel.completed }} completed</span></div><small v-if="funnel.dropOffs.length">Biggest drop-off: {{ funnel.dropOffs[0].label }} · {{ funnel.dropOffs[0].count }}</small></div></div><div v-else class="diagnostics-empty">No action flow telemetry yet. Run a flow through the widget to see conversion data.</div></article>
@@ -7460,7 +7483,7 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'businesses'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">One account · multiple businesses</p><h2>Businesses</h2><p>Manage every business under {{ activeOrganization?.name ?? 'your organization' }}.</p></div><button class="primary-button small" type="button" @click="openAddBusiness">+ Add business</button></div>
-          <article class="panel table-panel"><div class="table-heading business-row"><span>Business</span><span>Website</span><span>Billing</span><span>Actions</span></div><div v-if="!availableBusinesses.length" class="diagnostics-empty">No businesses yet. Add your first public website to begin.</div><div v-for="business in availableBusinesses" :key="business.id" class="table-row business-row"><div><strong>{{ business.name }}</strong><small>{{ formatLabel(business.role) }} · {{ formatPlanLabel(business.planKey) }}</small></div><span>{{ business.websiteUrl || 'Website pending' }}</span><span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ formatLabel(business.billingStatus) }}</span></span><button class="outline-button small" type="button" @click="workspaceSelection = business.slug">Open →</button></div></article>
+          <article class="panel table-panel"><div class="table-heading business-row"><span>Business</span><span>Website</span><span>Billing</span><span>Actions</span></div><div v-if="!availableBusinesses.length" class="diagnostics-empty">No businesses yet. Add your first public website to begin.</div><div v-for="business in availableBusinesses" :key="business.id" class="table-row business-row"><div><strong>{{ business.name }}</strong><small>{{ formatLabel(business.role) }} · {{ formatPlanLabel(business.planKey) }}</small></div><span>{{ business.websiteUrl || 'Website pending' }}</span><span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ formatLabel(business.billingStatus) }}</span></span><button class="outline-button small" type="button" :aria-label="`Open ${business.name}`" @click="openBusinessWorkspace(business.slug)">Open →</button></div></article>
           <article class="panel aggregate-billing-note"><p class="eyebrow">Shared organization billing</p><h2>{{ activeOrganization?.billing.plan.displayName ?? 'Trial' }}</h2><p>{{ availableBusinesses.length }} of {{ activeOrganization?.billing.plan.maxBusinesses ?? 1 }} business slots used. Add capacity from Billing when you are ready to grow.</p><button class="text-button" type="button" @click="openSettingsTab('billing')">View plan →</button></article>
         </div>
 

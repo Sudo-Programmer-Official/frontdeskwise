@@ -25,6 +25,7 @@ export type WorkflowGenerationContext = {
   workflowId?: string;
   actionId?: string;
   contextVersion?: number;
+  summaryVersion?: number;
   actionType?: string;
   actionName?: string;
   actionDescription?: string;
@@ -46,6 +47,7 @@ export type WorkflowBusinessContext = {
   organizationId?: string;
   businessId?: string;
   contextVersion?: number;
+  summaryVersion?: number;
   businessName?: string;
   businessType?: string;
   summary?: string;
@@ -157,8 +159,8 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
   if (intent === "business_fit") {
     const businessType = naturalBusinessType(context);
     return [
-      field("business_type", "Business type", "select", `What kind of ${businessType} do you run?`, true, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
-      field("main_goal", "Main goal", "select", "What are you mainly trying to improve?", true, ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
+      field("business_type", "Business type", "select", `What kind of ${businessType} do you run?`, true, ["Small salon", "Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
+      field("main_goal", "Main goal", "select", "What are you mainly trying to improve?", true, ["Online booking", "Online booking + reminders", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
     ];
   }
   return [];

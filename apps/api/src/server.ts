@@ -382,6 +382,11 @@ type DemoAuditInput = {
 type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
 type HandoffNotificationStatus = "sent" | "pending" | "failed" | null;
 const CONVERSATION_RESUME_WINDOW_MS = 24 * 60 * 60 * 1_000;
+// Visitor turns for one conversation must be processed in arrival order. The
+// workflow cursor, interruption stack, and handoff state are mutable; without
+// a per-conversation queue, a later side question can finish first and make an
+// earlier request appear to have answered the wrong turn.
+const conversationTurnLocks = new Map<string, Promise<void>>();
 type TeamRole = "owner" | "admin" | "staff" | "viewer";
 type ConversationEventType =
   | "AI_HANDOFF_REQUESTED"
@@ -5909,6 +5914,7 @@ function isLowQualityWebChunk(business: Business, chunk: KnowledgeChunk): boolea
 }
 
 async function workspacePayload(business: Business) {
+  const workspaceOrganizationId = business.organizationId ?? await businessOrganizationId(business);
   const conversations = [...business.conversations.values()];
   const leadCount = business.leads.length;
   const gapList = [...business.knowledgeGaps.values()];
@@ -5962,9 +5968,10 @@ async function workspacePayload(business: Business) {
   }
   const workflowContext = {
     ...buildWorkflowContext(businessContextInput),
-    organizationId: business.organizationId ?? undefined,
+    organizationId: workspaceOrganizationId ?? undefined,
     businessId: business.id,
     contextVersion: contextSnapshot.version,
+    summaryVersion: contextSnapshot.version,
   };
   const setupSteps = [
     { id: "domain_verified", label: "Verify website", complete: business.ownershipStatus === "verified" },
@@ -6006,6 +6013,7 @@ async function workspacePayload(business: Business) {
     status: business.billing.mode,
     business: {
       id: business.id,
+      organizationId: workspaceOrganizationId,
       name: business.name,
       location: business.location,
       vertical: business.vertical,
@@ -6088,8 +6096,11 @@ async function workspacePayload(business: Business) {
     workflowContext,
     businessContext: {
       schemaVersion: businessModel.schemaVersion,
+      organizationId: workspaceOrganizationId,
+      businessId: business.id,
       summary: contextSnapshot.summary,
       version: contextSnapshot.version,
+      summaryVersion: contextSnapshot.version,
       generatedAt: contextSnapshot.generatedAt,
       materialFingerprint: contextSnapshot.materialFingerprint,
       status: contextSnapshot.status,
@@ -6379,11 +6390,11 @@ function retrievalContext(
   if (intent === "getting_started") {
     parts.push(`${business.name} onboarding`, "start using the product", "first steps", "create a first task", "try signup free trial");
   }
-  const recentConversationContext = conversation?.messages
-    .filter((message) => ["user", "assistant", "human"].includes(message.role) && message.content.trim() && message.content.trim() !== question.trim())
-    .slice(-10)
-    .map((message) => `${message.role}: ${message.content.trim().slice(0, 240)}`);
-  if (recentConversationContext?.length) parts.push(`conversation context ${recentConversationContext.join(" ")}`);
+  // Do not put prior visitor or assistant turns into the retrieval query. The
+  // current turn owns intent and evidence selection; replaying the whole
+  // thread here lets a later cancellation/privacy turn contaminate an earlier
+  // integration question (and vice versa). Workflow state is added below via
+  // typed fields, which is the safe context channel.
   if (currentPage) {
     try {
       parts.push(`current page ${new URL(currentPage).pathname}`);
@@ -6688,6 +6699,10 @@ function resolvedKnowledgeAnswer(business: Business, question: string, intent: R
     .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))[0] ?? null;
 }
 
+function hasCancellationEvidence(value: string): boolean {
+  return /\b(?:cancellation\s+(?:policy|term|terms|process)|cancel(?:ling|ing|lation)?\s+(?:your|the|a)?\s*(?:subscription|plan|account|service)|cancel(?:lation)?\s+terms?|terminate(?:d|s|ing)?\s+(?:your|the|a)?\s*(?:subscription|plan|account|service)|end\s+(?:your|the|a)?\s*(?:subscription|plan|account|service)|refund|notice\s+period)\b/i.test(value);
+}
+
 function structuredFactAnswer(
   business: Business,
   question: string,
@@ -6724,6 +6739,12 @@ function structuredFactAnswer(
   });
   if (resolution.matches.length > 1 && !hasSpecificSubject) return null;
   const fact = match.fact;
+  if (intent === "policy" && /\b(cancel|cancellation|terminate|termination|end\s+(?:the\s+)?subscription)\b/i.test(question)
+    && !hasCancellationEvidence(`${fact.subject} ${fact.predicate} ${fact.valueText}`)) {
+    // A privacy/data-deletion policy is not a cancellation policy. Never let a
+    // broad policy resolver substitute one for the other.
+    return null;
+  }
   const value = fact.valueText;
   const answer = fact.kind === "hours"
     ? `${business.name}'s hours for ${fact.subject} are ${value}.`
@@ -6857,7 +6878,11 @@ async function answerQuestion(
     question,
     retrieval.matches.slice(0, 4).map(({ chunk }) => chunk.content.slice(0, 1_200)).join("\n\n"),
   );
-  const materiallyRelevant = answerability.answerable && directSensitiveEvidence;
+  const cancellationRequested = intent === "policy" && /\b(cancel|cancellation|terminate|termination|end\s+(?:the\s+)?subscription)\b/i.test(question);
+  const cancellationEvidence = !cancellationRequested || retrieval.matches.slice(0, 4).some(({ chunk }) =>
+    hasCancellationEvidence(chunk.content),
+  );
+  const materiallyRelevant = answerability.answerable && directSensitiveEvidence && cancellationEvidence;
   const margin = secondMatch ? Math.min(0.12, Math.max(0, (match?.score ?? 0) - secondMatch.score) * 50) : 0.12;
   const confidenceScore = materiallyRelevant && match
     ? Math.min(0.98, 0.35 + (match.evidenceScore * 0.5) + (retrieval.mode === "hybrid_rrf" ? 0.12 : 0.05) + margin)
@@ -6996,7 +7021,9 @@ async function answerQuestion(
     });
     const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question, intent, gapReason);
     return {
-      answer: knowledgeGapMessage(business.name, intent),
+      answer: cancellationRequested
+        ? `I don’t have enough verified information about ${business.name}'s cancellation terms to answer that confidently. I can help you contact the team if you’d like.`
+        : knowledgeGapMessage(business.name, intent),
       grounded: false,
       citations: [],
       knowledgeGap: gap,
@@ -8946,7 +8973,25 @@ async function persistConversationExchange(
   return result;
 }
 
+async function withConversationTurnLock<T>(conversationId: string, task: () => Promise<T>): Promise<T> {
+  const previous = conversationTurnLocks.get(conversationId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  conversationTurnLocks.set(conversationId, current);
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (conversationTurnLocks.get(conversationId) === current) conversationTurnLocks.delete(conversationId);
+  }
+}
+
 async function recordConversationQuestion(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null; clientMessageId?: string } = {}) {
+  return withConversationTurnLock(conversation.id, () => recordConversationQuestionUnlocked(business, conversation, question, options));
+}
+
+async function recordConversationQuestionUnlocked(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null; clientMessageId?: string } = {}) {
   if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
   const activeAction = conversation.actionState ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null : null;
   const orchestration = decideConversationRoute({ message: question, activeAction, actionState: conversation.actionState });
@@ -8969,37 +9014,27 @@ async function recordConversationQuestion(business: Business, conversation: Conv
     const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member", question);
     return persistTurn(result);
   }
-  if (conversation.status === "HUMAN_ACTIVE") {
+  if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED") {
     // The initial handoff response is emitted by requestHandoff. Follow-up
     // visitor messages stay in the same thread without another acknowledgement.
     const result = {
       ...handoffAnswer(business, "Human takeover is active"),
       answer: "",
       silent: true,
-      handoff: { status: "HUMAN_ACTIVE" as const, reason: "Human takeover is active" },
+      handoff: { status: conversation.status, reason: "Human takeover is active" },
     };
     return persistTurn(result);
   }
   if (conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED") {
-    const requestedAction = detectAction(business.actions, question, business.primaryActionId);
-    const currentActionId = conversation.actionState?.actionId;
-    if (requestedAction && requestedAction.id !== currentActionId) {
-      conversation.status = "AI_ACTIVE";
-      conversation.handoffReason = null;
-      conversation.handoffRequestedAt = null;
-      conversation.assignedUserId = null;
-      conversation.assignedAt = null;
-      conversation.actionState = undefined;
-      conversation.actionTaken = null;
-      await persistConversation(business, conversation);
-    } else {
-      const result = {
-        ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
-        answer: "",
-        silent: true,
-      };
-      return persistTurn(result);
-    }
+    // Waiting is authoritative. A visitor's next message must never reopen AI
+    // or switch to a new action; only staff's Return to AI transition may do
+    // that. This also prevents an old sales CTA from leaking after handoff.
+    const result = {
+      ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
+      answer: "",
+      silent: true,
+    };
+    return persistTurn(result);
   }
   let result: ConversationAnswerResult;
   try {
@@ -9008,6 +9043,17 @@ async function recordConversationQuestion(business: Business, conversation: Conv
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : "unknown widget answer failure", businessId: business.id, conversationId: conversation.id }, "Widget answer degraded after backend failure");
     result = temporaryConversationAnswer(question, "backend");
+  }
+  // A staff takeover can happen while retrieval or generation is in flight.
+  // Do not commit an AI answer after the authoritative status has changed.
+  const statusAfterProcessing = conversation.status as ConversationStatus;
+  if (statusAfterProcessing === "WAITING_FOR_STAFF" || statusAfterProcessing === "HANDOFF_REQUESTED" || statusAfterProcessing === "HUMAN_ACTIVE" || statusAfterProcessing === "AI_ASSISTED") {
+    result = {
+      ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
+      answer: "",
+      silent: true,
+      handoff: { status: statusAfterProcessing, reason: "Human takeover is active" },
+    };
   }
   return persistTurn(result);
 }
@@ -13839,19 +13885,30 @@ async function workflowIsolationForAction(
   action: ActionFlow,
   rawBody?: Record<string, unknown>,
 ): Promise<WorkflowIsolationResult> {
-  const context = asRecord(rawBody?.workflowContext);
+  const context = asRecord(rawBody?.workflowContext ?? rawBody?.businessContext);
   const requestedContextBusinessId = optionalString(rawBody?.workflowContextBusinessId, 120)
     ?? optionalString(context.businessId, 120)
     ?? null;
-  const contextVersionValue = rawBody?.workflowContextVersion ?? context.contextVersion;
+  const contextVersionValue = rawBody?.workflowContextVersion
+    ?? rawBody?.workflowContextSummaryVersion
+    ?? context.contextVersion
+    ?? context.summaryVersion;
   const requestedContextVersion = contextVersionValue === null || contextVersionValue === undefined || contextVersionValue === ""
     ? null
     : Number(contextVersionValue);
   const requestedBusinessId = optionalString(rawBody?.businessId, 120);
   const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
-  const currentProviders = business.actions
-    .filter((candidate) => candidate.id !== action.id)
-    .flatMap(actionProviderNames);
+  const requestedOrganizationId = optionalString(rawBody?.organizationId, 120)
+    ?? optionalString(rawBody?.workflowContextOrganizationId, 120)
+    ?? optionalString(context.organizationId, 120)
+    ?? null;
+  const activeBusinessIdentifiers = [
+    business.name,
+    business.websiteUrl,
+    ...business.facts.flatMap((fact) => [fact.subject, fact.valueText]),
+    ...business.actionResources.flatMap((resource) => [resource.name, resource.location, resource.program]),
+  ].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const currentProviders = business.actions.flatMap(actionProviderNames);
   currentProviders.push(...business.actionResources.map((resource) => resource.provider));
 
   let foreignBusinessNames: string[] = [];
@@ -13859,14 +13916,14 @@ async function workflowIsolationForAction(
   let foreignProviders: string[] = [];
   if (pool && organizationId) {
     try {
-      const result = await pool.query<{ business_name: string; action_key: string | null; action_name: string | null; provider: string | null; steps: unknown }>(
-        `select b.name as business_name, ba.action_key, ba.name as action_name, ba.provider, ba.steps
+      const result = await pool.query<{ business_name: string; business_website_url: string | null; action_key: string | null; action_name: string | null; provider: string | null; steps: unknown }>(
+        `select b.name as business_name, b.website_url as business_website_url, ba.action_key, ba.name as action_name, ba.provider, ba.steps
          from businesses b
          left join business_actions ba on ba.business_id = b.id
          where b.organization_id = $1 and b.id <> $2`,
         [organizationId, business.id],
       );
-      foreignBusinessNames = [...new Set(result.rows.map((row) => row.business_name).filter(Boolean))];
+      foreignBusinessNames = [...new Set(result.rows.flatMap((row) => [row.business_name, row.business_website_url].filter((value): value is string => Boolean(value?.trim()))))];
       foreignActionIdentifiers = [...new Set(result.rows.flatMap((row) => [row.action_key, row.action_name].filter((value): value is string => Boolean(value?.trim()))))];
       foreignProviders = [...new Set(result.rows.flatMap((row) => {
         const providers = row.provider ? [row.provider] : [];
@@ -13884,12 +13941,17 @@ async function workflowIsolationForAction(
   return validateWorkflowTenantIsolation(action, {
     businessId: business.id,
     businessName: business.name,
+    businessAliases: [business.websiteUrl],
+    activeBusinessIdentifiers,
+    activeActionIdentifiers: [action.key, action.name],
     currentProviders,
     foreignBusinessNames,
     foreignActionIdentifiers,
     foreignProviders,
     requestedBusinessId,
     requestedContextBusinessId,
+    requestedOrganizationId,
+    currentOrganizationId: organizationId,
     requestedContextVersion: Number.isFinite(requestedContextVersion) ? requestedContextVersion : null,
     currentContextVersion: business.businessContextSnapshot?.version ?? null,
   });
@@ -13902,6 +13964,11 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   // Keep disabled/archived definitions visible to owners so they can restore
   // them; detectAction and the widget runtime still exclude them.
   const configuredActions = business.actions;
+  const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
+  for (const action of configuredActions) {
+    if (!action.businessId) action.businessId = business.id;
+    if (organizationId) action.organizationId = organizationId;
+  }
   const actions = await Promise.all(configuredActions.map(async (action) => {
     const readiness = await actionReadinessForBusiness(business, action);
     const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action) : { ok: true } as const;
@@ -13986,6 +14053,9 @@ app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
   requireWritableBusiness(business);
   const body = asRecord(request.body);
   const action = normalizedAction(body);
+  action.businessId = business.id;
+  const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
+  if (organizationId) action.organizationId = organizationId;
   const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
   if (business.actions.some((item) => item.key === action.key)) throw httpError(409, "An action with this key already exists");
@@ -14012,6 +14082,9 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   const previousAction = business.actions[actionIndex];
   const body = asRecord(request.body);
   const action = normalizedAction(body, previousAction);
+  action.businessId = previousAction.businessId ?? business.id;
+  const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
+  if (organizationId) action.organizationId = organizationId;
   const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
   if (action.origin === "discovered" && action.enabled && action.lifecycleStatus === "needs_review") {

@@ -134,7 +134,13 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
     };
   }
 
-  if (active && (request.mode !== "transactional" || workflowMatchesActionIntent(input.activeAction!, request.actionIntent, message))) {
+  // "I need ..." is classified as transactional for new conversations, but
+  // while a qualification workflow is active it is commonly the visitor's
+  // answer to the current field (for example, their main goal). Keep that
+  // field answer inside the workflow unless it is a distinct knowledge or
+  // action intent.
+  const looksLikeActiveWorkflowAnswer = active && request.actionIntent === "general" && !isKnowledgeQuestion;
+  if (active && (request.mode !== "transactional" || looksLikeActiveWorkflowAnswer || workflowMatchesActionIntent(input.activeAction!, request.actionIntent, message))) {
     return {
       route: "WORKFLOW_CONTINUATION",
       conversationalIntent,

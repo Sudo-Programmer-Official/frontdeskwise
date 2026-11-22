@@ -122,6 +122,13 @@ export function currentWorkflowStep(action: ActionFlow, state: ConversationActio
   const visited = new Set<string>();
   while (step && !visited.has(step.id)) {
     visited.add(step.id);
+    // A legacy or hand-authored workflow may end on a capture step without an
+    // explicit complete step. Once its cursor is exhausted, do not fall back
+    // to the first step and loop forever.
+    if (state.completedStepIds?.includes(step.id)) {
+      step = nextBranchStep(action, step, state.values);
+      continue;
+    }
     if (!workflowStepIsAvailable(step, state)) {
       step = nextSequentialStep(action, step);
       continue;
@@ -354,9 +361,25 @@ function optionForField(field: ActionField, input: string): string | null {
     if (/\b(just for me|only me|by myself|myself|individual|solo|personal use|one person|single user)\b/.test(value)) return field.options?.find((option) => /solo|individual|personal|one person/i.test(option)) ?? "Solo";
     if (/\b(team|teams|coworkers?|colleagues?|multiple users?|small group|we[' ]?ll use|use it together)\b/.test(value)) return field.options?.find((option) => /team|group|multiple/i.test(option)) ?? "Team";
   }
+  if (field.key === "business_type" || fieldLooksLike(field, "business type", "business", "industry")) {
+    if (/\bsmall\s+(?:salon|beauty business)\b/.test(value)) return field.options?.find((option) => /small\s+(?:salon|beauty)/i.test(option)) ?? field.options?.find((option) => /salon/i.test(option)) ?? "Salon";
+    if (/\bsalon\b/.test(value)) return field.options?.find((option) => /salon/i.test(option)) ?? "Salon";
+    if (/\bbarber(?:shop)?\b/.test(value)) return field.options?.find((option) => /barber/i.test(option)) ?? "Barbershop";
+    if (/\bspa\b/.test(value)) return field.options?.find((option) => /spa/i.test(option)) ?? "Spa";
+    if (/\bbeauty\s+(?:studio|business)\b/.test(value)) return field.options?.find((option) => /beauty/i.test(option)) ?? "Beauty studio";
+  }
   if (field.key === "main_goal" || fieldLooksLike(field, "main goal", "goal", "objective")) {
     const planning = /\b(plan|planning|organize|priorit|daily)\w*/.test(value);
     const reminders = /\b(reminder|reminders|nudge|recap|alert|notifications?)\b/.test(value);
+    const onlineBooking = /\bonline\s+book(?:ing)?\b/.test(value);
+    if (onlineBooking && reminders) {
+      return field.options?.find((option) => /online\s+book(?:ing)?/i.test(option) && /reminder/i.test(option))
+        ?? (field.options?.some((option) => /online\s+book(?:ing)?/i.test(option))
+          && field.options?.some((option) => /reminder/i.test(option))
+          ? "Online booking + reminders"
+          : field.options?.find((option) => /online\s+book(?:ing)?/i.test(option)))
+        ?? "Online booking";
+    }
     if (planning && reminders) {
       return field.options?.find((option) => {
         const candidate = normalizedPhrase(option);

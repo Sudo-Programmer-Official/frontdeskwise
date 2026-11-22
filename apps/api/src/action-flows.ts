@@ -147,6 +147,8 @@ export type ActionFlow = {
   key: string;
   actionType: BusinessActionType;
   businessId?: string;
+  /** Response-only tenant context; persistence remains scoped by business_id. */
+  organizationId?: string;
   name: string;
   description: string;
   triggerPhrases: string[];
@@ -781,7 +783,8 @@ export function classifyVisitorRequest(question: string): VisitorRequestClassifi
   const informational = /^(how|what|when|where|why|does|is|are|can i|could i|tell me|explain)\b/.test(value)
     || /\bhow does\b|\bwhat happens\b|\bwhat is the process\b/.test(value);
   const explicitRequest = /^(i want|i d like|id like|i need|please|help me|sign|enroll|register|book|schedule|request|get|try|see|view|watch|explore|open|call|connect me|send me|take me|let s|lets|join)\b/.test(value)
-    || /\b(sign my child up|sign me up|book an appointment|schedule service|request a demo|book a demo|try the demo|see the demo|open the demo|join the waitlist|call now|call emergency)\b/.test(value);
+    || /\b(sign my child up|sign me up|book an appointment|schedule service|request a demo|book a demo|try the demo|see the demo|open the demo|join the waitlist|call now|call emergency)\b/.test(value)
+    || /^(?:can|could)\s+(?:someone|you|a team|the team)\b.*\b(?:demo|walk me through|talk to)\b/.test(value);
   const pricingKnowledge = /\b(pricing|price|prices|cost|costs|how much)\b/.test(value)
     && !/\b(request|requesting|get|getting|quote|estimate|book|schedule|appointment)\b/.test(value);
   let actionIntent = "general";
@@ -804,26 +807,71 @@ export function inferActionIntent(question: string): string {
   return classifyVisitorRequest(question).actionIntent;
 }
 
+function workflowStartScore(action: ActionFlow, question: string): number {
+  if (!action.steps?.length) return 0;
+  const value = normalize(question);
+  const fieldKeys = new Set(action.fields.map((field) => field.key));
+  let score = 0;
+
+  // Business-fit workflows need to be allowed to start from a visitor's
+  // qualification statement. Those statements are intentionally not phrased
+  // as commands ("I run a small salon..."), so transactional-only detection
+  // skips them.
+  if (fieldKeys.has("business_type") && fieldKeys.has("main_goal")) {
+    if (/\b(salon|barber(?:shop)?|spa|beauty studio|beauty business)\b/.test(value)) score += 20;
+    if (/\b(run|own|operate|looking for|need|trying to improve|software)\b/.test(value)) score += 8;
+  }
+
+  // Keep plan-selection starts narrow so ordinary pricing or feature
+  // questions do not unexpectedly open a workflow.
+  if (isPlanSelectionWorkflow(action) && /\b(choose|choosing|right|best|recommend|looking for|need help)\b/.test(value)) score += 12;
+  return score;
+}
+
+function guidedDemoRequest(question: string): boolean {
+  const value = normalize(question);
+  return /\b(walk me through|guided|live|someone|team|request|book|schedule|talk to)\b.{0,36}\bdemo\b|\bdemo\b.{0,36}\b(walk me through|guided|live|someone|team|request|book|schedule|talk to)\b/.test(value);
+}
+
 export function detectAction(actions: ActionFlow[], question: string, primaryActionId?: string | null): ActionFlow | null {
   const request = classifyVisitorRequest(question);
-  if (request.mode !== "transactional") return null;
   const value = normalize(question);
   const intent = request.actionIntent;
-  return actions
+  const workflowStart = request.mode === "informational"
+    ? actions.map((action) => ({ action, score: workflowStartScore(action, question) })).sort((left, right) => right.score - left.score)[0]
+    : undefined;
+  const canStartWorkflow = Boolean(workflowStart && workflowStart.score > 0);
+  if (request.mode !== "transactional" && !canStartWorkflow) return null;
+
+  const scored = actions
     .filter((action) => isActionReady(action))
     .map((action) => ({
       action,
       phraseScore: action.triggerPhrases.reduce((score, phrase) => value.includes(normalize(phrase)) ? score + normalize(phrase).length + 10 : score, 0),
       intentScore: action.triggerIntents.some((item) => normalize(item) === intent) ? 4 : 0,
       workflowScore: intent === "plan_selection" && isPlanSelectionWorkflow(action) ? 10_000 : 0,
-      primaryScore: primaryActionId && action.id === primaryActionId ? 100_000 : 0,
+      workflowStartScore: workflowStart?.action.id === action.id ? workflowStart.score : 0,
+      // A primary conversion is a fallback for a generic sales request. It
+      // must not outrank a separately configured guided-demo flow.
+      primaryScore: primaryActionId && action.id === primaryActionId && !(intent === "demo" && guidedDemoRequest(question)) ? 100_000 : 0,
     }))
     .filter((item) => !(item.action.executionMode === "DIRECT_LINK"
       && (item.action.actionType === "request_demo" || item.action.key === "open_link")
       && /\b(demo|trial)\b/i.test(`${item.action.name} ${item.action.completion.linkLabel ?? ""}`)
       && /\b(book|schedule)\b.{0,24}\b(demo|trial)\b/i.test(question)))
-    .filter((item) => item.phraseScore > 0 || item.intentScore > 0 || item.workflowScore > 0)
-    .sort((left, right) => right.primaryScore + right.workflowScore + right.phraseScore + right.intentScore - left.primaryScore - left.workflowScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
+    .filter((item) => item.phraseScore > 0 || item.intentScore > 0 || item.workflowScore > 0 || item.workflowStartScore > 0);
+
+  // If a non-link request-demo flow exists, explicit demo language should
+  // select it instead of the global "Try the demo" link. A direct link remains
+  // valid for the ordinary "Try the demo" path when no request flow exists.
+  const nonLinkDemo = scored.filter((item) => intent === "demo" && item.action.executionMode !== "DIRECT_LINK");
+  const guidedDemo = intent === "demo" && guidedDemoRequest(question);
+  const candidates = nonLinkDemo.length
+    ? scored.filter((item) => !(intent === "demo" && item.action.executionMode === "DIRECT_LINK"))
+    : scored.filter((item) => !(guidedDemo
+      && item.action.executionMode === "DIRECT_LINK"
+      && /\b(try|start|see|view|explore|open)\b/i.test(item.action.name)));
+  return candidates.sort((left, right) => right.primaryScore + right.workflowScore + right.workflowStartScore + right.phraseScore + right.intentScore - left.primaryScore - left.workflowScore - left.workflowStartScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
 }
 
 /**
@@ -894,6 +942,11 @@ export function validateFieldValue(field: ActionField, rawValue: string): { valu
     const choice = exact ?? (!["usage_type", "main_goal", "usage_level"].includes(field.key)
       ? field.options.find((option) => normalize(option).includes(normalize(value)) || normalize(value).includes(normalize(option)))
       : undefined);
+    if (!choice && field.key === "main_goal" && /online\s+book(?:ing)?/i.test(value) && /reminder/i.test(value)
+      && field.options.some((option) => /online\s+book(?:ing)?/i.test(option))
+      && field.options.some((option) => /reminder/i.test(option))) {
+      return { value: "Online booking + reminders" };
+    }
     if (!choice) return { value: null, error: "Please choose one of: " + field.options.join(", ") + "." };
     return { value: choice };
   }
