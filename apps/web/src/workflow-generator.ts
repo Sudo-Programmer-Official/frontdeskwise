@@ -149,10 +149,11 @@ function capture(
 
 function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationContext = {}): WorkflowFieldDraft[] {
   if (intent === "plan_selection") {
+    const businessName = businessLabel(context);
     return [
-      field("usage_type", "Usage type", "select", "Are you planning to use PlanCraftAI by yourself or with a team?", true, ["Solo", "Team"]),
-      field("main_goal", "Main goal", "select", "What would you mainly like PlanCraftAI to help you with?", true, ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
-      field("usage_level", "Usage level", "select", "How often do you expect to use PlanCraftAI?", true, ["Occasionally", "Regularly", "Daily"]),
+      field("usage_type", "Usage type", "select", `Are you planning to use ${businessName} by yourself or with a team?`, true, ["Solo", "Team"]),
+      field("main_goal", "Main goal", "select", `What would you mainly like ${businessName} to help you with?`, true, ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
+      field("usage_level", "Usage level", "select", `How often do you expect to use ${businessName}?`, true, ["Occasionally", "Regularly", "Daily"]),
       hiddenField("recommended_plan", "Recommended plan"),
     ];
   }
@@ -197,6 +198,11 @@ function canonicalBusinessName(context: WorkflowGenerationContext): string {
   return declaredIsDescriptor ? (brand || "this business") : declared;
 }
 
+function businessLabel(context: WorkflowGenerationContext): string {
+  const name = canonicalBusinessName(context);
+  return name === "this business" ? "your business" : name;
+}
+
 function naturalBusinessType(context: WorkflowGenerationContext): string {
   const raw = context.businessContext?.businessType?.trim() || "";
   const evidence = `${raw} ${context.businessContext?.businessName ?? ""} ${context.businessContext?.summary ?? ""}`;
@@ -205,11 +211,12 @@ function naturalBusinessType(context: WorkflowGenerationContext): string {
   return raw.toLowerCase();
 }
 
-function planSelectionSteps(): WorkflowStepDraft[] {
+function planSelectionSteps(context: WorkflowGenerationContext = {}): WorkflowStepDraft[] {
+  const businessName = businessLabel(context);
   return [
-    capture("usage-type", "Usage type", "usage_type", "Are you planning to use PlanCraftAI by yourself or with a team?", ["Solo", "Team"]),
-    capture("main-goal", "Main goal", "main_goal", "What would you mainly like PlanCraftAI to help you with?", ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
-    capture("usage-level", "Usage level", "usage_level", "How often do you expect to use PlanCraftAI?", ["Occasionally", "Regularly", "Daily"]),
+    capture("usage-type", "Usage type", "usage_type", `Are you planning to use ${businessName} by yourself or with a team?`, ["Solo", "Team"]),
+    capture("main-goal", "Main goal", "main_goal", `What would you mainly like ${businessName} to help you with?`, ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
+    capture("usage-level", "Usage level", "usage_level", `How often do you expect to use ${businessName}?`, ["Occasionally", "Regularly", "Daily"]),
     {
       id: "recommend-plan",
       type: "recommend",
@@ -326,7 +333,7 @@ function enrollmentSteps(): WorkflowStepDraft[] {
 
 function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft[] {
   const business = context.businessContext;
-  const businessName = canonicalBusinessName(context);
+  const businessName = businessLabel(context);
   const businessType = naturalBusinessType(context);
   const primaryCta = business?.discoveredCtas?.find((cta) => cta.url && /try|demo|book|start/i.test(`${cta.label} ${cta.url}`))
     ?? business?.discoveredCtas?.find((cta) => Boolean(cta.url));
@@ -418,7 +425,7 @@ export function inferWorkflowIntent(description: string, context: WorkflowGenera
 export function generateWorkflow(description: string, baseFields: WorkflowFieldDraft[] = [], context: WorkflowGenerationContext = {}): WorkflowGenerationResult {
   const intent = inferWorkflowIntent(description, context);
   const steps = intent === "plan_selection"
-    ? planSelectionSteps()
+    ? planSelectionSteps(context)
     : intent === "enrollment"
       ? enrollmentSteps()
       : intent === "business_fit"
@@ -450,6 +457,7 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
           ];
   const generated = generatedFields(intent, context);
   const businessName = canonicalBusinessName(context);
+  const businessNameForCopy = businessName === "this business" ? "" : businessName;
   const pricingVerified = context.businessContext?.pricing?.verified === true;
   const providers = context.availableProviders !== undefined
     ? context.availableProviders.map((provider) => provider.toLowerCase())
@@ -510,7 +518,7 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
     }
   }
   const defaultName = intent === "plan_selection"
-    ? businessName ? `Choose the right ${businessName} plan` : "Choose the right plan"
+    ? businessNameForCopy ? `Choose the right ${businessNameForCopy} plan` : "Choose the right plan"
     : intent === "enrollment"
       ? "Find the right swim lesson"
       : intent === "business_fit"

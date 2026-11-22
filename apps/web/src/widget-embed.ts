@@ -725,7 +725,7 @@ type FrontDeskWiseWindow = Window & {
     if (triggers.includes("scroll")) {
       // The embed listens to the host document's normal scroll position. Custom
       // overflow containers must forward their scroll state to the page to use
-      // this trigger; PlanCraftAI uses normal document scrolling.
+      // this trigger; the embedded widget uses normal document scrolling.
       const scrollProgress = (): number => {
         const documentElement = document.documentElement;
         const body = document.body;

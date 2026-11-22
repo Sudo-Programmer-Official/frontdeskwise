@@ -194,14 +194,14 @@ function markWebsitePreviewError(): void {
 }
 
 function sampleMessages(nextScenario: WidgetScenario): WidgetMessage[] {
-  const assistantName = (props.assistantName || "PlanCraftAI assistant")
+  const assistantName = (props.assistantName || "AI front desk")
     .replace(/\s+AI Assistant$/i, "")
     .replace(/\s+Assistant$/i, "")
-    .trim() || "PlanCraftAI";
-  const businessName = props.businessName || "PlanCraftAI";
+    .trim() || "AI front desk";
+  const businessName = props.businessName || "Your business";
   const welcome: WidgetMessage = { id: "preview-welcome", role: "assistant", content: props.welcomeMessage || `Hi! I'm the ${assistantName} assistant. I can answer questions, help you explore features, or get you started.` };
-  const question: WidgetMessage = { id: "preview-question", role: "user", content: "What services does PlanCraftAI offer?" };
-  const answer: WidgetMessage = { id: "preview-answer", role: "assistant", content: `${businessName} helps with voice planning, scheduling, reminders, and task intelligence.` };
+  const question: WidgetMessage = { id: "preview-question", role: "user", content: `What services does ${businessName} offer?` };
+  const answer: WidgetMessage = { id: "preview-answer", role: "assistant", content: `${businessName} can answer questions, explain its services, and help visitors take the next step.` };
   const fallback: WidgetMessage = { id: "preview-fallback", role: "assistant", content: "I don’t have enough verified information to answer that confidently. I can help you contact the team if you’d like." };
   if (nextScenario === "default" || nextScenario === "quick-actions" || nextScenario === "lead-form" || nextScenario === "completion-action") return [welcome];
   if (nextScenario === "safe-fallback") return [welcome, { id: "preview-fallback-question", role: "user", content: "Can you guarantee a result you do not have in your knowledge?" }, fallback];

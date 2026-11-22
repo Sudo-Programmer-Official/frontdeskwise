@@ -927,11 +927,11 @@ onMounted(() => {
       <button class="text-button" type="button" @click="dismissModelBanner">Dismiss</button>
     </div>
 
-    <div class="workflow-layout">
+    <div :class="['workflow-layout', { 'workflow-layout-empty': !workflowActions.length }]">
       <aside class="workflow-library panel">
         <div class="panel-heading"><div><p class="eyebrow">Your workflows</p><h3>{{ workflowActions.length }} configured</h3></div><button class="outline-button small" type="button" @click="openCreateWorkflow"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Create workflow</button></div>
         <label class="workflow-library-select">Choose a workflow<select v-model="selectedWorkflowId"><option v-for="action in workflowActions" :key="action.id" :value="action.id">{{ workflowDisplayName(action) }}</option></select></label>
-        <div v-if="!workflowActions.length" class="workflow-empty"><span class="workflow-empty-icon"><GitBranch :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No multi-step workflows yet.</strong><p>Choose an existing action or start from a template. You can create a new action inline if you need one.</p><button class="primary-button small" type="button" @click="openCreateWorkflow"><Plus :size="14" :stroke-width="1.8" aria-hidden="true" />Create workflow</button></div>
+        <div v-if="!workflowActions.length" class="workflow-empty"><span class="workflow-empty-icon"><GitBranch :size="28" :stroke-width="1.8" aria-hidden="true" /></span><strong>No workflows yet.</strong><p>Build your first guided customer journey with questions, branches, provider lookups, and a clear next step.</p><button class="primary-button" type="button" @click="openCreateWorkflow"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" />Create workflow</button></div>
         <button v-for="action in workflowActions" :key="action.id" type="button" :class="['workflow-library-item', { active: action.id === selectedWorkflowId }]" @click="selectedWorkflowId = action.id"><span class="workflow-library-item-icon"><GitBranch :size="16" :stroke-width="1.8" aria-hidden="true" /></span><span><strong>{{ workflowDisplayName(action) }}</strong><small>{{ action.steps?.length ?? 0 }} steps · {{ formatLabel(action.executionMode || 'FORM_FLOW') }}</small></span><ChevronDown :size="15" :stroke-width="1.8" aria-hidden="true" /></button>
       </aside>
 
@@ -998,7 +998,7 @@ onMounted(() => {
           <div v-if="!eligibleActions.length" class="workflow-create-empty"><strong>No eligible actions yet.</strong><span>Create one inline, then continue without leaving Workflows.</span></div>
           <button class="workflow-inline-action-button" type="button" @click="openNewActionFlow"><Plus :size="15" :stroke-width="1.9" aria-hidden="true" /> Create new action</button>
           <label v-if="createWorkflowMode === 'template'">Template <select v-model="createWorkflowTemplateKey" @change="createWorkflowDescription = workflowNameForTemplate(createWorkflowTemplateKey)"><option v-for="template in workflowTemplates" :key="template.key" :value="template.key">{{ template.label }}</option></select></label>
-          <label v-if="createWorkflowMode === 'describe' || createWorkflowMode === 'action'">Workflow goal <textarea v-model="createWorkflowDescription" rows="4" placeholder="Help salon owners decide if SalonFlow is right for them…" @input="resizeWorkflowGoalEditor($event.target as HTMLTextAreaElement)"></textarea><small class="workflow-goal-count">{{ createWorkflowDescription.length.toLocaleString() }} characters</small></label>
+        <label v-if="createWorkflowMode === 'describe' || createWorkflowMode === 'action'">Workflow goal <textarea v-model="createWorkflowDescription" rows="4" placeholder="Describe the customer journey this workflow should complete…" @input="resizeWorkflowGoalEditor($event.target as HTMLTextAreaElement)"></textarea><small class="workflow-goal-count">{{ createWorkflowDescription.length.toLocaleString() }} characters</small></label>
         </div>
 
         <div v-if="createNewActionOpen" class="workflow-new-action-panel">
@@ -1376,5 +1376,34 @@ onMounted(() => {
   .workflow-library-select { display: grid; gap: 6px; margin: 0 0 12px; color: #708096; font-size: 11px; font-weight: 700; }
   .workflow-library-select select { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid #d5dfeb; border-radius: 9px; background: #fff; color: #304563; font: inherit; }
   .workflow-library-item { display: none; }
+}
+
+/* Give the first-run state the same visual weight as the workspace it introduces. */
+.workflow-layout-empty { display: block; }
+.workflow-layout-empty .workflow-library { width: 100%; padding: 0; }
+.workflow-layout-empty .workflow-library .panel-heading { padding-bottom: 14px; }
+.workflow-layout-empty .workflow-empty {
+  align-content: center;
+  justify-items: center;
+  min-height: clamp(340px, 45vh, 560px);
+  box-sizing: border-box;
+  padding: clamp(36px, 6vw, 76px) 24px;
+  margin-top: 0;
+  border: 1px solid #dfe8f3;
+  border-radius: 18px;
+  background: radial-gradient(circle at 50% 0%, #f7faff 0%, #ffffff 58%);
+  color: #708096;
+  text-align: center;
+  box-shadow: 0 12px 32px rgba(47, 83, 137, .05);
+}
+.workflow-layout-empty .workflow-empty-icon { width: 64px; height: 64px; border-radius: 18px; color: #2f66c6; background: #e8f0ff; }
+.workflow-layout-empty .workflow-empty strong { color: #243758; font-size: 22px; letter-spacing: -.025em; }
+.workflow-layout-empty .workflow-empty p { max-width: 520px; font-size: 14px; line-height: 1.6; }
+.workflow-layout-empty .workflow-empty .primary-button { display: inline-flex; align-items: center; gap: 7px; min-height: 42px; margin-top: 8px; padding-inline: 18px; }
+
+@media (max-width: 560px) {
+  .workflow-layout-empty .workflow-empty { min-height: 320px; padding: 36px 18px; }
+  .workflow-layout-empty .workflow-empty strong { font-size: 19px; }
+  .workflow-layout-empty .workflow-empty p { font-size: 13px; }
 }
 </style>

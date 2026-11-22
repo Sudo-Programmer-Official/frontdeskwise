@@ -566,6 +566,7 @@ interface AgentPublishing {
   status: Exclude<AgentPublishStatus, "PUBLISHING">;
   domain: string | null;
   publishedAt: string | null;
+  configVersion: number | null;
 }
 
 interface WorkspacePayload {
@@ -1164,7 +1165,7 @@ const widgetInstall = ref<WidgetInstall | null>(null);
 const widgetInstallMessage = ref("");
 const widgetVerificationMessage = ref("");
 const widgetVerificationLoading = ref(false);
-const agentPublishing = ref<AgentPublishing>({ status: "NOT_PUBLISHED", domain: null, publishedAt: null });
+const agentPublishing = ref<AgentPublishing>({ status: "NOT_PUBLISHED", domain: null, publishedAt: null, configVersion: null });
 const agentPublishingLoading = ref(false);
 const widgetPreviewMode = ref<"desktop" | "mobile">("desktop");
 const ownershipVerification = ref<WorkspacePayload["ownership"] | null>(null);
@@ -2760,7 +2761,7 @@ function clearWorkspaceState() {
   actionsMessage.value = "";
   widgetInstall.value = null;
   widgetVerificationMessage.value = "";
-  agentPublishing.value = { status: "NOT_PUBLISHED", domain: null, publishedAt: null };
+  agentPublishing.value = { status: "NOT_PUBLISHED", domain: null, publishedAt: null, configVersion: null };
   agentPublishingLoading.value = false;
   ownershipVerification.value = null;
   verificationToken.value = "";
@@ -2828,6 +2829,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
     status: payload.publishedAt ? "LIVE" : "NOT_PUBLISHED",
     domain: null,
     publishedAt: payload.publishedAt ?? null,
+    configVersion: null,
   };
   workspaceStats.value = payload.stats ?? null;
   workspaceKnowledge.value = payload.knowledge ?? null;
@@ -6585,6 +6587,7 @@ function agentConfigRequestBody(nextModel: AgentSaveModel, publish = false): Rec
       url: nextModel.fallbackContactUrl || null,
     },
     ...(publish ? { publish: true } : {}),
+    ...(publish ? { tested: setupSteps.value.some((step) => step.id === "agent_tested" && step.complete) || testMessages.value.some((message) => message.role === "user" && message.content.trim()) } : {}),
   };
 }
 
@@ -7389,7 +7392,7 @@ function startMarketingDemo() {
 
                   <section class="action-semantics-card">
                     <div><p class="eyebrow">Conversion semantics</p><h3>How should this action behave?</h3><p>These settings control the primary CTA and when it appears after an answer.</p></div>
-                    <div v-if="actionDraft.executionMode === 'DIRECT_LINK'" class="action-customer-copy"><div><p class="eyebrow">Customer-facing copy</p><p>These words are shown to visitors. The internal template name stays out of the conversation.</p></div><div class="action-two-column action-copy-grid"><label>Action name<input v-model="actionDraft.name" type="text" placeholder="Try the demo" /></label><label>Button label<input v-model="actionDraft.completion.linkLabel" type="text" placeholder="Try the demo" /></label></div><label>Message before button<textarea v-model="actionDraft.completion.message" rows="2" placeholder="You can try SalonFlow here."></textarea></label></div>
+                    <div v-if="actionDraft.executionMode === 'DIRECT_LINK'" class="action-customer-copy"><div><p class="eyebrow">Customer-facing copy</p><p>These words are shown to visitors. The internal template name stays out of the conversation.</p></div><div class="action-two-column action-copy-grid"><label>Action name<input v-model="actionDraft.name" type="text" placeholder="Try the demo" /></label><label>Button label<input v-model="actionDraft.completion.linkLabel" type="text" placeholder="Try the demo" /></label></div><label>Message before button<textarea v-model="actionDraft.completion.message" rows="2" placeholder="You can try it here."></textarea></label></div>
                     <div class="action-two-column action-semantics-fields"><label>Execution mode<select v-model="actionDraft.executionMode"><option value="DIRECT_LINK">Direct link</option><option value="FORM_FLOW">Form flow</option><option value="PROVIDER_FLOW">Provider flow</option><option value="PHONE">Phone</option><option value="EMAIL">Email</option><option value="HANDOFF">Internal handoff</option><option value="API_ACTION">API action</option></select></label><label>When should this appear<select v-model="actionDraft.attachmentPolicy"><option value="sales_intent">When relevant to sales intent</option><option value="high_intent_only">Only for high intent</option><option value="explicit_request_only">Only when explicitly requested</option><option value="always">Frequently</option><option value="never_auto">Never automatically</option></select></label></div>
                     <label v-if="actionDraft.executionMode === 'PROVIDER_FLOW'">Provider<select v-model="actionDraft.provider"><option value="">Select a provider…</option><option value="jackrabbit">Jackrabbit</option></select><small class="form-help">The provider supplies live availability and the verified registration path. Connect it in Settings before making this action primary.</small></label>
                     <div v-if="actionDraft.executionMode === 'PROVIDER_FLOW' && actionProvider(actionDraft) === 'jackrabbit'" class="action-provider-status"><div><strong>Jackrabbit</strong><span>{{ providerIsConnected('jackrabbit') ? 'Connected and ready to verify live classes.' : 'Not connected yet.' }}</span></div><span :class="['status-pill', providerIsConnected('jackrabbit') ? 'booked' : 'qualified']">{{ providerIsConnected('jackrabbit') ? 'Connected' : 'Needs connection' }}</span><button v-if="!providerIsConnected('jackrabbit')" class="outline-button small" type="button" @click="openSettingsTab('integrations')">Connect Jackrabbit</button></div>

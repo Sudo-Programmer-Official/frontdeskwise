@@ -72,6 +72,7 @@ import {
   workflowSummary,
 } from "./workflow-engine.js";
 import { planRecommendationMessage, planRecommendationPayload, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
+import { nextTenantPublicationVersion, tenantPublicationHash } from "./tenant-publication.js";
 import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
 import {
   answerabilityDecision,
@@ -809,6 +810,10 @@ type Business = {
   agentConfig: AgentConfig;
   publishedAgentConfig: AgentConfig | null;
   publishedAgentConfigHash: string | null;
+  publishedConfigHash: string | null;
+  publishedActions: ActionFlow[] | null;
+  publishedPrimaryActionId: string | null;
+  publishedConfigVersion: number | null;
   billing: BillingState;
   widget: {
     siteKey: string;
@@ -1001,9 +1006,16 @@ function agentPublishingPayload(business: Business): {
   status: AgentPublishingStatus;
   domain: string | null;
   publishedAt: string | null;
+  configVersion: number | null;
 } {
-  if (!business.publishedAgentConfig) return { status: "NOT_PUBLISHED", domain: null, publishedAt: null };
+  if (!business.publishedAgentConfig) return { status: "NOT_PUBLISHED", domain: null, publishedAt: null, configVersion: null };
   const publishedHash = business.publishedAgentConfigHash ?? agentConfigHash(business.publishedAgentConfig);
+  const currentTenantHash = tenantPublicationHash({
+    agentConfig: business.agentConfig,
+    actions: business.actions,
+    primaryActionId: business.primaryActionId,
+    contextVersion: business.businessContextSnapshot?.version ?? null,
+  });
   let domain: string | null = null;
   try {
     domain = business.websiteUrl ? new URL(business.websiteUrl).hostname.replace(/^www\./i, "") : null;
@@ -1011,9 +1023,12 @@ function agentPublishingPayload(business: Business): {
     domain = null;
   }
   return {
-    status: agentConfigHash(business.agentConfig) === publishedHash ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES",
+    status: business.publishedConfigHash
+      ? currentTenantHash === business.publishedConfigHash ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES"
+      : agentConfigHash(business.agentConfig) === publishedHash ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES",
     domain,
     publishedAt: business.agentPublishedAt,
+    configVersion: business.publishedConfigVersion,
   };
 }
 
@@ -1763,6 +1778,19 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
   return { ...normalizedAction, readiness: actionReadiness(normalizedAction) };
 }
 
+function actionFromPublishedSnapshot(value: unknown): ActionFlow | null {
+  const snapshot = asRecord(value);
+  if (typeof snapshot.action_key === "string") return actionFromRow(snapshot);
+  if (typeof snapshot.key !== "string" || typeof snapshot.id !== "string") return null;
+  const normalizedAction = normalizeCanonicalEnrollmentWorkflow(snapshot as unknown as ActionFlow);
+  return { ...normalizedAction, readiness: actionReadiness(normalizedAction) };
+}
+
+function actionsFromPublishedSnapshot(value: unknown): ActionFlow[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map(actionFromPublishedSnapshot).filter((action): action is ActionFlow => Boolean(action));
+}
+
 function actionResourceFromRow(row: Record<string, unknown>): ActionResource {
   const type = (ACTION_RESOURCE_TYPES as readonly string[]).includes(String(row.resource_type))
     ? String(row.resource_type) as ActionResourceType
@@ -1965,6 +1993,10 @@ function makeBusiness(input: {
     agentConfig: defaultConfig(input.name),
     publishedAgentConfig: null,
     publishedAgentConfigHash: null,
+    publishedConfigHash: null,
+    publishedActions: null,
+    publishedPrimaryActionId: null,
+    publishedConfigVersion: null,
     billing: {
       mode: "sandbox",
       isDemo: true,
@@ -3011,6 +3043,29 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     app.log.warn({ businessId }, "Conversion events table is not available yet");
   }
   const config = configResult.rows[0];
+  let publication: Record<string, unknown> | null = null;
+  try {
+    const publicationResult = await pool.query<Record<string, unknown>>(
+      `select * from business_config_publications
+       where business_id = $1
+       order by version desc
+       limit 1`,
+      [businessId],
+    );
+    publication = publicationResult.rows[0] ?? null;
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Tenant publication table is not available yet; using legacy published state");
+  }
+  const publishedActions = publication ? actionsFromPublishedSnapshot(publication.actions) : null;
+  const publishedAgentConfig = config?.published_config ? agentConfigFromValue(config.published_config, String(row.name)) : null;
+  const publishedPrimaryActionId = publication && typeof publication.primary_action_id === "string" ? publication.primary_action_id : null;
+  const publishedContextVersion = publication && publication.context_version !== null && publication.context_version !== undefined && Number.isInteger(Number(publication.context_version))
+    ? Number(publication.context_version)
+    : null;
+  const publishedConfigHash = publication && publishedAgentConfig && publishedActions
+    ? tenantPublicationHash({ agentConfig: publishedAgentConfig, actions: publishedActions, primaryActionId: publishedPrimaryActionId, contextVersion: publishedContextVersion })
+    : null;
   const loaded: Business = {
     id: businessId,
     organizationId: typeof row.organization_id === "string" ? row.organization_id : null,
@@ -3165,8 +3220,12 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       fallbackEmail: config.fallback_email,
       fallbackContactUrl: config.fallback_contact_url,
     }, String(row.name)) : defaultConfig(String(row.name)),
-    publishedAgentConfig: config?.published_config ? agentConfigFromValue(config.published_config, String(row.name)) : null,
+    publishedAgentConfig,
     publishedAgentConfigHash: typeof config?.published_config_hash === "string" ? config.published_config_hash : null,
+    publishedConfigHash,
+    publishedActions,
+    publishedPrimaryActionId,
+    publishedConfigVersion: publication && Number.isInteger(Number(publication.version)) ? Number(publication.version) : null,
     billing: {
       mode: (row.organization_billing_mode ?? row.billing_mode) === "live" ? "live" : "sandbox",
       isDemo: row.is_demo !== false,
@@ -3779,17 +3838,59 @@ async function persistAgentConfig(business: Business): Promise<void> {
   );
 }
 
-async function persistPublishedAgentConfig(business: Business): Promise<void> {
+async function persistPublishedTenantState(business: Business): Promise<void> {
   if (!business.publishedAgentConfig) return;
-  business.agentPublishedAt = business.agentPublishedAt ?? new Date().toISOString();
-  business.publishedAgentConfigHash = agentConfigHash(business.publishedAgentConfig);
-  if (!pool) return;
-  await pool.query(
-    `update agent_configs
-     set published_config = $2, published_config_hash = $3, updated_at = now()
-     where business_id = $1`,
-    [business.id, JSON.stringify(business.publishedAgentConfig), business.publishedAgentConfigHash],
-  );
+  const publishedActions = business.actions.map((action) => JSON.parse(JSON.stringify(action)) as ActionFlow);
+  const contextVersion = business.businessContextSnapshot?.version ?? null;
+  const publishedAt = new Date().toISOString();
+  const agentHash = agentConfigHash(business.publishedAgentConfig);
+  const configHash = tenantPublicationHash({
+    agentConfig: business.publishedAgentConfig,
+    actions: publishedActions,
+    primaryActionId: business.primaryActionId,
+    contextVersion,
+  });
+  if (pool) {
+    const client = await pool.connect();
+    let version = nextTenantPublicationVersion(business.publishedConfigVersion);
+    try {
+      await client.query("begin");
+      await client.query("select id from businesses where id = $1 for update", [business.id]);
+      const versionResult = await client.query<{ version: number }>(
+        "select coalesce(max(version), 0) + 1 as version from business_config_publications where business_id = $1",
+        [business.id],
+      );
+      version = Number(versionResult.rows[0]?.version ?? version);
+      await client.query(
+        `update agent_configs
+         set published_config = $2, published_config_hash = $3, updated_at = now()
+         where business_id = $1`,
+        [business.id, JSON.stringify(business.publishedAgentConfig), agentHash],
+      );
+      await client.query(
+        `insert into business_config_publications
+           (id, business_id, version, config_hash, agent_config, actions, primary_action_id, context_version, published_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [randomUUID(), business.id, version, configHash, JSON.stringify(business.publishedAgentConfig), JSON.stringify(publishedActions), business.primaryActionId, contextVersion, publishedAt],
+      );
+      await client.query(
+        "update businesses set current_published_config_version = $2, agent_published_at = $3, updated_at = now() where id = $1",
+        [business.id, version, publishedAt],
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    business.publishedConfigVersion = version;
+  }
+  business.publishedAgentConfigHash = agentHash;
+  business.publishedActions = publishedActions;
+  business.publishedPrimaryActionId = business.primaryActionId;
+  business.publishedConfigHash = configHash;
+  business.agentPublishedAt = publishedAt;
 }
 
 function hashAccessToken(token: string): string {
@@ -5304,6 +5405,21 @@ async function getBusiness(slug: unknown): Promise<Business> {
   return business;
 }
 
+function publishedBusinessView(business: Business): Business {
+  if (!business.publishedAgentConfig) throw httpError(404, "AI front desk is not published");
+  const publishedActions = business.publishedActions;
+  return {
+    ...business,
+    agentConfig: cloneAgentConfig(business.publishedAgentConfig),
+    ...(publishedActions
+      ? {
+        actions: publishedActions.map((action) => JSON.parse(JSON.stringify(action)) as ActionFlow),
+        primaryActionId: business.publishedPrimaryActionId,
+      }
+      : {}),
+  };
+}
+
 async function getBusinessBySiteKey(siteKey: unknown): Promise<Business> {
   const value = requiredString(siteKey, "siteKey", 120);
   if (pool) {
@@ -5311,13 +5427,12 @@ async function getBusinessBySiteKey(siteKey: unknown): Promise<Business> {
     if (result.rowCount) {
       const business = await getBusiness(result.rows[0].slug);
       if (!business.publishedAgentConfig) throw httpError(404, "AI front desk is not published");
-      return { ...business, agentConfig: cloneAgentConfig(business.publishedAgentConfig) };
+      return publishedBusinessView(business);
     }
   }
   const business = [...businesses.values()].find((item) => item.widget.siteKey === value);
   if (!business) throw httpError(404, "Widget site key not found");
-  if (!business.publishedAgentConfig) throw httpError(404, "AI front desk is not published");
-  return { ...business, agentConfig: cloneAgentConfig(business.publishedAgentConfig) };
+  return publishedBusinessView(business);
 }
 
 async function recordWidgetLoad(business: Business): Promise<void> {
@@ -7599,7 +7714,7 @@ function verifiedPlanFactsForWorkflow(business: Business) {
 
 function planRecommendationFromState(business: Business, action: ActionFlow, state: ConversationActionState): PlanRecommendation | null {
   if (!isPlanSelectionWorkflow(action)) return null;
-  return recommendPlan(state.values, verifiedPlanFactsForWorkflow(business));
+  return recommendPlan(state.values, verifiedPlanFactsForWorkflow(business), customerBusinessName(business));
 }
 
 function planRecommendationInState(state: ConversationActionState): PlanRecommendation | null {
@@ -13835,10 +13950,13 @@ app.get("/api/v1/widget/:siteKey/config", async (request, reply) => {
   const publicConfig = {
     siteKey: business.widget.siteKey,
     slug: business.slug,
+    publicationVersion: business.publishedConfigVersion,
     business: { name: customerBusinessName(business), location: business.location, websiteUrl: business.websiteUrl },
     agent: customerFacingAgentConfig(business),
   };
-  const configVersion = createHash("sha256").update(JSON.stringify(publicConfig.agent)).digest("hex").slice(0, 16);
+  const configVersion = business.publishedConfigVersion
+    ? `v${business.publishedConfigVersion}`
+    : createHash("sha256").update(JSON.stringify(publicConfig.agent)).digest("hex").slice(0, 16);
   const entityTag = `"${configVersion}"`;
   reply.header("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
   reply.header("ETag", entityTag);
@@ -14788,6 +14906,9 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const publish = body.publish === true;
   if (publish) {
     requireVerifiedBusiness(business);
+    if (body.tested !== true) {
+      throw httpError(409, "Test the current assistant behavior before publishing a new production version");
+    }
     if (business.widget.loadCount < 1) {
       throw httpError(409, "Install the widget before publishing your AI front desk");
     }
@@ -14829,12 +14950,8 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   if (body.citationVisibility !== undefined) business.agentConfig.citationVisibility = normalizedCitationVisibility(body.citationVisibility);
   await persistAgentConfig(business);
   if (publish) {
-    business.agentPublishedAt = new Date().toISOString();
     business.publishedAgentConfig = cloneAgentConfig(business.agentConfig);
-    await persistPublishedAgentConfig(business);
-    if (pool) {
-      await pool.query("update businesses set agent_published_at = $2, updated_at = now() where id = $1", [business.id, business.agentPublishedAt]);
-    }
+    await persistPublishedTenantState(business);
   }
   return { agent: business.agentConfig, publishing: agentPublishingPayload(business), publishedAt: business.agentPublishedAt };
 });

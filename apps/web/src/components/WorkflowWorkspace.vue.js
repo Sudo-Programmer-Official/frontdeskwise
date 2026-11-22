@@ -186,7 +186,8 @@ function syncWorkflowGoalEditor() {
 }
 function defaultBusinessWorkflowDescription() {
     const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "this business";
-    if (/swim|lesson/i.test(businessName))
+    const businessEvidence = `${businessName} ${props.businessContext?.summary ?? ""}`;
+    if (/swim/i.test(businessEvidence))
         return ENROLLMENT_WORKFLOW_GOAL;
     const businessType = props.businessContext?.businessType?.trim() && props.businessContext.businessType !== "Unknown"
         ? props.businessContext.businessType.trim().toLowerCase()
@@ -1272,6 +1273,28 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
+    /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty-icon']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "view-content workflow-workspace" },
         'data-workflow-generation-key': (workflowGenerationKey.value || undefined),
@@ -1365,9 +1388,10 @@ const __VLS_template = () => {
         /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
     }
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-        ...{ class: "workflow-layout" },
+        ...{ class: (['workflow-layout', { 'workflow-layout-empty': !workflowActions.value.length }]) },
     });
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-layout-empty']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.aside, __VLS_intrinsics.aside)({
         ...{ class: "workflow-library panel" },
     });
@@ -1419,7 +1443,7 @@ const __VLS_template = () => {
         });
         (workflowDisplayName(action));
         // @ts-ignore
-        [draftIsDirty, draftIsDirty, draftIsDirty, workflowDraft, workflowSaveLoading, workflowSaveLoading, showModelBanner, workflowActions, workflowActions, selectedWorkflowId,];
+        [draftIsDirty, draftIsDirty, draftIsDirty, workflowDraft, workflowSaveLoading, workflowSaveLoading, showModelBanner, workflowActions, workflowActions, workflowActions, selectedWorkflowId,];
     }
     if (!workflowActions.value.length) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
@@ -1436,10 +1460,10 @@ const __VLS_template = () => {
         // @ts-ignore
         const __VLS_17 = __VLS_asFunctionalComponent1(__VLS_16, new __VLS_16({
             // @ts-ignore
-            size: (22), strokeWidth: (1.8), 'aria-hidden': "true",
+            size: (28), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
         const __VLS_18 = __VLS_17({
-            size: (22),
+            size: (28),
             strokeWidth: (1.8),
             'aria-hidden': "true",
         }, ...__VLS_functionalComponentArgsRest(__VLS_17));
@@ -1447,21 +1471,20 @@ const __VLS_template = () => {
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
             ...{ onClick: (openCreateWorkflow) },
-            ...{ class: "primary-button small" },
+            ...{ class: "primary-button" },
             type: "button",
         });
         /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
-        /** @type {__VLS_StyleScopedClasses['small']} */ ;
         let __VLS_21;
         /** @ts-ignore @type { | typeof Plus} */
         Plus;
         // @ts-ignore
         const __VLS_22 = __VLS_asFunctionalComponent1(__VLS_21, new __VLS_21({
             // @ts-ignore
-            size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
+            size: (16), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
         const __VLS_23 = __VLS_22({
-            size: (14),
+            size: (16),
             strokeWidth: (1.8),
             'aria-hidden': "true",
         }, ...__VLS_functionalComponentArgsRest(__VLS_22));
@@ -3040,7 +3063,7 @@ const __VLS_template = () => {
                     } },
                 value: (createWorkflowDescription.value),
                 rows: "4",
-                placeholder: "Help salon owners decide if SalonFlow is right for them…",
+                placeholder: "Describe the customer journey this workflow should complete…",
             });
             __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({
                 ...{ class: "workflow-goal-count" },

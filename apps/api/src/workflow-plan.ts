@@ -62,6 +62,7 @@ function priceForFact(valueText: string): string | null {
 export function recommendPlan(
   values: Record<string, string>,
   facts: VerifiedPlanFact[],
+  businessName = "your business",
 ): PlanRecommendation | null {
   const usageType = values.usage_type?.trim() || "";
   const usageLevel = values.usage_level?.trim() || "";
@@ -91,12 +92,13 @@ export function recommendPlan(
   const audience = team ? "with your team" : "by yourself";
   const cadence = /every day|daily|all the time|heavy|frequent/i.test(normalized(usageLevel)) ? "every day" : usageLevel.toLowerCase();
   const goal = values.main_goal?.trim().toLowerCase();
+  const businessLabel = businessName.trim() || "your business";
   return {
     plan,
     price,
     usageType,
     usageLevel,
-    reason: `${plan} is the best fit for using PlanCraftAI ${audience}, mainly for ${goal || "your stated goal"}, with ${cadence} usage.`,
+    reason: `${plan} is the best fit for using ${businessLabel} ${audience}, mainly for ${goal || "your stated goal"}, with ${cadence} usage.`,
   };
 }
 

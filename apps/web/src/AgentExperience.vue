@@ -35,6 +35,7 @@ interface AgentPublishing {
   status: Exclude<AgentPublishStatus, "PUBLISHING">;
   domain: string | null;
   publishedAt: string | null;
+  configVersion: number | null;
 }
 
 interface InstallationSupportPayload {
@@ -349,6 +350,10 @@ function saveChanges(): void {
 }
 
 function publishDraft(): void {
+  if (!testCompleted.value) {
+    selectTab("test");
+    return;
+  }
   emit("publish", cloneModel(draft.value));
 }
 
