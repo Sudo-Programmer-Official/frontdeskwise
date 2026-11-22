@@ -67,6 +67,11 @@ test("workflow builder exposes a grouped verified-knowledge step", () => {
   assert.match(workflowWorkspace, /Trigger \/ topic/);
   assert.match(workflowWorkspace, /Verified business knowledge/);
   assert.match(workflowWorkspace, /Keep current CTA if already available/);
+  assert.match(workflowWorkspace, /Preview \/ test/);
+  assert.match(workflowWorkspace, /How much does it cost\?/);
+  assert.match(workflowWorkspace, /Matched topic/);
+  assert.match(workflowWorkspace, /CTA retained/);
+  assert.match(workflowWorkspace, /runKnowledgePreview/);
   assert.match(workflowGenerator, /type: KNOWLEDGE_STEP_TYPE/);
   assert.match(workflowGenerator, /allowedFacts: "pricing"/);
   assert.doesNotMatch(workflowGenerator, /pricing.*\$65|\$65.*pricing/);

@@ -6,6 +6,14 @@ import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from 
 
 type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
 
+type KnowledgePreviewResult = {
+  matchedTopic: string;
+  evidence: string;
+  responseBehavior: string;
+  resumeBehavior: string;
+  ctaRetained: string;
+};
+
 interface WorkflowAction {
   id: string;
   key: string;
@@ -86,6 +94,9 @@ const locallyCreatedAction = ref<WorkflowAction | null>(null);
 const customFieldOpenFor = ref("");
 const customFieldLabel = ref("");
 const customFieldKey = ref("");
+const knowledgePreviewStepId = ref("");
+const knowledgePreviewQuestion = ref("");
+const knowledgePreviewResult = ref<KnowledgePreviewResult | null>(null);
 let draftSourceId = "";
 
 const stepTypeGroups = [
@@ -665,6 +676,64 @@ function handleStepTypeChange(step: WorkflowStep): void {
   markDirty();
 }
 
+function knowledgePreviewExamples(step: WorkflowStep): string[] {
+  const topic = stepConfigValue(step, "topic").toLowerCase();
+  if (/price|pricing|cost|fee|rate|plan/.test(topic)) {
+    return [
+      "How much does it cost?",
+      "What's the price for one salon?",
+      "Do you have a monthly plan?",
+    ];
+  }
+  if (/cancel|refund|warranty|policy/.test(topic)) return ["What's your cancellation policy?", "Can I get a refund?"];
+  if (/integrat|service|feature|capabilit/.test(topic)) return ["What integrations do you support?", "What can you help with?"];
+  if (/hour|location|address|where/.test(topic)) return ["What are your hours?", "Where are you located?"];
+  return [`What can you tell me about ${topic || "this topic"}?`];
+}
+
+function knowledgePreviewMatchesTopic(step: WorkflowStep, question: string): boolean {
+  const topic = stepConfigValue(step, "topic").toLowerCase().trim();
+  const normalizedQuestion = question.toLowerCase();
+  if (!topic || !question.trim()) return false;
+  const topicAliases = topic.includes("pricing") || topic.includes("price")
+    ? ["price", "pricing", "cost", "fee", "rate", "monthly", "plan"]
+    : topic.includes("cancel") || topic.includes("refund") || topic.includes("policy")
+      ? ["cancel", "cancellation", "refund", "policy", "warranty"]
+      : topic.includes("integrat") || topic.includes("service") || topic.includes("feature") || topic.includes("capabilit")
+        ? ["integrat", "service", "feature", "capabilit", "offer"]
+        : topic.includes("hour") || topic.includes("location") || topic.includes("address")
+          ? ["hour", "open", "location", "address", "where"]
+          : topic.split(/[^a-z0-9]+/).filter((token) => token.length > 2);
+  return topicAliases.some((alias) => normalizedQuestion.includes(alias));
+}
+
+function runKnowledgePreview(step: WorkflowStep, question = knowledgePreviewQuestion.value): void {
+  const previewQuestion = question.trim();
+  knowledgePreviewQuestion.value = previewQuestion;
+  knowledgePreviewStepId.value = step.id;
+  const matched = knowledgePreviewMatchesTopic(step, previewQuestion);
+  const topic = stepConfigValue(step, "topic") || "Knowledge topic";
+  const reviewStatus = stepConfigValue(step, "reviewStatus");
+  const source = stepConfigValue(step, "knowledgeSource");
+  const evidence = !matched
+    ? "not evaluated"
+    : reviewStatus === "needs_owner_confirmation"
+      ? "not verified"
+      : source === "verified_business_knowledge"
+        ? "verified"
+        : "unavailable";
+  const verified = evidence === "verified";
+  knowledgePreviewResult.value = {
+    matchedTopic: matched ? formatLabel(topic) : "No matching topic",
+    evidence,
+    responseBehavior: !matched
+      ? "step not triggered"
+      : formatLabel(stepConfigValue(step, verified ? "verifiedBehavior" : "unavailableBehavior") || (verified ? "answer_naturally" : "say_not_verified")),
+    resumeBehavior: matched ? formatLabel(stepConfigValue(step, "resumeBehavior") || "return_to_previous_step") : "unchanged",
+    ctaRetained: matched && stepConfigValue(step, "ctaBehavior") === "keep_current_if_available" ? "yes" : "no",
+  };
+}
+
 function stepOptionsText(step: WorkflowStep): string {
   return (step.options ?? []).join(", ");
 }
@@ -1071,7 +1140,7 @@ onMounted(() => {
                   <div v-if="captureAnswerUsesOptions(step)" class="workflow-options-editor"><div class="workflow-options-heading"><div><strong>Options</strong><small>{{ captureAnswerTypeLabel(step) === 'Multi-select' ? 'Visitors can choose more than one.' : 'Visitors choose one.' }}</small></div><button class="text-button" type="button" @click.stop="addCaptureOption(step)">+ Add option</button></div><div v-if="captureOptions(step).length" class="workflow-option-list"><div v-for="(option, optionIndex) in captureOptions(step)" :key="`${step.id}-option-${optionIndex}`" class="workflow-option-row"><input :value="option" type="text" placeholder="Option" @input="setCaptureOption(step, optionIndex, $event)" /><button type="button" aria-label="Remove option" @click.stop="removeCaptureOption(step, optionIndex)"><X :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></div><p v-else class="form-help">Add at least two options so visitors can answer this question.</p></div>
                 </div>
                 <div v-else class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="handleStepTypeChange(step)"><optgroup v-for="group in stepTypeGroups" :key="group.label" :label="group.label"><option v-for="type in group.options" :key="type.value" :value="type.value">{{ type.label }}</option></optgroup></select></label><label v-if="step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
-                <div v-if="step.type === 'knowledge'" class="workflow-knowledge-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Knowledge</p><strong>Answer from verified business knowledge</strong><small>Keep facts in Business Brain. This step stores only the topic and response policy.</small></div><span class="status-pill booked">Verified source</span></div><div class="workflow-step-grid"><label>Trigger / topic<input :value="stepConfigValue(step, 'topic')" type="text" placeholder="Pricing" @input="setStepConfigFromEvent(step, 'topic', $event)" /></label><label>Knowledge source<select :value="stepConfigValue(step, 'knowledgeSource')" @change="setStepConfigFromEvent(step, 'knowledgeSource', $event)"><option value="verified_business_knowledge">Verified business knowledge</option></select></label><label>Allowed facts<select :value="stepConfigValue(step, 'allowedFacts')" @change="setStepConfigFromEvent(step, 'allowedFacts', $event)"><option value="pricing">Pricing only</option><option value="policies">Policy facts</option><option value="services">Services and capabilities</option><option value="locations">Locations and hours</option><option value="all">All verified business knowledge</option></select></label><label>If verified<select :value="stepConfigValue(step, 'verifiedBehavior')" @change="setStepConfigFromEvent(step, 'verifiedBehavior', $event)"><option value="answer_naturally">Answer naturally</option></select></label><label>If unavailable<select :value="stepConfigValue(step, 'unavailableBehavior')" @change="setStepConfigFromEvent(step, 'unavailableBehavior', $event)"><option value="say_not_verified">Say information is not verified</option></select></label><label>After answering<select :value="stepConfigValue(step, 'resumeBehavior')" @change="setStepConfigFromEvent(step, 'resumeBehavior', $event)"><option value="return_to_previous_step">Resume previous workflow state</option></select></label><label>CTA behavior<select :value="stepConfigValue(step, 'ctaBehavior')" @change="setStepConfigFromEvent(step, 'ctaBehavior', $event)"><option value="keep_current_if_available">Keep current CTA if already available</option></select></label></div></div>
+                <div v-if="step.type === 'knowledge'" class="workflow-knowledge-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Knowledge</p><strong>Answer from verified business knowledge</strong><small>Keep facts in Business Brain. This step stores only the topic and response policy.</small></div><span class="status-pill booked">Verified source</span></div><div class="workflow-step-grid"><label>Trigger / topic<input :value="stepConfigValue(step, 'topic')" type="text" placeholder="Pricing" @input="setStepConfigFromEvent(step, 'topic', $event)" /></label><label>Knowledge source<select :value="stepConfigValue(step, 'knowledgeSource')" @change="setStepConfigFromEvent(step, 'knowledgeSource', $event)"><option value="verified_business_knowledge">Verified business knowledge</option></select></label><label>Allowed facts<select :value="stepConfigValue(step, 'allowedFacts')" @change="setStepConfigFromEvent(step, 'allowedFacts', $event)"><option value="pricing">Pricing only</option><option value="policies">Policy facts</option><option value="services">Services and capabilities</option><option value="locations">Locations and hours</option><option value="all">All verified business knowledge</option></select></label><label>If verified<select :value="stepConfigValue(step, 'verifiedBehavior')" @change="setStepConfigFromEvent(step, 'verifiedBehavior', $event)"><option value="answer_naturally">Answer naturally</option></select></label><label>If unavailable<select :value="stepConfigValue(step, 'unavailableBehavior')" @change="setStepConfigFromEvent(step, 'unavailableBehavior', $event)"><option value="say_not_verified">Say information is not verified</option></select></label><label>After answering<select :value="stepConfigValue(step, 'resumeBehavior')" @change="setStepConfigFromEvent(step, 'resumeBehavior', $event)"><option value="return_to_previous_step">Resume previous workflow state</option></select></label><label>CTA behavior<select :value="stepConfigValue(step, 'ctaBehavior')" @change="setStepConfigFromEvent(step, 'ctaBehavior', $event)"><option value="keep_current_if_available">Keep current CTA if already available</option></select></label></div><div class="workflow-knowledge-preview"><div class="workflow-knowledge-preview-heading"><div><p class="eyebrow">Preview / test</p><strong>Try a visitor question</strong><small>This simulates routing and response policy. It does not generate or store a business fact.</small></div><span class="workflow-preview-badge">Simulation</span></div><div class="workflow-knowledge-preview-input"><input v-model="knowledgePreviewQuestion" type="text" placeholder="How much does it cost?" @keydown.enter.prevent="runKnowledgePreview(step)" /><button class="outline-button small" type="button" :disabled="!knowledgePreviewQuestion.trim()" @click="runKnowledgePreview(step)">Run preview</button></div><div class="workflow-knowledge-examples"><span>Examples</span><button v-for="example in knowledgePreviewExamples(step)" :key="example" type="button" @click="runKnowledgePreview(step, example)">{{ example }}</button></div><dl v-if="knowledgePreviewStepId === step.id && knowledgePreviewResult" class="workflow-knowledge-preview-result"><div><dt>Matched topic</dt><dd>{{ knowledgePreviewResult.matchedTopic }}</dd></div><div><dt>Evidence</dt><dd>{{ knowledgePreviewResult.evidence }}</dd></div><div><dt>Response behavior</dt><dd>{{ knowledgePreviewResult.responseBehavior }}</dd></div><div><dt>Resume</dt><dd>{{ knowledgePreviewResult.resumeBehavior }}</dd></div><div><dt>CTA retained</dt><dd>{{ knowledgePreviewResult.ctaRetained }}</dd></div></dl></div></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
                 <div v-if="step.type === 'condition'" class="workflow-condition-box"><span class="workflow-condition-icon"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" /></span><label>Condition in plain English<textarea v-model="step.condition" rows="2" placeholder="If the visitor is ready to register, continue to the provider lookup." @input="markDirty"></textarea></label></div>
                 <div v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-provider-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Provider</p><strong>{{ step.type === 'lookup' ? 'Find availability' : 'Complete with provider' }}</strong></div><span :class="['status-pill', providerConnected ? 'booked' : 'new']">{{ providerConnected ? 'Connected' : 'Needs connection' }}</span></div><div class="workflow-step-grid"><label>Provider<select :value="stepConfigValue(step, 'provider')" @change="setStepConfigFromEvent(step, 'provider', $event)"><option value="">Select provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking provider</option><option value="crm">CRM / automation</option></select></label><label v-if="step.type === 'lookup'">Operation<select :value="stepConfigValue(step, 'operation')" @change="setStepConfigFromEvent(step, 'operation', $event)"><option value="find_locations">Find locations</option><option value="find_classes">Find classes</option><option value="get_availability">Get availability</option><option value="get_class_price">Get class price</option></select></label><label v-if="step.type === 'lookup'">Search fields<input :value="stepConfigValue(step, 'searchFields')" type="text" placeholder="location, schedule, age" @input="setStepConfigFromEvent(step, 'searchFields', $event)" /></label></div><small class="form-help">We’ll use the provider for this step and explain what happens if it is unavailable.</small></div>
@@ -1202,6 +1271,22 @@ onMounted(() => {
 .workflow-knowledge-box .workflow-provider-heading { align-items: center; }
 .workflow-knowledge-box .workflow-provider-heading strong { display: block; color: #294a7d; font-size: 13px; }
 .workflow-knowledge-box .workflow-provider-heading small { display: block; max-width: 620px; margin-top: 3px; color: #71829b; font-size: 11px; font-weight: 500; line-height: 1.4; }
+.workflow-knowledge-preview { display: grid; gap: 9px; padding: 11px; border: 1px solid #e2eaf5; border-radius: 10px; background: #fff; }
+.workflow-knowledge-preview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.workflow-knowledge-preview-heading > div { display: grid; gap: 2px; }
+.workflow-knowledge-preview-heading strong { color: #304563; font-size: 12px; }
+.workflow-knowledge-preview-heading small { color: #7b8ba0; font-size: 10px; font-weight: 500; line-height: 1.4; }
+.workflow-preview-badge { padding: 4px 7px; border: 1px solid #dbe5f4; border-radius: 999px; color: #647894; background: #f7faff; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.workflow-knowledge-preview-input { display: flex; align-items: center; gap: 7px; }
+.workflow-knowledge-preview-input input { flex: 1; min-width: 0; }
+.workflow-knowledge-examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.workflow-knowledge-examples > span { color: #7b8ba0; font-size: 10px; font-weight: 700; }
+.workflow-knowledge-examples button { padding: 4px 7px; border: 1px solid #dfe7f2; border-radius: 999px; color: #4c668d; background: #fbfdff; font-size: 10px; cursor: pointer; }
+.workflow-knowledge-examples button:hover { border-color: #9eb9e6; color: #2458b2; background: #f3f8ff; }
+.workflow-knowledge-preview-result { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin: 2px 0 0; padding-top: 9px; border-top: 1px solid #edf1f5; }
+.workflow-knowledge-preview-result div { display: grid; gap: 3px; min-width: 0; }
+.workflow-knowledge-preview-result dt { color: #8290a1; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.workflow-knowledge-preview-result dd { margin: 0; color: #304563; font-size: 10px; font-weight: 700; overflow-wrap: anywhere; }
 .workflow-custom-field-box > div:first-child { display: grid; gap: 3px; }
 .workflow-custom-field-box strong { color: #304563; font-size: 12px; }
 .workflow-custom-field-box small { color: #7b8ba0; font-size: 10px; line-height: 1.4; }
@@ -1642,5 +1727,8 @@ onMounted(() => {
   .workflow-conditional-heading { padding-left: 12px; }
   .workflow-advanced-row { align-items: flex-start; flex-direction: column; }
   .workflow-advanced-row select { width: 100%; }
+  .workflow-knowledge-preview-input { align-items: stretch; flex-direction: column; }
+  .workflow-knowledge-preview-input .outline-button { align-self: flex-start; }
+  .workflow-knowledge-preview-result { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>

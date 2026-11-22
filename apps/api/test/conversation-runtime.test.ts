@@ -10,6 +10,7 @@ import {
   runtimeHandoffState,
   safeConversationRuntimeState,
 } from "../src/conversation-runtime.js";
+import { pushWorkflowInterruption, resumeWorkflowInterruption } from "../src/workflow-engine.js";
 
 const action: ActionFlow = {
   id: "runtime-action",
@@ -80,6 +81,35 @@ test("runtime snapshot is the inspectable projection of workflow state", () => {
   assert.equal(runtime.businessContextVersion, 7);
   assertConversationRuntimeState(runtime);
   assert.equal(safeConversationRuntimeState({ ...runtime, collectedFields: { email: "visitor@example.com" } }).collectedFields.email, "[redacted]");
+});
+
+test("pricing interruption resumes with the workflow CTA still available", () => {
+  const salonAction: ActionFlow = {
+    ...action,
+    id: "salon-pricing-runtime",
+    key: "salon_fit",
+    steps: [
+      { id: "fit", type: "ask", question: "Which part of the business should improve?" },
+      { id: "pricing", type: "knowledge", label: "Pricing", config: { conditional: true, topic: "pricing", knowledgeSource: "verified_business_knowledge", allowedFacts: "pricing", ctaBehavior: "keep_current_if_available", resumeBehavior: "return_to_previous_step" } },
+      { id: "try-demo", type: "redirect", label: "Try the demo", config: { normalConversionEndpoint: true, actionKey: "try_demo" } },
+    ],
+  };
+  const state = createActionState(salonAction);
+  state.currentStepId = "try-demo";
+  state.completedStepIds = ["fit"];
+  const cta = { actionId: "try-demo", key: "try_demo", label: "Try the demo", executionMode: "DIRECT_LINK" as const, trackingKey: "try_demo", url: "https://example.com/try" };
+  const before = buildConversationRuntimeState({ businessId: "salon-business", action: salonAction, actionState: state, allowedCtas: [cta] });
+
+  pushWorkflowInterruption(state, { intent: "pricing", question: "How much does it cost?", returnStepId: "try-demo" }, "2026-01-01T00:00:00.000Z");
+  const during = buildConversationRuntimeState({ businessId: "salon-business", action: salonAction, actionState: state, allowedCtas: [cta] });
+  assert.equal(during.workflowCursor, "try-demo");
+  assert.equal(during.interruptionContext.currentIntent, "pricing");
+  assert.equal(during.allowedCtas[0]?.key, "try_demo");
+
+  assert.equal(resumeWorkflowInterruption(state)?.returnStepId, "try-demo");
+  const after = buildConversationRuntimeState({ businessId: "salon-business", action: salonAction, actionState: state, allowedCtas: [cta] });
+  assert.equal(after.workflowCursor, before.workflowCursor);
+  assert.equal(after.allowedCtas[0]?.key, before.allowedCtas[0]?.key);
 });
 
 test("waiting for staff preserves AI conversion state and owns the handoff status", () => {
