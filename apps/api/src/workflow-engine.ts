@@ -18,6 +18,7 @@ export type WorkflowStepStatus = "completed" | "current" | "pending" | "skipped"
 
 export type WorkflowNextBestAction =
   | "ASK_FIELD"
+  | "ANSWER_KNOWLEDGE"
   | "ASSESS_ABILITY"
   | "CAPTURE_DETAILS"
   | "LOOKUP_CLASSES"
@@ -87,6 +88,10 @@ function workflowStepIsAvailable(step: ActionStep, state: ConversationActionStat
   const config = step.config ?? {};
   const trigger = typeof config.trigger === "string" ? config.trigger : null;
   if (trigger && state.workflowTrigger !== trigger) return false;
+  // Knowledge steps marked as conditional are side paths. They are selected
+  // from the visitor's topic by the conversation runtime and must not become
+  // the normal cursor just because they appear in the saved step list.
+  if (step.type === "knowledge" && config.conditional === true && state.workflowTrigger !== config.topic) return false;
   // Owner-confirmed facts such as pricing must never be surfaced until the
   // business has verified them. The step remains visible in the owner editor,
   // but the runtime skips it and continues to the safe next step.
@@ -166,6 +171,7 @@ function workflowStepLabel(action: ActionFlow, step: ActionStep): string {
 
 export function workflowNextBestAction(action: ActionFlow, step: ActionStep | null): WorkflowNextBestAction {
   if (!step) return "COMPLETED";
+  if (step.type === "knowledge") return "ANSWER_KNOWLEDGE";
   if (step.fieldKey === "ability") return "ASSESS_ABILITY";
   if (step.type === "lookup") return actionProviderForFlow(action) ? "LOOKUP_CLASSES" : "LOOKUP_OPTIONS";
   if (step.type === "recommend") return "RECOMMEND_OPTION";
@@ -398,7 +404,9 @@ function optionForField(field: ActionField, input: string): string | null {
         ?? "Planning";
     }
     if (planning) return field.options?.find((option) => /planning|organ|priorit/i.test(option)) ?? "Planning";
-    if (reminders) return field.options?.find((option) => /reminder|nudge|recap/i.test(option)) ?? "Reminders";
+    if (reminders) return field.options?.find((option) => /^reminders?$/i.test(option.trim()))
+      ?? field.options?.find((option) => /reminder|nudge|recap/i.test(option))
+      ?? "Reminders";
     if (/\b(task breakdown|break down tasks|tasks? into steps)\b/.test(value)) return field.options?.find((option) => /task/i.test(option)) ?? "AI task breakdown";
     if (/\b(team|collaborat|shared|workspace)\b/.test(value)) return field.options?.find((option) => /team|coordination|workspace/i.test(option)) ?? "Team coordination";
   }

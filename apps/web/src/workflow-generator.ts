@@ -21,6 +21,8 @@ export type WorkflowStepDraft = {
   config?: Record<string, unknown>;
 };
 
+export const KNOWLEDGE_STEP_TYPE = "knowledge" as const;
+
 export type WorkflowGenerationContext = {
   organizationId?: string;
   businessId?: string;
@@ -108,6 +110,34 @@ const interruptionConfig = {
   sideQuestions: ["pricing", "features", "cancellation", "privacy"],
   resumeBehavior: "return_to_previous_step",
 };
+
+function answerFromKnowledge(
+  id: string,
+  label: string,
+  topic: string,
+  allowedFacts: string,
+  options: { conditional?: boolean; reviewStatus?: string } = {},
+): WorkflowStepDraft {
+  return {
+    id,
+    type: KNOWLEDGE_STEP_TYPE,
+    label,
+    question: "Answer naturally from verified business knowledge.",
+    config: {
+      ...interruptionConfig,
+      conditional: options.conditional ?? true,
+      topic,
+      knowledgeSource: "verified_business_knowledge",
+      allowedFacts,
+      verifiedBehavior: "answer_naturally",
+      unavailableBehavior: "say_not_verified",
+      resumeBehavior: "return_to_previous_step",
+      ctaBehavior: "keep_current_if_available",
+      reviewStatus: options.reviewStatus ?? "verified",
+      requiresVerifiedData: true,
+    },
+  };
+}
 
 function normalized(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
@@ -247,10 +277,22 @@ function planSelectionSteps(context: WorkflowGenerationContext = {}): WorkflowSt
     },
     {
       id: "show-pricing",
-      type: "ask",
+      type: KNOWLEDGE_STEP_TYPE,
       label: "Show verified pricing",
       question: "Here is the current verified pricing for the recommended plan.",
-      config: { ...interruptionConfig, reviewStatus: "verified", messageType: "verified_pricing", dataSource: "verified_business_knowledge", requiresVerifiedData: true },
+      config: {
+        ...interruptionConfig,
+        conditional: true,
+        topic: "pricing",
+        knowledgeSource: "verified_business_knowledge",
+        allowedFacts: "pricing",
+        verifiedBehavior: "answer_naturally",
+        unavailableBehavior: "say_not_verified",
+        resumeBehavior: "return_to_previous_step",
+        ctaBehavior: "keep_current_if_available",
+        reviewStatus: "verified",
+        requiresVerifiedData: true,
+      },
     },
     {
       id: "get-started",
@@ -354,13 +396,10 @@ function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft
       question: `Match verified ${businessName} features to the visitor’s needs.`,
       config: { ...interruptionConfig, reviewStatus: "verified", dataSource: "verified_business_knowledge", requiresVerifiedData: true, basedOn: ["business_type", "main_goal"] },
     },
-    {
-      id: "pricing",
-      type: "ask",
-      label: "Pricing",
-      question: "Show only verified pricing when it is relevant to the visitor’s question.",
-      config: { ...interruptionConfig, reviewStatus: business?.pricing?.verified ? "verified" : "needs_owner_confirmation", messageType: "verified_pricing", dataSource: "verified_business_knowledge", requiresVerifiedData: true },
-    },
+    answerFromKnowledge("pricing", "Pricing", "pricing", "pricing", {
+      conditional: true,
+      reviewStatus: business?.pricing?.verified ? "verified" : "needs_owner_confirmation",
+    }),
     {
       id: "try-demo",
       type: "redirect",

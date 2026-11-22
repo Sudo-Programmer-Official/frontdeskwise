@@ -42,6 +42,7 @@ import {
   type ActionOrigin,
   type ActionReviewReason,
   type ActionSourceType,
+  type ActionStep,
   type BusinessActionType,
   type ConversationActionState,
 } from "./action-flows.js";
@@ -133,6 +134,8 @@ import { isExplicitHumanRequest } from "./handoff-policy.js";
 import {
   assertConversationRuntimeState,
   buildConversationRuntimeState,
+  handoffSuppressesAi,
+  handoffShouldEnterFollowUp,
   runtimeHandoffState,
   safeConversationRuntimeState,
 } from "./conversation-runtime.js";
@@ -478,7 +481,7 @@ type DemoAuditInput = {
   metadata?: Record<string, unknown>;
 };
 
-type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
+type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
 type HandoffNotificationStatus = "sent" | "pending" | "failed" | null;
 const CONVERSATION_RESUME_WINDOW_MS = 24 * 60 * 60 * 1_000;
 // Visitor turns for one conversation must be processed in arrival order. The
@@ -490,6 +493,7 @@ type TeamRole = "owner" | "admin" | "staff" | "viewer";
 type ConversationEventType =
   | "AI_HANDOFF_REQUESTED"
   | "STAFF_NOTIFIED"
+  | "HANDOFF_FOLLOW_UP_PENDING"
   | "STAFF_ASSIGNED"
   | "HUMAN_JOINED"
   | "MESSAGE_SENT_BY_HUMAN"
@@ -557,6 +561,7 @@ type HandoffNotificationSettings = {
   defaultRecipientEmail: string | null;
   additionalRecipientEmails: string[];
   handoffDelaySeconds: 0 | 120 | 300;
+  handoffTimeoutSeconds: 120 | 300 | 600 | 900 | 1800;
   repeatEnabled: boolean;
   repeatAfterSeconds: number;
   notifyExplicitHumanRequest: boolean;
@@ -570,6 +575,7 @@ const defaultHandoffNotificationSettings: HandoffNotificationSettings = {
   defaultRecipientEmail: null,
   additionalRecipientEmails: [],
   handoffDelaySeconds: 0,
+  handoffTimeoutSeconds: 900,
   repeatEnabled: false,
   repeatAfterSeconds: 600,
   notifyExplicitHumanRequest: true,
@@ -1156,11 +1162,16 @@ function normalizedNotificationEmails(value: unknown): string[] {
 function handoffNotificationSettingsPayload(row?: Record<string, unknown>): HandoffNotificationSettings {
   const delay = Number(row?.handoff_delay_seconds ?? defaultHandoffNotificationSettings.handoffDelaySeconds);
   const handoffDelaySeconds: 0 | 120 | 300 = delay === 120 || delay === 300 ? delay : 0;
+  const timeout = Number(row?.handoff_timeout_seconds ?? defaultHandoffNotificationSettings.handoffTimeoutSeconds);
+  const handoffTimeoutSeconds: HandoffNotificationSettings["handoffTimeoutSeconds"] = [120, 300, 600, 900, 1800].includes(timeout)
+    ? timeout as HandoffNotificationSettings["handoffTimeoutSeconds"]
+    : defaultHandoffNotificationSettings.handoffTimeoutSeconds;
   return {
     enabled: row?.handoff_enabled !== false,
     defaultRecipientEmail: normalizedNotificationEmail(row?.default_recipient_email),
     additionalRecipientEmails: normalizedNotificationEmails(row?.additional_recipient_emails),
     handoffDelaySeconds,
+    handoffTimeoutSeconds,
     repeatEnabled: row?.repeat_enabled === true,
     repeatAfterSeconds: Math.max(60, Math.min(86_400, Number(row?.repeat_after_seconds ?? 600))),
     notifyExplicitHumanRequest: row?.notify_explicit_human_request !== false,
@@ -3207,7 +3218,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         sessionId: String(conversation.session_id),
         leadCaptured: Boolean(conversation.lead_captured),
         actionTaken: typeof conversation.action_taken === "string" ? conversation.action_taken : null,
-        status: conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF"
+        status: conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING"
           || conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "RESOLVED" || conversation.status === "EXPIRED"
           ? conversation.status : "AI_ACTIVE",
         assignedUserId: typeof conversation.assigned_user_id === "string" ? conversation.assigned_user_id : null,
@@ -6480,7 +6491,7 @@ function inboxConversationPayload(business: Business, conversation: Conversation
       completedAt: actionState.completedAt ?? null,
       values: Object.fromEntries(Object.entries(actionState.values).filter(([, value]) => typeof value === "string").slice(0, 50)),
       handoffRequired: action.completion.requiresStaff,
-      handoffState: conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
+          handoffState: conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
       ...(action.steps?.length ? { workflow: workflowSummary(action, actionState) } : {}),
     } : null,
     lastMessage: latestMessage ? inboxMessagePayload(latestMessage) : null,
@@ -6572,6 +6583,7 @@ type RetrievalContext = {
 type ActiveWorkflowAnswerContext = {
   action: ActionFlow;
   state: ConversationActionState;
+  step?: ActionStep;
 };
 
 function workflowAudienceTerms(workflow?: ActiveWorkflowAnswerContext): { target: RegExp; competing: RegExp } | null {
@@ -6628,6 +6640,12 @@ function canonicalBusinessFactsForAnswer(business: Business): BusinessFact[] {
   return canonicalBusinessFactsForRuntime(business).map(({ raw }) => raw);
 }
 
+function verifiedBusinessFactsForAnswer(business: Business): BusinessFact[] {
+  return canonicalBusinessFactsForRuntime(business)
+    .filter(({ canonical }) => canonical.status === "VERIFIED")
+    .map(({ raw }) => raw);
+}
+
 function looksLikeBusinessDescriptor(value: string): boolean {
   return /local[_ -]?business|salon management software|management software|more bookings|software for|^business$/i.test(value.trim());
 }
@@ -6653,6 +6671,19 @@ function customerFallbackMessage(business: Business): string {
   const configured = business.agentConfig.fallbackMessage.trim();
   if (!configured) return "I don’t have enough verified information to answer that confidently.";
   return canonicalizeCustomerCopy(business, configured);
+}
+
+function knowledgeUnavailableMessage(
+  business: Business,
+  intent: RetrievalIntent,
+  step?: ActionStep,
+): string {
+  if (step?.type === "knowledge" && step.config?.unavailableBehavior === "say_not_verified") {
+    const configuredTopic = typeof step.config.allowedFacts === "string" ? step.config.allowedFacts : "";
+    const topic = configuredTopic === "pricing" ? "pricing" : configuredTopic === "policies" ? "policy" : intent === "general" ? "that information" : intent;
+    return `I don’t have verified ${topic} information yet.`;
+  }
+  return knowledgeGapMessage(customerBusinessName(business), intent);
 }
 
 function canonicalizeCustomerCopy(business: Business, copy: string): string {
@@ -6697,11 +6728,23 @@ function canonicalVerifiedPricingFactsForAnswer(business: Business): BusinessFac
     .map(({ raw }) => raw);
 }
 
-function workflowScopedFacts(business: Business, workflow?: ActiveWorkflowAnswerContext): BusinessFact[] {
+function workflowScopedFacts(business: Business, workflow?: ActiveWorkflowAnswerContext, step?: ActionStep): BusinessFact[] {
   const audience = workflowAudienceTerms(workflow);
-  const facts = canonicalBusinessFactsForAnswer(business);
-  if (!audience) return facts;
+  const config = step?.config ?? {};
+  const facts = step?.type === "knowledge" && config.knowledgeSource === "verified_business_knowledge"
+    ? verifiedBusinessFactsForAnswer(business)
+    : canonicalBusinessFactsForAnswer(business);
+  const allowedFacts = typeof config.allowedFacts === "string" ? config.allowedFacts.toLowerCase() : "all";
+  const allowedKinds: Record<string, Set<BusinessFact["kind"]>> = {
+    pricing: new Set(["pricing"]),
+    policies: new Set(["policy"]),
+    services: new Set(["service"]),
+    locations: new Set(["location", "hours"]),
+  };
+  const kindFilter = allowedKinds[allowedFacts];
   return facts.filter((fact) => {
+    if (kindFilter && !kindFilter.has(fact.kind)) return false;
+    if (!audience) return true;
     if (fact.kind !== "pricing") return true;
     const text = `${fact.subject} ${fact.predicate} ${fact.valueText}`;
     return !(audience.competing.test(text) && !audience.target.test(text));
@@ -7165,7 +7208,7 @@ function structuredFactAnswer(
 async function answerQuestion(
   business: Business,
   question: string,
-  options: { recordGap?: boolean; conversation?: Conversation; currentPage?: string | null; workflow?: ActiveWorkflowAnswerContext } = {},
+  options: { recordGap?: boolean; conversation?: Conversation; currentPage?: string | null; workflow?: ActiveWorkflowAnswerContext; workflowStep?: ActionStep } = {},
 ) {
   const answerStartedAt = performance.now();
   const performanceTiming = {
@@ -7222,10 +7265,13 @@ async function answerQuestion(
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
-  const scopedFacts = workflowScopedFacts(business, options.workflow);
+  const workflowStep = options.workflowStep ?? options.workflow?.step;
+  const scopedFacts = workflowScopedFacts(business, options.workflow, workflowStep);
   const primaryCtaForAnswer = options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, initialIntent));
+  const allowedFacts = typeof workflowStep?.config?.allowedFacts === "string" ? workflowStep.config.allowedFacts : "all";
   const structured = initialIntent === "pricing"
-    ? workflowPricingAnswer(business, options.workflow) ?? structuredFactAnswer(business, question, initialIntent, canonicalVerifiedPricingFactsForAnswer(business))
+    ? (allowedFacts === "pricing" || allowedFacts === "all" ? workflowPricingAnswer(business, options.workflow) : null)
+      ?? structuredFactAnswer(business, question, initialIntent, allowedFacts === "pricing" || allowedFacts === "all" ? canonicalVerifiedPricingFactsForAnswer(business) : scopedFacts)
     : structuredFactAnswer(business, question, initialIntent, scopedFacts);
   if (structured) {
     const modelUsage: ModelUsage = {
@@ -7277,7 +7323,7 @@ async function answerQuestion(
       latencyMs: 0,
     };
     return {
-      answer: knowledgeGapMessage(customerBusinessName(business), "pricing"),
+      answer: knowledgeUnavailableMessage(business, initialIntent, workflowStep),
       grounded: false,
       citations: [],
       knowledgeGap: gap,
@@ -7448,9 +7494,9 @@ async function answerQuestion(
     });
     const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question, intent, gapReason);
     return {
-      answer: cancellationRequested
+      answer: cancellationRequested && !(workflowStep?.type === "knowledge" && workflowStep.config?.unavailableBehavior === "say_not_verified")
         ? `I don’t have enough verified information about ${customerBusinessName(business)}'s cancellation terms to answer that confidently. I can help you contact the team if you’d like.`
-        : knowledgeGapMessage(customerBusinessName(business), intent),
+        : knowledgeUnavailableMessage(business, intent, workflowStep),
       grounded: false,
       citations: [],
       knowledgeGap: gap,
@@ -7509,7 +7555,7 @@ type ActionFormSchema = {
   fields: Array<ActionFlow["fields"][number] & { value?: string }>;
 };
 
-type ConversationAnswerResult = Omit<AnswerResult, "failure"> & {
+type ConversationAnswerResult = Omit<AnswerResult, "failure" | "action"> & {
   recommendation?: {
     recommendedPlan: string;
     verifiedPrice: string | null;
@@ -7537,6 +7583,7 @@ type ConversationAnswerResult = Omit<AnswerResult, "failure"> & {
     key: string;
     status: "active" | "completed";
     captureMode: ConversationActionState["captureMode"];
+    conversionAvailable?: boolean;
     nextField?: string;
     linkUrl?: string;
     linkLabel?: string;
@@ -7615,6 +7662,7 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
     key: action.key,
     status: state.status,
     captureMode: state.captureMode,
+    conversionAvailable: state.conversionAvailable === true,
     ...(next ? { nextField: next.key } : {}),
     ...(state.status === "completed" && completionUrl
       ? { linkUrl: completionUrl, linkLabel: action.completion.linkLabel ?? action.completion.submitLabel ?? "Continue" }
@@ -7631,6 +7679,7 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
 }
 
 function actionAnswer(action: ActionFlow, state: ConversationActionState, answer: string, primaryCta?: PrimaryCta | null): ConversationAnswerResult {
+  if (primaryCta) state.conversionAvailable = true;
   const modelUsage: ModelUsage = {
     route: "tier0",
     model: null,
@@ -7663,14 +7712,17 @@ function actionAnswerWithKnowledge(
   primaryCta?: PrimaryCta | null,
 ): ConversationAnswerResult {
   // An interruption is still inside the active journey. Knowledge answers
-  // must not smuggle the global primary CTA or a generic lead form into it.
+  // must not smuggle a global primary CTA or a generic lead form into it.
+  // The workflow-owned CTA is different: once conversion is available it is
+  // part of the saved conversation state and should survive side questions.
   const { primaryCta: _primaryCta, quickActions: _quickActions, ...knowledgeAnswer } = result;
   const conciseAnswer = question && classifyQuestionIntent(question) === "pricing" && result.knowledgeGap && !result.grounded
     ? "I don't have verified pricing information yet."
     : result.answer;
+  if (primaryCta) state.conversionAvailable = true;
   return {
     ...knowledgeAnswer,
-    answer: `${conciseAnswer}\n\n${prompt}`,
+    answer: prompt.trim() ? `${conciseAnswer}\n\n${prompt}` : conciseAnswer,
     action: actionStatePayload(action, state),
     ...(primaryCta ? { primaryCta } : {}),
   };
@@ -7697,6 +7749,30 @@ function directLinkCustomerMessage(business: Business, action: ActionFlow): stri
 }
 
 const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
+
+function configuredKnowledgeStepForQuestion(action: ActionFlow, question: string): ActionStep | null {
+  const intent = classifyQuestionIntent(question);
+  const aliases: Record<string, string[]> = {
+    pricing: ["pricing", "price", "cost", "fee", "rate"],
+    policy: ["policy", "policies", "cancellation", "cancel", "refund", "warranty"],
+    services: ["service", "services", "feature", "features", "capability", "capabilities", "integration", "integrations"],
+    hours: ["hours", "open", "opening", "close", "closing"],
+    location: ["location", "locations", "address", "where"],
+    contact: ["contact", "phone", "email", "call"],
+    privacy: ["privacy", "data", "security"],
+  };
+  const terms = aliases[intent] ?? [intent];
+  const questionText = question.toLowerCase();
+  return (action.steps ?? []).find((step) => {
+    if (step.type !== "knowledge") return false;
+    const topic = typeof step.config?.topic === "string" ? step.config.topic : step.label ?? "";
+    const normalizedTopic = topic.toLowerCase();
+    const topicTokens = normalizedTopic.split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
+    return normalizedTopic.trim()
+      ? terms.some((term) => normalizedTopic.includes(term)) || topicTokens.some((token) => questionText.includes(token))
+      : terms.some((term) => questionText.includes(term));
+  }) ?? null;
+}
 
 function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>, business?: Business): string {
   if (step.type === "recommend" || step.type === "select") {
@@ -7748,9 +7824,10 @@ async function workflowResumePlanForConversation(
   business: Business,
   action: ActionFlow,
   state: ConversationActionState,
+  options: { allowStaffSensitiveActions?: boolean } = {},
 ): Promise<WorkflowResumePlan> {
   const plan = recomputeWorkflowResume(action, state);
-  const automatedStep = await advanceWorkflowAutomation(business, action, state);
+  const automatedStep = await advanceWorkflowAutomation(business, action, state, options);
   return { ...plan, step: automatedStep ?? currentWorkflowStep(action, state) };
 }
 
@@ -7759,14 +7836,43 @@ function workflowResumePrompt(
   state: ConversationActionState,
   plan: WorkflowResumePlan,
   business: Business,
+  question = "",
 ): string {
   const step = plan.step;
   const context = workflowCapturedContext(action, state);
   if (step?.type === "redirect" && context) {
+    if (state.conversionAvailable === true && !asksHowToProceed(question)) return "";
     const brand = assistantBrandName(business);
     return `Based on what you’ve told me — ${context} — ${brand} may be a good fit. Ready to see how ${brand} works?`;
   }
   return step ? workflowPrompt(action, state, step, business) : "The workflow is ready to continue.";
+}
+
+function asksHowToProceed(question: string): boolean {
+  return /\b(?:how do i|how can i|what do i do|what(?:'s| is) next|how should i proceed|how do i proceed|where do i start|how can i try|how do i try)\b/i.test(question.trim())
+    || /\bnext step\b/i.test(question.trim());
+}
+
+function workflowRedirectPrompt(
+  action: ActionFlow,
+  state: ConversationActionState,
+  step: NonNullable<ReturnType<typeof currentWorkflowStep>>,
+  plan: WorkflowResumePlan,
+  business: Business,
+  question: string,
+): string {
+  const prompt = plan.skippedStepIds.length
+    ? workflowResumePrompt(action, state, plan, business, question)
+    : workflowPrompt(action, state, step, business);
+  if (step.config?.normalConversionEndpoint === true && state.conversionAvailable === true && !asksHowToProceed(question)) return "";
+  return prompt;
+}
+
+function workflowUpdateAcknowledgement(state: ConversationActionState, updatedKeys: string[]): string {
+  const goalKey = updatedKeys.find((key) => /goal|objective|priority/i.test(key));
+  const goal = goalKey ? state.values[goalKey]?.trim() : "";
+  if (goal) return `Got it — I’ve updated your focus to ${goal.toLowerCase()}.`;
+  return "Got it — I’ve updated your workflow details.";
 }
 
 function workflowRequiredFieldsCaptured(action: ActionFlow, state: ConversationActionState): boolean {
@@ -7972,15 +8078,33 @@ async function resolveWorkflowActionResources(
   });
 }
 
+function waitingForStaff(conversation: Conversation): boolean {
+  return conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED" || conversation.status === "FOLLOW_UP_PENDING";
+}
+
+function staffSensitiveWorkflowStep(action: ActionFlow, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): boolean {
+  if (action.safetyPolicy === "manual_review" || action.safetyPolicy === "healthcare_emergency") return true;
+  return ["create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type);
+}
+
+function waitingActionHoldAnswer(action: ActionFlow, state: ConversationActionState): string {
+  const step = currentWorkflowStep(action, state);
+  if (step?.type === "book") return "I’ve captured that request. A team member will finalize the booking while they review this conversation.";
+  if (step?.type === "api_action") return "I’ve captured that request. A team member will review it before anything is changed.";
+  return "I’ve saved those details. A team member will review the next step, and I can still answer questions while you wait.";
+}
+
 async function advanceWorkflowAutomation(
   business: Business,
   action: ActionFlow,
   state: ConversationActionState,
+  options: { allowStaffSensitiveActions?: boolean } = {},
 ): Promise<NonNullable<ReturnType<typeof currentWorkflowStep>> | null> {
   let step = currentWorkflowStep(action, state);
   const visited = new Set<string>();
   while (step && !visited.has(step.id) && ["lookup", "recommend", "generate_link", "create_lead", "book", "api_action", "notify", "handoff", "complete"].includes(step.type)
     && (step.type !== "recommend" || isPlanSelectionWorkflow(action) || !step.config?.sourceStepId)) {
+    if (options.allowStaffSensitiveActions === false && staffSensitiveWorkflowStep(action, step)) break;
     visited.add(step.id);
     if (step.type === "lookup" || step.type === "recommend") {
         const cachedResult = state.lookupResults?.[step.id];
@@ -8073,6 +8197,7 @@ async function continueWorkflowActionConversation(
   if (!state.currentStepId) state.currentStepId = action.steps?.[0]?.id;
   const repeatable = repeatableWorkflowConfig(action);
   if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
+  const automationOptions = { allowStaffSensitiveActions: !waitingForStaff(conversation) };
 
   // Decide whether this is a side question before extracting values. A pricing
   // question can mention a competing audience (for example, "what does the
@@ -8122,21 +8247,25 @@ async function continueWorkflowActionConversation(
     ? initialOrchestration
     : decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
   const isSideQuestion = orchestration.route === "INTERRUPTION";
+  const knowledgeStep = configuredKnowledgeStepForQuestion(action, question);
   if (orchestration.route === "EXPLICIT_ACTION") {
     return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "What would you like to do?"}`);
   }
   if (isSideQuestion) {
-    const resumePlan = await workflowResumePlanForConversation(business, action, state);
+    const resumePlan = await workflowResumePlanForConversation(business, action, state, automationOptions);
     pushWorkflowInterruption(state, {
       intent: orchestration.interruptionIntent ?? classifyQuestionIntent(question),
       question,
       returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
-    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
+    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state, step: knowledgeStep ?? undefined }, workflowStep: knowledgeStep ?? undefined });
     const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
       ? workflowCtaForStep(business, action, resumePlan.step)
       : null;
-    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question, resumeCta);
+    const resumePrompt = waitingForStaff(conversation) && resumePlan.step && staffSensitiveWorkflowStep(action, resumePlan.step)
+      ? waitingActionHoldAnswer(action, state)
+      : workflowResumePrompt(action, state, resumePlan, business, question);
+    return actionAnswerWithKnowledge(knowledge, action, state, resumePrompt, question, resumeCta);
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
@@ -8144,22 +8273,26 @@ async function continueWorkflowActionConversation(
   }
 
   if (!extracted.updated.length && actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
-    const resumePlan = await workflowResumePlanForConversation(business, action, state);
+    const resumePlan = await workflowResumePlanForConversation(business, action, state, automationOptions);
     pushWorkflowInterruption(state, {
       intent: classifyQuestionIntent(question),
       question,
       returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
-    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
+    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state, step: knowledgeStep ?? undefined }, workflowStep: knowledgeStep ?? undefined });
     const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
       ? workflowCtaForStep(business, action, resumePlan.step)
       : null;
-    return actionAnswerWithKnowledge(knowledge, action, state, workflowResumePrompt(action, state, resumePlan, business), question, resumeCta);
+    const resumePrompt = waitingForStaff(conversation) && resumePlan.step && staffSensitiveWorkflowStep(action, resumePlan.step)
+      ? waitingActionHoldAnswer(action, state)
+      : workflowResumePrompt(action, state, resumePlan, business, question);
+    return actionAnswerWithKnowledge(knowledge, action, state, resumePrompt, question, resumeCta);
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
-  let step = await advanceWorkflowAutomation(business, action, state);
+  let step = await advanceWorkflowAutomation(business, action, state, automationOptions);
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
+  if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const initialResumePlan = recomputeWorkflowResume(action, state);
   step = initialResumePlan.step ?? step;
   state.currentStepId = step.id;
@@ -8195,12 +8328,13 @@ async function continueWorkflowActionConversation(
   }
 
   if (step.type === "redirect") {
-    const prompt = initialResumePlan.skippedStepIds.length
-      ? workflowResumePrompt(action, state, initialResumePlan, business)
-      : workflowPrompt(action, state, step, business);
+    const prompt = workflowRedirectPrompt(action, state, step, initialResumePlan, business, question);
     const cta = workflowCtaForStep(business, action, step);
     const showCta = explicitConversionRequest || (step.config?.normalConversionEndpoint === true && workflowRequiredFieldsCaptured(action, state));
-    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, showCta ? cta : null);
+    const answer = explicitConversionRequest
+      ? directLinkCustomerMessage(business, action)
+      : prompt || (extracted.updated.length ? workflowUpdateAcknowledgement(state, extracted.updated) : "Got it — the workflow is ready when you are.");
+    return actionAnswer(action, state, answer, showCta ? cta : null);
   }
 
   if (starting) {
@@ -8231,8 +8365,9 @@ async function continueWorkflowActionConversation(
     transitionWorkflow(action, state, step.id);
     const selectionStep = currentWorkflowStep(action, state);
     if (step.type === "recommend" && selectionStep?.type === "select") transitionWorkflow(action, state, selectionStep.id);
-    const next = await advanceWorkflowAutomation(business, action, state);
+    const next = await advanceWorkflowAutomation(business, action, state, automationOptions);
     if (!next || state.status === "completed") return completeActionConversation(business, conversation, action, state);
+    if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, next)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
     state.currentStepId = next.id;
     if (next.type === "form") {
       state.formShown = true;
@@ -8286,18 +8421,20 @@ async function continueWorkflowActionConversation(
     }
   }
 
-  step = await advanceWorkflowAutomation(business, action, state);
+  step = await advanceWorkflowAutomation(business, action, state, automationOptions);
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
+  if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const finalResumePlan = recomputeWorkflowResume(action, state);
   step = finalResumePlan.step ?? step;
   state.currentStepId = step.id;
   if (step.type === "redirect") {
-    const prompt = finalResumePlan.skippedStepIds.length
-      ? workflowResumePrompt(action, state, finalResumePlan, business)
-      : workflowPrompt(action, state, step, business);
+    const prompt = workflowRedirectPrompt(action, state, step, finalResumePlan, business, question);
     const cta = workflowCtaForStep(business, action, step);
     const showCta = explicitConversionRequest || (step.config?.normalConversionEndpoint === true && workflowRequiredFieldsCaptured(action, state));
-    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, showCta ? cta : null);
+    const answer = explicitConversionRequest
+      ? directLinkCustomerMessage(business, action)
+      : prompt || (extracted.updated.length ? workflowUpdateAcknowledgement(state, extracted.updated) : "Got it — the workflow is ready when you are.");
+    return actionAnswer(action, state, answer, showCta ? cta : null);
   }
   if (step.type === "form") {
     state.formShown = true;
@@ -8690,8 +8827,9 @@ async function submitActionForm(
     state.formShown = false;
     const formStep = currentWorkflowStep(action, state);
     if (formStep?.type === "form") transitionWorkflow(action, state, formStep.id);
-    const next = await advanceWorkflowAutomation(business, action, state);
+    const next = await advanceWorkflowAutomation(business, action, state, { allowStaffSensitiveActions: !waitingForStaff(conversation) });
     if (!next || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
+    if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, next)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
     state.currentStepId = next.id;
     if (next.type === "form") {
       state.formShown = true;
@@ -9002,7 +9140,7 @@ function maybeConversation(business: Business, conversationId: string): Conversa
 }
 
 function runtimeCtasForConversation(business: Business, conversation: Conversation): PrimaryCta[] {
-  if (runtimeHandoffState(conversation.status) !== "AI_ACTIVE") return [];
+  if (handoffSuppressesAi(runtimeHandoffState(conversation.status))) return [];
   const state = conversation.actionState;
   const action = state ? business.actions.find((candidate) => candidate.id === state.actionId) ?? null : null;
   if (!action || !state) return [];
@@ -9043,6 +9181,7 @@ function conversationStatusPayload(conversation: Conversation, business?: Busine
     } : null,
     assignedUserId: conversation.assignedUserId,
     handoffReason: conversation.handoffReason,
+    handoffRequestedAt: conversation.handoffRequestedAt,
     handoffNotificationStatus: conversation.handoffNotificationStatus,
     unreadCount: conversation.unreadCount,
     lastActivityAt: conversation.lastActivityAt,
@@ -9363,8 +9502,8 @@ function handoffAnswer(business: Business, reason: string, notificationStatus: E
   };
   return {
     answer: notificationStatus === "sent"
-      ? "Your message has been sent to the team. A team member will reply here shortly."
-      : "Your message has been saved for the team. A team member will reply here shortly.",
+      ? "Your message has been sent to the team. A team member will reply here shortly. I’m still here if you have another question while you wait."
+      : "Your message has been saved for the team. A team member will reply here shortly. I’m still here if you have another question while you wait.",
     grounded: false,
     citations: [],
     knowledgeGap: null,
@@ -9410,6 +9549,26 @@ async function requestHandoff(business: Business, conversation: Conversation, re
   return handoffAnswer(business, reason, notificationStatus);
 }
 
+async function refreshHandoffLifecycle(
+  business: Business,
+  conversation: Conversation,
+  settings?: HandoffNotificationSettings,
+): Promise<void> {
+  const handoffState = runtimeHandoffState(conversation.status);
+  if (handoffState !== "WAITING_FOR_STAFF") return;
+  const handoffSettings = settings ?? await loadHandoffNotificationSettings(business);
+  if (!handoffShouldEnterFollowUp(handoffState, conversation.handoffRequestedAt, handoffSettings.handoffTimeoutSeconds)) return;
+  const now = new Date().toISOString();
+  conversation.status = "FOLLOW_UP_PENDING";
+  conversation.lastActivityAt = now;
+  conversation.updatedAt = now;
+  await persistConversation(business, conversation);
+  await recordConversationEvent(business, conversation, "HANDOFF_FOLLOW_UP_PENDING", "system", null, {
+    handoffRequestedAt: conversation.handoffRequestedAt,
+    timeoutSeconds: handoffSettings.handoffTimeoutSeconds,
+  });
+}
+
 function conversationIsTerminal(conversation: Conversation): boolean {
   return conversation.status === "RESOLVED" || conversation.status === "EXPIRED";
 }
@@ -9438,7 +9597,9 @@ async function startConversation(business: Business, sessionId: string | null, o
     const sessionConversations = [...business.conversations.values()]
       .filter((conversation) => conversation.sessionId === normalizedSessionId && !conversationIsTerminal(conversation))
       .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
+    const handoffSettings = await loadHandoffNotificationSettings(business);
     for (const conversation of sessionConversations) {
+      await refreshHandoffLifecycle(business, conversation, handoffSettings);
       if (!conversationIsWithinResumeWindow(conversation)) await expireConversation(business, conversation);
     }
     const recentConversation = sessionConversations.find((conversation) => conversation.status !== "EXPIRED" && conversationIsWithinResumeWindow(conversation));
@@ -9474,6 +9635,7 @@ async function conversationForIncomingMessage(
   conversation: Conversation,
   sessionId?: string | null,
 ): Promise<Conversation> {
+  await refreshHandoffLifecycle(business, conversation);
   if (conversationIsTerminal(conversation)) {
     return startConversation(business, sessionId?.trim() ? sessionId : conversation.sessionId, { forceNew: true });
   }
@@ -9625,7 +9787,7 @@ async function persistConversationExchange(
   }
   conversation.updatedAt = now;
   conversation.lastActivityAt = now;
-  if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "WAITING_FOR_STAFF") {
+  if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING") {
     conversation.unreadCount += 1;
     await recordConversationEvent(business, conversation, "VISITOR_REPLIED", "visitor", null, { contentLength: userContent.length });
     if (conversation.status === "HUMAN_ACTIVE" && conversation.assignedUserId) {
@@ -9639,7 +9801,7 @@ async function persistConversationExchange(
   await persistMessage(conversation, userMessage);
   if (assistantMessage) await persistMessage(conversation, assistantMessage);
   await persistConversation(business, conversation);
-  if (!result.handoff && conversation.status === "AI_ACTIVE") {
+  if (!result.handoff && (conversation.status === "AI_ACTIVE" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING")) {
     await recordConversationEvent(business, conversation, "AI_RESPONSE_SENT", "ai", null, { grounded: result.grounded });
   }
   if (traceContext) {
@@ -9734,17 +9896,8 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
     };
     return persistTurn(result);
   }
-  if (conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED") {
-    // Waiting is authoritative. A visitor's next message must never reopen AI
-    // or switch to a new action; only staff's Return to AI transition may do
-    // that. This also prevents an old sales CTA from leaking after handoff.
-    const result = {
-      ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
-      answer: "",
-      silent: true,
-    };
-    return persistTurn(result);
-  }
+  // WAITING_FOR_STAFF is a notification state, not a reply lock. The visitor
+  // can continue verified questions and low-risk workflow work while waiting.
   let result: ConversationAnswerResult;
   try {
     result = await continueActionConversation(business, conversation, question, { sourcePage: options.currentPage })
@@ -9777,7 +9930,8 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
     ))
   );
   const workflowOwnsTurn = Boolean(activeWorkflow && conversation.actionState?.status === "active");
-  if (workflowOwnsTurn && result.primaryCta && !explicitConversionIntent) {
+  const conversionAvailable = activeWorkflow?.state.conversionAvailable === true;
+  if (workflowOwnsTurn && result.primaryCta && !explicitConversionIntent && !conversionAvailable) {
     const { primaryCta: _primaryCta, ...withoutPrimaryCta } = result;
     result = withoutPrimaryCta;
   }
@@ -9790,7 +9944,7 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
   // A staff takeover can happen while retrieval or generation is in flight.
   // Do not commit an AI answer after the authoritative status has changed.
   const statusAfterProcessing = conversation.status as ConversationStatus;
-  if (statusAfterProcessing === "WAITING_FOR_STAFF" || statusAfterProcessing === "HANDOFF_REQUESTED" || statusAfterProcessing === "HUMAN_ACTIVE" || statusAfterProcessing === "AI_ASSISTED") {
+  if (statusAfterProcessing === "HUMAN_ACTIVE" || statusAfterProcessing === "AI_ASSISTED") {
     result = {
       ...handoffAnswer(business, conversation.handoffReason ?? "A team member has been requested"),
       answer: "",
@@ -11235,6 +11389,8 @@ app.patch("/api/v1/demo/:slug/notification-settings", async (request) => {
   }
   const rawDelay = body.handoffDelaySeconds === undefined ? 0 : Number(body.handoffDelaySeconds);
   if (![0, 120, 300].includes(rawDelay)) throw httpError(400, "handoffDelaySeconds must be 0, 120, or 300");
+  const rawHandoffTimeout = body.handoffTimeoutSeconds === undefined ? 900 : Number(body.handoffTimeoutSeconds);
+  if (![120, 300, 600, 900, 1800].includes(rawHandoffTimeout)) throw httpError(400, "handoffTimeoutSeconds must be 120, 300, 600, 900, or 1800");
   const rawRepeatAfter = body.repeatAfterSeconds === undefined ? 600 : Number(body.repeatAfterSeconds);
   if (!Number.isInteger(rawRepeatAfter) || rawRepeatAfter < 60 || rawRepeatAfter > 86_400) throw httpError(400, "repeatAfterSeconds must be between 60 and 86400");
   const settings = {
@@ -11242,6 +11398,7 @@ app.patch("/api/v1/demo/:slug/notification-settings", async (request) => {
     defaultRecipientEmail,
     additionalRecipientEmails: normalizedNotificationEmails(body.additionalRecipientEmails),
     handoffDelaySeconds: rawDelay as 0 | 120 | 300,
+    handoffTimeoutSeconds: rawHandoffTimeout as HandoffNotificationSettings["handoffTimeoutSeconds"],
     repeatEnabled: body.repeatEnabled === true,
     repeatAfterSeconds: rawRepeatAfter,
     notifyExplicitHumanRequest: body.notifyExplicitHumanRequest !== false,
@@ -11252,14 +11409,15 @@ app.patch("/api/v1/demo/:slug/notification-settings", async (request) => {
   await pool.query(
     `insert into business_notification_settings
        (business_id, handoff_enabled, default_recipient_email, additional_recipient_emails,
-        handoff_delay_seconds, repeat_enabled, repeat_after_seconds,
+        handoff_delay_seconds, handoff_timeout_seconds, repeat_enabled, repeat_after_seconds,
         notify_explicit_human_request, notify_knowledge_gap, notify_high_value_lead, notify_every_lead, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
      on conflict (business_id) do update set
        handoff_enabled = excluded.handoff_enabled,
        default_recipient_email = excluded.default_recipient_email,
        additional_recipient_emails = excluded.additional_recipient_emails,
        handoff_delay_seconds = excluded.handoff_delay_seconds,
+       handoff_timeout_seconds = excluded.handoff_timeout_seconds,
        repeat_enabled = excluded.repeat_enabled,
        repeat_after_seconds = excluded.repeat_after_seconds,
        notify_explicit_human_request = excluded.notify_explicit_human_request,
@@ -11267,7 +11425,7 @@ app.patch("/api/v1/demo/:slug/notification-settings", async (request) => {
        notify_high_value_lead = excluded.notify_high_value_lead,
        notify_every_lead = excluded.notify_every_lead,
        updated_at = now()`,
-    [business.id, settings.enabled, settings.defaultRecipientEmail, JSON.stringify(settings.additionalRecipientEmails), settings.handoffDelaySeconds, settings.repeatEnabled, settings.repeatAfterSeconds, settings.notifyExplicitHumanRequest, settings.notifyKnowledgeGap, settings.notifyHighValueLead, settings.notifyEveryLead],
+    [business.id, settings.enabled, settings.defaultRecipientEmail, JSON.stringify(settings.additionalRecipientEmails), settings.handoffDelaySeconds, settings.handoffTimeoutSeconds, settings.repeatEnabled, settings.repeatAfterSeconds, settings.notifyExplicitHumanRequest, settings.notifyKnowledgeGap, settings.notifyHighValueLead, settings.notifyEveryLead],
   );
   return { ok: true, settings };
 });
@@ -13938,9 +14096,13 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  const handoffSettings = await loadHandoffNotificationSettings(business);
+  await Promise.all([...business.conversations.values()]
+    .filter((conversation) => conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF")
+    .map((conversation) => refreshHandoffLifecycle(business, conversation, handoffSettings)));
   const query = (request.query as Record<string, unknown> | undefined) ?? {};
   const status = optionalString(query.status, 40) as ConversationStatus | null;
-  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED", "EXPIRED"]);
+  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "FOLLOW_UP_PENDING", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED", "EXPIRED"]);
   if (status && !allowedStatuses.has(status)) throw httpError(400, "Unsupported conversation status filter");
   const assignedTo = optionalString(query.assignedTo, 80);
   const search = optionalString(query.q, 160)?.toLowerCase();
@@ -13958,7 +14120,7 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   const start = (page - 1) * limit;
   const conversations = filteredConversations.slice(start, start + limit);
   const summary = filteredConversations.reduce((result, conversation) => {
-    if (conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF") result.needsResponse += 1;
+    if (conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING") result.needsResponse += 1;
     if (conversation.status === "AI_ACTIVE" || conversation.status === "AI_ASSISTED") result.ai += 1;
     if (conversation.status === "RESOLVED") result.resolved += 1;
     result.unread += conversation.unreadCount ?? 0;
@@ -13977,6 +14139,7 @@ app.get("/api/v1/demo/:slug/conversations/:conversationId", async (request) => {
   const business = await getBusiness(params.slug);
   await requireBusinessTeamAccess(business, request, "viewer");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  await refreshHandoffLifecycle(business, conversation);
   let events = business.conversationEvents.filter((event) => event.conversationId === conversation.id);
   let notes = business.internalNotes.filter((note) => note.conversationId === conversation.id);
   if (pool) {
@@ -14073,7 +14236,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
       await client.query("begin");
       const update = await client.query(
         `update conversations set status = 'HUMAN_ACTIVE', assigned_user_id = $3, assigned_at = $4, human_joined_at = $4, unread_count = 0, last_activity_at = $4, updated_at = $4
-         where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'WAITING_FOR_STAFF', 'AI_ASSISTED')
+         where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'WAITING_FOR_STAFF', 'FOLLOW_UP_PENDING', 'AI_ASSISTED')
            and (assigned_user_id is null or assigned_user_id = $3 or $5 = true)
          returning id`,
         [conversation.id, business.id, persistedActorId, now, actor.role === "admin" || actor.role === "owner"],
@@ -14458,6 +14621,7 @@ app.get("/api/v1/widget/:siteKey/conversations/:conversationId", async (request)
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  await refreshHandoffLifecycle(business, conversation);
   return {
     conversation: conversationStatusPayload(conversation, business),
     messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload),
@@ -14469,7 +14633,8 @@ app.get("/api/v1/widget/:siteKey/conversations/:conversationId/status", async (r
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
-  return { conversation: conversationStatusPayload(conversation) };
+  await refreshHandoffLifecycle(business, conversation);
+  return { conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionId/submit", async (request) => {
@@ -14479,6 +14644,7 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionI
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
+  await refreshHandoffLifecycle(business, conversation);
   const body = asRecord(request.body);
   if (business.agentConfig.requireLeadConsent && body.consent !== true) {
     throw httpError(400, "Consent is required before sending your details.");

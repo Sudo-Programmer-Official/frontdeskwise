@@ -53,6 +53,7 @@ export type ActionStepType =
   | "ask"
   | "capture"
   | "form"
+  | "knowledge"
   | "condition"
   | "decision"
   | "lookup"
@@ -208,6 +209,8 @@ export type ConversationActionState = {
   captureMode: ResolvedActionCaptureMode;
   conversationalKeys: string[];
   formShown?: boolean;
+  /** A qualified conversion CTA is currently available to the visitor. */
+  conversionAvailable?: boolean;
   status: "active" | "completed";
   startedAt: string;
   completedAt?: string;

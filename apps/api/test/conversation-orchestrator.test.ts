@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createActionState, type ActionFlow } from "../src/action-flows.js";
-import { decideConversationRoute } from "../src/conversation-orchestrator.js";
+import { decideConversationRoute, isWorkflowCorrection } from "../src/conversation-orchestrator.js";
 import { applyWorkflowValues, currentWorkflowStep, extractWorkflowValues } from "../src/workflow-engine.js";
 
 const action = {
@@ -84,6 +84,36 @@ test("workflow answers containing knowledge keywords are not misrouted as interr
   assert.equal(decision.route, "WORKFLOW_CONTINUATION");
   assert.equal(decision.preserveWorkflowState, true);
   assert.equal(decision.interruptionIntent, null);
+});
+
+test("corrections stay in the workflow before knowledge fallback", () => {
+  const state = createActionState(planAction);
+  state.values = { usage_type: "Solo", main_goal: "Planning + reminders", usage_level: "Daily" };
+  state.currentStepId = "recommend-plan";
+
+  assert.equal(isWorkflowCorrection("Actually, reminders are the bigger problem for us."), true);
+  assert.equal(
+    decideConversationRoute({
+      message: "Actually, reminders are the bigger problem for us.",
+      activeAction: planAction,
+      actionState: state,
+    }).route,
+    "WORKFLOW_CONTINUATION",
+  );
+});
+
+test("natural pricing questions remain interruptions while a CTA is available", () => {
+  const state = createActionState(planAction);
+  state.currentStepId = "recommend-plan";
+  state.conversionAvailable = true;
+  const decision = decideConversationRoute({
+    message: "whats the price for a single salon",
+    activeAction: planAction,
+    actionState: state,
+  });
+
+  assert.equal(decision.route, "INTERRUPTION");
+  assert.equal(decision.interruptionIntent, "pricing");
 });
 
 test("an explicit plan recommendation request stays in the active workflow", () => {
@@ -197,6 +227,20 @@ test("workflow answers stay on the journey while explicit handoff takes priority
   const handoff = decideConversationRoute({ message: "Please connect me with a real person", activeAction: action, actionState: state });
   assert.equal(handoff.route, "HUMAN_HANDOFF");
   assert.equal(handoff.preserveWorkflowState, true);
+});
+
+test("waiting for staff keeps visitor questions available to AI", () => {
+  const state = createActionState(action);
+  const decision = decideConversationRoute({
+    message: "Does this integrate with Mindbody?",
+    activeAction: action,
+    actionState: state,
+    handoffState: "WAITING_FOR_STAFF",
+  });
+
+  assert.equal(decision.route, "INTERRUPTION");
+  assert.equal(decision.interruptionIntent, "services");
+  assert.equal(decision.handoffState, "WAITING_FOR_STAFF");
 });
 
 test("orchestrator distinguishes new action requests, general questions, and provider results", () => {

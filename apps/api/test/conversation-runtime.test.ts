@@ -5,6 +5,9 @@ import { decideConversationRoute } from "../src/conversation-orchestrator.js";
 import {
   assertConversationRuntimeState,
   buildConversationRuntimeState,
+  handoffSuppressesAi,
+  handoffShouldEnterFollowUp,
+  runtimeHandoffState,
   safeConversationRuntimeState,
 } from "../src/conversation-runtime.js";
 
@@ -72,13 +75,14 @@ test("runtime snapshot is the inspectable projection of workflow state", () => {
   assert.equal(runtime.workflowCursor, "capture-email");
   assert.equal(runtime.pendingQuestion?.fieldKey, "email");
   assert.equal(runtime.nextBestAction, "ASK_FIELD");
+  assert.equal(runtime.conversionAvailable, false);
   assert.equal(runtime.allowedCtas[0]?.key, "continue");
   assert.equal(runtime.businessContextVersion, 7);
   assertConversationRuntimeState(runtime);
   assert.equal(safeConversationRuntimeState({ ...runtime, collectedFields: { email: "visitor@example.com" } }).collectedFields.email, "[redacted]");
 });
 
-test("handoff authority clears CTA output and owns the next action", () => {
+test("waiting for staff preserves AI conversion state and owns the handoff status", () => {
   const state = createActionState(action);
   const runtime = buildConversationRuntimeState({
     businessId: "business-runtime",
@@ -88,8 +92,9 @@ test("handoff authority clears CTA output and owns the next action", () => {
     allowedCtas: [{ actionId: "runtime-cta", key: "continue", label: "Continue", executionMode: "DIRECT_LINK", trackingKey: "continue", url: "https://example.com" }],
   });
   assert.equal(runtime.handoffState, "WAITING_FOR_STAFF");
+  assert.equal(runtime.conversionAvailable, false);
   assert.equal(runtime.nextBestAction, "HANDOFF");
-  assert.deepEqual(runtime.allowedCtas, []);
+  assert.equal(runtime.allowedCtas[0]?.key, "continue");
   assertConversationRuntimeState(runtime);
 });
 
@@ -105,4 +110,14 @@ test("handoff state outranks provider results, explicit actions, and workflow co
   assert.equal(decision.route, "HUMAN_HANDOFF");
   assert.equal(decision.reason, "handoff_state_active");
   assert.equal(decision.handoffState, "HUMAN_ACTIVE");
+});
+
+test("follow-up pending keeps AI available after the configured timeout", () => {
+  const requestedAt = "2026-01-01T00:00:00.000Z";
+  const now = Date.parse("2026-01-01T00:15:00.000Z");
+  assert.equal(runtimeHandoffState("FOLLOW_UP_PENDING"), "FOLLOW_UP_PENDING");
+  assert.equal(handoffSuppressesAi("FOLLOW_UP_PENDING"), false);
+  assert.equal(handoffShouldEnterFollowUp("WAITING_FOR_STAFF", requestedAt, 900, now), true);
+  assert.equal(handoffShouldEnterFollowUp("WAITING_FOR_STAFF", requestedAt, 1_800, now), false);
+  assert.equal(handoffShouldEnterFollowUp("FOLLOW_UP_PENDING", requestedAt, 900, now), false);
 });

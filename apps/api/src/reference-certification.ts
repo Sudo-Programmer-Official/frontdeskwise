@@ -189,7 +189,7 @@ function salonFlow(): ReferenceBusiness {
       { id: "business-type", type: "capture", fieldKey: "business_type", question: "What kind of salon or beauty business do you run?" },
       { id: "main-goal", type: "capture", fieldKey: "main_goal", question: "What are you mainly trying to improve?" },
       { id: "capabilities", type: "recommend", label: "Relevant capabilities", config: { reviewStatus: "verified" } },
-      { id: "pricing", type: "ask", label: "Pricing and questions", question: "I can answer pricing and product questions from verified business knowledge.", config: { reviewStatus: "verified" } },
+      { id: "pricing", type: "knowledge", label: "Pricing", question: "Answer naturally from verified business knowledge.", config: { conditional: true, topic: "pricing", knowledgeSource: "verified_business_knowledge", allowedFacts: "pricing", verifiedBehavior: "answer_naturally", unavailableBehavior: "say_not_verified", resumeBehavior: "return_to_previous_step", ctaBehavior: "keep_current_if_available", reviewStatus: "verified", requiresVerifiedData: true } },
       { id: "try-demo", type: "redirect", label: "Try the demo", config: { actionKey: "try_demo", buttonLabel: "Try the demo", normalConversionEndpoint: true } },
       { id: "request-demo", type: "redirect", label: "Request a demo", config: { actionKey: "request_demo", buttonLabel: "Request a demo", trigger: "explicit_guided_demo_request", conditional: true } },
       { id: "support-handoff", type: "handoff", label: "Support / handoff", config: { trigger: "explicit_support_or_human_request", conditional: true } },
@@ -430,7 +430,7 @@ export function runReferenceTurn(business: ReferenceBusiness, prior: ReferenceSt
 
   const orchestration = decideConversationRoute({ message: turn.message, activeAction, actionState, handoffState });
   route = orchestration.route;
-  if (handoffState !== "AI_ACTIVE") {
+  if (handoffState === "HUMAN_ACTIVE" || handoffState === "AI_ASSISTED") {
     responseClass = "handoff_waiting";
   } else if (route === "HUMAN_HANDOFF") {
     handoffState = "WAITING_FOR_STAFF";

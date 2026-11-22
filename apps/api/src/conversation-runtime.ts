@@ -7,7 +7,7 @@ import { currentWorkflowStep, workflowField, workflowNextBestAction, workflowSum
  * resolved or expired conversation has no live routing authority; the active
  * states below are the only states that can suppress AI or CTAs.
  */
-export type RuntimeHandoffState = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HUMAN_ACTIVE" | "AI_ASSISTED" | null;
+export type RuntimeHandoffState = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | null;
 
 export type RuntimeRoute =
   | "GENERAL_QUESTION"
@@ -41,6 +41,7 @@ export type ConversationRuntimeState = {
   providerState: RuntimeProviderState;
   providerResult: { available: boolean; status: string | null };
   handoffState: RuntimeHandoffState;
+  conversionAvailable: boolean;
   nextBestAction: WorkflowNextBestAction | "HANDOFF" | null;
   allowedCtas: PrimaryCta[];
   businessContextVersion: number | null;
@@ -58,8 +59,25 @@ export type ConversationRuntimeInput = {
   allowedCtas?: PrimaryCta[];
 };
 
+/** Waiting for staff keeps AI available; only staff ownership suppresses AI/UI. */
+export function handoffSuppressesAi(status: RuntimeHandoffState): boolean {
+  return status === "HUMAN_ACTIVE" || status === "AI_ASSISTED";
+}
+
+export function handoffShouldEnterFollowUp(
+  status: RuntimeHandoffState,
+  handoffRequestedAt: string | null | undefined,
+  timeoutSeconds: number,
+  now = Date.now(),
+): boolean {
+  if (status !== "WAITING_FOR_STAFF" || !handoffRequestedAt || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return false;
+  const requestedAt = Date.parse(handoffRequestedAt);
+  return Number.isFinite(requestedAt) && now - requestedAt >= timeoutSeconds * 1_000;
+}
+
 export function runtimeHandoffState(status: string | null | undefined): RuntimeHandoffState {
   if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") return "WAITING_FOR_STAFF";
+  if (status === "FOLLOW_UP_PENDING") return "FOLLOW_UP_PENDING";
   if (status === "HUMAN_ACTIVE") return "HUMAN_ACTIVE";
   if (status === "AI_ASSISTED") return "AI_ASSISTED";
   if (status === "AI_ACTIVE") return "AI_ACTIVE";
@@ -101,7 +119,7 @@ export function buildConversationRuntimeState(input: ConversationRuntimeInput): 
   // `undefined` means the caller did not provide a status; explicit `null`
   // means the conversation is no longer in an active handoff state.
   const handoff = input.handoffState === undefined ? "AI_ACTIVE" : input.handoffState;
-  const allowedCtas = handoff && handoff !== "AI_ACTIVE" ? [] : [...(input.allowedCtas ?? [])];
+  const allowedCtas = handoffSuppressesAi(handoff) ? [] : [...(input.allowedCtas ?? [])];
   const nextBestAction = handoff && handoff !== "AI_ACTIVE"
     ? "HANDOFF"
     : workflow?.nextBestAction ?? (current && action ? workflowNextBestAction(action, current) : null);
@@ -132,6 +150,7 @@ export function buildConversationRuntimeState(input: ConversationRuntimeInput): 
       status: input.providerResult?.status ?? null,
     },
     handoffState: handoff,
+    conversionAvailable: !handoffSuppressesAi(handoff) && state?.conversionAvailable === true,
     nextBestAction,
     allowedCtas,
     businessContextVersion: input.businessContextVersion ?? null,
@@ -144,7 +163,7 @@ export function buildConversationRuntimeState(input: ConversationRuntimeInput): 
  */
 export function assertConversationRuntimeState(runtime: ConversationRuntimeState): void {
   if (!runtime.businessId.trim()) throw new Error("conversation_runtime_missing_business_id");
-  if (runtime.handoffState && runtime.handoffState !== "AI_ACTIVE" && runtime.allowedCtas.length) {
+  if (handoffSuppressesAi(runtime.handoffState) && runtime.allowedCtas.length) {
     throw new Error("conversation_runtime_cta_while_handoff_active");
   }
   if (runtime.activeWorkflow && runtime.workflowVersion === null) {

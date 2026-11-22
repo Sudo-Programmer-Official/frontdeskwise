@@ -88,23 +88,52 @@ const customFieldLabel = ref("");
 const customFieldKey = ref("");
 let draftSourceId = "";
 
-const stepTypes = [
-  { value: "capture", label: "Capture details" },
-  { value: "ask", label: "Ask a question" },
-  { value: "form", label: "Show a form" },
-  { value: "condition", label: "Condition / branch" },
-  { value: "lookup", label: "Find classes or availability" },
-  { value: "recommend", label: "Present recommendations" },
-  { value: "select", label: "Let visitor select" },
-  { value: "confirm", label: "Confirm selection" },
-  { value: "generate_link", label: "Generate registration link" },
-  { value: "redirect", label: "Show a call to action" },
-  { value: "create_lead", label: "Save a lead" },
-  { value: "book", label: "Book" },
-  { value: "notify", label: "Notify staff" },
-  { value: "handoff", label: "Hand off to a human" },
-  { value: "complete", label: "Complete workflow" },
+const stepTypeGroups = [
+  {
+    label: "INPUT",
+    options: [
+      { value: "capture", label: "Capture details" },
+      { value: "ask", label: "Ask a question" },
+      { value: "form", label: "Show a form" },
+    ],
+  },
+  {
+    label: "LOGIC",
+    options: [{ value: "condition", label: "Condition / branch" }],
+  },
+  {
+    label: "KNOWLEDGE",
+    options: [{ value: "knowledge", label: "Answer from knowledge" }],
+  },
+  {
+    label: "PROVIDER",
+    options: [{ value: "lookup", label: "Find classes or availability" }],
+  },
+  {
+    label: "DECISION",
+    options: [
+      { value: "recommend", label: "Present recommendations" },
+      { value: "select", label: "Let visitor select" },
+      { value: "confirm", label: "Confirm selection" },
+    ],
+  },
+  {
+    label: "ACTION",
+    options: [
+      { value: "generate_link", label: "Generate registration link" },
+      { value: "redirect", label: "Show a call to action" },
+      { value: "create_lead", label: "Save a lead" },
+      { value: "book", label: "Book" },
+      { value: "notify", label: "Notify staff" },
+      { value: "handoff", label: "Hand off to a human" },
+    ],
+  },
+  {
+    label: "END",
+    options: [{ value: "complete", label: "Complete workflow" }],
+  },
 ];
+const stepTypes = stepTypeGroups.flatMap((group) => group.options);
 
 const answerTypes: Array<{ value: WorkflowFieldDraft["type"]; label: string }> = [
   { value: "text", label: "Short text" },
@@ -220,7 +249,8 @@ function isConditionalStep(step: WorkflowStep): boolean {
     ? step.config as Record<string, unknown>
     : {};
   const searchable = `${step.label ?? ""} ${step.question ?? ""} ${step.condition ?? ""}`;
-  return Boolean(step.condition || step.branches || config.trigger || config.conditional || step.type === "condition" || step.type === "handoff" || /pricing|request a demo|support|handoff|human help|human handoff/i.test(searchable));
+  const legacyConditionalCopy = !(step.type === "knowledge" && config.conditional === false) && /pricing|request a demo|support|handoff|human help|human handoff/i.test(searchable);
+  return Boolean(step.condition || step.branches || config.trigger || (step.type === "knowledge" && config.conditional !== false) || config.conditional || step.type === "condition" || step.type === "handoff" || legacyConditionalCopy);
 }
 
 const workflowDisplaySteps = computed<WorkflowStep[]>(() => {
@@ -612,6 +642,29 @@ function setStepConfigFromEvent(step: WorkflowStep, key: string, event: Event) {
   setStepConfig(step, key, (event.target as HTMLInputElement | HTMLSelectElement).value);
 }
 
+function defaultKnowledgeConfig(): Record<string, unknown> {
+  return {
+    interruptionPolicy: "answer_and_resume",
+    topic: "pricing",
+    knowledgeSource: "verified_business_knowledge",
+    allowedFacts: "pricing",
+    verifiedBehavior: "answer_naturally",
+    unavailableBehavior: "say_not_verified",
+    resumeBehavior: "return_to_previous_step",
+    ctaBehavior: "keep_current_if_available",
+    conditional: true,
+    requiresVerifiedData: true,
+  };
+}
+
+function handleStepTypeChange(step: WorkflowStep): void {
+  if (step.type === "knowledge") {
+    step.question = step.question || "Answer naturally from verified business knowledge.";
+    step.config = { ...defaultKnowledgeConfig(), ...(step.config ?? {}) };
+  }
+  markDirty();
+}
+
 function stepOptionsText(step: WorkflowStep): string {
   return (step.options ?? []).join(", ");
 }
@@ -784,9 +837,11 @@ function addWorkflowStep(type = "capture") {
     id: `step-${Date.now()}-${nextIndex}`,
     type,
     label: stepTypeLabel(type),
-    question: type === "capture" || type === "ask" ? "What should we know?" : undefined,
+    question: type === "capture" || type === "ask" ? "What should we know?" : type === "knowledge" ? "Answer naturally from verified business knowledge." : undefined,
     required: type === "capture" || type === "ask",
-    config: type === "lookup" ? { provider: workflowProvider.value || "jackrabbit", operation: "find_classes", failureBehavior: "handoff", searchFields: "location, schedule, age" } : {},
+    config: type === "lookup"
+      ? { provider: workflowProvider.value || "jackrabbit", operation: "find_classes", failureBehavior: "handoff", searchFields: "location, schedule, age" }
+      : type === "knowledge" ? defaultKnowledgeConfig() : {},
   } as WorkflowStep);
   selectedStepIndex.value = draftSteps.value.length - 1;
   markDirty();
@@ -1002,11 +1057,11 @@ onMounted(() => {
             <div class="workflow-step-rail"><span>{{ workflowStepIndex(step) + 1 }}</span><i v-if="index < workflowDisplaySteps.length - 1"></i></div>
             <div class="workflow-step-body">
               <div class="workflow-step-toolbar"><div class="workflow-step-title"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-if="selectedStepIndex === workflowStepIndex(step)" v-model="step.label" type="text" aria-label="Workflow step label" @input="markDirty" /><strong v-else>{{ step.label || stepTypeLabel(step.type) }}</strong><span class="status-pill qualified">{{ stepTypeLabel(step.type) }}</span></div><div class="workflow-step-actions"><button class="workflow-edit-button" type="button" @click.stop="selectedStepIndex = selectedStepIndex === workflowStepIndex(step) ? -1 : workflowStepIndex(step)">{{ selectedStepIndex === workflowStepIndex(step) ? 'Done' : 'Edit' }}</button></div></div>
-              <div v-if="selectedStepIndex !== workflowStepIndex(step)" class="workflow-step-summary"><span>{{ step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.config?.trigger" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
+              <div v-if="selectedStepIndex !== workflowStepIndex(step)" class="workflow-step-summary"><span>{{ step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.config?.trigger || (step.config?.topic && step.config?.conditional !== false)" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
               <div v-else>
                 <div v-if="step.type === 'capture'" class="workflow-capture-config">
                   <div class="workflow-step-grid">
-                    <label>Step type<select v-model="step.type" @change="markDirty"><option v-for="type in stepTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label>
+                    <label>Step type<select v-model="step.type" @change="handleStepTypeChange(step)"><optgroup v-for="group in stepTypeGroups" :key="group.label" :label="group.label"><option v-for="type in group.options" :key="type.value" :value="type.value">{{ type.label }}</option></optgroup></select></label>
                     <div class="workflow-field-picker"><label>Field<select :value="step.fieldKey ?? ''" @change="selectCaptureField(step, $event)"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><button class="text-button workflow-create-field-button" type="button" @click.stop="openCustomFieldEditor(step)">+ Create custom field</button></div>
                     <label>Customer-facing question<input :value="step.question ?? ''" type="text" placeholder="What should the visitor answer?" @input="updateCaptureQuestion(step, $event)" /></label>
                     <label>Answer type<select :value="captureAnswerType(step)" @change="setCaptureAnswerType(step, $event)"><option v-for="type in answerTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label>
@@ -1015,7 +1070,8 @@ onMounted(() => {
                   <div v-if="customFieldOpenFor === step.id" class="workflow-custom-field-box"><div><p class="eyebrow">New stored field</p><strong>Create a field for this step</strong><small>Use this when the field you need is not in the list above.</small></div><div class="workflow-step-grid"><label>Field label<input v-model="customFieldLabel" type="text" placeholder="Usage type" /></label><label>Field key<input v-model="customFieldKey" type="text" placeholder="usage_type" /></label></div><div class="workflow-custom-field-actions"><button class="text-button" type="button" @click="closeCustomFieldEditor">Cancel</button><button class="primary-button small" type="button" :disabled="!customFieldLabel.trim()" @click="createCustomField(step)">Create field</button></div></div>
                   <div v-if="captureAnswerUsesOptions(step)" class="workflow-options-editor"><div class="workflow-options-heading"><div><strong>Options</strong><small>{{ captureAnswerTypeLabel(step) === 'Multi-select' ? 'Visitors can choose more than one.' : 'Visitors choose one.' }}</small></div><button class="text-button" type="button" @click.stop="addCaptureOption(step)">+ Add option</button></div><div v-if="captureOptions(step).length" class="workflow-option-list"><div v-for="(option, optionIndex) in captureOptions(step)" :key="`${step.id}-option-${optionIndex}`" class="workflow-option-row"><input :value="option" type="text" placeholder="Option" @input="setCaptureOption(step, optionIndex, $event)" /><button type="button" aria-label="Remove option" @click.stop="removeCaptureOption(step, optionIndex)"><X :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></div><p v-else class="form-help">Add at least two options so visitors can answer this question.</p></div>
                 </div>
-                <div v-else class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="markDirty"><option v-for="type in stepTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label><label v-if="step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
+                <div v-else class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="handleStepTypeChange(step)"><optgroup v-for="group in stepTypeGroups" :key="group.label" :label="group.label"><option v-for="type in group.options" :key="type.value" :value="type.value">{{ type.label }}</option></optgroup></select></label><label v-if="step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
+                <div v-if="step.type === 'knowledge'" class="workflow-knowledge-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Knowledge</p><strong>Answer from verified business knowledge</strong><small>Keep facts in Business Brain. This step stores only the topic and response policy.</small></div><span class="status-pill booked">Verified source</span></div><div class="workflow-step-grid"><label>Trigger / topic<input :value="stepConfigValue(step, 'topic')" type="text" placeholder="Pricing" @input="setStepConfigFromEvent(step, 'topic', $event)" /></label><label>Knowledge source<select :value="stepConfigValue(step, 'knowledgeSource')" @change="setStepConfigFromEvent(step, 'knowledgeSource', $event)"><option value="verified_business_knowledge">Verified business knowledge</option></select></label><label>Allowed facts<select :value="stepConfigValue(step, 'allowedFacts')" @change="setStepConfigFromEvent(step, 'allowedFacts', $event)"><option value="pricing">Pricing only</option><option value="policies">Policy facts</option><option value="services">Services and capabilities</option><option value="locations">Locations and hours</option><option value="all">All verified business knowledge</option></select></label><label>If verified<select :value="stepConfigValue(step, 'verifiedBehavior')" @change="setStepConfigFromEvent(step, 'verifiedBehavior', $event)"><option value="answer_naturally">Answer naturally</option></select></label><label>If unavailable<select :value="stepConfigValue(step, 'unavailableBehavior')" @change="setStepConfigFromEvent(step, 'unavailableBehavior', $event)"><option value="say_not_verified">Say information is not verified</option></select></label><label>After answering<select :value="stepConfigValue(step, 'resumeBehavior')" @change="setStepConfigFromEvent(step, 'resumeBehavior', $event)"><option value="return_to_previous_step">Resume previous workflow state</option></select></label><label>CTA behavior<select :value="stepConfigValue(step, 'ctaBehavior')" @change="setStepConfigFromEvent(step, 'ctaBehavior', $event)"><option value="keep_current_if_available">Keep current CTA if already available</option></select></label></div></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
                 <div v-if="step.type === 'condition'" class="workflow-condition-box"><span class="workflow-condition-icon"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" /></span><label>Condition in plain English<textarea v-model="step.condition" rows="2" placeholder="If the visitor is ready to register, continue to the provider lookup." @input="markDirty"></textarea></label></div>
                 <div v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-provider-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Provider</p><strong>{{ step.type === 'lookup' ? 'Find availability' : 'Complete with provider' }}</strong></div><span :class="['status-pill', providerConnected ? 'booked' : 'new']">{{ providerConnected ? 'Connected' : 'Needs connection' }}</span></div><div class="workflow-step-grid"><label>Provider<select :value="stepConfigValue(step, 'provider')" @change="setStepConfigFromEvent(step, 'provider', $event)"><option value="">Select provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking provider</option><option value="crm">CRM / automation</option></select></label><label v-if="step.type === 'lookup'">Operation<select :value="stepConfigValue(step, 'operation')" @change="setStepConfigFromEvent(step, 'operation', $event)"><option value="find_locations">Find locations</option><option value="find_classes">Find classes</option><option value="get_availability">Get availability</option><option value="get_class_price">Get class price</option></select></label><label v-if="step.type === 'lookup'">Search fields<input :value="stepConfigValue(step, 'searchFields')" type="text" placeholder="location, schedule, age" @input="setStepConfigFromEvent(step, 'searchFields', $event)" /></label></div><small class="form-help">We’ll use the provider for this step and explain what happens if it is unavailable.</small></div>
@@ -1142,6 +1198,10 @@ onMounted(() => {
 .workflow-field-picker > label { min-width: 0; }
 .workflow-create-field-button { justify-self: start; padding: 0; color: #315ba9; font-size: 10px; }
 .workflow-custom-field-box { display: grid; gap: 10px; padding: 12px; margin-top: 11px; border: 1px solid #d5e2f4; border-radius: 10px; background: #f7faff; }
+.workflow-knowledge-box { display: grid; gap: 11px; padding: 13px; margin-top: 11px; border: 1px solid #d9e7fb; border-radius: 11px; background: linear-gradient(135deg, #f7fbff, #fbfdff); }
+.workflow-knowledge-box .workflow-provider-heading { align-items: center; }
+.workflow-knowledge-box .workflow-provider-heading strong { display: block; color: #294a7d; font-size: 13px; }
+.workflow-knowledge-box .workflow-provider-heading small { display: block; max-width: 620px; margin-top: 3px; color: #71829b; font-size: 11px; font-weight: 500; line-height: 1.4; }
 .workflow-custom-field-box > div:first-child { display: grid; gap: 3px; }
 .workflow-custom-field-box strong { color: #304563; font-size: 12px; }
 .workflow-custom-field-box small { color: #7b8ba0; font-size: 10px; line-height: 1.4; }

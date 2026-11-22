@@ -61,6 +61,17 @@ test("owner production controls remain present", () => {
   assert.doesNotMatch(app, /id: "billing", label: "Billing", icon:/);
 });
 
+test("workflow builder exposes a grouped verified-knowledge step", () => {
+  assert.match(workflowWorkspace, /label: "KNOWLEDGE"/);
+  assert.match(workflowWorkspace, /label: "Answer from knowledge"/);
+  assert.match(workflowWorkspace, /Trigger \/ topic/);
+  assert.match(workflowWorkspace, /Verified business knowledge/);
+  assert.match(workflowWorkspace, /Keep current CTA if already available/);
+  assert.match(workflowGenerator, /type: KNOWLEDGE_STEP_TYPE/);
+  assert.match(workflowGenerator, /allowedFacts: "pricing"/);
+  assert.doesNotMatch(workflowGenerator, /pricing.*\$65|\$65.*pricing/);
+});
+
 test("owner UI uses the shared product design language", () => {
   assert.match(styles, /font-family:[^;]*Inter/);
   assert.match(styles, /select option\s*\{/);
@@ -234,6 +245,10 @@ test("qualified affirmative conversion replies keep the workflow CTA", () => {
   assert.match(apiServer, /Boolean\(activeWorkflow && affirmativeConversionRequest\(/);
   assert.match(apiServer, /currentWorkflowStep\(activeWorkflow\.action, activeWorkflow\.state\)/);
   assert.match(apiServer, /engine correctly attaches its CTA/);
+  assert.match(apiServer, /conversionAvailable/);
+  assert.match(apiServer, /!explicitConversionIntent && !conversionAvailable/);
+  assert.match(apiServer, /answer: prompt\.trim\(\) \? /);
+  assert.match(apiServer, /function workflowRedirectPrompt/);
 });
 
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
@@ -263,7 +278,11 @@ test("widget header and live polling follow the canonical conversation status", 
   const source = `${widgetRenderer}\n${widgetEmbed}\n${widgetShell}`;
   assert.match(source, /status === "HUMAN_ACTIVE"\) subtitleText\.textContent = "Team member joined"/);
   assert.match(source, /AI assistant online/);
-  assert.doesNotMatch(source, /status === "HUMAN_ACTIVE" \|\| status === "AI_ASSISTED"/);
+  assert.match(widgetRenderer, /FOLLOW_UP_PENDING/);
+  assert.match(widgetRenderer, /Team notified · follow-up pending/);
+  assert.match(widgetEmbed, /handoffRequestedAt/);
+  assert.match(widgetRenderer, /function isAiSuppressed\(status/);
+  assert.doesNotMatch(widgetRenderer, /function isAiSuppressed\(status[^}]+WAITING_FOR_STAFF/);
   assert.match(widgetEmbed, /conversations\/\$\{encodeURIComponent\(conversationId\)\}\/status/);
   assert.match(widgetEmbed, /startPolling\(\);/);
   assert.match(widgetEmbed, /if \(pollTimer !== null \|\| !state\.isOpen \|\| !conversationId\) return/);

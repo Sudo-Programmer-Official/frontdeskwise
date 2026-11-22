@@ -100,7 +100,7 @@ export interface WidgetConfig {
   fallbackContacts?: WidgetFallbackContacts;
 }
 
-export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_REQUESTED" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
+export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_REQUESTED" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
 
 export interface WidgetState {
   isOpen: boolean;
@@ -118,6 +118,7 @@ export interface WidgetState {
   leadSubmitting?: boolean;
   typing?: boolean;
   handoffStatus?: WidgetHandoffStatus;
+  handoffRequestedAt?: string | null;
   handoffNotice?: { visible: boolean; message: string; choice?: boolean };
   proactive?: { visible: boolean; message: string };
   healthState?: WidgetHealthState;
@@ -185,11 +186,8 @@ function shouldShowCitation(message: WidgetMessage, config: WidgetConfig): boole
   return visibility !== "contextual" || CONTEXTUAL_CITATION_TERMS.test(message.content);
 }
 
-function isHandoffActive(status: WidgetHandoffStatus | undefined): boolean {
-  return status === "WAITING_FOR_STAFF"
-    || status === "HANDOFF_REQUESTED"
-    || status === "HUMAN_ACTIVE"
-    || status === "AI_ASSISTED";
+function isAiSuppressed(status: WidgetHandoffStatus | undefined): boolean {
+  return status === "HUMAN_ACTIVE" || status === "AI_ASSISTED";
 }
 
 const WIDGET_STYLES = `
@@ -555,7 +553,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderQuickActions(): void {
     quickActions.replaceChildren();
-    if (isHandoffActive(state.handoffStatus)) return;
+    if (isAiSuppressed(state.handoffStatus)) return;
     const primaryCta = state.primaryCta;
     const failureState = state.healthState === "TEMPORARY_ERROR" || state.healthState === "MESSAGE_FAILED";
     const renderPrimaryCta = (secondary = false): void => {
@@ -617,7 +615,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderActionForm(): void {
     actionForm.replaceChildren();
-    if (isHandoffActive(state.handoffStatus)) {
+    if (isAiSuppressed(state.handoffStatus)) {
       actionForm.hidden = true;
       return;
     }
@@ -696,10 +694,15 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   function renderHandoff(): void {
     const status = state.handoffStatus;
     const waiting = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+    const followUpPending = status === "FOLLOW_UP_PENDING";
+    const waitingSince = state.handoffRequestedAt ? Date.parse(state.handoffRequestedAt) : NaN;
+    const waitingLong = waiting && Number.isFinite(waitingSince) && Date.now() - waitingSince >= 10 * 60 * 1_000;
     const inactive = status === "RESOLVED" || status === "EXPIRED";
-    statusDot.classList.toggle("fdw-status-dot-waiting", waiting);
+    statusDot.classList.toggle("fdw-status-dot-waiting", waiting || followUpPending);
     statusDot.classList.toggle("fdw-status-dot-inactive", inactive);
-    if (waiting) subtitleText.textContent = "Waiting for a team member";
+    if (followUpPending) subtitleText.textContent = "Team notified · follow-up pending";
+    else if (waitingLong) subtitleText.textContent = "Team hasn’t joined yet · AI still available";
+    else if (waiting) subtitleText.textContent = "Team notified · AI still available";
     else if (status === "HUMAN_ACTIVE") subtitleText.textContent = "Team member joined";
     else if (status === "RESOLVED") subtitleText.textContent = "Conversation resolved";
     else if (status === "EXPIRED") subtitleText.textContent = "Starting a fresh conversation";
@@ -775,9 +778,9 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     renderMessages();
     renderQuickActions();
     renderActionForm();
-    const handoffActive = isHandoffActive(state.handoffStatus);
-    lead.hidden = handoffActive || !(state.leadVisible && config.showLeadCapture !== false);
-    lead.classList.toggle("fdw-visible", !handoffActive && state.leadVisible === true && config.showLeadCapture !== false);
+    const aiSuppressed = isAiSuppressed(state.handoffStatus);
+    lead.hidden = aiSuppressed || !(state.leadVisible && config.showLeadCapture !== false);
+    lead.classList.toggle("fdw-visible", !aiSuppressed && state.leadVisible === true && config.showLeadCapture !== false);
     const submit = lead.querySelector<HTMLButtonElement>("button[type=submit]");
     if (submit) {
       submit.disabled = Boolean(state.leadSubmitting);

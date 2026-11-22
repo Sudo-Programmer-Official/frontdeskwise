@@ -84,6 +84,12 @@ test("SalonFlow prompt is generated from the active business context", () => {
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.destinationUrl, "https://www.salonflow.studio/start");
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.reviewStatus, "needs_owner_confirmation");
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.requiresVerifiedData, true);
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.type, "knowledge");
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.topic, "pricing");
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.knowledgeSource, "verified_business_knowledge");
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.allowedFacts, "pricing");
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.resumeBehavior, "return_to_previous_step");
+  assert.equal(JSON.stringify(result.steps.find((step) => step.id === "pricing")).includes("$65"), false);
   assert.equal(result.steps.some((step) => step.id === "fit-explanation"), false);
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.normalConversionEndpoint, true);
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.actionKey, "try_demo");

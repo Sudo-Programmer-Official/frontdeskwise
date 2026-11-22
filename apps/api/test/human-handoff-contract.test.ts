@@ -8,6 +8,7 @@ const settingsMigration = await readFile(resolve(process.cwd(), "../../infra/db/
 const templateMigration = await readFile(resolve(process.cwd(), "../../infra/db/031_human_handoff_template.sql"), "utf8");
 const gapTemplateMigration = await readFile(resolve(process.cwd(), "../../infra/db/032_knowledge_gap_template.sql"), "utf8");
 const gapRepairMigration = await readFile(resolve(process.cwd(), "../../infra/db/033_knowledge_gap_diagnostics_repair.sql"), "utf8");
+const followUpMigration = await readFile(resolve(process.cwd(), "../../infra/db/068_handoff_follow_up_pending.sql"), "utf8");
 
 test("handoff storage and delivery are business-scoped and actionable", () => {
   assert.match(settingsMigration, /create table if not exists business_notification_settings/);
@@ -17,6 +18,8 @@ test("handoff storage and delivery are business-scoped and actionable", () => {
   assert.match(gapTemplateMigration, /knowledge_gap/);
   assert.match(gapRepairMigration, /add column if not exists intent/);
   assert.match(gapRepairMigration, /add column if not exists reason/);
+  assert.match(followUpMigration, /FOLLOW_UP_PENDING/);
+  assert.match(followUpMigration, /handoff_timeout_seconds/);
   assert.match(server, /\/notification-settings/);
   assert.match(server, /inbox_url: lifecycleAppUrl\(`\/app\/\$\{business\.slug\}\/inbox\?conversation=/);
   assert.match(server, /using legacy schema/);
@@ -46,5 +49,5 @@ test("returning a conversation to AI clears live takeover state", () => {
 test("widget status polling has a lightweight canonical status contract", () => {
   assert.match(server, /conversations\/:conversationId\/status/);
   assert.match(server, /updatedAt: conversation\.updatedAt/);
-  assert.match(server, /return \{ conversation: conversationStatusPayload\(conversation\) \}/);
+  assert.match(server, /return \{ conversation: conversationStatusPayload\(conversation, business\) \}/);
 });

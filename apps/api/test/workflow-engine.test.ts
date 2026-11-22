@@ -77,6 +77,26 @@ test("workflow skips unverified pricing and keeps guided demo as a conditional b
   assert.equal(currentWorkflowStep(salonWorkflow, state)?.id, "complete");
 });
 
+test("conditional knowledge steps stay off the normal cursor until their topic is requested", () => {
+  const knowledgeWorkflow: ActionFlow = {
+    ...flow,
+    id: "knowledge-side-path",
+    steps: [
+      { id: "name", type: "capture", fieldKey: "name" },
+      { id: "pricing", type: "knowledge", label: "Pricing", config: { conditional: true, topic: "pricing" } },
+      { id: "done", type: "complete" },
+    ],
+  };
+  const state = createActionState(knowledgeWorkflow);
+  assert.equal(currentWorkflowStep(knowledgeWorkflow, state)?.id, "name");
+  state.values.name = "Alex";
+  state.completedStepIds = ["name"];
+  state.currentStepId = "pricing";
+  assert.equal(currentWorkflowStep(knowledgeWorkflow, state)?.id, "done");
+  state.workflowTrigger = "pricing";
+  assert.equal(currentWorkflowStep(knowledgeWorkflow, state)?.id, "pricing");
+});
+
 test("workflow interruptions preserve the cursor and resume", () => {
   const state = createActionState(flow);
   pushWorkflowInterruption(state, { intent: "pricing", question: "How much?", returnStepId: "name" }, "2026-01-01T00:00:00.000Z");
@@ -241,6 +261,9 @@ test("SalonFlow captures a small salon and a composite booking/reminders goal", 
   const applied = applyWorkflowValues(salon, state, values);
   assert.deepEqual(applied.updated, ["business_type", "main_goal"]);
   assert.equal(state.values.main_goal, "Online booking + reminders");
+
+  const correction = extractWorkflowValues(salon, "Actually, reminders are the bigger problem for us.");
+  assert.equal(correction.main_goal, "Reminders");
 });
 
 test("workflow software capture stores the product name instead of the whole sentence", () => {

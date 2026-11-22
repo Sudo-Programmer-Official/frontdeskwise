@@ -68,7 +68,7 @@ type FrontDeskWiseWindow = Window & {
     proactiveFrequency?: "session" | "24h" | "visit";
   };
   type WidgetConfigResponse = { agent?: AgentConfig };
-  type ConversationPayload = { conversation?: { id?: string; status?: string; leadCaptured?: boolean; action?: { id?: string; status?: string } | null; lastActivityAt?: string; updatedAt?: string; handoffNotificationStatus?: string }; messages?: Array<{ id?: string; role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
+  type ConversationPayload = { conversation?: { id?: string; status?: string; leadCaptured?: boolean; action?: { id?: string; status?: string } | null; lastActivityAt?: string; updatedAt?: string; handoffRequestedAt?: string | null; handoffNotificationStatus?: string }; messages?: Array<{ id?: string; role?: string; authorName?: string; content?: string; createdAt?: string; citations?: Array<{ title?: string; url?: string; pageType?: string }> }> };
 
   class WidgetRequestError extends Error {
     readonly retryable: boolean;
@@ -94,6 +94,7 @@ type FrontDeskWiseWindow = Window & {
   let lastConversationUpdatedAt = "";
   let handoffNoticeTimer: number | null = null;
   let handoffWaiting = false;
+  let handoffFollowUpShown = false;
   let handoffDismissedKey: string | null = null;
   let proactiveTimers: number[] = [];
   let proactiveCleanups: Array<() => void> = [];
@@ -349,21 +350,30 @@ type FrontDeskWiseWindow = Window & {
     }, HANDOFF_NOTICE_TIMEOUT_MS);
   }
 
-  function renderConversationStatus(status: string | undefined, options: { returning?: boolean; notificationStatus?: string } = {}): void {
+  function renderConversationStatus(status: string | undefined, options: { returning?: boolean; handoffRequestedAt?: string | null; notificationStatus?: string } = {}): void {
     const waitingForStaff = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
     const normalizedStatus = (status || "AI_ACTIVE") as WidgetHandoffStatus;
-    if (normalizedStatus === "HUMAN_ACTIVE" || waitingForStaff) {
+    const followUpPending = normalizedStatus === "FOLLOW_UP_PENDING";
+    if (normalizedStatus === "HUMAN_ACTIVE" || waitingForStaff || followUpPending) {
       clearProactiveEngagement();
       proactiveShown = true;
     }
-    if (waitingForStaff) {
-      updateState({ handoffStatus: normalizedStatus });
+    if (waitingForStaff || followUpPending) {
+      updateState({ handoffStatus: normalizedStatus, handoffRequestedAt: options.handoffRequestedAt ?? state.handoffRequestedAt ?? null });
+      if (followUpPending) {
+        if (!handoffFollowUpShown) {
+          handoffFollowUpShown = true;
+          showHandoffNotice("It looks like the team may not be available right now. Your request is saved and they can follow up. I’m still here if you have questions.");
+        }
+        handoffWaiting = false;
+        return;
+      }
       if (!handoffWaiting) {
         handoffWaiting = true;
         showHandoffNotice(
           options.notificationStatus === "failed"
             ? "Your message has been saved for the team."
-            : options.returning ? "You still have a conversation waiting for the team." : "A team member has been notified.",
+            : options.returning ? "You still have a conversation waiting for the team. I’m still here if you have questions." : "A team member has been notified. I’m still here if you have questions.",
           options.returning,
         );
       }
@@ -371,7 +381,8 @@ type FrontDeskWiseWindow = Window & {
       return;
     }
     handoffWaiting = false;
-    updateState({ handoffStatus: normalizedStatus });
+    handoffFollowUpShown = false;
+    updateState({ handoffStatus: normalizedStatus, handoffRequestedAt: null });
     hideHandoffNotice();
   }
 
@@ -529,7 +540,7 @@ type FrontDeskWiseWindow = Window & {
       }
       lastConversationUpdatedAt = payload.conversation?.updatedAt || payload.conversation?.lastActivityAt || lastConversationUpdatedAt;
       reconcileRemoteConversation(payload.conversation);
-      renderConversationStatus(payload.conversation?.status, { returning: includeHistory, notificationStatus: payload.conversation?.handoffNotificationStatus });
+      renderConversationStatus(payload.conversation?.status, { returning: includeHistory, handoffRequestedAt: payload.conversation?.handoffRequestedAt, notificationStatus: payload.conversation?.handoffNotificationStatus });
       const remoteMessages = payload.messages || [];
       if (remoteMessages.length) mergeRemoteMessages(remoteMessages, includeHistory);
       markPerformance("conversation_restored", { requestId: lastRequestId });
@@ -561,7 +572,7 @@ type FrontDeskWiseWindow = Window & {
       const statusChanged = remoteStatus !== (state.handoffStatus || "AI_ACTIVE");
       const conversationChanged = Boolean(remoteUpdatedAt && remoteUpdatedAt !== lastConversationUpdatedAt);
       lastConversationUpdatedAt = remoteUpdatedAt || lastConversationUpdatedAt;
-      renderConversationStatus(remoteStatus, { notificationStatus: payload.conversation?.handoffNotificationStatus });
+      renderConversationStatus(remoteStatus, { handoffRequestedAt: payload.conversation?.handoffRequestedAt, notificationStatus: payload.conversation?.handoffNotificationStatus });
       if (conversationChanged || statusChanged) await syncConversation();
     } catch {
       // Status polling is best-effort; the visitor can continue using the assistant.
@@ -687,7 +698,11 @@ type FrontDeskWiseWindow = Window & {
 
   function hasActiveHandoff(): boolean {
     if (!conversationId) return false;
-    return state.handoffStatus === "HUMAN_ACTIVE" || state.handoffStatus === "WAITING_FOR_STAFF" || state.handoffStatus === "HANDOFF_REQUESTED";
+    return state.handoffStatus === "HUMAN_ACTIVE" || state.handoffStatus === "WAITING_FOR_STAFF" || state.handoffStatus === "HANDOFF_REQUESTED" || state.handoffStatus === "FOLLOW_UP_PENDING";
+  }
+
+  function aiSuppressedByHandoff(status: string | undefined): boolean {
+    return status === "HUMAN_ACTIVE" || status === "AI_ASSISTED";
   }
 
   function clearProactiveEngagement(): void {
@@ -783,6 +798,7 @@ type FrontDeskWiseWindow = Window & {
     stopPolling();
     lastConversationUpdatedAt = "";
     handoffWaiting = false;
+    handoffFollowUpShown = false;
     handoffDismissedKey = null;
     if (handoffNoticeTimer !== null) {
       window.clearTimeout(handoffNoticeTimer);
@@ -800,6 +816,7 @@ type FrontDeskWiseWindow = Window & {
       leadCaptured: false,
       leadVisible: false,
       handoffStatus: "AI_ACTIVE",
+      handoffRequestedAt: null,
       handoffNotice: { visible: false, message: "" },
     };
     renderer.update({ state });
@@ -880,13 +897,10 @@ type FrontDeskWiseWindow = Window & {
       reconcileRemoteConversation(answer.conversation);
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       const responseStatus = answer.conversation?.status || answer.handoff?.status;
-      renderConversationStatus(responseStatus, { notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
+      renderConversationStatus(responseStatus, { handoffRequestedAt: answer.conversation?.handoffRequestedAt, notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
       if (conversationId && state.isOpen) startPolling();
       const workflowActive = answer.conversation?.action?.status === "active";
-      const handoffActive = responseStatus === "HANDOFF_REQUESTED"
-        || responseStatus === "WAITING_FOR_STAFF"
-        || responseStatus === "HUMAN_ACTIVE"
-        || responseStatus === "AI_ASSISTED";
+      const handoffActive = aiSuppressedByHandoff(responseStatus);
       // The API only returns a CTA after workflow policy allows it. Keep that
       // authoritative result even when the workflow remains active at a
       // redirect step; stale UI state was already reconciled above.
@@ -908,8 +922,8 @@ type FrontDeskWiseWindow = Window & {
         });
       }
       // Keep the in-memory workflow cursor while a human owns the thread. The
-      // renderer hides its form/CTA in handoff mode, and the saved action can
-      // resume when staff returns the conversation to AI.
+      // renderer hides its form/CTA only in human-owned mode, and the saved
+      // action can resume when staff returns the conversation to AI.
       if (!handoffActive || answer.action) renderActionForm(answer.action);
       const leadCaptured = state.leadCaptured === true || answer.conversation?.leadCaptured === true;
       if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
@@ -971,7 +985,7 @@ type FrontDeskWiseWindow = Window & {
       updateState({ actionError: "", healthState: "READY" });
       reconcileRemoteConversation(answer.conversation);
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
-      renderConversationStatus(answer.conversation?.status);
+      renderConversationStatus(answer.conversation?.status, { handoffRequestedAt: answer.conversation?.handoffRequestedAt });
       if (conversationId && state.isOpen) startPolling();
       renderActionForm(answer.action);
     } catch (error) {

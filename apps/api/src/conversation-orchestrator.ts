@@ -2,7 +2,7 @@ import { classifyVisitorRequest, isPlanSelectionWorkflow, type ActionFlow, type 
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { classifyQuestionIntent, type RetrievalIntent } from "./retrieval.js";
 import { currentWorkflowStep, workflowNextBestAction, type WorkflowNextBestAction } from "./workflow-engine.js";
-import type { RuntimeHandoffState } from "./conversation-runtime.js";
+import { handoffSuppressesAi, type RuntimeHandoffState } from "./conversation-runtime.js";
 
 export type ConversationRoute = "GENERAL_QUESTION" | "WORKFLOW_CONTINUATION" | "INTERRUPTION" | "EXPLICIT_ACTION" | "HUMAN_HANDOFF" | "PROVIDER_RESULT";
 
@@ -35,7 +35,20 @@ const interruptionIntents = new Set<RetrievalIntent>([
 ]);
 
 function questionLike(message: string): boolean {
-  return /^(how|what|when|where|why|who|is|are|can|could|does|do|tell me|explain)\b/i.test(message.trim());
+  return /^(?:how|what(?:'s|s)?|when|where|why|who|is|are|can|could|does|do|tell me|explain)\b/i.test(message.trim());
+}
+
+/**
+ * Corrections are workflow answers even when they contain a knowledge intent
+ * such as "reminders". Keep the check narrow so "Actually, what does..."
+ * remains a knowledge question.
+ */
+export function isWorkflowCorrection(message: string): boolean {
+  const value = message.trim();
+  const prefix = /^(?:actually|rather|instead|correction|to clarify|on second thought)\b\s*,?\s*/i;
+  if (!prefix.test(value)) return false;
+  const remainder = value.replace(prefix, "").trim();
+  return Boolean(remainder) && !questionLike(remainder) && !/[?]$/.test(value);
 }
 
 function standaloneKnowledgeQuestion(message: string, intent: RetrievalIntent): boolean {
@@ -84,10 +97,9 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
   const nextBestAction = currentStep && input.activeAction ? workflowNextBestAction(input.activeAction, currentStep) : null;
   const handoffState = input.handoffState ?? "AI_ACTIVE";
 
-  // Handoff is conversation authority, not another intent. Once staff is
-  // waiting, active, or assisting, every incoming message stays on that
-  // branch and cannot reopen AI, a workflow, or a CTA.
-  if (handoffState !== "AI_ACTIVE") {
+  // A waiting notification is not a reply lock. Only an active staff-owned
+  // conversation prevents customer-facing AI routing.
+  if (handoffSuppressesAi(handoffState)) {
     return {
       route: "HUMAN_HANDOFF",
       conversationalIntent,
@@ -142,7 +154,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
   // example, "I mainly need planning and reminders"). Only route a turn to
   // knowledge when it is shaped like a question or a standalone side-topic;
   // otherwise extraction must get the first chance to advance the workflow.
-  const isKnowledgeQuestion = questionLike(message) || standaloneKnowledgeQuestion(message, conversationalIntent);
+  const isCorrection = active && isWorkflowCorrection(message);
+  const isKnowledgeQuestion = !isCorrection && (questionLike(message) || standaloneKnowledgeQuestion(message, conversationalIntent));
   const isInterruption = active && isKnowledgeQuestion && (interruptionIntents.has(conversationalIntent) || request.mode === "informational");
   if (isInterruption) {
     return {

@@ -29,6 +29,7 @@ function comparableState(state: ConversationActionState | null | undefined): Rec
     completedStepIds: [...(state.completedStepIds ?? [])],
     selectedActionResourceId: state.selectedActionResourceId ?? null,
     completionUrlPresent: Boolean(state.completionUrl),
+    conversionAvailable: state.conversionAvailable === true,
     values: Object.fromEntries(Object.entries(state.values).sort(([left], [right]) => left.localeCompare(right))),
     interruptionStack: (state.interruptionStack ?? []).map((item) => ({ intent: item.intent, returnStepId: item.returnStepId })),
   };

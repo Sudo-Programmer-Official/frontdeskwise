@@ -26,11 +26,8 @@ function shouldShowCitation(message, config) {
         return false;
     return visibility !== "contextual" || CONTEXTUAL_CITATION_TERMS.test(message.content);
 }
-function isHandoffActive(status) {
-    return status === "WAITING_FOR_STAFF"
-        || status === "HANDOFF_REQUESTED"
-        || status === "HUMAN_ACTIVE"
-        || status === "AI_ASSISTED";
+function isAiSuppressed(status) {
+    return status === "HUMAN_ACTIVE" || status === "AI_ASSISTED";
 }
 const WIDGET_STYLES = `
   :host { all: initial; }
@@ -395,7 +392,7 @@ export function createWidgetRenderer(mount, options) {
     }
     function renderQuickActions() {
         quickActions.replaceChildren();
-        if (isHandoffActive(state.handoffStatus))
+        if (isAiSuppressed(state.handoffStatus))
             return;
         const primaryCta = state.primaryCta;
         const failureState = state.healthState === "TEMPORARY_ERROR" || state.healthState === "MESSAGE_FAILED";
@@ -464,7 +461,7 @@ export function createWidgetRenderer(mount, options) {
     }
     function renderActionForm() {
         actionForm.replaceChildren();
-        if (isHandoffActive(state.handoffStatus)) {
+        if (isAiSuppressed(state.handoffStatus)) {
             actionForm.hidden = true;
             return;
         }
@@ -545,11 +542,18 @@ export function createWidgetRenderer(mount, options) {
     function renderHandoff() {
         const status = state.handoffStatus;
         const waiting = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+        const followUpPending = status === "FOLLOW_UP_PENDING";
+        const waitingSince = state.handoffRequestedAt ? Date.parse(state.handoffRequestedAt) : NaN;
+        const waitingLong = waiting && Number.isFinite(waitingSince) && Date.now() - waitingSince >= 10 * 60 * 1_000;
         const inactive = status === "RESOLVED" || status === "EXPIRED";
-        statusDot.classList.toggle("fdw-status-dot-waiting", waiting);
+        statusDot.classList.toggle("fdw-status-dot-waiting", waiting || followUpPending);
         statusDot.classList.toggle("fdw-status-dot-inactive", inactive);
-        if (waiting)
-            subtitleText.textContent = "Waiting for a team member";
+        if (followUpPending)
+            subtitleText.textContent = "Team notified · follow-up pending";
+        else if (waitingLong)
+            subtitleText.textContent = "Team hasn’t joined yet · AI still available";
+        else if (waiting)
+            subtitleText.textContent = "Team notified · AI still available";
         else if (status === "HUMAN_ACTIVE")
             subtitleText.textContent = "Team member joined";
         else if (status === "RESOLVED")
@@ -639,9 +643,9 @@ export function createWidgetRenderer(mount, options) {
         renderMessages();
         renderQuickActions();
         renderActionForm();
-        const handoffActive = isHandoffActive(state.handoffStatus);
-        lead.hidden = handoffActive || !(state.leadVisible && config.showLeadCapture !== false);
-        lead.classList.toggle("fdw-visible", !handoffActive && state.leadVisible === true && config.showLeadCapture !== false);
+        const aiSuppressed = isAiSuppressed(state.handoffStatus);
+        lead.hidden = aiSuppressed || !(state.leadVisible && config.showLeadCapture !== false);
+        lead.classList.toggle("fdw-visible", !aiSuppressed && state.leadVisible === true && config.showLeadCapture !== false);
         const submit = lead.querySelector("button[type=submit]");
         if (submit) {
             submit.disabled = Boolean(state.leadSubmitting);

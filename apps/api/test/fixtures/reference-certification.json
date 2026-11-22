@@ -24,12 +24,12 @@
             "route": "WORKFLOW_CONTINUATION",
             "extractedFields": ["main_goal"],
             "stateBefore": {"workflowCursor": "main-goal", "handoffState": "AI_ACTIVE"},
-            "stateAfter": {"workflowCursor": "pricing", "values": {"business_type": "Small salon", "main_goal": "Online booking, Reminders"}},
+            "stateAfter": {"workflowCursor": "try-demo", "values": {"business_type": "Small salon", "main_goal": "Online booking, Reminders"}},
             "providerCall": null,
-            "nextBestAction": "CAPTURE_DETAILS",
-            "cta": null,
+            "nextBestAction": "CONTINUE_WORKFLOW",
+            "cta": "try_demo",
             "handoffState": "AI_ACTIVE",
-            "responseClass": "workflow_prompt"
+            "responseClass": "cta"
           }
         },
         {
@@ -38,10 +38,10 @@
           "expected": {
             "route": "INTERRUPTION",
             "extractedFields": [],
-            "stateBefore": {"workflowCursor": "pricing", "handoffState": "AI_ACTIVE"},
-            "stateAfter": {"workflowCursor": "pricing", "values": {"business_type": "Small salon", "main_goal": "Online booking, Reminders"}},
+            "stateBefore": {"workflowCursor": "try-demo", "handoffState": "AI_ACTIVE"},
+            "stateAfter": {"workflowCursor": "try-demo", "values": {"business_type": "Small salon", "main_goal": "Online booking, Reminders"}},
             "providerCall": null,
-            "nextBestAction": "CAPTURE_DETAILS",
+            "nextBestAction": "CONTINUE_WORKFLOW",
             "cta": null,
             "handoffState": "AI_ACTIVE",
             "responseClass": "knowledge_answer"
@@ -53,7 +53,7 @@
           "expected": {
             "route": "WORKFLOW_CONTINUATION",
             "extractedFields": [],
-            "stateBefore": {"workflowCursor": "pricing", "handoffState": "AI_ACTIVE"},
+            "stateBefore": {"workflowCursor": "try-demo", "handoffState": "AI_ACTIVE"},
             "stateAfter": {"workflowCursor": "request-demo"},
             "providerCall": null,
             "nextBestAction": "CONTINUE_WORKFLOW",
@@ -81,15 +81,15 @@
           "id": "salon-waiting",
           "message": "Actually, show me the demo now.",
           "expected": {
-            "route": "HUMAN_HANDOFF",
+            "route": "WORKFLOW_CONTINUATION",
             "extractedFields": [],
             "stateBefore": {"workflowCursor": "request-demo", "handoffState": "WAITING_FOR_STAFF"},
             "stateAfter": {"workflowCursor": "request-demo"},
             "providerCall": null,
             "nextBestAction": "HANDOFF",
-            "cta": null,
+            "cta": "request_demo",
             "handoffState": "WAITING_FOR_STAFF",
-            "responseClass": "handoff_waiting"
+            "responseClass": "cta"
           }
         }
       ]
