@@ -4673,6 +4673,15 @@ function openWorkflowAction(actionId: string) {
   navigateToWorkspaceView("actions");
 }
 
+function testWorkflowFromBuilder(actionId: string) {
+  const action = actionFlows.value.find((item) => item.id === actionId);
+  if (action) runActionTest(action);
+}
+
+async function publishWorkflowFromBuilder() {
+  await publishAgent(agentModel.value);
+}
+
 function ensureCompletionLinkTemplate() {
   if (!actionDraft.value) return;
   if (actionDraft.value.completion.completionMode === "external_provider" || actionDraft.value.completion.completionMode === "payment_link") {
@@ -7376,7 +7385,7 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'workflows'" class="workflow-workspace-shell">
           <p v-if="workflowContextRefreshMessage" class="form-error workflow-context-refresh-message" role="status">{{ workflowContextRefreshMessage }}</p>
-          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" />
+          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">

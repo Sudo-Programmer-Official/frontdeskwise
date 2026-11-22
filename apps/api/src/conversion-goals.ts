@@ -63,6 +63,13 @@ export function shouldAttachPrimaryCta(
     && (action.actionType === "request_demo" || action.key === "open_link")
     && /\b(demo|trial)\b/i.test(`${action.name} ${action.completion.linkLabel ?? ""}`);
   if (directDemoAction && /\b(book|schedule)\b.{0,24}\b(demo|trial)\b/i.test(question)) return false;
+  // A demo destination is a conversion step, not a generic sales garnish.
+  // Keep it behind explicit conversion language; active workflows handle the
+  // qualified path separately and can expose their own redirect step.
+  if (directDemoAction) {
+    return visitor.mode === "transactional"
+      && /\b(demo|trial|try|start|see|view|explore|open|ready)\b/i.test(question);
+  }
   if (policy === "always") return true;
   if (policy === "explicit_request_only") return visitor.mode === "transactional";
   if (policy === "high_intent_only") {

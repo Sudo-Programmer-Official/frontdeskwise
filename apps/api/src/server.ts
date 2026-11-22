@@ -7657,13 +7657,17 @@ function actionAnswerWithKnowledge(
   action: ActionFlow,
   state: ConversationActionState,
   prompt: string,
+  question?: string,
 ): ConversationAnswerResult {
   // An interruption is still inside the active journey. Knowledge answers
   // must not smuggle the global primary CTA or a generic lead form into it.
   const { primaryCta: _primaryCta, quickActions: _quickActions, ...knowledgeAnswer } = result;
+  const conciseAnswer = question && classifyQuestionIntent(question) === "pricing" && result.knowledgeGap && !result.grounded
+    ? "I don't have verified pricing information yet."
+    : result.answer;
   return {
     ...knowledgeAnswer,
-    answer: `${result.answer}\n\nBack to ${isPlanSelectionWorkflow(action) ? "your plan" : "the workflow"}: ${prompt}`,
+    answer: `${conciseAnswer}\n\n${prompt}`,
     action: actionStatePayload(action, state),
   };
 }
@@ -7983,7 +7987,10 @@ async function continueWorkflowActionConversation(
   // team plan cost?") without being an answer to the paused field.
   const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
   const guidedDemo = explicitGuidedDemoRequest(question);
-  const normalConversion = /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question) && !guidedDemo;
+  const normalConversion = initialOrchestration.requestMode === "transactional"
+    && /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question)
+    && !guidedDemo;
+  const explicitConversionRequest = guidedDemo || normalConversion;
   if (guidedDemo && action.steps?.some((step) => step.config?.trigger === "explicit_guided_demo_request")) {
     state.workflowTrigger = "explicit_guided_demo_request";
     state.currentStepId = action.steps.find((step) => step.config?.trigger === "explicit_guided_demo_request")?.id ?? state.currentStepId;
@@ -8031,7 +8038,7 @@ async function continueWorkflowActionConversation(
       returnStepId: currentAfterExtraction?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "The workflow is ready to continue.");
+    return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "The workflow is ready to continue.", question);
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
@@ -8046,7 +8053,7 @@ async function continueWorkflowActionConversation(
       returnStepId: current?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current, business) : "The workflow is ready to continue.");
+    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current, business) : "The workflow is ready to continue.", question);
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
@@ -8086,7 +8093,8 @@ async function continueWorkflowActionConversation(
 
   if (step.type === "redirect") {
     const prompt = workflowPrompt(action, state, step, business);
-    return actionAnswer(action, state, starting ? "Sure — I can help with " + action.name.toLowerCase() + ". " + prompt : prompt, workflowCtaForStep(business, action, step));
+    const cta = workflowCtaForStep(business, action, step);
+    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, explicitConversionRequest ? cta : null);
   }
 
   if (starting) {
@@ -8096,7 +8104,7 @@ async function continueWorkflowActionConversation(
       return actionAnswer(action, state, "Great — just complete these details below and I’ll prepare the next step.");
     }
     await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: step.fieldKey ?? step.id });
-    return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + workflowPrompt(action, state, step, business));
+    return actionAnswer(action, state, workflowPrompt(action, state, step, business));
   }
 
   if (state.formShown || step.type === "form") {
@@ -8176,7 +8184,9 @@ async function continueWorkflowActionConversation(
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
   state.currentStepId = step.id;
   if (step.type === "redirect") {
-    return actionAnswer(action, state, workflowPrompt(action, state, step, business), workflowCtaForStep(business, action, step));
+    const prompt = workflowPrompt(action, state, step, business);
+    const cta = workflowCtaForStep(business, action, step);
+    return actionAnswer(action, state, explicitConversionRequest ? directLinkCustomerMessage(business, action) : prompt, explicitConversionRequest ? cta : null);
   }
   if (step.type === "form") {
     state.formShown = true;
@@ -8244,7 +8254,7 @@ async function continueActionConversation(
       const formMessage = "Absolutely — I can help with that. Just leave your details and the team can take it from here.";
       if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
         const knowledge = await answerQuestion(business, question);
-        return actionAnswerWithKnowledge(knowledge, action, state, formMessage);
+        return actionAnswerWithKnowledge(knowledge, action, state, formMessage, question);
       }
       return actionAnswer(action, state, formMessage);
     }
@@ -8256,7 +8266,7 @@ async function continueActionConversation(
     });
     if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
       const knowledge = await answerQuestion(business, question);
-      return actionAnswerWithKnowledge(knowledge, action, state, fieldPrompt(next));
+      return actionAnswerWithKnowledge(knowledge, action, state, fieldPrompt(next), question);
     }
     return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + fieldPrompt(next));
   }
@@ -8277,7 +8287,7 @@ async function continueActionConversation(
   if (classifyVisitorRequest(question).mode === "informational") {
     const knowledge = await answerQuestion(business, question);
     const current = nextConversationalField(action, state);
-    return actionAnswerWithKnowledge(knowledge, action, state, state.formShown ? "The form is ready below." : current ? fieldPrompt(current) : "The form is ready below.");
+    return actionAnswerWithKnowledge(knowledge, action, state, state.formShown ? "The form is ready below." : current ? fieldPrompt(current) : "The form is ready below.", question);
   }
   if (actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
     const knowledge = await answerQuestion(business, question);
@@ -8287,7 +8297,7 @@ async function continueActionConversation(
     } else if (current) {
       await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: current.key });
     }
-    return actionAnswerWithKnowledge(knowledge, action, state, state.formShown ? "The form is ready below." : current ? fieldPrompt(current) : "The form is ready below.");
+    return actionAnswerWithKnowledge(knowledge, action, state, state.formShown ? "The form is ready below." : current ? fieldPrompt(current) : "The form is ready below.", question);
   }
   if (state.formShown) {
     return actionAnswer(action, state, "Please complete the form below to continue.");
@@ -9636,12 +9646,17 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
   // if a future action implementation or a degraded answer path falls back to
   // knowledge answering, and always return enough action state for the widget
   // to preserve the form/cursor.
-  const explicitConversionIntent = /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question) || explicitGuidedDemoRequest(question);
-  if (activeWorkflow && result.primaryCta && result.action?.status === "active" && !explicitConversionIntent) {
+  const explicitConversionIntent = (
+    (orchestration.requestMode === "transactional"
+      && /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question))
+    || explicitGuidedDemoRequest(question)
+  );
+  const workflowOwnsTurn = Boolean(activeWorkflow && conversation.actionState?.status === "active");
+  if (workflowOwnsTurn && result.primaryCta && !explicitConversionIntent) {
     const { primaryCta: _primaryCta, ...withoutPrimaryCta } = result;
     result = withoutPrimaryCta;
   }
-  if (activeWorkflow && !result.action) {
+  if (workflowOwnsTurn && activeWorkflow && !result.action) {
     result = {
       ...result,
       action: actionStatePayload(activeWorkflow.action, activeWorkflow.state),

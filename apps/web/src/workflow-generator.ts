@@ -175,6 +175,7 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
     return [
       field("business_type", "Business type", "select", `What kind of ${businessType} do you run?`, true, ["Small salon", "Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
       field("main_goal", "Main goal", "select", "What are you mainly trying to improve?", true, ["Online booking", "Online booking + reminders", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
+      field("current_software", "Current software", "text", "Are you using any salon software today?"),
     ];
   }
   return [];
@@ -345,6 +346,7 @@ function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft
   return [
     capture("business-type", "Business type", "business_type", `What kind of ${businessType} do you run?`, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
     capture("main-goal", "Main goal", "main_goal", "What are you mainly trying to improve?", ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
+    capture("current-software", "Current software", "current_software", "Are you using any salon software today?"),
     {
       id: "relevant-capabilities",
       type: "recommend",
@@ -356,7 +358,7 @@ function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft
       id: "fit-explanation",
       type: "ask",
       label: "Fit explanation",
-      question: `Briefly explain why ${businessName} may be a good fit based on the visitor’s needs.`,
+      question: "Does that sound like the kind of workflow you want to improve?",
       config: { ...interruptionConfig, reviewStatus: "suggested", messageType: "fit_explanation", dataSource: "verified_business_knowledge" },
     },
     {

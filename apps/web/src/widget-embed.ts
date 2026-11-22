@@ -858,7 +858,7 @@ type FrontDeskWiseWindow = Window & {
       updateMessage(messageId, { status: "sending" });
       updateState({ typing: true, typingMessage: typingMessageFor(typingContext, performance.now() - typingStartedAt), healthState: "LOADING" });
       const responseStartedAt = performance.now();
-      const answer = await api<{ conversationId?: string; messageId?: string; assistantMessageId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; primaryCta?: WidgetPrimaryCta | null; action?: WidgetAction; handoff?: { notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: ConversationPayload["conversation"] }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
+      const answer = await api<{ conversationId?: string; messageId?: string; assistantMessageId?: string; answer: string; grounded?: boolean; citations?: WidgetMessage["citations"]; quickActions?: WidgetState["quickActions"]; primaryCta?: WidgetPrimaryCta | null; action?: WidgetAction; handoff?: { status?: string; notificationStatus?: string }; failure?: { kind?: string; retrievedEvidence?: boolean; retryable?: boolean }; conversation?: ConversationPayload["conversation"] }>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify({ question, sessionId: visitorId, pageUrl: window.location.href, clientMessageId }) }, MESSAGE_TIMEOUT_MS);
       const responseCompletedAt = performance.now();
       markPerformance("first_assistant_content_available", {
         durationMs: Math.round(responseCompletedAt - responseStartedAt),
@@ -878,14 +878,23 @@ type FrontDeskWiseWindow = Window & {
       if (answer.answer?.trim()) addAssistantResponse(answer.answer, answer.citations || [], clientMessageId, answer.assistantMessageId);
       reconcileRemoteConversation(answer.conversation);
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
-      renderConversationStatus(answer.conversation?.status, { notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
+      const responseStatus = answer.conversation?.status || answer.handoff?.status;
+      renderConversationStatus(responseStatus, { notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
       if (conversationId && state.isOpen) startPolling();
       const workflowActive = answer.conversation?.action?.status === "active";
+      const handoffActive = responseStatus === "HANDOFF_REQUESTED"
+        || responseStatus === "WAITING_FOR_STAFF"
+        || responseStatus === "HUMAN_ACTIVE"
+        || responseStatus === "AI_ASSISTED";
       // The API only returns a CTA after workflow policy allows it. Keep that
       // authoritative result even when the workflow remains active at a
       // redirect step; stale UI state was already reconciled above.
-      updateState({ quickActions: answer.quickActions || [], primaryCta: answer.primaryCta || null });
-      if (answer.primaryCta) {
+      updateState({
+        quickActions: handoffActive ? [] : answer.quickActions || [],
+        primaryCta: handoffActive ? null : answer.primaryCta || null,
+        ...(handoffActive ? { leadVisible: false } : {}),
+      });
+      if (answer.primaryCta && !handoffActive) {
         telemetry("CTA_SHOWN", {
           flowId: answer.primaryCta.actionId,
           metadata: {
@@ -897,11 +906,14 @@ type FrontDeskWiseWindow = Window & {
           },
         });
       }
-      renderActionForm(answer.action);
+      // Keep the in-memory workflow cursor while a human owns the thread. The
+      // renderer hides its form/CTA in handoff mode, and the saved action can
+      // resume when staff returns the conversation to AI.
+      if (!handoffActive || answer.action) renderActionForm(answer.action);
       const leadCaptured = state.leadCaptured === true || answer.conversation?.leadCaptured === true;
       if (leadCaptured) updateState({ leadCaptured: true, leadVisible: false });
       if (answer.action) updateState({ leadVisible: false });
-      if (!leadCaptured && !workflowActive && !answer.grounded && !answer.action && !(answer.quickActions && answer.quickActions.length) && !answer.failure && config?.showLeadCapture !== false) updateState({ leadVisible: true });
+      if (!handoffActive && !leadCaptured && !workflowActive && !answer.grounded && !answer.action && !answer.primaryCta && !(answer.quickActions && answer.quickActions.length) && !answer.failure && config?.showLeadCapture !== false) updateState({ leadVisible: true });
       requestAnimationFrame(() => {
         const renderedAt = performance.now();
         markPerformance("full_response_rendered", {
@@ -981,7 +993,7 @@ type FrontDeskWiseWindow = Window & {
     try {
       await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name, email: values.email, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
       updateState({ leadCaptured: true, leadVisible: false });
-      addMessage("Thanks — the team can follow up with you.", "assistant");
+      addMessage("Thanks — your details were sent to the team.", "assistant");
     } catch (error) {
       addMessage("We couldn’t send your details. Your entries are still here — please try again.", "assistant");
       setHealth("ACTION_FAILED", "", { statusContacts: fallbackContacts() });

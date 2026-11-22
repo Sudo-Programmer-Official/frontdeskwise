@@ -185,6 +185,13 @@ function shouldShowCitation(message: WidgetMessage, config: WidgetConfig): boole
   return visibility !== "contextual" || CONTEXTUAL_CITATION_TERMS.test(message.content);
 }
 
+function isHandoffActive(status: WidgetHandoffStatus | undefined): boolean {
+  return status === "WAITING_FOR_STAFF"
+    || status === "HANDOFF_REQUESTED"
+    || status === "HUMAN_ACTIVE"
+    || status === "AI_ASSISTED";
+}
+
 const WIDGET_STYLES = `
   :host { all: initial; }
   .fdw-widget-root, .fdw-widget-root * { box-sizing: border-box; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
@@ -548,6 +555,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderQuickActions(): void {
     quickActions.replaceChildren();
+    if (isHandoffActive(state.handoffStatus)) return;
     const primaryCta = state.primaryCta;
     const failureState = state.healthState === "TEMPORARY_ERROR" || state.healthState === "MESSAGE_FAILED";
     const renderPrimaryCta = (secondary = false): void => {
@@ -609,6 +617,10 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderActionForm(): void {
     actionForm.replaceChildren();
+    if (isHandoffActive(state.handoffStatus)) {
+      actionForm.hidden = true;
+      return;
+    }
     const action = state.action;
     if (!action || action.status === "completed") {
       actionForm.hidden = true;
@@ -763,8 +775,9 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     renderMessages();
     renderQuickActions();
     renderActionForm();
-    lead.hidden = !(state.leadVisible && config.showLeadCapture !== false);
-    lead.classList.toggle("fdw-visible", state.leadVisible === true && config.showLeadCapture !== false);
+    const handoffActive = isHandoffActive(state.handoffStatus);
+    lead.hidden = handoffActive || !(state.leadVisible && config.showLeadCapture !== false);
+    lead.classList.toggle("fdw-visible", !handoffActive && state.leadVisible === true && config.showLeadCapture !== false);
     const submit = lead.querySelector<HTMLButtonElement>("button[type=submit]");
     if (submit) {
       submit.disabled = Boolean(state.leadSubmitting);

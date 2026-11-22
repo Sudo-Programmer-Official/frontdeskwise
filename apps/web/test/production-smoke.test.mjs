@@ -219,18 +219,18 @@ test("widget reconciles stale action state and never shows a global CTA over an 
   assert.match(widgetEmbed, /const workflowActive = answer\.conversation\?\.action\?\.status === "active"/);
   assert.match(widgetEmbed, /The API only returns a CTA after workflow policy allows it/);
   assert.match(widgetEmbed, /!leadCaptured && !workflowActive && !answer\.grounded/);
-  const followUpAcknowledgements = widgetEmbed.match(/Thanks — the team can follow up with you\./g) || [];
+  const followUpAcknowledgements = widgetEmbed.match(/Thanks — your details were sent to the team\./g) || [];
   assert.equal(followUpAcknowledgements.length, 1);
   const leadSubmit = widgetEmbed.slice(widgetEmbed.indexOf("async function submitLead"), widgetEmbed.indexOf("function recordAbandonment"));
   assert.match(leadSubmit, /await api\(`/);
-  assert.match(leadSubmit, /Thanks — the team can follow up with you\./);
+  assert.match(leadSubmit, /Thanks — your details were sent to the team\./);
 });
 
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
   assert.match(widgetEmbed, /leadCaptured: true, leadVisible: false/);
-  assert.match(widgetEmbed, /if \(!leadCaptured && !workflowActive && !answer\.grounded/);
-  assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
+  assert.match(widgetEmbed, /if \(!handoffActive && !leadCaptured && !workflowActive && !answer\.grounded/);
+  assert.match(widgetEmbed, /!answer\.primaryCta && !\(answer\.quickActions && answer\.quickActions\.length\)/);
   assert.match(widgetEmbed, /updateState\(\{[^}]*typing: true/);
   assert.match(widgetEmbed, /MESSAGE_CONTEXT_TIMEOUT_MS = 4_000/);
   assert.match(widgetEmbed, /Working on that…/);
@@ -500,7 +500,7 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(app, /WorkflowWorkspace/);
   assert.match(app, /Open workflow/);
   for (const marker of [
-    "Actions are what · Workflows are how",
+    "Workflow goal",
     "Create workflow",
     "Use an existing action",
     "Start from a template",
@@ -508,13 +508,13 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
     "Create new action",
     "Action",
     "Generate steps",
-    "Choose what happens if unavailable",
+    "Provider, fallback, and completion",
     "Provider",
     "Condition in plain English",
     "Customer journey",
     "Runtime will use the updated steps",
     "Configuration complete",
-    "Needs testing",
+    "Test workflow",
   ]) {
     assert.ok(workflowWorkspace.includes(marker), `missing workflow builder marker: ${marker}`);
   }
@@ -551,7 +551,7 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   }
   assert.match(workflowWorkspace, /workflow-isolation-warning/);
   assert.match(workflowWorkspace, /overflow-wrap: anywhere/);
-  assert.match(workflowWorkspace, /View full goal/);
+  assert.match(workflowWorkspace, /Edit goal/);
   assert.match(workflowWorkspace, /workflowGoalExpanded/);
   assert.match(workflowWorkspace, /resizeWorkflowGoalEditor/);
   assert.match(workflowWorkspace, /characters/);

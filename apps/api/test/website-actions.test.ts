@@ -236,14 +236,16 @@ test("sales-intent CTA policy excludes privacy, support, and anti-sales question
     enabled: true,
     lifecycleStatus: "active",
   } as ActionFlow;
-  assert.equal(shouldAttachPrimaryCta(action, "What does SalonFlow do?", "services"), true);
-  assert.equal(shouldAttachPrimaryCta(action, "What's pricing?", "pricing"), true);
-  assert.equal(shouldAttachPrimaryCta(action, "How do I get started?", "getting_started"), true);
+  assert.equal(shouldAttachPrimaryCta(action, "What does SalonFlow do?", "services"), false);
+  assert.equal(shouldAttachPrimaryCta(action, "What's pricing?", "pricing"), false);
+  assert.equal(shouldAttachPrimaryCta(action, "How do I get started?", "getting_started"), false);
+  assert.equal(shouldAttachPrimaryCta(action, "I want to try the demo.", "general"), true);
   assert.equal(shouldAttachPrimaryCta(action, "Do you sell my data?", "privacy"), false);
   assert.equal(shouldAttachPrimaryCta(action, "I need account help", "support"), false);
   assert.equal(shouldAttachPrimaryCta(action, "I hate sales calls", "general"), false);
   assert.equal(shouldAttachPrimaryCta(action, "Book a demo", "booking"), false);
-  assert.deepEqual(primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "What's pricing?", "pricing"), {
+  assert.equal(primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "What's pricing?", "pricing"), null);
+  assert.deepEqual(primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "I want to try the demo.", "general"), {
     actionId: "try-demo",
     key: "request_demo",
     label: "Try the Demo",
@@ -251,7 +253,7 @@ test("sales-intent CTA policy excludes privacy, support, and anti-sales question
     trackingKey: "salonflow_try_demo",
     url: "https://www.salonflow.studio/start",
   });
-  const cta = primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "What's pricing?", "pricing");
+  const cta = primaryCtaForQuestion({ primaryActionId: action.id, actions: [action] }, "I want to try the demo.", "general");
   assert.equal(primaryCtaIntroduction(cta, "pricing"), "Want to see how it works in practice?");
   assert.equal(primaryCtaIntroduction(cta, "services"), "You can explore these features in the live demo.");
   assert.equal(primaryCtaIntroduction(cta, "getting_started"), "The fastest way to get started is to try the demo.");
