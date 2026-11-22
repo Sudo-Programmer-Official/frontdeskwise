@@ -234,7 +234,8 @@ function syncWorkflowGoalEditor(): void {
 
 function defaultBusinessWorkflowDescription(): string {
   const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "this business";
-  if (/swim|lesson/i.test(businessName)) return ENROLLMENT_WORKFLOW_GOAL;
+  const businessEvidence = `${businessName} ${props.businessContext?.summary ?? ""}`;
+  if (/swim/i.test(businessEvidence)) return ENROLLMENT_WORKFLOW_GOAL;
   const businessType = props.businessContext?.businessType?.trim() && props.businessContext.businessType !== "Unknown"
     ? props.businessContext.businessType.trim().toLowerCase()
     : "business";

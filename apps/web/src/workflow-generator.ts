@@ -90,7 +90,7 @@ export function preserveWorkflowGoal(value: string): string | null {
   return value.trim() ? value : null;
 }
 
-export const ENROLLMENT_WORKFLOW_GOAL = "Help parents find the right British Swim School lesson for their child and move them toward registration. Ask only the minimum useful questions about the swimmer's age, ability, goals, preferred location, and schedule. Answer side questions from verified British Swim School knowledge and resume the workflow. Use Jackrabbit for live class availability and waitlist information. Show only verified options, let the parent choose a class, then provide the verified registration link. If no suitable class is available or Jackrabbit fails, offer waitlist/help or handoff to the team. Never invent availability, pricing, program levels, or registration URLs.";
+export const ENROLLMENT_WORKFLOW_GOAL = "Help parents find the right swim lesson for their child and move them toward registration. Ask only the minimum useful questions about the swimmer's age, ability, goals, preferred location, and schedule. Answer side questions from verified business knowledge and resume the workflow. Use the connected provider for live class availability and waitlist information. Show only verified options, let the parent choose a class, then provide the verified registration link. If no suitable class is available or the provider fails, offer waitlist/help or handoff to the team. Never invent availability, pricing, program levels, or registration URLs.";
 
 export function workflowGenerationCacheKey(context: Pick<WorkflowGenerationContext, "organizationId" | "businessId" | "workflowId" | "actionId" | "contextVersion">): string {
   return [
