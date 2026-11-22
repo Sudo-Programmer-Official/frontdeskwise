@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 import { CrawlError, detectSpaIndicators, extractBrandColors, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
+import { PAGE_TYPES } from "../src/page-classification.ts";
 
 test("normalisePublicUrl adds https to a bare domain", () => {
   assert.equal(normalisePublicUrl("  example.com/path  "), "https://example.com/path");
@@ -38,4 +41,13 @@ test("detectSpaIndicators identifies an empty client-rendered app shell", () => 
     <body><div id="app"></div></body></html>
   `);
   assert.deepEqual(indicators, ["low_visible_text", "app_mount_point", "module_script"]);
+});
+
+test("database source page types stay aligned with the crawler taxonomy", async () => {
+  const migration = await readFile(resolve(import.meta.dirname, "../../../infra/db/064_business_source_page_types.sql"), "utf8");
+  for (const pageType of PAGE_TYPES) {
+    assert.match(migration, new RegExp(`'${pageType}'`), `missing database page type: ${pageType}`);
+  }
+  assert.match(migration, /'web_page'/);
+  assert.match(migration, /'document'/);
 });

@@ -71,7 +71,7 @@ import {
   workflowNextBestAction,
   workflowSummary,
 } from "./workflow-engine.js";
-import { planRecommendationMessage, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
+import { planRecommendationMessage, planRecommendationPayload, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
 import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
 import {
   answerabilityDecision,
@@ -125,6 +125,12 @@ import {
 } from "./lifecycle-messaging.js";
 import { decideConversationRoute } from "./conversation-orchestrator.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
+import {
+  assertConversationRuntimeState,
+  buildConversationRuntimeState,
+  runtimeHandoffState,
+  safeConversationRuntimeState,
+} from "./conversation-runtime.js";
 import {
   providerTrace,
   snapshotConversationWorkflowState,
@@ -208,6 +214,14 @@ const renderedPageAdapter = createRenderedPageAdapter();
 
 function crawlConfiguredWebsite(websiteUrl: string) {
   return crawlWebsite(websiteUrl, { renderPage: renderedPageAdapter });
+}
+
+function firstCrawledPageOrError(crawled: { pages: CrawledPage[] }): CrawledPage {
+  const firstPage = crawled.pages[0];
+  if (!firstPage) {
+    throw httpError(422, "We couldn't read that website yet. Check that the URL is public and try again.");
+  }
+  return firstPage;
 }
 
 function trialEndFromNow(): string {
@@ -832,7 +846,7 @@ const defaultConfig = (businessName: string): AgentConfig => ({
   widgetColor: "#0d6efd",
   collectLeads: true,
   showBookingAction: true,
-  fallbackMessage: "I do not have enough information to answer that confidently. I can take your details and have the team follow up.",
+  fallbackMessage: "I don’t have enough verified information to answer that confidently.",
   widgetDefaultMode: "compact",
   widgetAllowExpand: true,
   widgetQuickActions: defaultQuickActions(businessName),
@@ -1953,6 +1967,8 @@ async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): 
       // or silently replace its primary-action meaning.
       if (existing.origin === "configured") continue;
       Object.assign(existing, {
+        name: extracted.name,
+        description: extracted.description,
         actionType: extracted.actionType,
         destination: extracted.destination,
         provider: extracted.provider,
@@ -5946,7 +5962,7 @@ async function workspacePayload(business: Business) {
       : semantic.status;
   const businessContextInput = {
     businessId: business.id,
-    businessName: business.name,
+    businessName: customerBusinessName(business),
     businessType: business.vertical,
     location: business.location,
     primaryAction: business.actions.find((action) => action.id === business.primaryActionId) ?? null,
@@ -6173,7 +6189,7 @@ function inboxConversationPayload(business: Business, conversation: Conversation
   const visibleMessages = conversation.messages.filter((message) => message.kind !== "internal_note");
   const latestMessage = visibleMessages.at(-1);
   return {
-    ...conversationStatusPayload(conversation),
+    ...conversationStatusPayload(conversation, business),
     sessionId: conversation.sessionId,
     leadCaptured: conversation.leadCaptured,
     actionTaken: conversation.actionTaken,
@@ -6302,10 +6318,116 @@ function workflowAudienceTerms(workflow?: ActiveWorkflowAnswerContext): { target
   return null;
 }
 
+type RuntimeCanonicalFact = {
+  raw: BusinessFact;
+  canonical: ReturnType<typeof buildCanonicalBusinessModel>["knowledge"]["facts"][number];
+};
+
+/**
+ * Runtime answers and workflow decisions must read the same canonical winner.
+ * This keeps conflicts, stale facts, and owner/system authority handling out of
+ * the individual customer-facing paths.
+ */
+function canonicalBusinessFactsForRuntime(business: Business): RuntimeCanonicalFact[] {
+  const model = buildCanonicalBusinessModel({
+    businessId: business.id,
+    businessName: customerBusinessName(business),
+    businessType: business.vertical,
+    location: business.location,
+    primaryAction: business.actions.find((action) => action.id === business.primaryActionId) ?? null,
+    actions: business.actions,
+    actionResources: business.actionResources,
+    facts: business.facts,
+    chunks: business.chunks,
+    sources: business.sources.map((source) => ({ id: source.id, title: source.title, url: source.url, crawlStatus: source.crawlStatus, lastCrawledAt: source.lastCrawledAt })),
+    knowledgeGaps: [...business.knowledgeGaps.values()],
+    privacyNoticeUrl: business.agentConfig.privacyNoticeUrl,
+  });
+  const rawById = new Map(business.facts.map((fact) => [fact.id, fact]));
+  return model.knowledge.facts.flatMap((canonical) => {
+    const raw = rawById.get(canonical.id);
+    return raw ? [{ raw, canonical }] : [];
+  });
+}
+
+function canonicalBusinessFactsForAnswer(business: Business): BusinessFact[] {
+  return canonicalBusinessFactsForRuntime(business).map(({ raw }) => raw);
+}
+
+function looksLikeBusinessDescriptor(value: string): boolean {
+  return /local[_ -]?business|salon management software|management software|more bookings|software for|^business$/i.test(value.trim());
+}
+
+function customerBusinessName(business: Business): string {
+  const declared = business.name.trim();
+  const evidence = [
+    business.agentConfig.assistantName,
+    ...business.sources.flatMap((source) => [source.title, source.url]),
+    ...business.facts.flatMap((fact) => [fact.subject, fact.predicate, fact.valueText]),
+    ...business.actions.flatMap((action) => [action.name, action.key, action.completion.message ?? "", action.completion.linkLabel ?? ""]),
+    ...business.chunks.slice(0, 80).map((chunk) => chunk.content),
+  ].filter(Boolean).join(" ");
+  const explicit = /\b(?:canonical\s+brand(?:\s+name)?|brand(?:\s+name)?|business\s+name)\s*[:\-]\s*([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,2})/i.exec(evidence)?.[1]?.trim();
+  const candidate = [...evidence.matchAll(/\b([A-Z][A-Za-z0-9]*(?:Flow|AI|CRM|Hub|Works|Labs|Studio))\b/g)]
+    .map((match) => match[1])
+    .find((value) => !/^assistant$/i.test(value));
+  if (looksLikeBusinessDescriptor(declared)) return explicit || candidate || declared;
+  return declared || explicit || candidate || "the business";
+}
+
+function customerFallbackMessage(business: Business): string {
+  const configured = business.agentConfig.fallbackMessage.trim();
+  if (!configured) return "I don’t have enough verified information to answer that confidently.";
+  return canonicalizeCustomerCopy(business, configured);
+}
+
+function canonicalizeCustomerCopy(business: Business, copy: string): string {
+  const canonical = customerBusinessName(business);
+  if (!business.name.trim() || business.name.trim() === canonical) return copy;
+  return copy.replace(new RegExp(business.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), canonical);
+}
+
+function customerPrimaryCta(business: Business, cta: PrimaryCta | null): PrimaryCta | null {
+  if (!cta) return null;
+  return {
+    ...cta,
+    label: canonicalizeCustomerCopy(business, cta.label),
+    ...(cta.question ? { question: canonicalizeCustomerCopy(business, cta.question) } : {}),
+  };
+}
+
+function customerFacingAgentConfig(business: Business): AgentConfig {
+  const configuredAssistant = business.agentConfig.assistantName.trim();
+  const assistantBrand = configuredAssistant.replace(/\s+AI Assistant$/i, "").replace(/\s+Assistant$/i, "").trim();
+  return {
+    ...business.agentConfig,
+    assistantName: looksLikeBusinessDescriptor(assistantBrand) ? `${customerBusinessName(business)} Assistant` : business.agentConfig.assistantName,
+    welcomeMessage: canonicalizeCustomerCopy(business, business.agentConfig.welcomeMessage),
+    fallbackMessage: customerFallbackMessage(business),
+    widgetQuickActions: business.agentConfig.widgetQuickActions.map((action) => ({
+      label: canonicalizeCustomerCopy(business, action.label),
+      question: canonicalizeCustomerCopy(business, action.question),
+    })),
+  };
+}
+
+function canonicalVerifiedPlanFactsForWorkflow(business: Business): BusinessFact[] {
+  return canonicalBusinessFactsForRuntime(business)
+    .filter(({ canonical }) => canonical.kind === "pricing" && canonical.status === "VERIFIED" && canonical.usableForCritical)
+    .map(({ raw }) => raw);
+}
+
+function canonicalVerifiedPricingFactsForAnswer(business: Business): BusinessFact[] {
+  return canonicalBusinessFactsForRuntime(business)
+    .filter(({ canonical }) => canonical.kind === "pricing" && canonical.status === "VERIFIED" && canonical.usableForCritical)
+    .map(({ raw }) => raw);
+}
+
 function workflowScopedFacts(business: Business, workflow?: ActiveWorkflowAnswerContext): BusinessFact[] {
   const audience = workflowAudienceTerms(workflow);
-  if (!audience) return business.facts;
-  return business.facts.filter((fact) => {
+  const facts = canonicalBusinessFactsForAnswer(business);
+  if (!audience) return facts;
+  return facts.filter((fact) => {
     if (fact.kind !== "pricing") return true;
     const text = `${fact.subject} ${fact.predicate} ${fact.valueText}`;
     return !(audience.competing.test(text) && !audience.target.test(text));
@@ -6325,11 +6447,9 @@ function workflowPricingAnswer(
   workflow: ActiveWorkflowAnswerContext | undefined,
 ): StructuredFactAnswer | null {
   const audience = workflowAudienceTerms(workflow);
-  if (!workflow || !audience || !workflow.state.values.usage_type) return null;
 
-  const plans = workflowScopedFacts(business, workflow)
-    .filter((fact) => fact.active && fact.kind === "pricing")
-    .filter((fact) => /\b(free|solo|individual|personal|starter|pro|premium|plan|tier|subscription)\b/i.test(`${fact.subject} ${fact.predicate} ${fact.valueText}`))
+  const plans = canonicalVerifiedPricingFactsForAnswer(business)
+    .filter((fact) => !audience || !(audience.competing.test(`${fact.subject} ${fact.predicate} ${fact.valueText}`) && !audience.target.test(`${fact.subject} ${fact.predicate} ${fact.valueText}`)))
     .filter((fact) => /\$|€|£|\/month|per month|monthly|free/i.test(fact.valueText))
     .filter((fact, index, facts) => facts.findIndex((candidate) => `${candidate.subject}|${candidate.valueText}`.toLowerCase() === `${fact.subject}|${fact.valueText}`.toLowerCase()) === index)
     .sort((left, right) => {
@@ -6340,8 +6460,10 @@ function workflowPricingAnswer(
     .slice(0, 8);
   if (!plans.length) return null;
 
-  const audienceLabel = /team|group|multiple/i.test(workflow.state.values.usage_type) ? "For team use" : "For individual use";
-  const summary = plans.map((fact) => `${fact.subject} at ${fact.valueText}`).join("; ");
+  const audienceLabel = workflow && audience
+    ? /team|group|multiple/i.test(workflow.state.values.usage_type) ? "For team use" : "For individual use"
+    : null;
+  const summary = plans.map((fact) => `${canonicalizeCustomerCopy(business, fact.subject)} at ${fact.valueText}`).join("; ");
   const citations = plans
     .map((fact) => {
       const source = fact.sourceId ? business.sources.find((item) => item.id === fact.sourceId) : null;
@@ -6352,7 +6474,7 @@ function workflowPricingAnswer(
     .slice(0, 2);
   const fact = plans[0];
   return {
-    answer: `${audienceLabel}, ${summary}.`,
+    answer: audienceLabel ? `${audienceLabel}, ${summary}.` : `${customerBusinessName(business)} pricing: ${summary}.`,
     fact,
     confidenceScore: Math.min(0.99, 0.72 + fact.confidence * 0.2 + (fact.authority === "owner_verified" || fact.authority === "system_of_record" ? 0.06 : 0)),
     citations,
@@ -6388,7 +6510,7 @@ function retrievalContext(
   const intent = classifyQuestionIntent(normalizedQuery);
   const parts = [normalizedQuery];
   if (intent === "getting_started") {
-    parts.push(`${business.name} onboarding`, "start using the product", "first steps", "create a first task", "try signup free trial");
+    parts.push(`${customerBusinessName(business)} onboarding`, "start using the product", "first steps", "create a first task", "try signup free trial");
   }
   // Do not put prior visitor or assistant turns into the retrieval query. The
   // current turn owns intent and evidence selection; replaying the whole
@@ -6660,10 +6782,10 @@ function extractiveAnswer(
   };
   const selected = useful.filter((sentence) => answerSignals[intent].test(sentence)).slice(0, 3);
   const excerpt = shapeCustomerAnswer((selected.length ? selected : useful).join(" ").slice(0, 1_200).trim(), tone);
-  if (!selected.length && ["pricing", "permissions", "privacy", "support", "policy", "contact", "location", "hours", "calendar", "reminders", "voice", "teams", "unsupported"].includes(intent)) return business.agentConfig.fallbackMessage;
-  if (!excerpt) return business.agentConfig.fallbackMessage;
+  if (!selected.length && ["pricing", "permissions", "privacy", "support", "policy", "contact", "location", "hours", "calendar", "reminders", "voice", "teams", "unsupported"].includes(intent)) return customerFallbackMessage(business);
+  if (!excerpt) return customerFallbackMessage(business);
   if (intent === "services" && !/\b(offer|offers|provide|provides|services?|solutions?|products?)\b/i.test(excerpt)) {
-    return `${business.name} offers the services described on its website: ${excerpt}`;
+    return `${customerBusinessName(business)} offers the services described on its website: ${excerpt}`;
   }
   if (intent === "services" && !/\b(if you|tell me|help)\b/i.test(excerpt)) {
     return `${excerpt} If you tell me what you’re trying to automate or build, I can point you to the most relevant service.`;
@@ -6746,15 +6868,16 @@ function structuredFactAnswer(
     return null;
   }
   const value = fact.valueText;
+  const subject = canonicalizeCustomerCopy(business, fact.subject);
   const answer = fact.kind === "hours"
-    ? `${business.name}'s hours for ${fact.subject} are ${value}.`
+    ? `${customerBusinessName(business)}'s hours for ${subject} are ${value}.`
     : fact.kind === "pricing"
-      ? `${fact.subject} costs ${value}.`
+      ? `${subject} costs ${value}.`
       : fact.kind === "contact"
-        ? `${fact.subject}: ${value}.`
+        ? `${subject}: ${value}.`
         : fact.kind === "location"
-          ? `${fact.subject} is located at ${value}.`
-          : `${fact.subject}: ${value}.`;
+          ? `${subject} is located at ${value}.`
+          : `${subject}: ${value}.`;
   const source = fact.sourceId ? business.sources.find((item) => item.id === fact.sourceId) : null;
   return {
     answer,
@@ -6792,7 +6915,7 @@ async function answerQuestion(
       latencyMs: 0,
     };
     return {
-      answer: business.agentConfig.welcomeMessage,
+      answer: canonicalizeCustomerCopy(business, business.agentConfig.welcomeMessage),
       grounded: false,
       citations: [],
       knowledgeGap: null,
@@ -6826,9 +6949,9 @@ async function answerQuestion(
     };
   }
   const scopedFacts = workflowScopedFacts(business, options.workflow);
-  const primaryCtaForAnswer = options.workflow ? null : primaryCtaForQuestion(business, question, initialIntent);
+  const primaryCtaForAnswer = options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, initialIntent));
   const structured = initialIntent === "pricing"
-    ? workflowPricingAnswer(business, options.workflow) ?? structuredFactAnswer(business, question, initialIntent, scopedFacts)
+    ? workflowPricingAnswer(business, options.workflow) ?? structuredFactAnswer(business, question, initialIntent, canonicalVerifiedPricingFactsForAnswer(business))
     : structuredFactAnswer(business, question, initialIntent, scopedFacts);
   if (structured) {
     const modelUsage: ModelUsage = {
@@ -6860,6 +6983,36 @@ async function answerQuestion(
       },
       modelUsage,
       primaryCta: primaryCtaForAnswer ?? undefined,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+    };
+  }
+  // Pricing is a critical fact. Once the canonical model says there is no
+  // verified usable pricing fact, stop here instead of allowing a stale or
+  // website-only retrieval chunk to emit a conflicting amount.
+  if (initialIntent === "pricing") {
+    const gap = options.recordGap === false
+      ? (existingGap?.status === "open" ? existingGap : null)
+      : rememberGap(business, question, initialIntent, "no_authoritative_source");
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "pricing_requires_verified_canonical_fact",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
+    return {
+      answer: knowledgeGapMessage(customerBusinessName(business), "pricing"),
+      grounded: false,
+      citations: [],
+      knowledgeGap: gap,
+      quickActions: [knowledgeGapContactAction],
+      confidenceScore: 0,
+      confidenceBand: "low" as const,
+      retrieval: { mode: "pricing_requires_verified_fact", candidateCount: 0, topScore: 0, ...modelUsage },
+      modelUsage,
+      primaryCta: undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
@@ -6927,7 +7080,7 @@ async function answerQuestion(
         tone: business.agentConfig.tone,
         customToneInstructions: business.agentConfig.customToneInstructions,
       });
-      if (generated) generated.answer = shapeCustomerAnswer(generated.answer, business.agentConfig.tone);
+      if (generated) generated.answer = canonicalizeCustomerCopy(business, shapeCustomerAnswer(generated.answer, business.agentConfig.tone));
       generationUsage = generated?.usage ?? null;
       performanceTiming.llmFirstTokenMs = generated?.usage.latencyMs ?? null;
       performanceTiming.llmTotalMs += generated?.usage.latencyMs ?? 0;
@@ -7006,7 +7159,7 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
+      primaryCta: options.workflow ? undefined : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent)) ?? undefined,
       failure: { kind: "temporary_ai" as const, retryable: true, retrievedEvidence: true },
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
@@ -7022,8 +7175,8 @@ async function answerQuestion(
     const gap = options.recordGap === false ? (existingGap?.status === "open" ? existingGap : null) : rememberGap(business, question, intent, gapReason);
     return {
       answer: cancellationRequested
-        ? `I don’t have enough verified information about ${business.name}'s cancellation terms to answer that confidently. I can help you contact the team if you’d like.`
-        : knowledgeGapMessage(business.name, intent),
+        ? `I don’t have enough verified information about ${customerBusinessName(business)}'s cancellation terms to answer that confidently. I can help you contact the team if you’d like.`
+        : knowledgeGapMessage(customerBusinessName(business), intent),
       grounded: false,
       citations: [],
       knowledgeGap: gap,
@@ -7032,14 +7185,14 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
+      primaryCta: options.workflow ? undefined : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent)) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
   if (generated) {
     return {
-      answer: answerWithGettingStartedCta(generated.answer, intent, options.workflow ? null : primaryCtaForQuestion(business, question, intent)),
+      answer: answerWithGettingStartedCta(generated.answer, intent, options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent))),
       grounded: true,
       citations,
       knowledgeGap: null,
@@ -7047,13 +7200,13 @@ async function answerQuestion(
       confidenceBand,
       retrieval: enrichedRetrieval,
       modelUsage,
-      primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
+      primaryCta: options.workflow ? undefined : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent)) ?? undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
 
   return {
-    answer: answerWithGettingStartedCta(extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone), intent, options.workflow ? null : primaryCtaForQuestion(business, question, intent)),
+    answer: answerWithGettingStartedCta(extractiveAnswer(business, retrieval.matches.slice(0, 4), intent, business.agentConfig.tone), intent, options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent))),
     grounded: true,
     citations,
     knowledgeGap: null,
@@ -7061,7 +7214,7 @@ async function answerQuestion(
     confidenceBand,
     retrieval: enrichedRetrieval,
     modelUsage,
-    primaryCta: options.workflow ? undefined : primaryCtaForQuestion(business, question, intent) ?? undefined,
+    primaryCta: options.workflow ? undefined : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent)) ?? undefined,
     performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
   };
 }
@@ -7083,6 +7236,12 @@ type ActionFormSchema = {
 };
 
 type ConversationAnswerResult = Omit<AnswerResult, "failure"> & {
+  recommendation?: {
+    recommendedPlan: string;
+    verifiedPrice: string | null;
+    reason: string;
+    primaryCta: PrimaryCta | null;
+  };
   quickActions?: Array<{ label: string; question: string }>;
   failure?: {
     kind: "temporary_ai" | "retrieval" | "backend";
@@ -7119,6 +7278,7 @@ type ConversationDecisionTraceContext = {
   orchestration: ReturnType<typeof decideConversationRoute>;
   actionBefore: ActionFlow | null;
   stateBefore: ConversationActionState | null;
+  handoffStateBefore: ReturnType<typeof runtimeHandoffState>;
 };
 
 function cloneConversationActionState(state: ConversationActionState | null | undefined): ConversationActionState | null {
@@ -7238,7 +7398,8 @@ function actionAnswerWithKnowledge(
 
 function assistantBrandName(business: Business): string {
   const configured = business.agentConfig.assistantName.trim();
-  return configured.replace(/\s+AI Assistant$/i, "").replace(/\s+Assistant$/i, "").trim() || business.name;
+  const assistantName = configured.replace(/\s+AI Assistant$/i, "").replace(/\s+Assistant$/i, "").trim();
+  return !assistantName || looksLikeBusinessDescriptor(assistantName) ? customerBusinessName(business) : assistantName;
 }
 
 function directLinkCustomerMessage(business: Business, action: ActionFlow): string {
@@ -7249,7 +7410,7 @@ function directLinkCustomerMessage(business: Business, action: ActionFlow): stri
     "Here's the verified link.",
     "Here’s the verified link.",
   ]);
-  if (configured && !genericMessages.has(configured)) return configured;
+  if (configured && !genericMessages.has(configured)) return canonicalizeCustomerCopy(business, configured);
   const label = action.completion.linkLabel ?? action.name;
   if (/\bdemo\b/i.test(`${action.name} ${label}`)) return `Absolutely — you can try ${assistantBrandName(business)} here.`;
   return `Absolutely — ${label.toLowerCase()} is ready here.`;
@@ -7257,11 +7418,14 @@ function directLinkCustomerMessage(business: Business, action: ActionFlow): stri
 
 const actionKnowledgeIntents = new Set<RetrievalIntent>(["services", "hours", "contact", "location", "pricing", "permissions", "privacy", "support", "policy", "reminders", "calendar", "voice", "teams"]);
 
-function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): string {
-  if (step.type === "confirm") return workflowLookupPrompt(state) ?? step.question ?? "Would you like to continue?";
+function workflowPrompt(action: ActionFlow, state: ConversationActionState, step: NonNullable<ReturnType<typeof currentWorkflowStep>>, business?: Business): string {
+  if (step.type === "confirm") {
+    const prompt = workflowLookupPrompt(state) ?? step.question ?? "Would you like to continue?";
+    return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
+  }
   const field = workflowField(action, step.fieldKey);
-  if (field) return fieldPrompt(field);
-  return step.question ?? step.label ?? `Let's continue with ${action.name.toLowerCase()}.`;
+  const prompt = field ? fieldPrompt(field) : step.question ?? step.label ?? `Let's continue with ${action.name.toLowerCase()}.`;
+  return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
 }
 
 function actionConfigString(config: Record<string, unknown>, key: string): string | null {
@@ -7340,8 +7504,7 @@ function workflowLookupPrompt(state: ConversationActionState): string | null {
 }
 
 function verifiedPlanFactsForWorkflow(business: Business) {
-  return business.facts
-    .filter((fact) => fact.active)
+  return canonicalVerifiedPlanFactsForWorkflow(business)
     .map((fact) => ({
       subject: fact.subject,
       predicate: fact.predicate,
@@ -7365,13 +7528,27 @@ function planRecommendationInState(state: ConversationActionState): PlanRecommen
   return recommendation && typeof recommendation === "object" ? recommendation as PlanRecommendation : null;
 }
 
+function persistPlanRecommendation(state: ConversationActionState, recommendation: PlanRecommendation): void {
+  state.values.recommended_plan = recommendation.plan;
+  state.lookupResults = {
+    ...(state.lookupResults ?? {}),
+    pricing_context: {
+      recommendedPlan: recommendation.plan,
+      verifiedPrice: recommendation.price,
+      verified: true,
+    },
+  };
+}
+
 function workflowCtaForStep(business: Business, action: ActionFlow, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): PrimaryCta | null {
   if (step.type !== "redirect") return null;
   const actionKey = actionConfigString(step.config ?? {}, "actionKey");
   const configured = actionKey
     ? business.actions.find((candidate) => candidate.key === actionKey && candidate.enabled && candidate.lifecycleStatus !== "disabled")
     : primaryActionForBusiness(business);
-  return primaryCtaForAction(configured ?? action);
+  const cta = primaryCtaForAction(configured ?? action);
+  const buttonLabel = actionConfigString(step.config ?? {}, "buttonLabel");
+  return customerPrimaryCta(business, cta && buttonLabel ? { ...cta, label: buttonLabel } : cta);
 }
 
 async function resolveWorkflowActionResources(
@@ -7456,6 +7633,10 @@ async function advanceWorkflowAutomation(
             ? await resolveWorkflowActionResources(business, action, step, state)
             : step.config?.result;
       if (result !== undefined) state.lookupResults = { ...(state.lookupResults ?? {}), [step.id]: result };
+      if (step.type === "recommend" && isPlanSelectionWorkflow(action) && result && typeof result === "object") {
+        const recommendation = (result as Record<string, unknown>).recommendation;
+        if (recommendation && typeof recommendation === "object") persistPlanRecommendation(state, recommendation as PlanRecommendation);
+      }
       if (step.type === "recommend" && isPlanSelectionWorkflow(action) && result === undefined) break;
     }
     if (step.type === "generate_link") {
@@ -7524,7 +7705,7 @@ async function continueWorkflowActionConversation(
   // Decide whether this is a side question before extracting values. A pricing
   // question can mention a competing audience (for example, "what does the
   // team plan cost?") without being an answer to the paused field.
-  const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state });
+  const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
   const guidedDemo = explicitGuidedDemoRequest(question);
   const normalConversion = /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question) && !guidedDemo;
   if (guidedDemo && action.steps?.some((step) => step.config?.trigger === "explicit_guided_demo_request")) {
@@ -7562,10 +7743,10 @@ async function continueWorkflowActionConversation(
   const currentAfterExtraction = currentWorkflowStep(action, state);
   const orchestration = preserveWorkflowState
     ? initialOrchestration
-    : decideConversationRoute({ message: question, activeAction: action, actionState: state });
+    : decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
   const isSideQuestion = orchestration.route === "INTERRUPTION";
   if (orchestration.route === "EXPLICIT_ACTION") {
-    return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction) : "What would you like to do?"}`);
+    return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "What would you like to do?"}`);
   }
   if (isSideQuestion) {
     pushWorkflowInterruption(state, {
@@ -7574,11 +7755,11 @@ async function continueWorkflowActionConversation(
       returnStepId: currentAfterExtraction?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction) : "The workflow is ready to continue.");
+    return actionAnswerWithKnowledge(knowledge, action, state, currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "The workflow is ready to continue.");
   }
 
   if (repeatable && wantsAnotherParticipant(question) && startAnotherWorkflowParticipant(state, repeatable, action)) {
-    return actionAnswer(action, state, `Absolutely — let’s add another ${repeatable.entityLabel}. ${workflowPrompt(action, state, currentWorkflowStep(action, state) ?? action.steps![0])}`);
+    return actionAnswer(action, state, `Absolutely — let’s add another ${repeatable.entityLabel}. ${workflowPrompt(action, state, currentWorkflowStep(action, state) ?? action.steps![0], business)}`);
   }
 
   if (!extracted.updated.length && actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
@@ -7589,7 +7770,7 @@ async function continueWorkflowActionConversation(
       returnStepId: current?.id ?? state.currentStepId ?? null,
     });
     const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state } });
-    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current) : "The workflow is ready to continue.");
+    return actionAnswerWithKnowledge(knowledge, action, state, current ? workflowPrompt(action, state, current, business) : "The workflow is ready to continue.");
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
@@ -7598,9 +7779,18 @@ async function continueWorkflowActionConversation(
   state.currentStepId = step.id;
 
   if (isPlanSelectionWorkflow(action)) {
-    const recommendation = planRecommendationInState(state);
+    const recommendation = planRecommendationInState(state) ?? planRecommendationFromState(business, action, state);
+    if (recommendation) persistPlanRecommendation(state, recommendation);
     if (step.id === "recommend-plan" && !recommendation) {
-      return actionAnswer(action, state, "I have your answers. I’m still waiting for verified plan information before I recommend a plan.");
+      const hasVerifiedPlanFacts = canonicalVerifiedPlanFactsForWorkflow(business).length > 0;
+      const audience = /team|group|multiple/i.test(state.values.usage_type ?? "") ? "team" : "solo";
+      return actionAnswer(
+        action,
+        state,
+        hasVerifiedPlanFacts
+          ? `I couldn't find a verified ${audience} plan that matches those answers yet.`
+          : "I don't have verified plan information available to recommend a plan yet.",
+      );
     }
     if (recommendation && (step.id === "explain-plan" || step.id === "get-started")) {
       if (step.id === "explain-plan") {
@@ -7612,12 +7802,14 @@ async function continueWorkflowActionConversation(
       }
       const readyStep = currentWorkflowStep(action, state);
       const cta = readyStep ? workflowCtaForStep(business, action, readyStep) : null;
-      return actionAnswer(action, state, `${planRecommendationMessage(recommendation)}\n\nReady to get started?`, cta);
+      const response = actionAnswer(action, state, `${planRecommendationMessage(recommendation)}\n\nReady to get started?`, cta);
+      response.recommendation = { ...planRecommendationPayload(recommendation), primaryCta: cta };
+      return response;
     }
   }
 
   if (step.type === "redirect") {
-    const prompt = workflowPrompt(action, state, step);
+    const prompt = workflowPrompt(action, state, step, business);
     return actionAnswer(action, state, starting ? "Sure — I can help with " + action.name.toLowerCase() + ". " + prompt : prompt, workflowCtaForStep(business, action, step));
   }
 
@@ -7628,7 +7820,7 @@ async function continueWorkflowActionConversation(
       return actionAnswer(action, state, "Great — just complete these details below and I’ll prepare the next step.");
     }
     await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: step.fieldKey ?? step.id });
-    return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + workflowPrompt(action, state, step));
+    return actionAnswer(action, state, "Sure — I can help with " + action.name.toLowerCase() + ". " + workflowPrompt(action, state, step, business));
   }
 
   if (state.formShown || step.type === "form") {
@@ -7646,14 +7838,14 @@ async function continueWorkflowActionConversation(
           state.selectedActionResourceId = candidate.id;
           transitionWorkflow(action, state, step.id);
         } else {
-          return actionAnswer(action, state, "That option is not available. " + workflowPrompt(action, state, step));
+          return actionAnswer(action, state, "That option is not available. " + workflowPrompt(action, state, step, business));
         }
       } else {
-        return actionAnswer(action, state, workflowPrompt(action, state, step));
+        return actionAnswer(action, state, workflowPrompt(action, state, step, business));
       }
     } else {
       if (!/^(yes|y|sure|ok|okay|please|continue|do it|go ahead)\b/i.test(question.trim())) {
-        return actionAnswer(action, state, "No problem. " + workflowPrompt(action, state, step));
+        return actionAnswer(action, state, "No problem. " + workflowPrompt(action, state, step, business));
       }
       transitionWorkflow(action, state, step.id);
     }
@@ -7665,10 +7857,10 @@ async function continueWorkflowActionConversation(
       const alreadyExtracted = field?.key ? extracted.updated.includes(field.key) : false;
       if (!alreadyExtracted) {
         if (extracted.updated.length) {
-          return actionAnswer(action, state, `Thanks — ${workflowPrompt(action, state, step)}`);
+          return actionAnswer(action, state, `Thanks — ${workflowPrompt(action, state, step, business)}`);
         }
         const input = applyWorkflowInput(action, state, question);
-        if (!input.ok) return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step)}`);
+        if (!input.ok) return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step, business)}`);
         if (repeatable && input.value && repeatable.fieldKeys.includes(field?.key ?? step.fieldKey ?? "")) setWorkflowParticipantValue(state, field?.key ?? step.fieldKey ?? "", input.value);
         await recordConversionEvent(business, {
           event: "FIELD_COMPLETED",
@@ -7684,7 +7876,7 @@ async function continueWorkflowActionConversation(
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
   state.currentStepId = step.id;
   if (step.type === "redirect") {
-    return actionAnswer(action, state, workflowPrompt(action, state, step), workflowCtaForStep(business, action, step));
+    return actionAnswer(action, state, workflowPrompt(action, state, step, business), workflowCtaForStep(business, action, step));
   }
   if (step.type === "form") {
     state.formShown = true;
@@ -7692,7 +7884,7 @@ async function continueWorkflowActionConversation(
     return actionAnswer(action, state, "Almost done — just leave the remaining details below.");
   }
   await recordConversionEvent(business, { event: "FIELD_VIEWED", conversationId: conversation.id, flowId: action.id, fieldId: step.fieldKey ?? step.id });
-  return actionAnswer(action, state, "Thanks — " + workflowPrompt(action, state, step));
+  return actionAnswer(action, state, "Thanks — " + workflowPrompt(action, state, step, business));
 }
 
 async function continueActionConversation(
@@ -7872,14 +8064,14 @@ async function completeActionConversation(
   if (submission.status === "completed") {
     state.status = "completed";
     state.formShown = false;
-    return actionAnswer(action, state, action.completion.message);
+    return actionAnswer(action, state, canonicalizeCustomerCopy(business, action.completion.message));
   }
   state.status = "completed";
   state.completedAt = new Date().toISOString();
   state.formShown = false;
   if (state.participants?.length) completeActiveWorkflowParticipant(state);
   conversation.actionTaken = action.key;
-  let answer = action.completion.message;
+  let answer = canonicalizeCustomerCopy(business, action.completion.message);
   if (action.completion.linkTemplate && action.completion.completionMode !== "native_form" && action.completion.completionMode !== "human_follow_up") {
     try {
       const generated = generateCompletionLink(action.completion.linkTemplate, state.values);
@@ -8040,7 +8232,7 @@ async function submitActionForm(
   if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
   if (state.status === "completed") {
     const submission = business.actionSubmissions.find((item) => item.conversationId === conversation.id && item.actionId === action.id);
-    if (submission?.status === "completed") return actionAnswer(action, state, action.completion.message);
+    if (submission?.status === "completed") return actionAnswer(action, state, canonicalizeCustomerCopy(business, action.completion.message));
     return completeActionConversation(business, conversation, action, state);
   }
   await recordConversionEvent(business, {
@@ -8081,7 +8273,7 @@ async function submitActionForm(
       await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
       return actionAnswer(action, state, "One more detail is needed below.");
     }
-    return actionAnswer(action, state, workflowPrompt(action, state, next));
+    return actionAnswer(action, state, workflowPrompt(action, state, next, business));
   }
   const remaining = nextActionField(action, state);
   if (remaining) {
@@ -8096,6 +8288,12 @@ function customerAnswerPayload(result: ConversationAnswerResult) {
     answer: result.answer,
     grounded: result.grounded,
     citations: result.citations,
+    ...(result.recommendation ? {
+      recommendation: result.recommendation,
+      recommendedPlan: result.recommendation.recommendedPlan,
+      verifiedPrice: result.recommendation.verifiedPrice,
+      reason: result.recommendation.reason,
+    } : {}),
     ...(result.primaryCta ? { primaryCta: result.primaryCta } : {}),
     ...(result.quickActions?.length ? { quickActions: result.quickActions } : {}),
     ...(result.handoff ? { handoff: result.handoff } : {}),
@@ -8378,17 +8576,53 @@ function maybeConversation(business: Business, conversationId: string): Conversa
   return conversation;
 }
 
-function conversationStatusPayload(conversation: Conversation) {
+function runtimeCtasForConversation(business: Business, conversation: Conversation): PrimaryCta[] {
+  if (runtimeHandoffState(conversation.status) !== "AI_ACTIVE") return [];
+  const state = conversation.actionState;
+  const action = state ? business.actions.find((candidate) => candidate.id === state.actionId) ?? null : null;
+  if (!action || !state) return [];
+  if (state.completionUrl) {
+    return [{
+      actionId: action.id,
+      key: action.key,
+      label: action.completion.linkLabel ?? action.completion.submitLabel ?? "Continue",
+      executionMode: action.executionMode ?? "FORM_FLOW",
+      trackingKey: action.trackingKey ?? action.key,
+      url: state.completionUrl,
+    }];
+  }
+  const step = currentWorkflowStep(action, state);
+  const cta = step ? workflowCtaForStep(business, action, step) : null;
+  return cta ? [cta] : [];
+}
+
+function conversationStatusPayload(conversation: Conversation, business?: Business, allowedCtas?: PrimaryCta[]) {
+  const runtime = business
+    ? safeConversationRuntimeState(buildConversationRuntimeState({
+        businessId: business.id,
+        conversationId: conversation.id,
+        businessContextVersion: business.businessContextSnapshot?.version ?? null,
+        handoffState: runtimeHandoffState(conversation.status),
+        action: conversation.actionState ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null : null,
+        actionState: conversation.actionState ?? null,
+        allowedCtas: allowedCtas ?? runtimeCtasForConversation(business, conversation),
+      }))
+    : null;
   return {
     id: conversation.id,
     status: conversation.status,
     leadCaptured: conversation.leadCaptured,
+    action: conversation.actionState ? {
+      id: conversation.actionState.actionId,
+      status: conversation.actionState.status,
+    } : null,
     assignedUserId: conversation.assignedUserId,
     handoffReason: conversation.handoffReason,
     handoffNotificationStatus: conversation.handoffNotificationStatus,
     unreadCount: conversation.unreadCount,
     lastActivityAt: conversation.lastActivityAt,
     updatedAt: conversation.updatedAt,
+    ...(runtime ? { runtime } : {}),
   };
 }
 
@@ -8848,6 +9082,28 @@ async function recordConversationDecisionTrace(
     : null;
   const stateAfter = conversation.actionState ?? null;
   const provider = providerTrace(actionAfter ?? context.actionBefore, stateAfter, result.actionDelivery);
+  const runtimeBefore = buildConversationRuntimeState({
+    businessId: business.id,
+    conversationId: conversation.id,
+    businessContextVersion: business.businessContextSnapshot?.version ?? null,
+    handoffState: context.handoffStateBefore,
+    action: context.actionBefore,
+    actionState: context.stateBefore,
+    route: context.orchestration.route,
+  });
+  const runtimeAfter = buildConversationRuntimeState({
+    businessId: business.id,
+    conversationId: conversation.id,
+    businessContextVersion: business.businessContextSnapshot?.version ?? null,
+    handoffState: runtimeHandoffState(conversation.status),
+    action: actionAfter,
+    actionState: stateAfter,
+    route: context.orchestration.route,
+    providerResult: result.actionDelivery ? { status: result.actionDelivery.status } : null,
+    allowedCtas: result.primaryCta ? [result.primaryCta] : [],
+  });
+  assertConversationRuntimeState(runtimeBefore);
+  assertConversationRuntimeState(runtimeAfter);
   const ctaActionSelected = result.primaryCta
     ? {
         actionId: result.primaryCta.actionId,
@@ -8861,7 +9117,7 @@ async function recordConversationDecisionTrace(
       ? { actionId: result.action.id, key: result.action.key, status: result.action.status }
       : null;
   await recordConversationEvent(business, conversation, "CONVERSATION_DECISION_TRACE", "system", null, {
-    trace_version: 1,
+    trace_version: 2,
     turn_id: context.turnId,
     route: context.orchestration.route,
     confidence: context.orchestration.confidence,
@@ -8882,6 +9138,8 @@ async function recordConversationDecisionTrace(
       ? { lookup_steps: provider.lookupSteps, action_delivery: provider.actionDelivery }
       : null,
     workflow_state_after: snapshotConversationWorkflowState(stateAfter),
+    runtime_state_before: safeConversationRuntimeState(runtimeBefore),
+    runtime_state_after: safeConversationRuntimeState(runtimeAfter),
     cta_action_selected: ctaActionSelected,
     response: {
       grounded: result.grounded,
@@ -8994,13 +9252,18 @@ async function recordConversationQuestion(business: Business, conversation: Conv
 async function recordConversationQuestionUnlocked(business: Business, conversation: Conversation, question: string, options: { currentPage?: string | null; clientMessageId?: string } = {}) {
   if (conversationIsTerminal(conversation)) throw httpError(409, "Conversation is closed; start a new conversation");
   const activeAction = conversation.actionState ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null : null;
-  const orchestration = decideConversationRoute({ message: question, activeAction, actionState: conversation.actionState });
+  const activeWorkflow = activeAction && conversation.actionState?.status === "active"
+    ? { action: activeAction, state: conversation.actionState }
+    : undefined;
+  const handoffStateBefore = runtimeHandoffState(conversation.status);
+  const orchestration = decideConversationRoute({ message: question, activeAction, actionState: conversation.actionState, handoffState: handoffStateBefore });
   const traceContext: ConversationDecisionTraceContext = {
     turnId: options.clientMessageId ?? randomUUID(),
     startedAt: performance.now(),
     orchestration,
     actionBefore: activeAction,
     stateBefore: cloneConversationActionState(conversation.actionState),
+    handoffStateBefore,
   };
   const persistTurn = (result: ConversationAnswerResult) => persistConversationExchange(
     business,
@@ -9039,10 +9302,29 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
   let result: ConversationAnswerResult;
   try {
     result = await continueActionConversation(business, conversation, question, { sourcePage: options.currentPage })
-      ?? await answerQuestion(business, question, { conversation, currentPage: options.currentPage });
+      ?? await answerQuestion(business, question, {
+        conversation,
+        currentPage: options.currentPage,
+        ...(activeWorkflow ? { workflow: activeWorkflow } : {}),
+      });
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : "unknown widget answer failure", businessId: business.id, conversationId: conversation.id }, "Widget answer degraded after backend failure");
     result = temporaryConversationAnswer(question, "backend");
+  }
+  // An incomplete workflow owns the turn. Keep a global CTA from leaking in
+  // if a future action implementation or a degraded answer path falls back to
+  // knowledge answering, and always return enough action state for the widget
+  // to preserve the form/cursor.
+  const explicitConversionIntent = /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question) || explicitGuidedDemoRequest(question);
+  if (activeWorkflow && result.primaryCta && result.action?.status === "active" && !explicitConversionIntent) {
+    const { primaryCta: _primaryCta, ...withoutPrimaryCta } = result;
+    result = withoutPrimaryCta;
+  }
+  if (activeWorkflow && !result.action) {
+    result = {
+      ...result,
+      action: actionStatePayload(activeWorkflow.action, activeWorkflow.state),
+    };
   }
   // A staff takeover can happen while retrieval or generation is in flight.
   // Do not commit an AI answer after the authoritative status has changed.
@@ -9055,6 +9337,7 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
       handoff: { status: statusAfterProcessing, reason: "Human takeover is active" },
     };
   }
+  result = { ...result, answer: canonicalizeCustomerCopy(business, result.answer) };
   return persistTurn(result);
 }
 
@@ -9074,9 +9357,11 @@ async function recordActionFormSubmission(
       message: "Submitted action details.",
       activeAction: actionBefore,
       actionState: conversation.actionState,
+      handoffState: runtimeHandoffState(conversation.status),
     }),
     actionBefore,
     stateBefore,
+    handoffStateBefore: runtimeHandoffState(conversation.status),
   };
   if (conversation.actionState?.actionId === actionId && sourcePage) conversation.actionState.sourcePage = sourcePage;
   const result = await submitActionForm(business, conversation, actionId, values);
@@ -11782,7 +12067,7 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   }
 
   const crawled = await crawlConfiguredWebsite(websiteUrl);
-  const firstPage = crawled.pages[0];
+  const firstPage = firstCrawledPageOrError(crawled);
   const name = businessNameFromTitle(firstPage.title, websiteUrl);
   const baseSlug = slugify(name);
   let slug = baseSlug;
@@ -11849,7 +12134,7 @@ async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<
 
   try {
     const crawled = await crawlConfiguredWebsite(websiteUrl);
-    const firstPage = crawled.pages[0];
+    const firstPage = firstCrawledPageOrError(crawled);
     const name = businessNameFromTitle(firstPage.title, websiteUrl);
     const baseSlug = slugify(name);
     let slug = baseSlug;
@@ -11940,7 +12225,7 @@ app.post("/api/v1/demo/:slug/public/test", async (request) => {
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   // Public samples are intentionally read-only: prospects can test the agent,
   // but their questions do not mutate the seeded demo's conversations or gaps.
-  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false })), businessName: business.name };
+  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false })), businessName: customerBusinessName(business) };
 });
 
 app.get("/api/v1/demo/:slug", async (request) => {
@@ -13171,7 +13456,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/read", async (request
       [conversation.id, business.id, conversation.updatedAt],
     );
   }
-  return { ok: true, conversation: conversationStatusPayload(conversation) };
+  return { ok: true, conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.get("/api/v1/demo/:slug/notifications", async (request) => {
@@ -13215,7 +13500,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
     throw httpError(409, "This conversation is already assigned to another team member");
   }
   if (conversation.status === "HUMAN_ACTIVE" && conversation.assignedUserId === persistedActorId) {
-    return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
+    return { conversation: conversationStatusPayload(conversation, business), actor: { id: actor.id, name: actor.name, role: actor.role } };
   }
   if (pool && persistedActorId) {
     const client = await pool.connect();
@@ -13255,7 +13540,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
       conversation.unreadCount = 0;
       conversation.updatedAt = now;
       await cancelPendingHandoffReminders(conversation.id);
-      return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
+      return { conversation: conversationStatusPayload(conversation, business), actor: { id: actor.id, name: actor.name, role: actor.role } };
     }
   }
   conversation.status = "HUMAN_ACTIVE";
@@ -13269,7 +13554,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
   await recordConversationEvent(business, conversation, "HUMAN_JOINED", "staff", persistedActorId, { name: actor.name });
   await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", persistedActorId, { name: actor.name });
   if (!pool || actor.legacyDemo) await persistConversation(business, conversation);
-  return { conversation: conversationStatusPayload(conversation), actor: { id: actor.id, name: actor.name, role: actor.role } };
+      return { conversation: conversationStatusPayload(conversation, business), actor: { id: actor.id, name: actor.name, role: actor.role } };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/assign", async (request) => {
@@ -13291,7 +13576,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/assign", async (reque
   conversation.lastActivityAt = now;
   await persistConversation(business, conversation);
   await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", actor.id, { assigneeId });
-  return { conversation: conversationStatusPayload(conversation) };
+  return { conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/return-to-ai", async (request) => {
@@ -13342,7 +13627,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/return-to-ai", async 
     await persistConversation(business, conversation);
   }
   await recordConversationEvent(business, conversation, "RETURNED_TO_AI", "staff", actor.legacyDemo ? null : actor.id);
-  return { conversation: conversationStatusPayload(conversation) };
+  return { conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/resolve", async (request) => {
@@ -13362,7 +13647,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/resolve", async (requ
   if (pool && !actor.legacyDemo) await pool.query("update conversation_assignments set status = 'released', released_at = now() where conversation_id = $1 and status = 'active'", [conversation.id]);
   await recordConversationEvent(business, conversation, "CONVERSATION_RESOLVED", "staff", actor.legacyDemo ? null : actor.id);
   await persistConversation(business, conversation);
-  return { conversation: conversationStatusPayload(conversation) };
+  return { conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", async (request) => {
@@ -13378,7 +13663,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", asyn
   const clientMessageId = typeof body.clientMessageId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.clientMessageId.trim()) ? body.clientMessageId.trim() : undefined;
   if (clientMessageId) {
     const existing = conversation.messages.find((message) => message.id === clientMessageId && message.role === "human");
-    if (existing) return { message: inboxMessagePayload(existing), conversation: conversationStatusPayload(conversation) };
+    if (existing) return { message: inboxMessagePayload(existing), conversation: conversationStatusPayload(conversation, business) };
   }
   const now = new Date().toISOString();
   const message: Message = { id: clientMessageId ?? randomUUID(), role: "human", kind: "message", authorUserId: actor.legacyDemo ? undefined : actor.id, authorName: actor.name, content, createdAt: now };
@@ -13390,7 +13675,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", asyn
   await persistMessage(conversation, message);
   await persistConversation(business, conversation);
   await recordConversationEvent(business, conversation, "MESSAGE_SENT_BY_HUMAN", "staff", actor.legacyDemo ? null : actor.id, { contentLength: content.length });
-  return { message: inboxMessagePayload(message), conversation: conversationStatusPayload(conversation) };
+  return { message: inboxMessagePayload(message), conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/ai-assist", async (request) => {
@@ -13406,7 +13691,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/ai-assist", async (re
   conversation.status = "AI_ASSISTED";
   conversation.lastActivityAt = new Date().toISOString();
   await persistConversation(business, conversation);
-  return { suggestion: result.answer, grounded: result.grounded, citations: result.citations, conversation: conversationStatusPayload(conversation) };
+  return { suggestion: result.answer, grounded: result.grounded, citations: result.citations, conversation: conversationStatusPayload(conversation, business) };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/notes", async (request) => {
@@ -13435,8 +13720,8 @@ app.get("/api/v1/widget/:siteKey/config", async (request, reply) => {
   const publicConfig = {
     siteKey: business.widget.siteKey,
     slug: business.slug,
-    business: { name: business.name, location: business.location, websiteUrl: business.websiteUrl },
-    agent: business.agentConfig,
+    business: { name: customerBusinessName(business), location: business.location, websiteUrl: business.websiteUrl },
+    agent: customerFacingAgentConfig(business),
   };
   const configVersion = createHash("sha256").update(JSON.stringify(publicConfig.agent)).digest("hex").slice(0, 16);
   const entityTag = `"${configVersion}"`;
@@ -13555,7 +13840,7 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
         conversationId: conversation.id,
         messageId: clientMessageId,
         assistantMessageId: existingAnswer?.id,
-        conversation: conversationStatusPayload(conversation),
+        conversation: conversationStatusPayload(conversation, business),
         answer: existingAnswer?.content ?? "",
         grounded: existingAnswer?.grounded ?? false,
         citations: existingAnswer?.citations ?? [],
@@ -13596,7 +13881,7 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
     conversationId: conversation.id,
     messageId: clientMessageId,
     assistantMessageId: assistantMessage?.id,
-    conversation: conversationStatusPayload(conversation),
+    conversation: conversationStatusPayload(conversation, business, result.primaryCta ? [result.primaryCta] : undefined),
     ...customerAnswerPayload(result),
   };
 });
@@ -13607,7 +13892,7 @@ app.get("/api/v1/widget/:siteKey/conversations/:conversationId", async (request)
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   return {
-    conversation: conversationStatusPayload(conversation),
+    conversation: conversationStatusPayload(conversation, business),
     messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload),
   };
 });
@@ -13638,7 +13923,11 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionI
     asRecord(body.values),
     optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000),
   );
-  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...customerAnswerPayload(result) };
+  return {
+    conversationId: conversation.id,
+    conversation: conversationStatusPayload(conversation, business, result.primaryCta ? [result.primaryCta] : undefined),
+    ...customerAnswerPayload(result),
+  };
 });
 
 app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
@@ -14459,7 +14748,11 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages", async (req
   conversation = await conversationForIncomingMessage(business, conversation, optionalString(body.sessionId, 160));
   const question = requiredString(body.question, "question", 1_000);
   const result = await recordConversationQuestion(business, conversation, question);
-  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...result };
+  return {
+    conversationId: conversation.id,
+    conversation: conversationStatusPayload(conversation, business, result.primaryCta ? [result.primaryCta] : undefined),
+    ...result,
+  };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/actions/:actionId/submit", async (request) => {
@@ -14476,7 +14769,11 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/actions/:actionId/sub
     asRecord(body.values),
     optionalString(body.pageUrl, 2_000) ?? optionalString(body.sourcePage, 2_000),
   );
-  return { conversationId: conversation.id, conversation: conversationStatusPayload(conversation), ...result };
+  return {
+    conversationId: conversation.id,
+    conversation: conversationStatusPayload(conversation, business, result.primaryCta ? [result.primaryCta] : undefined),
+    ...result,
+  };
 });
 
 app.post("/api/v1/demo/:slug/leads", async (request, reply) => {

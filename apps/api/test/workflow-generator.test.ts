@@ -23,6 +23,10 @@ test("PlanCraftAI prompt takes priority over Capture a lead", () => {
   assert.deepEqual(result.steps.slice(0, 3).map((step) => step.fieldKey), ["usage_type", "main_goal", "usage_level"]);
   assert.equal(result.steps.at(-1)?.type, "redirect");
   assert.equal(result.steps.at(-1)?.config?.buttonLabel, "Get started");
+  assert.deepEqual(result.fields.slice(0, 3).map((field) => field.key), ["usage_type", "main_goal", "usage_level"]);
+  assert.equal(result.fields.find((field) => field.key === "recommended_plan")?.visibility, "hidden");
+  assert.equal(result.fields.some((field) => field.key === "business_type" || field.key === "relevant_capabilities"), false);
+  assert.deepEqual(result.fields.find((field) => field.key === "usage_level")?.options, ["Occasionally", "Regularly", "Daily"]);
   assert.equal(result.fields.find((field) => field.key === "name")?.required, false);
   assert.equal(result.steps[0].config?.interruptionPolicy, "answer_and_resume");
   assert.equal(result.steps[0].config?.reviewStatus, "owner_defined");

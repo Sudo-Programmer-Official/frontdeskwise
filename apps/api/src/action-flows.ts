@@ -695,6 +695,7 @@ export function defaultActionFlows(
   candidates: WebsiteActionCandidate[] = [],
 ): ActionFlow[] {
   const value = (name + " " + websiteContent).toLowerCase();
+  const isSwimSchool = /\bswim(?:ming)?\b|\bswim school\b/.test(value);
   const keys = new Set<string>(["capture_lead"]);
   const bestCandidateByType = new Map<string, WebsiteActionCandidate>();
   for (const candidate of candidates.sort((left, right) => right.priority - left.priority || right.confidence - left.confidence)) {
@@ -719,6 +720,14 @@ export function defaultActionFlows(
     const template = actionTemplate(key);
     if (!template) return null;
     const action = cloneTemplate(template, idFactory(key), now);
+    const canonicalName = key === "enroll_child" && isSwimSchool
+      ? "Find the right swim lesson"
+      : action.name;
+    const canonicalDescription = key === "enroll_child" && isSwimSchool
+      ? "Help parents find a suitable lesson, check live availability, and continue to verified registration."
+      : action.description;
+    action.name = canonicalName;
+    action.description = canonicalDescription;
     const candidate = candidateByKey.get(key);
     if (!candidate) return action;
     const tryDemoCandidate = candidate.actionType === "request_demo"
@@ -736,8 +745,8 @@ export function defaultActionFlows(
           triggerIntents: [],
         }
         : {}),
-      name: candidate.label || action.name,
-      description: candidate.description || action.description,
+      name: canonicalName,
+      description: canonicalDescription,
       destination: candidate.destination,
       provider: candidate.provider,
       priority: candidate.priority,
@@ -871,6 +880,16 @@ export function detectAction(actions: ActionFlow[], question: string, primaryAct
     : scored.filter((item) => !(guidedDemo
       && item.action.executionMode === "DIRECT_LINK"
       && /\b(try|start|see|view|explore|open)\b/i.test(item.action.name)));
+
+  // A qualification statement is a workflow start, not a generic sales CTA.
+  // Keep this explicit so a configured primary action cannot win merely
+  // because it happens to be present in the action registry. This is the
+  // discovery-time equivalent of the active-workflow precedence enforced by
+  // the conversation orchestrator.
+  const workflowStartCandidate = candidates
+    .filter((item) => item.workflowStartScore > 0 && Boolean(item.action.steps?.length))
+    .sort((left, right) => right.workflowStartScore - left.workflowStartScore || right.phraseScore - left.phraseScore)[0];
+  if (workflowStartCandidate) return workflowStartCandidate.action;
   return candidates.sort((left, right) => right.primaryScore + right.workflowScore + right.workflowStartScore + right.phraseScore + right.intentScore - left.primaryScore - left.workflowScore - left.workflowStartScore - left.phraseScore - left.intentScore)[0]?.action ?? null;
 }
 

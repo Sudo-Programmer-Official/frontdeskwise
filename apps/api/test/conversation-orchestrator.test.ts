@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createActionState, type ActionFlow } from "../src/action-flows.js";
 import { decideConversationRoute } from "../src/conversation-orchestrator.js";
+import { applyWorkflowValues, currentWorkflowStep, extractWorkflowValues } from "../src/workflow-engine.js";
 
 const action = {
   id: "enroll-child",
@@ -47,6 +48,7 @@ const planAction = {
     { id: "usage-type", type: "capture", fieldKey: "usage_type" },
     { id: "main-goal", type: "capture", fieldKey: "main_goal" },
     { id: "usage-level", type: "capture", fieldKey: "usage_level" },
+    { id: "recommend-plan", type: "recommend", config: { recommendationType: "plan" } },
   ],
 } as ActionFlow;
 
@@ -84,6 +86,21 @@ test("workflow answers containing knowledge keywords are not misrouted as interr
   assert.equal(decision.interruptionIntent, null);
 });
 
+test("an explicit plan recommendation request stays in the active workflow", () => {
+  const state = createActionState(planAction);
+  state.values = { usage_type: "Solo", main_goal: "Planning + reminders", usage_level: "Daily" };
+  state.currentStepId = "recommend-plan";
+  const decision = decideConversationRoute({
+    message: "Okay, which plan should I choose?",
+    activeAction: planAction,
+    actionState: state,
+  });
+
+  assert.equal(decision.route, "WORKFLOW_CONTINUATION");
+  assert.equal(decision.preserveWorkflowState, true);
+  assert.equal(decision.nextBestAction, "RECOMMEND_OPTION");
+});
+
 test("transactional wording can still be an answer to the active qualification workflow", () => {
   const salonAction: ActionFlow = {
     ...planAction,
@@ -102,6 +119,50 @@ test("transactional wording can still be an answer to the active qualification w
 
   assert.equal(decision.route, "WORKFLOW_CONTINUATION");
   assert.equal(decision.preserveWorkflowState, true);
+});
+
+test("SalonFlow regression keeps qualification ahead of CTA and resumes after side questions", () => {
+  const salonWorkflow: ActionFlow = {
+    ...planAction,
+    id: "salon-flow",
+    key: "business_fit",
+    name: "SalonFlow fit",
+    fields: [
+      { id: "business_type", key: "business_type", label: "Business type", type: "select", required: true, question: "What kind of business do you run?", options: ["Small salon", "Salon"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What are you mainly trying to improve?", options: ["Online booking + reminders", "Reminders"] },
+    ],
+    steps: [
+      { id: "business-type", type: "capture", fieldKey: "business_type" },
+      { id: "main-goal", type: "capture", fieldKey: "main_goal" },
+      { id: "fit", type: "ask", question: "Here are the most relevant SalonFlow capabilities." },
+    ],
+  } as ActionFlow;
+  const state = createActionState(salonWorkflow);
+  const first = extractWorkflowValues(salonWorkflow, "I run a small salon and I’m looking for software.");
+  applyWorkflowValues(salonWorkflow, state, first);
+  assert.equal(state.values.business_type, "Small salon");
+  assert.equal(currentWorkflowStep(salonWorkflow, state)?.id, "main-goal");
+
+  const second = extractWorkflowValues(salonWorkflow, "I mainly need better online booking and reminders.");
+  applyWorkflowValues(salonWorkflow, state, second);
+  assert.equal(state.values.main_goal, "Online booking + reminders");
+  const cursor = currentWorkflowStep(salonWorkflow, state)?.id;
+  assert.equal(cursor, "fit");
+
+  for (const question of [
+    "How much does it cost?",
+    "Does SalonFlow integrate with Mindbody?",
+    "What if I don’t like it or want to cancel later?",
+  ]) {
+    const interruption = decideConversationRoute({ message: question, activeAction: salonWorkflow, actionState: state });
+    assert.equal(interruption.route, "INTERRUPTION");
+    assert.equal(interruption.currentStepId, cursor);
+    assert.equal(interruption.preserveWorkflowState, true);
+  }
+  assert.equal(
+    decideConversationRoute({ message: "Okay, I want to try it.", activeAction: salonWorkflow, actionState: state }).route,
+    "WORKFLOW_CONTINUATION",
+  );
 });
 
 test("normal conversion and guided demo requests stay inside the active workflow", () => {

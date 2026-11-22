@@ -6,6 +6,7 @@ import {
   applyWorkflowValues,
   currentWorkflowStep,
   extractWorkflowValues,
+  invalidateWorkflowLookups,
   pushWorkflowInterruption,
   resumeWorkflowInterruption,
   setWorkflowParticipantValue,
@@ -153,7 +154,7 @@ test("plan selection extracts natural solo, paired-goal, daily, and correction l
     fields: [
       { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?", options: ["Solo", "Team"] },
       { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?", options: ["Planning", "Reminders", "Planning + reminders"] },
-      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasional", "Regularly", "Every day"] },
+      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasionally", "Regularly", "Daily"] },
     ],
     steps: [
       { id: "usage-type", type: "capture", fieldKey: "usage_type" },
@@ -169,14 +170,53 @@ test("plan selection extracts natural solo, paired-goal, daily, and correction l
   assert.equal(state.values.main_goal, "Planning + reminders");
   assert.equal(currentWorkflowStep(plan, state)?.id, "usage-level");
 
-  const daily = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "I'll probably use it every day."));
+  const daily = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "I'll probably use it frequently."));
   assert.deepEqual(daily.updated, ["usage_level"]);
-  assert.equal(state.values.usage_level, "Every day");
+  assert.equal(state.values.usage_level, "Daily");
   assert.equal(currentWorkflowStep(plan, state)?.id, "recommend-plan");
 
   const correction = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "Actually I may use it with a small team."));
   assert.deepEqual(correction.updated, ["usage_type"]);
   assert.equal(state.values.usage_type, "Team");
+});
+
+test("plan corrections invalidate the stored recommendation and pricing context", () => {
+  const plan: ActionFlow = {
+    ...flow,
+    id: "plan-selection-invalidation",
+    key: "choose_plan",
+    name: "Choose the right plan",
+    fields: [
+      { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?", options: ["Solo", "Team"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?", options: ["Planning", "Planning + reminders"] },
+      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasionally", "Regularly", "Daily"] },
+      { id: "recommended_plan", key: "recommended_plan", label: "Recommended plan", type: "text", required: false, visibility: "hidden", question: "" },
+    ],
+    steps: [
+      { id: "usage-type", type: "capture", fieldKey: "usage_type" },
+      { id: "main-goal", type: "capture", fieldKey: "main_goal" },
+      { id: "usage-level", type: "capture", fieldKey: "usage_level" },
+      { id: "recommend-plan", type: "recommend", config: { recommendationType: "plan" } },
+      { id: "explain-plan", type: "ask" },
+    ],
+  };
+  const state = createActionState(plan);
+  state.currentStepId = "explain-plan";
+  state.values = { usage_type: "Solo", main_goal: "Planning + reminders", usage_level: "Daily", recommended_plan: "Solo Premium" };
+  state.lookupResults = {
+    "recommend-plan": { status: "matched", recommendation: { plan: "Solo Premium", price: "$5/month" } },
+    pricing_context: { recommendedPlan: "Solo Premium", verifiedPrice: "$5/month", verified: true },
+  };
+  state.completedStepIds = ["usage-type", "main-goal", "usage-level", "recommend-plan"];
+
+  const invalidated = invalidateWorkflowLookups(plan, state, ["usage_type"]);
+
+  assert.equal(invalidated, true);
+  assert.equal(state.values.recommended_plan, undefined);
+  assert.equal(state.lookupResults?.["recommend-plan"], undefined);
+  assert.equal(state.lookupResults?.pricing_context, undefined);
+  assert.equal(state.currentStepId, "recommend-plan");
+  assert.equal(state.status, "active");
 });
 
 test("SalonFlow captures a small salon and a composite booking/reminders goal", () => {
@@ -211,7 +251,7 @@ test("plan selection accepts a literal option and advances past the current step
     fields: [
       { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?", options: ["Solo", "Team"] },
       { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?", options: ["Planning", "Reminders", "Planning + reminders"] },
-      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasional", "Regularly", "Every day"] },
+      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasionally", "Regularly", "Daily"] },
     ],
     steps: [
       { id: "usage-type", type: "capture", fieldKey: "usage_type" },

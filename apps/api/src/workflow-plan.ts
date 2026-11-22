@@ -13,6 +13,12 @@ export type PlanRecommendation = {
   usageLevel: string;
 };
 
+export type PlanRecommendationPayload = {
+  recommendedPlan: string;
+  verifiedPrice: string | null;
+  reason: string;
+};
+
 function normalized(value: unknown): string {
   return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -27,7 +33,7 @@ function isSoloPlan(text: string): boolean {
 
 function planTierScore(text: string, usageLevel: string): number {
   const value = normalized(text);
-  const heavy = /every day|daily|heavy|frequent/.test(normalized(usageLevel));
+  const heavy = /every day|daily|all the time|heavy|frequent/.test(normalized(usageLevel));
   if (heavy && /pro|premium|growth|advanced|unlimited/.test(value)) return 30;
   if (!heavy && /starter|basic|essential|solo/.test(value)) return 20;
   if (/pro|premium|growth|advanced|unlimited/.test(value)) return 10;
@@ -38,8 +44,14 @@ function planTierScore(text: string, usageLevel: string): number {
 function planNameForFact(fact: VerifiedPlanFact): string {
   const subject = fact.subject.trim();
   if (/\b(solo|team|starter|basic|essential|pro|premium|growth|advanced|unlimited)\b/i.test(subject)) return subject;
-  const fromValue = fact.valueText.match(/\b((?:solo|team|starter|basic|essential|pro|premium|growth|advanced|unlimited)[a-z0-9+& -]{0,40}?)(?=\s*(?:—|-|:|\$|€|£|at\b|for\b))/i);
+  const fromValue = fact.valueText.match(/\b((?:free|solo|team|starter|basic|essential|pro|premium|growth|advanced|unlimited)[a-z0-9+& -]{0,40}?)(?=\s*(?:—|-|:|\$|€|£|at\b|for\b))/i);
   return fromValue?.[1]?.trim() || subject || fact.valueText.trim();
+}
+
+function priceForFact(valueText: string): string | null {
+  const currency = valueText.match(/(?:\$|€|£)\s?\d+(?:[.,]\d+)?(?:\s*\/\s*(?:month|mo|year|yr))?/i)?.[0];
+  if (currency) return currency.replace(/\s*\/\s*/, "/");
+  return /per month|monthly|\/month/i.test(valueText) ? valueText.trim() : null;
 }
 
 /**
@@ -63,21 +75,39 @@ export function recommendPlan(
     .filter(({ text }) => team ? !isSoloPlan(text) : !isTeamPlan(text))
     .sort((left, right) => planTierScore(right.text, usageLevel) - planTierScore(left.text, usageLevel));
 
-  const selected = candidates[0];
+  // A team journey must not fall back to an unscoped free or solo tier when
+  // the canonical Business Brain has no verified team fact. That is a safe
+  // data gap, not permission to guess from a generic pricing result.
+  if (team && !candidates.some(({ text }) => isTeamPlan(text))) return null;
+
+  const audienceCandidates = team
+    ? candidates.filter(({ text }) => isTeamPlan(text))
+    : candidates;
+
+  const selected = audienceCandidates[0];
   if (!selected) return null;
   const plan = planNameForFact(selected.fact);
-  const price = /\$|€|£|per month|monthly|\/month/i.test(selected.fact.valueText) ? selected.fact.valueText.trim() : null;
-  const audience = team ? "your team" : "solo use";
-  const cadence = /every day|daily|heavy|frequent/i.test(normalized(usageLevel)) ? "daily use" : `${usageLevel.toLowerCase()} use`;
+  const price = priceForFact(selected.fact.valueText);
+  const audience = team ? "with your team" : "by yourself";
+  const cadence = /every day|daily|all the time|heavy|frequent/i.test(normalized(usageLevel)) ? "every day" : usageLevel.toLowerCase();
+  const goal = values.main_goal?.trim().toLowerCase();
   return {
     plan,
     price,
     usageType,
     usageLevel,
-    reason: `${plan} fits ${audience} and ${cadence}${values.main_goal ? ` focused on ${values.main_goal.toLowerCase()}` : ""}.`,
+    reason: `${plan} is the best fit for using PlanCraftAI ${audience}, mainly for ${goal || "your stated goal"}, with ${cadence} usage.`,
   };
 }
 
 export function planRecommendationMessage(recommendation: PlanRecommendation): string {
-  return `Based on what you told me, I recommend **${recommendation.plan}**. ${recommendation.reason}${recommendation.price ? ` Verified pricing: ${recommendation.price}.` : ""}`;
+  return `Based on what you've told me, **${recommendation.plan}** is the best fit. ${recommendation.reason}${recommendation.price ? ` It's ${recommendation.price}.` : ""}`;
+}
+
+export function planRecommendationPayload(recommendation: PlanRecommendation): PlanRecommendationPayload {
+  return {
+    recommendedPlan: recommendation.plan,
+    verifiedPrice: recommendation.price,
+    reason: recommendation.reason,
+  };
 }

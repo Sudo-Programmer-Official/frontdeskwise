@@ -3,6 +3,7 @@ export type WorkflowFieldDraft = {
   label: string;
   type: "text" | "email" | "phone" | "select" | "multi_select" | "date" | "number";
   required: boolean;
+  visibility?: "visible" | "hidden";
   question: string;
   options?: string[];
 };
@@ -121,6 +122,10 @@ function field(
   return { key, label, type, question, required, ...(options ? { options } : {}) };
 }
 
+function hiddenField(key: string, label: string): WorkflowFieldDraft {
+  return { key, label, type: "text", question: "", required: false, visibility: "hidden" };
+}
+
 function capture(
   id: string,
   label: string,
@@ -145,7 +150,8 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
     return [
       field("usage_type", "Usage type", "select", "Are you planning to use PlanCraftAI by yourself or with a team?", true, ["Solo", "Team"]),
       field("main_goal", "Main goal", "select", "What would you mainly like PlanCraftAI to help you with?", true, ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
-      field("usage_level", "Usage level", "select", "How often do you expect to use PlanCraftAI?", true, ["Occasional", "Regularly", "Every day"]),
+      field("usage_level", "Usage level", "select", "How often do you expect to use PlanCraftAI?", true, ["Occasionally", "Regularly", "Daily"]),
+      hiddenField("recommended_plan", "Recommended plan"),
     ];
   }
   if (intent === "enrollment") {
@@ -197,7 +203,7 @@ function planSelectionSteps(): WorkflowStepDraft[] {
   return [
     capture("usage-type", "Usage type", "usage_type", "Are you planning to use PlanCraftAI by yourself or with a team?", ["Solo", "Team"]),
     capture("main-goal", "Main goal", "main_goal", "What would you mainly like PlanCraftAI to help you with?", ["Planning", "Reminders", "Planning + reminders", "AI task breakdown", "Team coordination", "Other"]),
-    capture("usage-level", "Usage level", "usage_level", "How often do you expect to use PlanCraftAI?", ["Occasional", "Regularly", "Every day"]),
+    capture("usage-level", "Usage level", "usage_level", "How often do you expect to use PlanCraftAI?", ["Occasionally", "Regularly", "Daily"]),
     {
       id: "recommend-plan",
       type: "recommend",

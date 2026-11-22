@@ -20,6 +20,8 @@ test("swim school enrollment uses progressive capture", () => {
   const actions = defaultActionFlows("British Swim School", "swim lessons for students", ids);
   const action = detectAction(actions, "Sign me up");
   assert.equal(action?.key, "enroll_child");
+  assert.equal(action?.name, "Find the right swim lesson");
+  assert.match(action?.description ?? "", /verified registration/i);
   assert.equal(action?.executionMode, "PROVIDER_FLOW");
   assert.equal(action?.provider, "jackrabbit");
   assert.equal(action?.attachmentPolicy, "high_intent_only");

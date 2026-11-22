@@ -1,0 +1,262 @@
+{
+  "businesses": [
+    {
+      "key": "salonflow",
+      "turns": [
+        {
+          "id": "salon-start",
+          "message": "I run a small salon.",
+          "expected": {
+            "route": "GENERAL_QUESTION",
+            "extractedFields": ["business_type"],
+            "stateAfter": {"workflowCursor": "main-goal", "values": {"business_type": "Small salon"}},
+            "providerCall": null,
+            "nextBestAction": "ASK_FIELD",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "salon-qualify",
+          "message": "We mainly need online booking and reminders.",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["main_goal"],
+            "stateBefore": {"workflowCursor": "main-goal", "handoffState": "AI_ACTIVE"},
+            "stateAfter": {"workflowCursor": "pricing", "values": {"business_type": "Small salon", "main_goal": "Online booking, Reminders"}},
+            "providerCall": null,
+            "nextBestAction": "CAPTURE_DETAILS",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "salon-interruption",
+          "message": "What does SalonFlow cost?",
+          "expected": {
+            "route": "INTERRUPTION",
+            "extractedFields": [],
+            "stateBefore": {"workflowCursor": "pricing", "handoffState": "AI_ACTIVE"},
+            "stateAfter": {"workflowCursor": "pricing", "values": {"business_type": "Small salon", "main_goal": "Online booking, Reminders"}},
+            "providerCall": null,
+            "nextBestAction": "CAPTURE_DETAILS",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "knowledge_answer"
+          }
+        },
+        {
+          "id": "salon-guided-demo",
+          "message": "I want a guided demo.",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": [],
+            "stateBefore": {"workflowCursor": "pricing", "handoffState": "AI_ACTIVE"},
+            "stateAfter": {"workflowCursor": "request-demo"},
+            "providerCall": null,
+            "nextBestAction": "CONTINUE_WORKFLOW",
+            "cta": "request_demo",
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "cta"
+          }
+        },
+        {
+          "id": "salon-support",
+          "message": "Please connect me with support.",
+          "expected": {
+            "route": "HUMAN_HANDOFF",
+            "extractedFields": [],
+            "stateBefore": {"workflowCursor": "request-demo", "handoffState": "AI_ACTIVE"},
+            "stateAfter": {"workflowCursor": "request-demo"},
+            "providerCall": null,
+            "nextBestAction": "HANDOFF",
+            "cta": null,
+            "handoffState": "WAITING_FOR_STAFF",
+            "responseClass": "handoff_requested"
+          }
+        },
+        {
+          "id": "salon-waiting",
+          "message": "Actually, show me the demo now.",
+          "expected": {
+            "route": "HUMAN_HANDOFF",
+            "extractedFields": [],
+            "stateBefore": {"workflowCursor": "request-demo", "handoffState": "WAITING_FOR_STAFF"},
+            "stateAfter": {"workflowCursor": "request-demo"},
+            "providerCall": null,
+            "nextBestAction": "HANDOFF",
+            "cta": null,
+            "handoffState": "WAITING_FOR_STAFF",
+            "responseClass": "handoff_waiting"
+          }
+        }
+      ]
+    },
+    {
+      "key": "plancraftai",
+      "turns": [
+        {
+          "id": "plan-start",
+          "message": "Help me choose a plan.",
+          "expected": {
+            "route": "EXPLICIT_ACTION",
+            "extractedFields": ["main_goal"],
+            "stateAfter": {"workflowCursor": "usage-type", "values": {"main_goal": "Planning"}},
+            "providerCall": null,
+            "nextBestAction": "ASK_FIELD",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "plan-solo",
+          "message": "Solo",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["usage_type"],
+            "stateAfter": {"workflowCursor": "usage-level", "values": {"usage_type": "Solo", "main_goal": "Planning"}},
+            "providerCall": null,
+            "nextBestAction": "ASK_FIELD",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "plan-goal",
+          "message": "Planning and reminders",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["main_goal"],
+            "stateAfter": {"workflowCursor": "usage-level", "values": {"usage_type": "Solo", "main_goal": "Planning + reminders"}},
+            "providerCall": null,
+            "nextBestAction": "ASK_FIELD",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "plan-recommend",
+          "message": "Daily",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["usage_level"],
+            "stateAfter": {"workflowCursor": "get-started", "values": {"usage_type": "Solo", "main_goal": "Planning + reminders", "usage_level": "Daily", "recommended_plan": "Solo Premium"}},
+            "providerCall": null,
+            "nextBestAction": "CONTINUE_WORKFLOW",
+            "cta": "signup",
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "recommendation"
+          }
+        },
+        {
+          "id": "plan-correction",
+          "message": "Actually, team.",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["usage_type", "main_goal"],
+            "stateAfter": {"workflowCursor": "get-started", "values": {"usage_type": "Team", "main_goal": "Team coordination", "usage_level": "Daily", "recommended_plan": "Team Pro"}},
+            "providerCall": null,
+            "nextBestAction": "CONTINUE_WORKFLOW",
+            "cta": "signup",
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "recommendation"
+          }
+        },
+        {
+          "id": "plan-handoff",
+          "message": "Please connect me to a person.",
+          "expected": {
+            "route": "HUMAN_HANDOFF",
+            "extractedFields": [],
+            "stateAfter": {"workflowCursor": "get-started"},
+            "providerCall": null,
+            "nextBestAction": "HANDOFF",
+            "cta": null,
+            "handoffState": "WAITING_FOR_STAFF",
+            "responseClass": "handoff_requested"
+          }
+        }
+      ]
+    },
+    {
+      "key": "british-swim-school",
+      "turns": [
+        {
+          "id": "swim-start",
+          "message": "Sign my child up.",
+          "expected": {
+            "route": "EXPLICIT_ACTION",
+            "extractedFields": [],
+            "stateAfter": {"workflowCursor": "customer-type"},
+            "providerCall": null,
+            "nextBestAction": "ASK_FIELD",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "swim-qualify",
+          "message": "New student, age 7, beginner, learn to swim.",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["customer_type", "child_age", "ability", "goal"],
+            "stateAfter": {"workflowCursor": "enrollment-details", "values": {"customer_type": "New student", "child_age": "7", "ability": "Beginner", "goal": "Learn to swim"}},
+            "providerCall": null,
+            "nextBestAction": "CAPTURE_DETAILS",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "workflow_prompt"
+          }
+        },
+        {
+          "id": "swim-provider",
+          "message": "At Largo, Turtle 2, Saturdays. My name is Jamie Rivera, jamie@example.com, 727-555-0199.",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": ["location", "program", "schedule_preference", "parent_name", "email", "phone"],
+            "stateAfter": {"workflowCursor": "enrollment-confirm", "values": {"location": "Largo", "program": "Turtle 2", "schedule_preference": "Saturdays", "parent_name": "Jamie Rivera", "email": "jamie@example.com", "phone": "727-555-0199"}},
+            "providerCall": {"provider": "jackrabbit", "operation": "lookup", "status": "succeeded"},
+            "nextBestAction": "CONFIRM_SELECTION",
+            "cta": null,
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "provider_result"
+          }
+        },
+        {
+          "id": "swim-register",
+          "message": "Option 1, please.",
+          "expected": {
+            "route": "WORKFLOW_CONTINUATION",
+            "extractedFields": [],
+            "stateAfter": {"workflowCursor": null, "values": {"location": "Largo", "program": "Turtle 2", "schedule_preference": "Saturdays", "parent_name": "Jamie Rivera", "email": "jamie@example.com", "phone": "727-555-0199"}},
+            "providerCall": null,
+            "nextBestAction": "COMPLETED",
+            "cta": "enroll_child",
+            "handoffState": "AI_ACTIVE",
+            "responseClass": "cta"
+          }
+        },
+        {
+          "id": "swim-handoff",
+          "message": "Can you connect me to a person?",
+          "expected": {
+            "route": "HUMAN_HANDOFF",
+            "extractedFields": [],
+            "stateAfter": {"workflowCursor": null},
+            "providerCall": null,
+            "nextBestAction": "HANDOFF",
+            "cta": null,
+            "handoffState": "WAITING_FOR_STAFF",
+            "responseClass": "handoff_requested"
+          }
+        }
+      ]
+    }
+  ]
+}

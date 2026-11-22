@@ -208,10 +208,24 @@ test("widget preserves visitor messages through send and history reconciliation"
   assert.match(widgetRenderer, /precedingMessage = state\.messages\.at\(-2\)/);
 });
 
+test("widget reconciles stale action state and never shows a global CTA over an active workflow", () => {
+  assert.match(widgetEmbed, /function reconcileRemoteConversation/);
+  assert.match(widgetEmbed, /remoteAction\.status === "completed"/);
+  assert.match(widgetEmbed, /updateState\(\{ primaryCta: null, leadVisible: false \}\)/);
+  assert.match(widgetEmbed, /const workflowActive = answer\.conversation\?\.action\?\.status === "active"/);
+  assert.match(widgetEmbed, /The API only returns a CTA after workflow policy allows it/);
+  assert.match(widgetEmbed, /!leadCaptured && !workflowActive && !answer\.grounded/);
+  const followUpAcknowledgements = widgetEmbed.match(/Thanks — the team can follow up with you\./g) || [];
+  assert.equal(followUpAcknowledgements.length, 1);
+  const leadSubmit = widgetEmbed.slice(widgetEmbed.indexOf("async function submitLead"), widgetEmbed.indexOf("function recordAbandonment"));
+  assert.match(leadSubmit, /await api\(`/);
+  assert.match(leadSubmit, /Thanks — the team can follow up with you\./);
+});
+
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
   assert.match(widgetEmbed, /leadCaptured: true, leadVisible: false/);
-  assert.match(widgetEmbed, /if \(!leadCaptured && !answer\.grounded/);
+  assert.match(widgetEmbed, /if \(!leadCaptured && !workflowActive && !answer\.grounded/);
   assert.match(widgetEmbed, /!answer\.grounded && !answer\.action && !\(answer\.quickActions && answer\.quickActions\.length\)/);
   assert.match(widgetEmbed, /updateState\(\{[^}]*typing: true/);
   assert.match(widgetEmbed, /MESSAGE_CONTEXT_TIMEOUT_MS = 4_000/);
@@ -493,13 +507,14 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
     "Choose what happens if unavailable",
     "Provider",
     "Condition in plain English",
-    "Workflow preview",
+    "Customer journey",
     "Runtime will use the updated steps",
     "Configuration complete",
     "Needs testing",
   ]) {
     assert.ok(workflowWorkspace.includes(marker), `missing workflow builder marker: ${marker}`);
   }
+  assert.doesNotMatch(workflowWorkspace, /Customer preview|Workflow preview/);
   assert.match(workflowWorkspace, /@click="openCreateWorkflow"/);
   assert.doesNotMatch(workflowWorkspace, /@click="emit\('open-action', ''\)"/);
   assert.match(workflowWorkspace, /actions\/\$\{encodeURIComponent\(action\.id\)\}/);

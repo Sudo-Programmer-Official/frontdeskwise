@@ -12,6 +12,7 @@
     "test": "node --import tsx --test test/*.test.ts",
     "action-registry:certify": "node --import tsx src/action-registry-certify.ts",
     "jackrabbit:certify": "node --import tsx src/jackrabbit-certify.ts",
+    "reference:certify": "node --import tsx src/reference-certification.ts",
     "benchmark:cross-site": "node --import tsx src/cross-site-benchmark.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js"

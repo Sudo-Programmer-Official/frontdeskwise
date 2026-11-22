@@ -96,7 +96,6 @@ const eligibleActions = computed(() => allActions.value
 }));
 const selectedWorkflow = computed(() => workflowActions.value.find((action) => action.id === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
 const draftSteps = computed(() => (workflowDraft.value?.steps ?? []));
-const previewStep = computed(() => selectedStepIndex.value >= 0 ? draftSteps.value[selectedStepIndex.value] ?? null : null);
 const workflowProvider = computed(() => {
     const direct = workflowDraft.value?.provider?.trim();
     if (direct)
@@ -880,7 +879,6 @@ const __VLS_template = () => {
     __VLS_withDotValue(advancedOpen, {});
     __VLS_withDotValue(providerStep, {});
     __VLS_withDotValue(workflowProvider, {});
-    __VLS_withDotValue(previewStep, {});
     __VLS_withDotValue(workflowSaveError, {});
     __VLS_withDotValue(workflowSaveMessage, {});
     __VLS_withDotValue(createWorkflowOpen, {});
@@ -896,7 +894,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
@@ -972,15 +969,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-technical-details']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-technical-details']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-technical-details']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-heading']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
-    /** @type {__VLS_StyleScopedClasses['mini-orb']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-bubble']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-options']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
@@ -1019,9 +1007,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-settings']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-settings']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-settings']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-modal-close']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-create-modal']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
@@ -1049,12 +1034,8 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-model-banner']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
@@ -1189,21 +1170,9 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-heading']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-thread']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
@@ -1212,7 +1181,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
     /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
@@ -1237,8 +1205,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-step-grid']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-grid']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-footer']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
     /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
@@ -1256,7 +1222,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
     /** @type {__VLS_StyleScopedClasses['panel-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library']} */ ;
@@ -1280,13 +1245,11 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-section-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-empty-builder']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-body']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-title']} */ ;
@@ -1296,10 +1259,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-summary']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-step-summary']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-bubble']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-lookup']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-isolation-warning']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
@@ -1309,7 +1268,6 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library-select']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-library-item']} */ ;
-    /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "view-content workflow-workspace" },
         'data-workflow-generation-key': (workflowGenerationKey.value || undefined),
@@ -2841,177 +2799,6 @@ const __VLS_template = () => {
             /** @type {__VLS_StyleScopedClasses['small']} */ ;
         }
     }
-    if (workflowDraft.value) {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.aside, __VLS_intrinsics.aside)({
-            ...{ class: "workflow-preview-panel panel" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-preview-panel']} */ ;
-        /** @type {__VLS_StyleScopedClasses['panel']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-preview-heading" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-preview-heading']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "eyebrow" },
-        });
-        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "preview-live-dot" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-live-dot']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-preview-window" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-preview-window']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-preview-top" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-preview-top']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "mini-orb" },
-        });
-        /** @type {__VLS_StyleScopedClasses['mini-orb']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.img)({
-            src: "/frontdeskwise-logo-mark.png",
-            alt: "",
-            'aria-hidden': "true",
-        });
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
-        __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
-        (__VLS_ctx.businessName || 'Your business');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "online-dot" },
-        });
-        /** @type {__VLS_StyleScopedClasses['online-dot']} */ ;
-        if (previewStep.value) {
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-preview-thread" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-preview-thread']} */ ;
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-preview-bubble" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-preview-bubble']} */ ;
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-preview-bubble visitor" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-preview-bubble']} */ ;
-            /** @type {__VLS_StyleScopedClasses['visitor']} */ ;
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-preview-bubble" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-preview-bubble']} */ ;
-            (previewStep.value.question || `Next: ${previewStep.value.label || stepTypeLabel(previewStep.value.type)}`);
-            if (previewStep.value.options?.length) {
-                __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                    ...{ class: "workflow-preview-options" },
-                });
-                /** @type {__VLS_StyleScopedClasses['workflow-preview-options']} */ ;
-                const __VLS_102 = __VLS_tryAsConstant((previewStep.value.options));
-                for (const [option] of __VLS_vFor(__VLS_nonNull(__VLS_102))) {
-                    __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-                        key: (option),
-                        type: "button",
-                    });
-                    (option);
-                    // @ts-ignore
-                    [workflowDraft, providerFailureBehavior, businessName, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep,];
-                }
-            }
-            if (previewStep.value.type === 'lookup') {
-                __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                    ...{ class: "workflow-preview-lookup" },
-                });
-                /** @type {__VLS_StyleScopedClasses['workflow-preview-lookup']} */ ;
-                let __VLS_103;
-                /** @ts-ignore @type { | typeof GitBranch} */
-                GitBranch;
-                // @ts-ignore
-                const __VLS_104 = __VLS_asFunctionalComponent1(__VLS_103, new __VLS_103({
-                    // @ts-ignore
-                    size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
-                }));
-                const __VLS_105 = __VLS_104({
-                    size: (15),
-                    strokeWidth: (1.8),
-                    'aria-hidden': "true",
-                }, ...__VLS_functionalComponentArgsRest(__VLS_104));
-                (formatLabel(stepConfigValue(previewStep.value, 'provider') || 'provider'));
-            }
-            if (previewStep.value.type === 'redirect') {
-                __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                    ...{ class: "workflow-preview-cta" },
-                });
-                /** @type {__VLS_StyleScopedClasses['workflow-preview-cta']} */ ;
-                __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-                    ...{ class: "primary-button small" },
-                    type: "button",
-                });
-                /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
-                /** @type {__VLS_StyleScopedClasses['small']} */ ;
-                (stepConfigValue(previewStep.value, 'buttonLabel') || previewStep.value.label || 'Continue');
-            }
-        }
-        else {
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-preview-empty" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
-            let __VLS_108;
-            /** @ts-ignore @type { | typeof Sparkles} */
-            Sparkles;
-            // @ts-ignore
-            const __VLS_109 = __VLS_asFunctionalComponent1(__VLS_108, new __VLS_108({
-                // @ts-ignore
-                size: (20), strokeWidth: (1.8), 'aria-hidden': "true",
-            }));
-            const __VLS_110 = __VLS_109({
-                size: (20),
-                strokeWidth: (1.8),
-                'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_109));
-            __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
-            __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
-        }
-        if (previewStep.value) {
-            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-                ...{ class: "workflow-preview-input" },
-            });
-            /** @type {__VLS_StyleScopedClasses['workflow-preview-input']} */ ;
-            let __VLS_113;
-            /** @ts-ignore @type { | typeof ArrowRight} */
-            ArrowRight;
-            // @ts-ignore
-            const __VLS_114 = __VLS_asFunctionalComponent1(__VLS_113, new __VLS_113({
-                // @ts-ignore
-                size: (14), strokeWidth: (1.8), 'aria-hidden': "true",
-            }));
-            const __VLS_115 = __VLS_114({
-                size: (14),
-                strokeWidth: (1.8),
-                'aria-hidden': "true",
-            }, ...__VLS_functionalComponentArgsRest(__VLS_114));
-        }
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "form-help" },
-        });
-        /** @type {__VLS_StyleScopedClasses['form-help']} */ ;
-        (previewStep.value ? `Previewing step ${selectedStepIndex.value + 1} of ${draftSteps.value.length}.` : 'Add or select a step to preview what visitors will experience.');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "workflow-preview-meta" },
-        });
-        /** @type {__VLS_StyleScopedClasses['workflow-preview-meta']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-        (draftSteps.value.length);
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-        (workflowProvider.value ? formatLabel(workflowProvider.value) : 'No provider');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-        (__VLS_unwrap(configurationLabel, {}));
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-    }
     if (workflowSaveError.value) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
             ...{ class: "form-error" },
@@ -3031,19 +2818,19 @@ const __VLS_template = () => {
             ...{ class: "workflow-save-note" },
         });
         /** @type {__VLS_StyleScopedClasses['workflow-save-note']} */ ;
-        let __VLS_118;
+        let __VLS_102;
         /** @ts-ignore @type { | typeof X} */
         X;
         // @ts-ignore
-        const __VLS_119 = __VLS_asFunctionalComponent1(__VLS_118, new __VLS_118({
+        const __VLS_103 = __VLS_asFunctionalComponent1(__VLS_102, new __VLS_102({
             // @ts-ignore
             size: (15), strokeWidth: (1.8), 'aria-hidden': "true",
         }));
-        const __VLS_120 = __VLS_119({
+        const __VLS_104 = __VLS_103({
             size: (15),
             strokeWidth: (1.8),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_119));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_103));
     }
     if (createWorkflowOpen.value) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
@@ -3094,7 +2881,7 @@ const __VLS_template = () => {
                         throw 0;
                     return (selectCreateWorkflowMode('action'));
                     // @ts-ignore
-                    [workflowDraft, workflowDraft, configurationLabel, draftSteps, draftSteps, selectedStepIndex, workflowProvider, workflowProvider, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, workflowSaveError, workflowSaveError, workflowSaveMessage, workflowSaveMessage, createWorkflowOpen,];
+                    [workflowDraft, workflowDraft, providerFailureBehavior, workflowSaveError, workflowSaveError, workflowSaveMessage, workflowSaveMessage, createWorkflowOpen,];
                 } },
             type: "button",
             ...{ class: (['workflow-create-choice', { selected: createWorkflowMode.value === 'action' }]) },
@@ -3170,8 +2957,8 @@ const __VLS_template = () => {
                 value: "",
                 disabled: true,
             });
-            const __VLS_123 = __VLS_tryAsConstant((eligibleActions.value));
-            for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_123))) {
+            const __VLS_107 = __VLS_tryAsConstant((eligibleActions.value));
+            for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_107))) {
                 __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                     key: (action.id),
                     value: (action.id),
@@ -3195,19 +2982,19 @@ const __VLS_template = () => {
             type: "button",
         });
         /** @type {__VLS_StyleScopedClasses['workflow-inline-action-button']} */ ;
-        let __VLS_124;
+        let __VLS_108;
         /** @ts-ignore @type { | typeof Plus} */
         Plus;
         // @ts-ignore
-        const __VLS_125 = __VLS_asFunctionalComponent1(__VLS_124, new __VLS_124({
+        const __VLS_109 = __VLS_asFunctionalComponent1(__VLS_108, new __VLS_108({
             // @ts-ignore
             size: (15), strokeWidth: (1.9), 'aria-hidden': "true",
         }));
-        const __VLS_126 = __VLS_125({
+        const __VLS_110 = __VLS_109({
             size: (15),
             strokeWidth: (1.9),
             'aria-hidden': "true",
-        }, ...__VLS_functionalComponentArgsRest(__VLS_125));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_109));
         if (createWorkflowMode.value === 'template') {
             __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
             __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
@@ -3223,8 +3010,8 @@ const __VLS_template = () => {
                     } },
                 value: (__VLS_unwrap(createWorkflowTemplateKey, {})),
             });
-            const __VLS_129 = __VLS_tryAsConstant((__VLS_unwrap(workflowTemplates, {})));
-            for (const [template] of __VLS_vFor(__VLS_nonNull(__VLS_129))) {
+            const __VLS_113 = __VLS_tryAsConstant((__VLS_unwrap(workflowTemplates, {})));
+            for (const [template] of __VLS_vFor(__VLS_nonNull(__VLS_113))) {
                 __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
                     key: (template.key),
                     value: (template.key),

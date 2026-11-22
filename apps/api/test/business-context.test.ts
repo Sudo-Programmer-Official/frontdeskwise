@@ -22,16 +22,16 @@ function fact(id: string, kind: "pricing" | "availability" | "service" | "custom
   }, now);
 }
 
-function modelWithFacts(facts: ReturnType<typeof fact>[]) {
+function modelWithFacts(facts: ReturnType<typeof fact>[], options: { businessName?: string; chunks?: Array<{ sourceId: string; content: string }> } = {}) {
   return buildCanonicalBusinessModel({
     businessId: "business-1",
-    businessName: "PlanCraftAI",
+    businessName: options.businessName ?? "PlanCraftAI",
     businessType: "AI planning SaaS",
     location: "Remote",
     actions: [],
     actionResources: [],
     facts,
-    chunks: [{ sourceId: "website-1", content: "PlanCraftAI helps teams plan work." }],
+    chunks: options.chunks ?? [{ sourceId: "website-1", content: "PlanCraftAI helps teams plan work." }],
     sources: [{ id: "website-1", title: "Home", url: "https://plancraft.ai", crawlStatus: "ready", lastCrawledAt: now }],
     knowledgeGaps: [{ question: "Can I cancel?", status: "open" }],
     now,
@@ -67,6 +67,24 @@ test("canonical model preserves provenance and fails closed on conflicted critic
   assert.deepEqual(workflowContext.constraints.usableCriticalStatuses, ["VERIFIED"]);
   assert.ok(workflowContext.relevantFacts.some((item) => item.kind === "service"));
   assert.ok(workflowContext.knowledgeGaps.includes("Can I cancel?"));
+});
+
+test("verified SalonFlow pricing is the only critical pricing source", () => {
+  const model = modelWithFacts([fact("salonflow-price", "pricing", "$65/month", "owner_structured")], {
+    businessName: "Salon Management Software for More Bookings",
+    chunks: [{ sourceId: "website-1", content: "The canonical brand is SalonFlow." }],
+  });
+  const pricing = model.knowledge.facts.find((item) => item.kind === "pricing");
+  assert.equal(pricing?.valueText, "$65/month");
+  assert.equal(pricing?.status, "VERIFIED");
+  assert.equal(pricing?.usableForCritical, true);
+
+  const conflicted = modelWithFacts([
+      fact("salonflow-price-owner", "pricing", "$65/month", "owner_structured"),
+      fact("salonflow-price-site", "pricing", "$79/month", "website"),
+    ], { businessName: "Salon Management Software for More Bookings" }).knowledge.facts.find((item) => item.kind === "pricing");
+  assert.equal(conflicted?.status, "CONFLICTED");
+  assert.equal(conflicted?.usableForCritical, false);
 });
 
 test("business context snapshots advance only when material business intelligence changes", () => {

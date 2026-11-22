@@ -2,6 +2,7 @@ import { classifyVisitorRequest, isPlanSelectionWorkflow, type ActionFlow, type 
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { classifyQuestionIntent, type RetrievalIntent } from "./retrieval.js";
 import { currentWorkflowStep, workflowNextBestAction, type WorkflowNextBestAction } from "./workflow-engine.js";
+import type { RuntimeHandoffState } from "./conversation-runtime.js";
 
 export type ConversationRoute = "GENERAL_QUESTION" | "WORKFLOW_CONTINUATION" | "INTERRUPTION" | "EXPLICIT_ACTION" | "HUMAN_HANDOFF" | "PROVIDER_RESULT";
 
@@ -9,6 +10,7 @@ export type ConversationOrchestrationInput = {
   message: string;
   activeAction?: ActionFlow | null;
   actionState?: ConversationActionState | null;
+  handoffState?: RuntimeHandoffState;
   providerResult?: boolean;
 };
 
@@ -24,6 +26,7 @@ export type ConversationOrchestrationDecision = {
   currentStepId: string | null;
   nextBestAction: WorkflowNextBestAction | null;
   interruptionIntent: RetrievalIntent | null;
+  handoffState: RuntimeHandoffState;
 };
 
 const interruptionIntents = new Set<RetrievalIntent>([
@@ -79,6 +82,27 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
   const activeWorkflowId = input.actionState?.actionId ?? input.activeAction?.id ?? null;
   const currentStepId = currentStep?.id ?? input.actionState?.currentStepId ?? null;
   const nextBestAction = currentStep && input.activeAction ? workflowNextBestAction(input.activeAction, currentStep) : null;
+  const handoffState = input.handoffState ?? "AI_ACTIVE";
+
+  // Handoff is conversation authority, not another intent. Once staff is
+  // waiting, active, or assisting, every incoming message stays on that
+  // branch and cannot reopen AI, a workflow, or a CTA.
+  if (handoffState !== "AI_ACTIVE") {
+    return {
+      route: "HUMAN_HANDOFF",
+      conversationalIntent,
+      actionIntent: request.actionIntent,
+      requestMode: request.mode,
+      confidence: 1,
+      reason: "handoff_state_active",
+      preserveWorkflowState: active,
+      activeWorkflowId,
+      currentStepId,
+      nextBestAction,
+      interruptionIntent: null,
+      handoffState,
+    };
+  }
 
   if (input.providerResult) {
     return {
@@ -93,6 +117,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       currentStepId,
       nextBestAction,
       interruptionIntent: null,
+      handoffState,
     };
   }
 
@@ -109,6 +134,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       currentStepId,
       nextBestAction,
       interruptionIntent: null,
+      handoffState,
     };
   }
 
@@ -131,6 +157,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       currentStepId,
       nextBestAction,
       interruptionIntent: conversationalIntent,
+      handoffState,
     };
   }
 
@@ -153,6 +180,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       currentStepId,
       nextBestAction,
       interruptionIntent: null,
+      handoffState,
     };
   }
 
@@ -169,6 +197,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       currentStepId,
       nextBestAction,
       interruptionIntent: null,
+      handoffState,
     };
   }
 
@@ -184,5 +213,6 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
     currentStepId,
     nextBestAction,
     interruptionIntent: null,
+    handoffState,
   };
 }

@@ -132,6 +132,13 @@ test("business-fit statements start the workflow and guided demos outrank Try th
     completion: { ...lead.completion, createLead: false, linkUrl: "https://example.test/start", linkLabel: "Try the demo" },
     destination: { url: "https://example.test/start", label: "Try the demo" },
   } as unknown as ActionFlow;
+  const configuredPrimary = {
+    ...tryDemo,
+    id: "configured-primary",
+    key: "try_demo",
+    triggerPhrases: ["software"],
+  } as unknown as ActionFlow;
+  assert.equal(detectAction([configuredPrimary, businessFit], "I run a small salon and I'm looking for software", configuredPrimary.id)?.id, businessFit.id);
   const requestDemo = {
     ...tryDemo,
     id: "request-demo",

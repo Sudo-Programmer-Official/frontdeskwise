@@ -290,6 +290,12 @@ export function invalidateWorkflowLookups(action: ActionFlow, state: Conversatio
   const firstStaleIndex = Math.min(...staleSteps.map((step) => action.steps!.findIndex((candidate) => candidate.id === step.id)));
   const currentIndex = state.currentStepId ? action.steps.findIndex((step) => step.id === state.currentStepId) : -1;
   state.lookupResults = Object.fromEntries(Object.entries(state.lookupResults ?? {}).filter(([stepId]) => !staleSteps.some((step) => step.id === stepId)));
+  const isPlanSelection = action.fields.some((field) => field.key === "recommended_plan")
+    || action.steps.some((step) => step.type === "recommend" && step.config?.recommendationType === "plan");
+  if (isPlanSelection && updatedKeys.some((key) => ["usage_type", "main_goal", "usage_level"].includes(key))) {
+    delete state.values.recommended_plan;
+    delete state.lookupResults?.pricing_context;
+  }
   state.selectedActionResourceId = undefined;
   state.completionUrl = undefined;
   if (currentIndex >= firstStaleIndex || staleSteps.some((step) => state.completedStepIds?.includes(step.id))) {
@@ -369,7 +375,10 @@ function optionForField(field: ActionField, input: string): string | null {
     if (/\bbeauty\s+(?:studio|business)\b/.test(value)) return field.options?.find((option) => /beauty/i.test(option)) ?? "Beauty studio";
   }
   if (field.key === "main_goal" || fieldLooksLike(field, "main goal", "goal", "objective")) {
-    const planning = /\b(plan|planning|organize|priorit|daily)\w*/.test(value);
+    // "daily" is a usage-frequency answer, not evidence that the visitor
+    // changed their planning goal. Treating it as a goal caused a later turn
+    // to overwrite an earlier qualified goal with stale inferred state.
+    const planning = /\b(plan|planning|organize|priorit)\w*/.test(value);
     const reminders = /\b(reminder|reminders|nudge|recap|alert|notifications?)\b/.test(value);
     const onlineBooking = /\bonline\s+book(?:ing)?\b/.test(value);
     if (onlineBooking && reminders) {
@@ -394,9 +403,9 @@ function optionForField(field: ActionField, input: string): string | null {
     if (/\b(team|collaborat|shared|workspace)\b/.test(value)) return field.options?.find((option) => /team|coordination|workspace/i.test(option)) ?? "Team coordination";
   }
   if (field.key === "usage_level" || fieldLooksLike(field, "usage level", "frequency", "often")) {
-    if (/\b(every day|each day|daily|day to day|all the time)\b/.test(value)) return field.options?.find((option) => /every day|daily|heavy|frequent/i.test(option)) ?? "Every day";
-    if (/\b(regularly|regular|most days|several times|often)\b/.test(value)) return field.options?.find((option) => /regular|often/i.test(option)) ?? "Regular";
-    if (/\b(occasionally|occasional|sometimes|once in a while|rarely)\b/.test(value)) return field.options?.find((option) => /occasional|sometimes/i.test(option)) ?? "Occasional";
+    if (/\b(every day|each day|daily|day to day|all the time|frequently)\b/.test(value)) return field.options?.find((option) => /every day|daily|heavy|frequent/i.test(option)) ?? "Daily";
+    if (/\b(regularly|regular|most days|several times|often)\b/.test(value)) return field.options?.find((option) => /regular|often/i.test(option)) ?? "Regularly";
+    if (/\b(occasionally|occasional|sometimes|once in a while|rarely)\b/.test(value)) return field.options?.find((option) => /occasional|occasionally|sometimes/i.test(option)) ?? "Occasionally";
   }
   return null;
 }
