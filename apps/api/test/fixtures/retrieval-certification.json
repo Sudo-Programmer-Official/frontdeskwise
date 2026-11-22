@@ -1,0 +1,46 @@
+{
+  "tenants": [
+    {
+      "key": "salonflow",
+      "chunks": [
+        { "id": "salon-services", "sourceId": "salon-services-page", "title": "SalonFlow features", "url": "https://salonflow.example/features", "pageType": "service", "content": "SalonFlow supports online booking, client management, appointment reminders, QR check-in, reviews, and loyalty." },
+        { "id": "salon-pricing", "sourceId": "salon-pricing-page", "title": "SalonFlow pricing", "url": "https://salonflow.example/pricing", "pageType": "pricing", "content": "The standard salon plan costs $65 per month. Pricing and plan details are listed here." },
+        { "id": "salon-policy", "sourceId": "salon-policy-page", "title": "SalonFlow cancellation policy", "url": "https://salonflow.example/policy", "pageType": "policy", "content": "You can cancel your SalonFlow subscription whenever you want from the account settings." },
+        { "id": "salon-setup", "sourceId": "salon-setup-page", "title": "Get started with SalonFlow", "url": "https://salonflow.example/get-started", "pageType": "web_page", "content": "Create your workspace, add your salon, and invite staff to get started." }
+      ],
+      "cases": [
+        { "id": "salon-cancel", "query": "Can I cancel whenever I want?", "relevantChunkIds": ["salon-policy"], "forbiddenChunkIds": ["salon-pricing", "salon-setup"] },
+        { "id": "salon-cost", "query": "What does SalonFlow cost?", "relevantChunkIds": ["salon-pricing"], "forbiddenChunkIds": ["salon-setup"] },
+        { "id": "salon-reminders", "query": "Does SalonFlow have reminders?", "relevantChunkIds": ["salon-services"], "forbiddenChunkIds": ["salon-pricing"] }
+      ]
+    },
+    {
+      "key": "plancraftai",
+      "chunks": [
+        { "id": "plan-features", "sourceId": "plan-features-page", "title": "PlanCraftAI features", "url": "https://plancraft.example/features", "pageType": "product", "content": "PlanCraftAI helps teams plan work, organize priorities, and keep projects moving." },
+        { "id": "plan-reminders", "sourceId": "plan-reminders-page", "title": "PlanCraftAI reminders", "url": "https://plancraft.example/reminders", "pageType": "reminders", "content": "PlanCraftAI sends reminders, follow-ups, and daily recaps for outstanding work." },
+        { "id": "plan-pricing", "sourceId": "plan-pricing-page", "title": "PlanCraftAI pricing", "url": "https://plancraft.example/pricing", "pageType": "pricing", "content": "Free is $0, Solo Premium is $5 per month, and Team Pro is $20 per month for teams." },
+        { "id": "plan-signup", "sourceId": "plan-signup-page", "title": "Get started with PlanCraftAI", "url": "https://plancraft.example/signup", "pageType": "signup", "content": "Start PlanCraftAI by creating an account and choosing a workspace." }
+      ],
+      "cases": [
+        { "id": "plan-reminders", "query": "Can it send reminders?", "relevantChunkIds": ["plan-reminders"], "forbiddenChunkIds": ["plan-pricing", "plan-signup"] },
+        { "id": "plan-price", "query": "How much is Solo Premium?", "relevantChunkIds": ["plan-pricing"], "forbiddenChunkIds": ["plan-signup"] },
+        { "id": "plan-start", "query": "How do I get started?", "relevantChunkIds": ["plan-signup"], "forbiddenChunkIds": ["plan-pricing"] }
+      ]
+    },
+    {
+      "key": "british-swim-school",
+      "chunks": [
+        { "id": "swim-programs", "sourceId": "swim-programs-page", "title": "Swim programs", "url": "https://swim.example/programs", "pageType": "service", "content": "British Swim School offers swim lessons for babies, children, and adults across progressive swim levels." },
+        { "id": "swim-schedule", "sourceId": "swim-schedule-page", "title": "Class schedules", "url": "https://swim.example/schedule", "pageType": "schedule", "content": "Classes run on weekdays and Saturdays at participating locations. Check the schedule for openings." },
+        { "id": "swim-registration", "sourceId": "swim-registration-page", "title": "Registration", "url": "https://swim.example/register", "pageType": "signup", "content": "Start enrollment by sharing the student's age, ability, preferred location, and schedule." },
+        { "id": "swim-policy", "sourceId": "swim-policy-page", "title": "Missed lesson policy", "url": "https://swim.example/policy", "pageType": "policy", "content": "The missed lesson policy explains make-up options and cancellation rules for enrolled families." }
+      ],
+      "cases": [
+        { "id": "swim-age", "query": "What swim programs do you offer?", "relevantChunkIds": ["swim-programs"], "forbiddenChunkIds": ["swim-registration"] },
+        { "id": "swim-schedule", "query": "What are the class schedules?", "relevantChunkIds": ["swim-schedule"] },
+        { "id": "swim-enrollment", "query": "How does enrollment work?", "relevantChunkIds": ["swim-registration"], "forbiddenChunkIds": ["swim-policy"] }
+      ]
+    }
+  ]
+}

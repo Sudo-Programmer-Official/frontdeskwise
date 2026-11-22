@@ -1,0 +1,61 @@
+{
+  "cases": [
+    {
+      "id": "swim-lesson-need",
+      "tenant": "british-swim-school",
+      "message": "I need swimming lessons for my 6-year-old on Saturday near 33626.",
+      "expectedMode": "transactional",
+      "expectedIntent": "enrollment",
+      "expectedActionType": "enroll",
+      "expectedArgs": { "child_age": "6", "location": "33626", "schedule_preference": "Saturday" }
+    },
+    {
+      "id": "swim-pricing-question",
+      "tenant": "british-swim-school",
+      "message": "What do swim lessons cost?",
+      "expectedMode": "informational",
+      "expectedIntent": "quote",
+      "expectedActionType": null
+    },
+    {
+      "id": "swim-enrollment-command",
+      "tenant": "british-swim-school",
+      "message": "Enroll my daughter.",
+      "expectedMode": "transactional",
+      "expectedIntent": "enrollment",
+      "expectedActionType": "enroll"
+    },
+    {
+      "id": "salon-guided-demo",
+      "tenant": "salonflow",
+      "message": "I want someone to walk me through a guided demo.",
+      "expectedMode": "transactional",
+      "expectedIntent": "demo",
+      "expectedActionType": "request_demo"
+    },
+    {
+      "id": "contact-team",
+      "tenant": "frontdeskwise",
+      "message": "I want someone to call me.",
+      "expectedMode": "transactional",
+      "expectedIntent": "lead",
+      "expectedActionType": "contact_team"
+    },
+    {
+      "id": "daycare-tour",
+      "tenant": "daycarespots",
+      "message": "Schedule a tour.",
+      "expectedMode": "transactional",
+      "expectedIntent": "tour",
+      "expectedActionType": "external_booking"
+    },
+    {
+      "id": "hours-knowledge",
+      "tenant": "frontdeskwise",
+      "message": "What are your business hours?",
+      "expectedMode": "informational",
+      "expectedIntent": "general",
+      "expectedActionType": null
+    }
+  ]
+}

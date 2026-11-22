@@ -211,6 +211,11 @@ export type ConversationActionState = {
   status: "active" | "completed";
   startedAt: string;
   completedAt?: string;
+  loopGuard?: {
+    lastFingerprint: string | null;
+    consecutiveUnchangedTurns: number;
+    triggered: boolean;
+  };
 };
 
 export type ActionParticipant = {
@@ -795,15 +800,15 @@ export function classifyVisitorRequest(question: string): VisitorRequestClassifi
   let actionIntent = "general";
   if (/\b(choose|choosing|recommend|right|best)\b.{0,32}\bplans?\b|\bplans?\b.{0,32}\b(choose|recommend|right|best)\b|\bsolo\b|\bteam\b.{0,24}\bplans?\b/.test(value)) actionIntent = "plan_selection";
   else if (/demo/.test(value)) actionIntent = "demo";
-  else if (/sign my child up|sign me up|enroll|register|registration|new student|current student/.test(value)) actionIntent = "enrollment";
+  else if (/sign my child up|sign me up|enroll|registration|new student|current student|swim(?:ming)?\s+lessons?|lessons?\s+for\s+(?:my|a)\s+(?:child|kid|student)/.test(value)) actionIntent = "enrollment";
+  else if (/tour|visit the (daycare|school)/.test(value)) actionIntent = "tour";
   else if (/book|appointment|schedule|reserve|birthday|open play/.test(value)) actionIntent = "booking";
   else if (/quote|estimate|how much|cost|pricing/.test(value)) actionIntent = "quote";
   else if (/consult|specialist/.test(value)) actionIntent = "consultation";
-  else if (/tour|visit the (daycare|school)/.test(value)) actionIntent = "tour";
   else if (/waitlist|waiting list/.test(value)) actionIntent = "waitlist";
   else if (/emergency|urgent/.test(value)) actionIntent = "emergency";
   else if (/contact|reach|talk to someone|call me|call now/.test(value)) actionIntent = "lead";
-  if (pricingKnowledge) return { mode: "informational", actionIntent, confidence: 0.93, reason: "pricing_information_request" };
+  if (pricingKnowledge) return { mode: "informational", actionIntent: "quote", confidence: 0.93, reason: "pricing_information_request" };
   if (explicitRequest && !informational) return { mode: "transactional", actionIntent, confidence: 0.94, reason: "explicit_action_request" };
   return { mode: "informational", actionIntent, confidence: informational ? 0.93 : 0.72, reason: informational ? "explanatory_question" : "no_explicit_action_request" };
 }

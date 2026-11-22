@@ -1,0 +1,2267 @@
+{
+  "generatedAt": "2026-11-22T15:42:07.039Z",
+  "commit": "da15667",
+  "layers": {
+    "retrieval": {
+      "pass": true,
+      "metrics": {
+        "recallAtK": 1,
+        "precisionAtK": 0.2,
+        "reciprocalRank": 1,
+        "ndcgAtK": 1
+      },
+      "forbiddenEvidenceRate": 0,
+      "tenants": [
+        {
+          "key": "salonflow",
+          "pass": true,
+          "metrics": {
+            "recallAtK": 1,
+            "precisionAtK": 0.2,
+            "reciprocalRank": 1,
+            "ndcgAtK": 1
+          },
+          "forbiddenEvidenceRate": 0
+        },
+        {
+          "key": "plancraftai",
+          "pass": true,
+          "metrics": {
+            "recallAtK": 1,
+            "precisionAtK": 0.2,
+            "reciprocalRank": 1,
+            "ndcgAtK": 1
+          },
+          "forbiddenEvidenceRate": 0
+        },
+        {
+          "key": "british-swim-school",
+          "pass": true,
+          "metrics": {
+            "recallAtK": 1,
+            "precisionAtK": 0.2,
+            "reciprocalRank": 1,
+            "ndcgAtK": 1
+          },
+          "forbiddenEvidenceRate": 0
+        }
+      ]
+    },
+    "routing": {
+      "generatedAt": "2026-11-22T15:42:07.025Z",
+      "cases": [
+        {
+          "id": "swim-lesson-need",
+          "tenant": "british-swim-school",
+          "message": "I need swimming lessons for my 6-year-old on Saturday near 33626.",
+          "expectedMode": "transactional",
+          "expectedIntent": "enrollment",
+          "expectedActionType": "enroll",
+          "expectedArgs": {
+            "child_age": "6",
+            "location": "33626",
+            "schedule_preference": "Saturday"
+          },
+          "actualMode": "transactional",
+          "actualIntent": "enrollment",
+          "selectedActionType": "enroll",
+          "selectedActionKey": "enroll_child",
+          "extractedArgs": {
+            "child_age": "6",
+            "location": "33626",
+            "schedule_preference": "Saturday"
+          },
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        },
+        {
+          "id": "swim-pricing-question",
+          "tenant": "british-swim-school",
+          "message": "What do swim lessons cost?",
+          "expectedMode": "informational",
+          "expectedIntent": "quote",
+          "expectedActionType": null,
+          "actualMode": "informational",
+          "actualIntent": "quote",
+          "selectedActionType": null,
+          "selectedActionKey": null,
+          "extractedArgs": {},
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        },
+        {
+          "id": "swim-enrollment-command",
+          "tenant": "british-swim-school",
+          "message": "Enroll my daughter.",
+          "expectedMode": "transactional",
+          "expectedIntent": "enrollment",
+          "expectedActionType": "enroll",
+          "actualMode": "transactional",
+          "actualIntent": "enrollment",
+          "selectedActionType": "enroll",
+          "selectedActionKey": "enroll_child",
+          "extractedArgs": {},
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        },
+        {
+          "id": "salon-guided-demo",
+          "tenant": "salonflow",
+          "message": "I want someone to walk me through a guided demo.",
+          "expectedMode": "transactional",
+          "expectedIntent": "demo",
+          "expectedActionType": "request_demo",
+          "actualMode": "transactional",
+          "actualIntent": "demo",
+          "selectedActionType": "request_demo",
+          "selectedActionKey": "request_demo",
+          "extractedArgs": {},
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        },
+        {
+          "id": "contact-team",
+          "tenant": "frontdeskwise",
+          "message": "I want someone to call me.",
+          "expectedMode": "transactional",
+          "expectedIntent": "lead",
+          "expectedActionType": "contact_team",
+          "actualMode": "transactional",
+          "actualIntent": "lead",
+          "selectedActionType": "contact_team",
+          "selectedActionKey": "capture_lead",
+          "extractedArgs": {},
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        },
+        {
+          "id": "daycare-tour",
+          "tenant": "daycarespots",
+          "message": "Schedule a tour.",
+          "expectedMode": "transactional",
+          "expectedIntent": "tour",
+          "expectedActionType": "external_booking",
+          "actualMode": "transactional",
+          "actualIntent": "tour",
+          "selectedActionType": "external_booking",
+          "selectedActionKey": "book_tour",
+          "extractedArgs": {},
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        },
+        {
+          "id": "hours-knowledge",
+          "tenant": "frontdeskwise",
+          "message": "What are your business hours?",
+          "expectedMode": "informational",
+          "expectedIntent": "general",
+          "expectedActionType": null,
+          "actualMode": "informational",
+          "actualIntent": "general",
+          "selectedActionType": null,
+          "selectedActionKey": null,
+          "extractedArgs": {},
+          "routeCorrect": true,
+          "actionCorrect": true,
+          "argsCorrect": true,
+          "unnecessaryAction": false,
+          "pass": true
+        }
+      ],
+      "summary": {
+        "total": 7,
+        "passed": 7,
+        "routeAccuracy": 1,
+        "actionAccuracy": 1,
+        "argumentAccuracy": 1,
+        "incorrectActionRate": 0,
+        "unnecessaryActionRate": 0
+      },
+      "pass": true
+    },
+    "workflow": {
+      "generatedAt": "2026-11-22T15:42:07.039Z",
+      "businesses": [
+        {
+          "key": "salonflow",
+          "name": "SalonFlow",
+          "workflowVerification": {
+            "ok": true,
+            "score": 1,
+            "issues": [],
+            "reachableStepIds": [
+              "business-type",
+              "main-goal",
+              "capabilities",
+              "pricing",
+              "try-demo",
+              "request-demo",
+              "support-handoff"
+            ],
+            "terminalStepIds": [
+              "try-demo",
+              "request-demo",
+              "support-handoff"
+            ]
+          },
+          "processPassRate": 1,
+          "outcomePassRate": 1,
+          "pass": true,
+          "turns": [
+            {
+              "id": "salon-start",
+              "message": "I run a small salon.",
+              "route": "GENERAL_QUESTION",
+              "extractedFields": [
+                "business_type"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": null,
+                "workflowVersion": null,
+                "workflowCursor": null,
+                "collectedFields": {},
+                "pendingQuestion": null,
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": null,
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "stateAfter": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "main-goal",
+                "collectedFields": {
+                  "business_type": "Small salon"
+                },
+                "pendingQuestion": {
+                  "stepId": "main-goal",
+                  "fieldKey": "main_goal",
+                  "question": "What are you mainly trying to improve?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "providerCall": null,
+              "nextBestAction": "ASK_FIELD",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "salon-qualify",
+              "message": "We mainly need online booking and reminders.",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "main_goal"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "main-goal",
+                "collectedFields": {
+                  "business_type": "Small salon"
+                },
+                "pendingQuestion": {
+                  "stepId": "main-goal",
+                  "fieldKey": "main_goal",
+                  "question": "What are you mainly trying to improve?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "stateAfter": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "pricing",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "pricing",
+                  "fieldKey": null,
+                  "question": "I can answer pricing and product questions from verified business knowledge."
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CAPTURE_DETAILS",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "providerCall": null,
+              "nextBestAction": "CAPTURE_DETAILS",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "salon-interruption",
+              "message": "What does SalonFlow cost?",
+              "route": "INTERRUPTION",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "pricing",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "pricing",
+                  "fieldKey": null,
+                  "question": "I can answer pricing and product questions from verified business knowledge."
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CAPTURE_DETAILS",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "stateAfter": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "pricing",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "pricing",
+                  "fieldKey": null,
+                  "question": "I can answer pricing and product questions from verified business knowledge."
+                },
+                "interruptionContext": {
+                  "depth": 1,
+                  "currentIntent": "pricing",
+                  "returnStepId": "pricing"
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CAPTURE_DETAILS",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "providerCall": null,
+              "nextBestAction": "CAPTURE_DETAILS",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "knowledge_answer",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "salon-guided-demo",
+              "message": "I want a guided demo.",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "pricing",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "pricing",
+                  "fieldKey": null,
+                  "question": "I can answer pricing and product questions from verified business knowledge."
+                },
+                "interruptionContext": {
+                  "depth": 1,
+                  "currentIntent": "pricing",
+                  "returnStepId": "pricing"
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CAPTURE_DETAILS",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "stateAfter": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "request-demo",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "request-demo",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CONTINUE_WORKFLOW",
+                "allowedCtas": [
+                  {
+                    "actionId": "salon-request-demo",
+                    "key": "request_demo",
+                    "label": "Request a demo",
+                    "executionMode": "DIRECT_LINK",
+                    "trackingKey": "request_demo",
+                    "url": "https://salonflow.example/request-demo"
+                  }
+                ],
+                "businessContextVersion": 11
+              },
+              "providerCall": null,
+              "nextBestAction": "CONTINUE_WORKFLOW",
+              "cta": "request_demo",
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "cta",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "salon-support",
+              "message": "Please connect me with support.",
+              "route": "HUMAN_HANDOFF",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "request-demo",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "request-demo",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CONTINUE_WORKFLOW",
+                "allowedCtas": [
+                  {
+                    "actionId": "salon-request-demo",
+                    "key": "request_demo",
+                    "label": "Request a demo",
+                    "executionMode": "DIRECT_LINK",
+                    "trackingKey": "request_demo",
+                    "url": "https://salonflow.example/request-demo"
+                  }
+                ],
+                "businessContextVersion": 11
+              },
+              "stateAfter": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "request-demo",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "request-demo",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "WAITING_FOR_STAFF",
+                "nextBestAction": "HANDOFF",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "providerCall": null,
+              "nextBestAction": "HANDOFF",
+              "cta": null,
+              "handoffState": "WAITING_FOR_STAFF",
+              "responseClass": "handoff_requested",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "salon-waiting",
+              "message": "Actually, show me the demo now.",
+              "route": "HUMAN_HANDOFF",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "request-demo",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "request-demo",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "WAITING_FOR_STAFF",
+                "nextBestAction": "HANDOFF",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "stateAfter": {
+                "conversationId": "reference-salonflow",
+                "businessId": "reference-salonflow",
+                "activeWorkflow": {
+                  "id": "salon-fit-workflow",
+                  "key": "salon_fit",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "request-demo",
+                "collectedFields": {
+                  "business_type": "Small salon",
+                  "main_goal": "Online booking, Reminders",
+                  "recommended_plan": "Relevant capabilities"
+                },
+                "pendingQuestion": {
+                  "stepId": "request-demo",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "capabilities",
+                  "lookups": [
+                    {
+                      "stepId": "capabilities",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "WAITING_FOR_STAFF",
+                "nextBestAction": "HANDOFF",
+                "allowedCtas": [],
+                "businessContextVersion": 11
+              },
+              "providerCall": null,
+              "nextBestAction": "HANDOFF",
+              "cta": null,
+              "handoffState": "WAITING_FOR_STAFF",
+              "responseClass": "handoff_waiting",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            }
+          ]
+        },
+        {
+          "key": "plancraftai",
+          "name": "PlanCraftAI",
+          "workflowVerification": {
+            "ok": true,
+            "score": 1,
+            "issues": [],
+            "reachableStepIds": [
+              "usage-type",
+              "main-goal",
+              "usage-level",
+              "recommend-plan",
+              "explain-plan",
+              "show-pricing",
+              "get-started"
+            ],
+            "terminalStepIds": [
+              "get-started"
+            ]
+          },
+          "processPassRate": 1,
+          "outcomePassRate": 1,
+          "pass": true,
+          "turns": [
+            {
+              "id": "plan-start",
+              "message": "Help me choose a plan.",
+              "route": "EXPLICIT_ACTION",
+              "extractedFields": [
+                "main_goal"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": null,
+                "workflowVersion": null,
+                "workflowCursor": null,
+                "collectedFields": {},
+                "pendingQuestion": null,
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": null,
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "stateAfter": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "usage-type",
+                "collectedFields": {
+                  "main_goal": "Planning"
+                },
+                "pendingQuestion": {
+                  "stepId": "usage-type",
+                  "fieldKey": "usage_type",
+                  "question": "Will you use PlanCraftAI by yourself or with a team?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "providerCall": null,
+              "nextBestAction": "ASK_FIELD",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "plan-solo",
+              "message": "Solo",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "usage_type"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "usage-type",
+                "collectedFields": {
+                  "main_goal": "Planning"
+                },
+                "pendingQuestion": {
+                  "stepId": "usage-type",
+                  "fieldKey": "usage_type",
+                  "question": "Will you use PlanCraftAI by yourself or with a team?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "stateAfter": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "usage-level",
+                "collectedFields": {
+                  "main_goal": "Planning",
+                  "usage_type": "Solo"
+                },
+                "pendingQuestion": {
+                  "stepId": "usage-level",
+                  "fieldKey": "usage_level",
+                  "question": "How often will you use PlanCraftAI?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "providerCall": null,
+              "nextBestAction": "ASK_FIELD",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "plan-goal",
+              "message": "Planning and reminders",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "main_goal"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "usage-level",
+                "collectedFields": {
+                  "main_goal": "Planning",
+                  "usage_type": "Solo"
+                },
+                "pendingQuestion": {
+                  "stepId": "usage-level",
+                  "fieldKey": "usage_level",
+                  "question": "How often will you use PlanCraftAI?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "stateAfter": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "usage-level",
+                "collectedFields": {
+                  "main_goal": "Planning + reminders",
+                  "usage_type": "Solo"
+                },
+                "pendingQuestion": {
+                  "stepId": "usage-level",
+                  "fieldKey": "usage_level",
+                  "question": "How often will you use PlanCraftAI?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "providerCall": null,
+              "nextBestAction": "ASK_FIELD",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "plan-recommend",
+              "message": "Daily",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "usage_level"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "usage-level",
+                "collectedFields": {
+                  "main_goal": "Planning + reminders",
+                  "usage_type": "Solo"
+                },
+                "pendingQuestion": {
+                  "stepId": "usage-level",
+                  "fieldKey": "usage_level",
+                  "question": "How often will you use PlanCraftAI?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "stateAfter": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "get-started",
+                "collectedFields": {
+                  "main_goal": "Planning + reminders",
+                  "usage_type": "Solo",
+                  "usage_level": "Daily",
+                  "recommended_plan": "Solo Premium"
+                },
+                "pendingQuestion": {
+                  "stepId": "get-started",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "recommend-plan",
+                  "lookups": [
+                    {
+                      "stepId": "recommend-plan",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CONTINUE_WORKFLOW",
+                "allowedCtas": [
+                  {
+                    "actionId": "plancraft-signup",
+                    "key": "signup",
+                    "label": "Start PlanCraftAI",
+                    "executionMode": "DIRECT_LINK",
+                    "trackingKey": "signup",
+                    "url": "https://plancraft.example/signup"
+                  }
+                ],
+                "businessContextVersion": 12
+              },
+              "providerCall": null,
+              "nextBestAction": "CONTINUE_WORKFLOW",
+              "cta": "signup",
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "recommendation",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "plan-correction",
+              "message": "Actually, team.",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "usage_type",
+                "main_goal"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "get-started",
+                "collectedFields": {
+                  "main_goal": "Planning + reminders",
+                  "usage_type": "Solo",
+                  "usage_level": "Daily",
+                  "recommended_plan": "Solo Premium"
+                },
+                "pendingQuestion": {
+                  "stepId": "get-started",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "recommend-plan",
+                  "lookups": [
+                    {
+                      "stepId": "recommend-plan",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CONTINUE_WORKFLOW",
+                "allowedCtas": [
+                  {
+                    "actionId": "plancraft-signup",
+                    "key": "signup",
+                    "label": "Start PlanCraftAI",
+                    "executionMode": "DIRECT_LINK",
+                    "trackingKey": "signup",
+                    "url": "https://plancraft.example/signup"
+                  }
+                ],
+                "businessContextVersion": 12
+              },
+              "stateAfter": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "get-started",
+                "collectedFields": {
+                  "main_goal": "Team coordination",
+                  "usage_type": "Team",
+                  "usage_level": "Daily",
+                  "recommended_plan": "Team Pro"
+                },
+                "pendingQuestion": {
+                  "stepId": "get-started",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "recommend-plan",
+                  "lookups": [
+                    {
+                      "stepId": "recommend-plan",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CONTINUE_WORKFLOW",
+                "allowedCtas": [
+                  {
+                    "actionId": "plancraft-signup",
+                    "key": "signup",
+                    "label": "Start PlanCraftAI",
+                    "executionMode": "DIRECT_LINK",
+                    "trackingKey": "signup",
+                    "url": "https://plancraft.example/signup"
+                  }
+                ],
+                "businessContextVersion": 12
+              },
+              "providerCall": null,
+              "nextBestAction": "CONTINUE_WORKFLOW",
+              "cta": "signup",
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "recommendation",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "plan-handoff",
+              "message": "Please connect me to a person.",
+              "route": "HUMAN_HANDOFF",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "get-started",
+                "collectedFields": {
+                  "main_goal": "Team coordination",
+                  "usage_type": "Team",
+                  "usage_level": "Daily",
+                  "recommended_plan": "Team Pro"
+                },
+                "pendingQuestion": {
+                  "stepId": "get-started",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "recommend-plan",
+                  "lookups": [
+                    {
+                      "stepId": "recommend-plan",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "CONTINUE_WORKFLOW",
+                "allowedCtas": [
+                  {
+                    "actionId": "plancraft-signup",
+                    "key": "signup",
+                    "label": "Start PlanCraftAI",
+                    "executionMode": "DIRECT_LINK",
+                    "trackingKey": "signup",
+                    "url": "https://plancraft.example/signup"
+                  }
+                ],
+                "businessContextVersion": 12
+              },
+              "stateAfter": {
+                "conversationId": "reference-plancraftai",
+                "businessId": "reference-plancraftai",
+                "activeWorkflow": {
+                  "id": "plancraft-plan-workflow",
+                  "key": "plan_selection",
+                  "version": 1
+                },
+                "workflowVersion": 1,
+                "workflowCursor": "get-started",
+                "collectedFields": {
+                  "main_goal": "Team coordination",
+                  "usage_type": "Team",
+                  "usage_level": "Daily",
+                  "recommended_plan": "Team Pro"
+                },
+                "pendingQuestion": {
+                  "stepId": "get-started",
+                  "fieldKey": null,
+                  "question": null
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "succeeded",
+                  "lastOperation": "recommend-plan",
+                  "lookups": [
+                    {
+                      "stepId": "recommend-plan",
+                      "status": "matched",
+                      "matchCount": 0
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "WAITING_FOR_STAFF",
+                "nextBestAction": "HANDOFF",
+                "allowedCtas": [],
+                "businessContextVersion": 12
+              },
+              "providerCall": null,
+              "nextBestAction": "HANDOFF",
+              "cta": null,
+              "handoffState": "WAITING_FOR_STAFF",
+              "responseClass": "handoff_requested",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            }
+          ]
+        },
+        {
+          "key": "british-swim-school",
+          "name": "British Swim School",
+          "workflowVerification": {
+            "ok": true,
+            "score": 1,
+            "issues": [],
+            "reachableStepIds": [
+              "customer-type",
+              "student-age",
+              "student-ability",
+              "student-goal",
+              "student-location",
+              "student-schedule",
+              "registration-options",
+              "class-recommendations",
+              "class-selection",
+              "parent-contact",
+              "enrollment-confirm",
+              "registration-link",
+              "enrollment-complete"
+            ],
+            "terminalStepIds": [
+              "enrollment-complete"
+            ]
+          },
+          "processPassRate": 1,
+          "outcomePassRate": 1,
+          "pass": true,
+          "turns": [
+            {
+              "id": "swim-start",
+              "message": "Sign my child up.",
+              "route": "EXPLICIT_ACTION",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": null,
+                "workflowVersion": null,
+                "workflowCursor": null,
+                "collectedFields": {},
+                "pendingQuestion": null,
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": null,
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": null,
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "stateAfter": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": {
+                  "id": "reference-swim-enroll_child",
+                  "key": "enroll_child",
+                  "version": 2
+                },
+                "workflowVersion": 2,
+                "workflowCursor": "customer-type",
+                "collectedFields": {},
+                "pendingQuestion": {
+                  "stepId": "customer-type",
+                  "fieldKey": "customer_type",
+                  "question": "Is this for a new student or someone already enrolled?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "providerCall": null,
+              "nextBestAction": "ASK_FIELD",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "swim-qualify",
+              "message": "New student, age 7, beginner, learn to swim.",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "customer_type",
+                "child_age",
+                "ability",
+                "goal"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": {
+                  "id": "reference-swim-enroll_child",
+                  "key": "enroll_child",
+                  "version": 2
+                },
+                "workflowVersion": 2,
+                "workflowCursor": "customer-type",
+                "collectedFields": {},
+                "pendingQuestion": {
+                  "stepId": "customer-type",
+                  "fieldKey": "customer_type",
+                  "question": "Is this for a new student or someone already enrolled?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "stateAfter": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": {
+                  "id": "reference-swim-enroll_child",
+                  "key": "enroll_child",
+                  "version": 2
+                },
+                "workflowVersion": 2,
+                "workflowCursor": "student-location",
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim"
+                },
+                "pendingQuestion": {
+                  "stepId": "student-location",
+                  "fieldKey": "location",
+                  "question": "Which location or ZIP code is most convenient?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "providerCall": null,
+              "nextBestAction": "ASK_FIELD",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "workflow_prompt",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "swim-provider",
+              "message": "At Largo, Turtle 2, Saturdays. My name is Jamie Rivera, jamie@example.com, 727-555-0199.",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [
+                "location",
+                "program",
+                "schedule_preference",
+                "parent_name",
+                "email",
+                "phone"
+              ],
+              "stateBefore": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": {
+                  "id": "reference-swim-enroll_child",
+                  "key": "enroll_child",
+                  "version": 2
+                },
+                "workflowVersion": 2,
+                "workflowCursor": "student-location",
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim"
+                },
+                "pendingQuestion": {
+                  "stepId": "student-location",
+                  "fieldKey": "location",
+                  "question": "Which location or ZIP code is most convenient?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "idle",
+                  "lastOperation": null,
+                  "lookups": []
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "ASK_FIELD",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "stateAfter": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": {
+                  "id": "reference-swim-enroll_child",
+                  "key": "enroll_child",
+                  "version": 2
+                },
+                "workflowVersion": 2,
+                "workflowCursor": "class-recommendations",
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim",
+                  "location": "Largo",
+                  "program": "Turtle 2",
+                  "schedule_preference": "Saturdays",
+                  "parent_name": "Jamie Rivera",
+                  "email": "jamie@example.com",
+                  "phone": "727-555-0199"
+                },
+                "pendingQuestion": {
+                  "stepId": "class-recommendations",
+                  "fieldKey": null,
+                  "question": "I found these matching classes. Which one would you like to consider?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "succeeded",
+                  "lastOperation": "registration-options",
+                  "lookups": [
+                    {
+                      "stepId": "registration-options",
+                      "status": "matched",
+                      "matchCount": 1
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": true,
+                  "status": "succeeded"
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "RECOMMEND_OPTION",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "providerCall": {
+                "provider": "jackrabbit",
+                "operation": "lookup",
+                "status": "succeeded"
+              },
+              "nextBestAction": "RECOMMEND_OPTION",
+              "cta": null,
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "provider_result",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "swim-register",
+              "message": "Option 1, please.",
+              "route": "WORKFLOW_CONTINUATION",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": {
+                  "id": "reference-swim-enroll_child",
+                  "key": "enroll_child",
+                  "version": 2
+                },
+                "workflowVersion": 2,
+                "workflowCursor": "class-recommendations",
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim",
+                  "location": "Largo",
+                  "program": "Turtle 2",
+                  "schedule_preference": "Saturdays",
+                  "parent_name": "Jamie Rivera",
+                  "email": "jamie@example.com",
+                  "phone": "727-555-0199"
+                },
+                "pendingQuestion": {
+                  "stepId": "class-recommendations",
+                  "fieldKey": null,
+                  "question": "I found these matching classes. Which one would you like to consider?"
+                },
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": null,
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "succeeded",
+                  "lastOperation": "registration-options",
+                  "lookups": [
+                    {
+                      "stepId": "registration-options",
+                      "status": "matched",
+                      "matchCount": 1
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "RECOMMEND_OPTION",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "stateAfter": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": null,
+                "workflowVersion": 2,
+                "workflowCursor": null,
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim",
+                  "location": "Largo",
+                  "program": "Turtle 2",
+                  "schedule_preference": "Saturdays",
+                  "parent_name": "Jamie Rivera",
+                  "email": "jamie@example.com",
+                  "phone": "727-555-0199"
+                },
+                "pendingQuestion": null,
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": {
+                  "id": "reference-class-1",
+                  "key": "enroll_child"
+                },
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "succeeded",
+                  "lastOperation": "registration-options",
+                  "lookups": [
+                    {
+                      "stepId": "registration-options",
+                      "status": "matched",
+                      "matchCount": 1
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "COMPLETED",
+                "allowedCtas": [
+                  {
+                    "actionId": "reference-swim-enroll_child",
+                    "key": "enroll_child",
+                    "label": "Continue registration",
+                    "executionMode": "PROVIDER_FLOW",
+                    "trackingKey": "enroll_child",
+                    "url": "https://register.example/start?classId=reference-class-1"
+                  }
+                ],
+                "businessContextVersion": 13
+              },
+              "providerCall": null,
+              "nextBestAction": "COMPLETED",
+              "cta": "enroll_child",
+              "handoffState": "AI_ACTIVE",
+              "responseClass": "cta",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            },
+            {
+              "id": "swim-handoff",
+              "message": "Can you connect me to a person?",
+              "route": "HUMAN_HANDOFF",
+              "extractedFields": [],
+              "stateBefore": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": null,
+                "workflowVersion": 2,
+                "workflowCursor": null,
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim",
+                  "location": "Largo",
+                  "program": "Turtle 2",
+                  "schedule_preference": "Saturdays",
+                  "parent_name": "Jamie Rivera",
+                  "email": "jamie@example.com",
+                  "phone": "727-555-0199"
+                },
+                "pendingQuestion": null,
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": {
+                  "id": "reference-class-1",
+                  "key": "enroll_child"
+                },
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "succeeded",
+                  "lastOperation": "registration-options",
+                  "lookups": [
+                    {
+                      "stepId": "registration-options",
+                      "status": "matched",
+                      "matchCount": 1
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "AI_ACTIVE",
+                "nextBestAction": "COMPLETED",
+                "allowedCtas": [
+                  {
+                    "actionId": "reference-swim-enroll_child",
+                    "key": "enroll_child",
+                    "label": "Continue registration",
+                    "executionMode": "PROVIDER_FLOW",
+                    "trackingKey": "enroll_child",
+                    "url": "https://register.example/start?classId=reference-class-1"
+                  }
+                ],
+                "businessContextVersion": 13
+              },
+              "stateAfter": {
+                "conversationId": "reference-british-swim-school",
+                "businessId": "reference-british-swim-school",
+                "activeWorkflow": null,
+                "workflowVersion": 2,
+                "workflowCursor": null,
+                "collectedFields": {
+                  "customer_type": "New student",
+                  "child_age": "7",
+                  "ability": "Beginner",
+                  "goal": "Learn to swim",
+                  "location": "Largo",
+                  "program": "Turtle 2",
+                  "schedule_preference": "Saturdays",
+                  "parent_name": "Jamie Rivera",
+                  "email": "jamie@example.com",
+                  "phone": "727-555-0199"
+                },
+                "pendingQuestion": null,
+                "interruptionContext": {
+                  "depth": 0,
+                  "currentIntent": null,
+                  "returnStepId": null
+                },
+                "selectedAction": {
+                  "id": "reference-class-1",
+                  "key": "enroll_child"
+                },
+                "providerState": {
+                  "provider": "jackrabbit",
+                  "status": "succeeded",
+                  "lastOperation": "registration-options",
+                  "lookups": [
+                    {
+                      "stepId": "registration-options",
+                      "status": "matched",
+                      "matchCount": 1
+                    }
+                  ]
+                },
+                "providerResult": {
+                  "available": false,
+                  "status": null
+                },
+                "handoffState": "WAITING_FOR_STAFF",
+                "nextBestAction": "HANDOFF",
+                "allowedCtas": [],
+                "businessContextVersion": 13
+              },
+              "providerCall": null,
+              "nextBestAction": "HANDOFF",
+              "cta": null,
+              "handoffState": "WAITING_FOR_STAFF",
+              "responseClass": "handoff_requested",
+              "process": {
+                "pass": true,
+                "failures": []
+              },
+              "outcome": {
+                "pass": true,
+                "failures": []
+              },
+              "pass": true,
+              "mismatches": []
+            }
+          ]
+        }
+      ],
+      "pass": true
+    }
+  },
+  "pass": true,
+  "baseline": {
+    "fileName": "certification-pyramid-2026-11-22T15-32-46-605Z.json",
+    "generatedAt": "2026-11-22T15:32:46.604Z"
+  },
+  "scores": {
+    "retrieval.recallAtK": 1,
+    "retrieval.precisionAtK": 0.2,
+    "retrieval.mrr": 1,
+    "retrieval.ndcgAtK": 1,
+    "retrieval.forbiddenEvidenceRate": 0,
+    "routing.routeAccuracy": 1,
+    "routing.actionAccuracy": 1,
+    "routing.argumentAccuracy": 1,
+    "routing.incorrectActionRate": 0,
+    "routing.unnecessaryActionRate": 0,
+    "workflow.processPassRate": 1,
+    "workflow.outcomePassRate": 1,
+    "workflow.successRate": 1
+  },
+  "scoreDeltas": {
+    "retrieval.forbiddenEvidenceRate": 0,
+    "retrieval.mrr": 0,
+    "retrieval.ndcgAtK": 0,
+    "retrieval.precisionAtK": 0,
+    "retrieval.recallAtK": 0,
+    "routing.actionAccuracy": 0,
+    "routing.argumentAccuracy": 0,
+    "routing.incorrectActionRate": 0,
+    "routing.routeAccuracy": 0,
+    "routing.unnecessaryActionRate": 0,
+    "workflow.outcomePassRate": 0,
+    "workflow.processPassRate": 0,
+    "workflow.successRate": 0
+  }
+}

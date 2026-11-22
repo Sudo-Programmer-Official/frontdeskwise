@@ -436,14 +436,16 @@ export function extractWorkflowValues(action: ActionFlow, input: string): Record
   const email = value.match(/\b[^\s@]+@[^\s@]+\.[^\s@]+\b/)?.[0];
   const phone = value.match(/(?:\+?\d[\d\s().-]{6,}\d)/)?.[0]?.trim();
   const zip = value.match(/\b\d{5}(?:-\d{4})?\b/)?.[0];
-  const age = value.match(/\b(?:age\s*|(?:is|are)\s+|(?:she|he|they)\s+(?:is|are)\s+)(\d{1,3})(?:\s*(?:years?|year)\s*old)?\b/i)?.[1];
+  const age = value.match(/\b(?:age\s*|(?:is|are)\s+|(?:she|he|they)\s+(?:is|are)\s+)(\d{1,3})(?:\s*(?:years?|year)\s*old)?\b/i)?.[1]
+    ?? value.match(/\b(\d{1,3})\s*[- ]?year[- ]?old\b/i)?.[1];
   const day = value.match(/\b(?:weekends?|weekdays?|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?|mornings?|afternoons?|evenings?|after school)\b/i)?.[0];
   const location = value.match(/\b(?:location|at|in|near)\s+(?:is\s+)?([a-z][a-z0-9 &'./-]{2,60}?)(?=\s+(?:on|for|and|but|because|this|next)\b|[,.!?]|$)/i)?.[1]?.trim()
     ?? value.match(/\bactually\s*,?\s+([A-Z][a-z0-9 &'./-]{2,60}?)(?=\s+(?:on|for|and|but|because|this|next)\b|[,.!?]|$)/)?.[1]?.trim()
     ?? value.match(/\b(?:at|in|near)\s+([A-Z][a-z0-9 &'./-]{2,60}?)(?=\s+(?:on|for|and|but|because|this|next)\b|[,.!?]|$)/)?.[1]?.trim();
   const correctedLocation = value.match(/\b(?:location is|prefer(?:red)? location is)\s*,?\s+([a-z][a-z0-9'-]{2,40}(?:\s+[A-Z][a-z0-9'-]{2,40})?)/i)?.[1]?.trim()
     ?? value.match(/\bActually\s*,?\s+([A-Z][a-z0-9'-]{2,40}(?:\s+[A-Z][a-z0-9'-]{2,40})?)/)?.[1]?.trim();
-  const program = value.match(/\b(?:program|class|lesson)\s*(?:is|:)?\s*([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim();
+  const program = value.match(/\b(?:program|class)\s*(?:is|:)\s*([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim()
+    ?? value.match(/\b(?:program|class)\s+([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim();
   const name = value.match(/\b(?:my name is|i am|i'm|parent(?:'s)? name is|guardian(?:'s)? name is)\s+([a-z][a-z .'-]{1,80})/i)?.[1]?.trim();
 
   for (const field of action.fields) {

@@ -788,6 +788,30 @@ interface AdminWorkflowAuditItem {
   createdAt: string;
 }
 
+interface AdminCertificationRun {
+  fileName: string;
+  generatedAt: string;
+  commit: string | null;
+  pass: boolean;
+  layers: {
+    retrieval: { pass: boolean; metrics: Record<string, number>; forbiddenEvidenceRate: number };
+    routing: { pass: boolean; summary: Record<string, number> };
+    workflow: { pass: boolean; businesses: Array<{ key: string; name: string; pass: boolean; processPassRate: number; outcomePassRate: number; workflowVerification: { ok: boolean; issues: Array<{ code: string; message: string }> } }> };
+  };
+  baseline: { fileName: string; generatedAt: string | null; commit: string | null } | null;
+  scores: Record<string, number>;
+  scoreDeltas: Record<string, number> | null;
+}
+
+interface AdminCertificationPayload {
+  latest: AdminCertificationRun | null;
+  history: Array<Pick<AdminCertificationRun, "fileName" | "generatedAt" | "commit" | "pass" | "scores" | "scoreDeltas">>;
+  improvementSignals: {
+    counts: Array<{ type: string; count: number; lastSeenAt: string | null }>;
+    recent: Array<{ id: string; type: string; normalizedQuestion: string | null; reason: string | null; businessName: string; businessSlug: string; occurredAt: string }>;
+  };
+}
+
 interface AdminUser {
   id: string;
   email: string;
@@ -1351,6 +1375,9 @@ const adminWorkflowReplayQuestion = ref("");
 const adminWorkflowReplayLoading = ref(false);
 const adminWorkflowReplayError = ref("");
 const adminWorkflowReplayResult = ref<Record<string, unknown> | null>(null);
+const adminCertification = ref<AdminCertificationPayload | null>(null);
+const adminCertificationLoading = ref(false);
+const adminCertificationError = ref("");
 const selectedAdminWorkflowAction = computed(() => adminActionRegistry.value.find((action) => action.id === adminWorkflowDetailsActionId.value) ?? null);
 const adminBillingMessage = ref("");
 const adminOverridePlanKey = ref("starter");
@@ -1502,6 +1529,7 @@ const adminNavItems: Array<{ id: AdminSection; label: string; icon: LucideIcon }
   { id: "overview", label: "Command center", icon: LayoutDashboard },
   { id: "organizations", label: "Organizations", icon: Building2 },
   { id: "action-registry", label: "Action registry", icon: Zap },
+  { id: "certification", label: "Certification", icon: ShieldCheck },
   { id: "users", label: "Users & access", icon: UsersRound },
   { id: "demos", label: "Demo operations", icon: Sparkles },
   { id: "messaging", label: "Messaging", icon: Mail },
@@ -2027,6 +2055,7 @@ async function applyRouteState(nextRoute: AppRoute) {
     else {
       void loadAdminOrganizations();
       void loadAdminActionRegistry();
+      void loadAdminCertification();
       void loadAdminUsers();
       void loadAdminDemoRequests();
       void loadAdminInstallationSupport();
@@ -5295,6 +5324,19 @@ function formatLabel(value: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
+function certificationScoreLabel(key: string): string {
+  return formatLabel(key.replace(/^(retrieval|routing|workflow)\./, ""));
+}
+
+function certificationScoreValue(value: number | undefined): string {
+  return value === undefined ? "—" : `${(value * 100).toFixed(1)}%`;
+}
+
+function certificationDeltaValue(value: number | undefined): string {
+  if (value === undefined) return "—";
+  return `${value > 0 ? "+" : ""}${(value * 100).toFixed(1)} pts`;
+}
+
 function formatTemplateVariable(value: string): string {
   return `{{${value}}}`;
 }
@@ -5490,6 +5532,22 @@ async function loadAdminActionRegistry() {
     adminActionRegistryError.value = error instanceof Error ? error.message : "Could not load the action registry.";
   } finally {
     adminActionRegistryLoading.value = false;
+  }
+}
+
+async function loadAdminCertification() {
+  if (!authSnapshot.value || adminCertificationLoading.value) return;
+  adminCertificationLoading.value = true;
+  adminCertificationError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/certification"), { headers: ownerHeaders() });
+    const payload = await response.json() as AdminCertificationPayload & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load certification status.");
+    adminCertification.value = payload;
+  } catch (error) {
+    adminCertificationError.value = error instanceof Error ? error.message : "Could not load certification status.";
+  } finally {
+    adminCertificationLoading.value = false;
   }
 }
 
@@ -6661,6 +6719,7 @@ watch([knowledgeGapFilter, knowledgeGapSort, knowledgeGapSearch, knowledgeGapInt
 watch(adminSection, (nextSection, previousSection) => {
   if (nextSection === previousSection || route.value.kind !== "platform" || route.value.section === nextSection) return;
   if (nextSection === "action-registry") void loadAdminActionRegistry();
+  if (nextSection === "certification") void loadAdminCertification();
   if (nextSection === "support") void loadAdminSupportCases();
   commitRoute(platformRoute(nextSection));
 });
@@ -6697,6 +6756,7 @@ watch(view, (nextView, previousView) => {
   if (nextView === "admin") {
     void loadAdminOrganizations();
     void loadAdminActionRegistry();
+    void loadAdminCertification();
     void loadAdminUsers();
     void loadAdminDemoRequests();
     void loadAdminInstallationSupport();
@@ -7541,6 +7601,17 @@ function startMarketingDemo() {
             <div class="ds-stat-grid admin-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Building2 :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizations.length }}</strong><small>Organizations</small><em>{{ adminTrialCount }} on trial</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><UserCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminLeadTotal }}</strong><small>Leads captured</small><em>Across all tenants</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminConversationTotal }}</strong><small>Conversations</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminPausedCount + adminFailedDemoCount }}</strong><small>Needs attention</small><em>{{ adminDisabledUserCount }} disabled users</em></article></div>
             <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'support'"><span>Open support cases</span><strong>{{ adminSupportSummary.open }}</strong></button><button type="button" @click="adminSection = 'installation-support'"><span>New installation requests</span><strong>{{ installationSupportSummary.new }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
           </template>
+          <article v-if="adminSection === 'certification'" class="panel certification-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Release confidence</p><h2>Platform certification</h2><p>Retrieval, routing, and workflow quality from the latest release-gate run.</p></div><div class="toolbar-actions"><span v-if="adminCertification?.latest" :class="['status-pill', adminCertification.latest.pass ? 'booked' : 'new']">{{ adminCertification.latest.pass ? 'PASS' : 'FAIL' }}</span><button class="outline-button small" type="button" :disabled="adminCertificationLoading" @click="loadAdminCertification">{{ adminCertificationLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+            <p v-if="adminCertificationError" class="form-error">{{ adminCertificationError }}</p>
+            <template v-if="adminCertification?.latest">
+              <div class="ds-stat-grid admin-detail-stat-grid"><article v-for="layer in [{ key: 'retrieval', label: 'Retrieval', pass: adminCertification.latest.layers.retrieval.pass }, { key: 'routing', label: 'Routing', pass: adminCertification.latest.layers.routing.pass }, { key: 'workflow', label: 'Workflow', pass: adminCertification.latest.layers.workflow.pass }]" :key="layer.key" class="ds-stat-card"><span :class="['ds-stat-icon', layer.pass ? 'green' : 'orange']"><ShieldCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ layer.pass ? 'PASS' : 'FAIL' }}</strong><small>{{ layer.label }}</small><em>{{ layer.pass ? 'Release invariant satisfied' : 'Needs investigation' }}</em></article></div>
+              <div class="admin-certification-meta"><span>Last run {{ new Date(adminCertification.latest.generatedAt).toLocaleString() }}</span><span>Commit {{ adminCertification.latest.commit || 'not recorded' }}</span><span v-if="adminCertification.latest.baseline">Compared with {{ adminCertification.latest.baseline.fileName }}{{ adminCertification.latest.baseline.commit ? ` · ${adminCertification.latest.baseline.commit}` : '' }}</span></div>
+              <div class="admin-certification-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Quality deltas</p><h3>Score movement</h3></div><span class="status-pill qualified">{{ adminCertification.latest.scoreDeltas ? 'Compared' : 'Baseline pending' }}</span></div><div v-if="adminCertification.latest.scoreDeltas" class="admin-certification-score-list"><div v-for="(delta, key) in adminCertification.latest.scoreDeltas" :key="key"><span>{{ certificationScoreLabel(String(key)) }}</span><strong>{{ certificationDeltaValue(delta) }}</strong><small>Current {{ certificationScoreValue(adminCertification.latest.scores[String(key)]) }}</small></div></div><div v-else class="diagnostics-empty">The next run will establish the first score baseline.</div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Reference businesses</p><h3>End-to-end workflow status</h3></div></div><div class="admin-certification-business-list"><div v-for="business in adminCertification.latest.layers.workflow.businesses" :key="business.key"><span><strong>{{ business.name }}</strong><small>{{ business.processPassRate * 100 }}% process · {{ business.outcomePassRate * 100 }}% outcome</small></span><span :class="['status-pill', business.pass && business.workflowVerification.ok ? 'booked' : 'new']">{{ business.pass && business.workflowVerification.ok ? 'PASS' : 'FAIL' }}</span></div></div></article></div>
+              <div class="admin-certification-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Observed production signals</p><h3>Improvement queue</h3></div><span class="status-pill qualified">{{ adminCertification.improvementSignals.recent.length }} recent</span></div><div v-if="adminCertification.improvementSignals.counts.length" class="admin-certification-score-list"><div v-for="signal in adminCertification.improvementSignals.counts" :key="signal.type"><span>{{ formatLabel(signal.type) }}</span><strong>{{ signal.count }}</strong><small>Last {{ signal.lastSeenAt ? new Date(signal.lastSeenAt).toLocaleString() : '—' }}</small></div></div><div v-else class="diagnostics-empty">No improvement signals recorded yet.</div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Recent examples</p><h3>Failure signals to review</h3></div></div><div v-if="adminCertification.improvementSignals.recent.length" class="admin-certification-signal-list"><div v-for="signal in adminCertification.improvementSignals.recent" :key="signal.id"><span class="status-pill qualified">{{ formatLabel(signal.type) }}</span><div><strong>{{ signal.businessName }}</strong><small>{{ signal.normalizedQuestion || signal.reason || 'No question captured' }}</small><em>{{ new Date(signal.occurredAt).toLocaleString() }}</em></div></div></div><div v-else class="diagnostics-empty">The platform will show redacted production examples here.</div></article></div>
+            </template>
+            <div v-else-if="!adminCertificationLoading" class="diagnostics-empty">No certification report is available in this deployment yet. Run the release gate and publish the report artifact.</div>
+          </article>
           <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }} · {{ organization.mrrAmountCents === null ? 'No MRR' : `$${(organization.mrrAmountCents / 100).toFixed(0)} MRR` }}</small><small v-if="organization.lastPaymentStatus || organization.cancelAtPeriodEnd">{{ organization.lastPaymentStatus ? `Payment ${organization.lastPaymentStatus}` : '' }}{{ organization.cancelAtPeriodEnd ? ' · cancellation scheduled' : '' }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
           <template v-if="adminSection === 'business-detail'">
             <div v-if="adminBusinessDetailLoading" class="ds-card admin-detail-loading">Loading business detail…</div>

@@ -27,6 +27,18 @@ Business URL → instant personalized demo → lead capture → owner dashboard 
 - Versioned action workflows with generic steps (`ask`, `capture`, `form`, `condition`, `lookup`, `recommend`, `select`, `confirm`, `book`, `generate_link`, `handoff`, and `complete`), interruption state, repeatable participants, and provider completion-link prefill mappings.
 - Conversion telemetry for flow starts, field progress, forms, action outcomes, handoffs, booking links, and abandonment.
 
+Offline certification is split into an evaluation pyramid so failures are attributable:
+
+```text
+retrieval → action routing/argument extraction → workflow/conversation certification
+```
+
+Run the complete isolated suite with `npm run certification:pyramid --prefix apps/api`. The report is written to `apps/api/benchmark-results/` and includes Recall@5, Precision@5, MRR, NDCG@5, incorrect-action rate, unnecessary-action rate, workflow process/outcome rates, and the existing reference workflow results. Reports include commit identity, a prior-run baseline, and score deltas when available. Individual layers are available through `retrieval:certify`, `action-routing:certify`, and `reference:certify`.
+
+The release sequence is available as `npm run release:gate`: API tests → certification pyramid → API build → web build. Super Admin’s Certification view exposes the latest run, per-layer status, score movement, reference-business results, and redacted production improvement signals.
+
+Workflow certification also runs a deterministic publication gate for graph reachability, required-field capture, provider dependencies, and verified completion links. Reference workflows report process and outcome pass rates separately. Runtime loop guards persist compact state fingerprints, hand off after repeated non-progress, and emit tenant-scoped improvement signals for low-confidence answers, corrections, provider failures, handoffs, and loops; these signals are evaluation data, not automatic workflow changes.
+
 ## Run locally
 
 ```bash

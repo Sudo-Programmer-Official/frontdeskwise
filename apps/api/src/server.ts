@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { resolveTxt } from "node:dns/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
@@ -137,6 +139,9 @@ import {
   snapshotConversationWorkflowState,
   workflowFieldChanges,
 } from "./conversation-decision-trace.js";
+import { observeWorkflowLoop } from "./workflow-loop-guard.js";
+import { deriveImprovementSignals, normalizeImprovementQuestion } from "./improvement-signals.js";
+import { verifyWorkflowSet } from "./workflow-verifier.js";
 import {
   createActionConnector,
   type ActionConnectorProvider,
@@ -492,7 +497,8 @@ type ConversationEventType =
   | "VISITOR_REPLIED"
   | "INTERNAL_NOTE_ADDED"
   | "AI_RESPONSE_SENT"
-  | "CONVERSATION_DECISION_TRACE";
+  | "CONVERSATION_DECISION_TRACE"
+  | "LOOP_GUARD_TRIGGERED";
 
 type Message = {
   id?: string;
@@ -598,7 +604,8 @@ type ConversionEventType =
   | "HANDOFF_REQUESTED"
   | "LEAD_CAPTURED"
   | "BOOKING_LINK_OPENED"
-  | "CONVERSATION_ABANDONED";
+  | "CONVERSATION_ABANDONED"
+  | "IMPROVEMENT_SIGNAL";
 
 type ConversionEvent = {
   id: string;
@@ -632,7 +639,7 @@ const conversionEventTypes = new Set<ConversionEventType>([
   "FLOW_STARTED", "FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED",
   "FORM_DISPLAYED", "FORM_SUBMITTED", "ACTION_STARTED", "ACTION_SUCCEEDED",
   "ACTION_FAILED", "FLOW_COMPLETED", "CTA_SHOWN", "CTA_CLICKED", "DEMO_LINK_OPENED", "HANDOFF_REQUESTED",
-  "LEAD_CAPTURED", "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED",
+  "LEAD_CAPTURED", "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED", "IMPROVEMENT_SIGNAL",
 ]);
 
 const widgetPerformanceEventTypes = new Set([
@@ -1040,6 +1047,68 @@ function httpError(statusCode: number, message: string): Error & { statusCode: n
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+async function loadCertificationReportFiles(limit = 10): Promise<Array<{ fileName: string; report: Record<string, unknown> }>> {
+  const directories = [join(process.cwd(), "benchmark-results"), join(process.cwd(), "apps/api/benchmark-results")];
+  const candidates: Array<{ fileName: string; path: string }> = [];
+  for (const directory of directories) {
+    try {
+      const fileNames = await readdir(directory);
+      for (const fileName of fileNames.filter((name) => /^certification-pyramid-.*\.json$/.test(name))) candidates.push({ fileName, path: join(directory, fileName) });
+    } catch {
+      // A deployed API may not ship local benchmark artifacts. Production runs
+      // can still be surfaced through the database-backed improvement signals.
+    }
+  }
+  const unique = [...new Map(candidates.map((candidate) => [candidate.path, candidate])).values()]
+    .sort((left, right) => right.fileName.localeCompare(left.fileName))
+    .slice(0, limit);
+  const reports: Array<{ fileName: string; report: Record<string, unknown> }> = [];
+  for (const candidate of unique) {
+    try {
+      const parsed = JSON.parse(await readFile(candidate.path, "utf8"));
+      if (parsed && typeof parsed === "object") reports.push({ fileName: candidate.fileName, report: parsed as Record<string, unknown> });
+    } catch {
+      // Ignore incomplete or malformed local artifacts; the next run remains usable.
+    }
+  }
+  return reports;
+}
+
+function certificationDashboardRun(fileName: string, report: Record<string, unknown>): Record<string, unknown> {
+  const layers = asRecord(report.layers);
+  const retrieval = asRecord(layers.retrieval);
+  const routing = asRecord(layers.routing);
+  const workflow = asRecord(layers.workflow);
+  return {
+    fileName,
+    generatedAt: typeof report.generatedAt === "string" ? report.generatedAt : new Date().toISOString(),
+    commit: typeof report.commit === "string" ? report.commit : null,
+    pass: report.pass === true,
+    layers: {
+      retrieval: { pass: retrieval.pass === true, metrics: asRecord(retrieval.metrics), forbiddenEvidenceRate: Number(retrieval.forbiddenEvidenceRate ?? 0) },
+      routing: { pass: routing.pass === true, summary: asRecord(asRecord(routing).summary) },
+      workflow: {
+        pass: workflow.pass === true,
+        businesses: (Array.isArray(workflow.businesses) ? workflow.businesses : []).map((value) => {
+          const business = asRecord(value);
+          const verification = asRecord(business.workflowVerification);
+          return {
+            key: String(business.key ?? "unknown"),
+            name: String(business.name ?? business.key ?? "Unknown business"),
+            pass: business.pass === true,
+            processPassRate: Number(business.processPassRate ?? 0),
+            outcomePassRate: Number(business.outcomePassRate ?? 0),
+            workflowVerification: { ok: verification.ok === true, issues: Array.isArray(verification.issues) ? verification.issues.map((issue) => { const item = asRecord(issue); return { code: String(item.code ?? "unknown"), message: String(item.message ?? "") }; }) : [] },
+          };
+        }),
+      },
+    },
+    baseline: report.baseline && typeof report.baseline === "object" ? asRecord(report.baseline) : null,
+    scores: asRecord(report.scores),
+    scoreDeltas: report.scoreDeltas && typeof report.scoreDeltas === "object" ? asRecord(report.scoreDeltas) : null,
+  };
 }
 
 function isUniqueConstraintError(value: unknown, constraint: string): boolean {
@@ -3891,6 +3960,17 @@ async function persistPublishedTenantState(business: Business): Promise<void> {
   business.publishedPrimaryActionId = business.primaryActionId;
   business.publishedConfigHash = configHash;
   business.agentPublishedAt = publishedAt;
+}
+
+function assertPublishableWorkflows(business: Business): void {
+  const verification = verifyWorkflowSet(business.actions);
+  if (verification.ok) return;
+  const failures = verification.workflows
+    .filter((workflow) => !workflow.result.ok)
+    .slice(0, 3)
+    .map((workflow) => `${workflow.actionKey}: ${workflow.result.issues.slice(0, 2).map((item) => item.code).join(", ")}`)
+    .join("; ");
+  throw httpError(409, `Workflow verification failed before publication${failures ? ` (${failures})` : ""}`);
 }
 
 function hashAccessToken(token: string): string {
@@ -9397,6 +9477,21 @@ async function persistConversationExchange(
   };
   conversation.messages.push(userMessage);
   if (assistantMessage) conversation.messages.push(assistantMessage);
+  const improvementSignals = deriveImprovementSignals({
+    question: userContent,
+    grounded: result.grounded,
+    retrievalMode: result.retrieval.mode,
+    handoff: Boolean(result.handoff),
+    providerFailure: result.actionDelivery?.status === "failed" || result.retrieval.reason?.toLowerCase().includes("provider") === true,
+  });
+  for (const signal of improvementSignals) {
+    await recordConversionEvent(business, {
+      event: "IMPROVEMENT_SIGNAL",
+      conversationId: conversation.id,
+      flowId: result.action?.id ?? null,
+      metadata: { signalType: signal.type, reason: signal.reason, normalizedQuestion: signal.normalizedQuestion },
+    });
+  }
   conversation.updatedAt = now;
   conversation.lastActivityAt = now;
   if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "WAITING_FOR_STAFF") {
@@ -9556,6 +9651,34 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
       silent: true,
       handoff: { status: statusAfterProcessing, reason: "Human takeover is active" },
     };
+  }
+  if (activeWorkflow && conversation.actionState) {
+    const loop = observeWorkflowLoop(conversation.actionState.loopGuard, {
+      stateBefore: traceContext.stateBefore,
+      stateAfter: conversation.actionState,
+    });
+    conversation.actionState.loopGuard = loop.guard;
+    if (loop.triggered && conversation.status === "AI_ACTIVE") {
+      await recordConversationEvent(business, conversation, "LOOP_GUARD_TRIGGERED", "system", null, {
+        actionId: activeWorkflow.action.id,
+        workflowStepId: conversation.actionState.currentStepId ?? null,
+        consecutiveUnchangedTurns: loop.guard.consecutiveUnchangedTurns,
+        fingerprint: loop.fingerprint,
+        reason: loop.reason,
+      });
+      await recordConversionEvent(business, {
+        event: "IMPROVEMENT_SIGNAL",
+        conversationId: conversation.id,
+        flowId: activeWorkflow.action.id,
+        metadata: {
+          signalType: "workflow_loop",
+          reason: loop.reason,
+          normalizedQuestion: normalizeImprovementQuestion(question),
+        },
+      });
+      const guarded = await requestHandoff(business, conversation, "The workflow did not make progress after repeated turns", question);
+      return persistTurn(guarded);
+    }
   }
   result = { ...result, answer: canonicalizeCustomerCopy(business, result.answer) };
   return persistTurn(result);
@@ -11001,6 +11124,54 @@ app.patch("/api/v1/demo/:slug/notification-settings", async (request) => {
     [business.id, settings.enabled, settings.defaultRecipientEmail, JSON.stringify(settings.additionalRecipientEmails), settings.handoffDelaySeconds, settings.repeatEnabled, settings.repeatAfterSeconds, settings.notifyExplicitHumanRequest, settings.notifyKnowledgeGap, settings.notifyHighValueLead, settings.notifyEveryLead],
   );
   return { ok: true, settings };
+});
+
+app.get("/api/v1/admin/certification", async (request) => {
+  await requireSuperAdmin(request);
+  const reports = await loadCertificationReportFiles();
+  let counts: Array<{ type: string; count: number; lastSeenAt: string | null }> = [];
+  let recent: Array<{ id: string; type: string; normalizedQuestion: string | null; reason: string | null; businessName: string; businessSlug: string; occurredAt: string }> = [];
+  if (pool) {
+    try {
+      const countResult = await pool.query<Record<string, unknown>>(
+        `select metadata->>'signalType' as signal_type, count(*)::integer as signal_count, max(occurred_at) as last_seen_at
+         from conversion_events
+         where event = 'IMPROVEMENT_SIGNAL'
+         group by metadata->>'signalType'
+         order by signal_count desc, last_seen_at desc
+         limit 25`,
+      );
+      counts = countResult.rows.map((row) => ({ type: String(row.signal_type ?? "unknown"), count: Number(row.signal_count ?? 0), lastSeenAt: row.last_seen_at ? toIso(row.last_seen_at) : null }));
+      const recentResult = await pool.query<Record<string, unknown>>(
+        `select ce.id, ce.metadata, ce.occurred_at, b.name as business_name, b.slug as business_slug
+         from conversion_events ce
+         join businesses b on b.id = ce.business_id
+         where ce.event = 'IMPROVEMENT_SIGNAL'
+         order by ce.occurred_at desc
+         limit 50`,
+      );
+      recent = recentResult.rows.map((row) => {
+        const metadata = asRecord(row.metadata);
+        return {
+          id: String(row.id),
+          type: typeof metadata.signalType === "string" ? metadata.signalType : "unknown",
+          normalizedQuestion: typeof metadata.normalizedQuestion === "string" ? metadata.normalizedQuestion : null,
+          reason: typeof metadata.reason === "string" ? metadata.reason : null,
+          businessName: String(row.business_name ?? "Unknown business"),
+          businessSlug: String(row.business_slug ?? ""),
+          occurredAt: toIso(row.occurred_at),
+        };
+      });
+    } catch (error) {
+      if (!isMissingDatabaseTable(error)) throw error;
+    }
+  }
+  const dashboardRuns = reports.map(({ fileName, report }) => certificationDashboardRun(fileName, report));
+  return {
+    latest: dashboardRuns[0] ?? null,
+    history: dashboardRuns.map((run) => ({ fileName: run.fileName, generatedAt: run.generatedAt, commit: run.commit, pass: run.pass, scores: run.scores, scoreDeltas: run.scoreDeltas })),
+    improvementSignals: { counts, recent },
+  };
 });
 
 app.get("/api/v1/admin/organizations", async (request) => {
@@ -14912,6 +15083,7 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
     if (business.widget.loadCount < 1) {
       throw httpError(409, "Install the widget before publishing your AI front desk");
     }
+    assertPublishableWorkflows(business);
   }
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);

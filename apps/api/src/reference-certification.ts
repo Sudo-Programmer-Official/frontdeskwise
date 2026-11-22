@@ -29,6 +29,7 @@ import {
   workflowNextBestAction,
   workflowSummary,
 } from "./workflow-engine.js";
+import { verifyWorkflowDefinition, type WorkflowVerificationResult } from "./workflow-verifier.js";
 
 export type ReferenceResponseClass =
   | "workflow_prompt"
@@ -86,6 +87,8 @@ type ReferenceTurnResult = {
   cta: string | null;
   handoffState: RuntimeHandoffState;
   responseClass: ReferenceResponseClass;
+  process: { pass: boolean; failures: string[] };
+  outcome: { pass: boolean; failures: string[] };
   pass: boolean;
   mismatches: string[];
 };
@@ -94,6 +97,9 @@ type ReferenceBusinessReport = {
   key: string;
   name: string;
   pass: boolean;
+  workflowVerification: WorkflowVerificationResult;
+  processPassRate: number;
+  outcomePassRate: number;
   turns: ReferenceTurnResult[];
 };
 
@@ -386,20 +392,21 @@ function advanceSyntheticSteps(business: ReferenceBusiness, state: ConversationA
   return { providerCall, cta, responseClass };
 }
 
-function compareTurn(expected: ReferenceTurn["expected"], actual: ReferenceTurnResult): string[] {
-  const mismatches: string[] = [];
-  if (expected.route !== actual.route) mismatches.push(`route expected ${expected.route} got ${actual.route}`);
-  if (JSON.stringify(expected.extractedFields) !== JSON.stringify(actual.extractedFields)) mismatches.push(`fields expected ${JSON.stringify(expected.extractedFields)} got ${JSON.stringify(actual.extractedFields)}`);
-  if (expected.stateBefore?.workflowCursor !== undefined && expected.stateBefore.workflowCursor !== actual.stateBefore.workflowCursor) mismatches.push(`stateBefore.cursor expected ${expected.stateBefore.workflowCursor} got ${actual.stateBefore.workflowCursor}`);
-  if (expected.stateBefore?.handoffState !== undefined && expected.stateBefore.handoffState !== actual.stateBefore.handoffState) mismatches.push(`stateBefore.handoff expected ${expected.stateBefore.handoffState} got ${actual.stateBefore.handoffState}`);
-  if (expected.stateAfter.workflowCursor !== undefined && expected.stateAfter.workflowCursor !== actual.stateAfter.workflowCursor) mismatches.push(`stateAfter.cursor expected ${expected.stateAfter.workflowCursor} got ${actual.stateAfter.workflowCursor}`);
-  if (!valuesMatch(actual.stateAfter.collectedFields, expected.stateAfter.values)) mismatches.push("stateAfter.values mismatch");
-  if (JSON.stringify(expected.providerCall) !== JSON.stringify(actual.providerCall)) mismatches.push(`provider expected ${JSON.stringify(expected.providerCall)} got ${JSON.stringify(actual.providerCall)}`);
-  if (expected.nextBestAction !== actual.nextBestAction) mismatches.push(`nextBestAction expected ${expected.nextBestAction} got ${actual.nextBestAction}`);
-  if (expected.cta !== actual.cta) mismatches.push(`cta expected ${expected.cta} got ${actual.cta}`);
-  if (expected.handoffState !== actual.handoffState) mismatches.push(`handoff expected ${expected.handoffState} got ${actual.handoffState}`);
-  if (expected.responseClass !== actual.responseClass) mismatches.push(`responseClass expected ${expected.responseClass} got ${actual.responseClass}`);
-  return mismatches;
+function compareTurn(expected: ReferenceTurn["expected"], actual: ReferenceTurnResult): { process: string[]; outcome: string[] } {
+  const process: string[] = [];
+  const outcome: string[] = [];
+  if (expected.route !== actual.route) process.push(`route expected ${expected.route} got ${actual.route}`);
+  if (JSON.stringify(expected.extractedFields) !== JSON.stringify(actual.extractedFields)) process.push(`fields expected ${JSON.stringify(expected.extractedFields)} got ${JSON.stringify(actual.extractedFields)}`);
+  if (expected.stateBefore?.workflowCursor !== undefined && expected.stateBefore.workflowCursor !== actual.stateBefore.workflowCursor) process.push(`stateBefore.cursor expected ${expected.stateBefore.workflowCursor} got ${actual.stateBefore.workflowCursor}`);
+  if (expected.stateBefore?.handoffState !== undefined && expected.stateBefore.handoffState !== actual.stateBefore.handoffState) process.push(`stateBefore.handoff expected ${expected.stateBefore.handoffState} got ${actual.stateBefore.handoffState}`);
+  if (expected.nextBestAction !== actual.nextBestAction) process.push(`nextBestAction expected ${expected.nextBestAction} got ${actual.nextBestAction}`);
+  if (expected.stateAfter.workflowCursor !== undefined && expected.stateAfter.workflowCursor !== actual.stateAfter.workflowCursor) outcome.push(`stateAfter.cursor expected ${expected.stateAfter.workflowCursor} got ${actual.stateAfter.workflowCursor}`);
+  if (!valuesMatch(actual.stateAfter.collectedFields, expected.stateAfter.values)) outcome.push("stateAfter.values mismatch");
+  if (JSON.stringify(expected.providerCall) !== JSON.stringify(actual.providerCall)) outcome.push(`provider expected ${JSON.stringify(expected.providerCall)} got ${JSON.stringify(actual.providerCall)}`);
+  if (expected.cta !== actual.cta) outcome.push(`cta expected ${expected.cta} got ${actual.cta}`);
+  if (expected.handoffState !== actual.handoffState) outcome.push(`handoff expected ${expected.handoffState} got ${actual.handoffState}`);
+  if (expected.responseClass !== actual.responseClass) outcome.push(`responseClass expected ${expected.responseClass} got ${actual.responseClass}`);
+  return { process, outcome };
 }
 
 export function runReferenceTurn(business: ReferenceBusiness, prior: ReferenceState, turn: ReferenceTurn): { state: ReferenceState; result: ReferenceTurnResult } {
@@ -491,10 +498,15 @@ export function runReferenceTurn(business: ReferenceBusiness, prior: ReferenceSt
     cta: cta?.key ?? null,
     handoffState,
     responseClass,
+    process: { pass: false, failures: [] },
+    outcome: { pass: false, failures: [] },
     pass: false,
     mismatches: [],
   };
-  actual.mismatches = compareTurn(turn.expected, actual);
+  const checks = compareTurn(turn.expected, actual);
+  actual.process = { pass: checks.process.length === 0, failures: checks.process };
+  actual.outcome = { pass: checks.outcome.length === 0, failures: checks.outcome };
+  actual.mismatches = [...checks.process, ...checks.outcome];
   actual.pass = actual.mismatches.length === 0;
   return { state: { action: activeAction, state: actionState, handoffState, providerCall, cta }, result: actual };
 }
@@ -512,13 +524,22 @@ export async function runReferenceCertification(fixture?: ReferenceFixture) {
     const business = businesses.get(entry.key);
     if (!business) throw new Error(`reference_business_missing:${entry.key}`);
     let state: ReferenceState = { action: null, state: null, handoffState: "AI_ACTIVE", providerCall: null, cta: null };
+    const workflowVerification = verifyWorkflowDefinition(business.workflow);
     const turns: ReferenceTurnResult[] = [];
     for (const turn of entry.turns) {
       const next = runReferenceTurn(business, state, turn);
       state = next.state;
       turns.push(next.result);
     }
-    reports.push({ key: business.key, name: business.name, pass: turns.every((turn) => turn.pass), turns });
+    reports.push({
+      key: business.key,
+      name: business.name,
+      workflowVerification,
+      processPassRate: turns.length ? Number((turns.filter((turn) => turn.process.pass).length / turns.length).toFixed(4)) : 0,
+      outcomePassRate: turns.length ? Number((turns.filter((turn) => turn.outcome.pass).length / turns.length).toFixed(4)) : 0,
+      pass: workflowVerification.ok && turns.every((turn) => turn.pass),
+      turns,
+    });
   }
   return { generatedAt: new Date().toISOString(), businesses: reports, pass: reports.every((business) => business.pass) };
 }

@@ -12,6 +12,10 @@ export type ConversationTraceState = {
   interruptionStack: Array<{ intent: string; returnStepId: string | null }>;
   participantCount: number;
   formShown: boolean;
+  loopGuard: {
+    consecutiveUnchangedTurns: number;
+    triggered: boolean;
+  } | null;
 };
 
 export type ConversationTraceFieldChange = {
@@ -55,6 +59,10 @@ export function snapshotConversationWorkflowState(state: ConversationActionState
     })),
     participantCount: state.participants?.length ?? 0,
     formShown: Boolean(state.formShown),
+    loopGuard: state.loopGuard ? {
+      consecutiveUnchangedTurns: state.loopGuard.consecutiveUnchangedTurns,
+      triggered: state.loopGuard.triggered,
+    } : null,
   };
 }
 

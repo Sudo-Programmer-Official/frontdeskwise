@@ -19,7 +19,7 @@ export type WorkspaceView =
 
 export type SettingsRouteTab = "general" | "team" | "integrations" | "verification" | "notifications" | "billing";
 export type AgentRouteTab = "capabilities" | "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
-export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "action-registry" | "users" | "demos" | "messaging" | "support" | "installation-support" | "operations";
+export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "action-registry" | "certification" | "users" | "demos" | "messaging" | "support" | "installation-support" | "operations";
 export type OnboardingRouteStep = "index" | "business" | "knowledge" | "agent" | "install";
 
 export type AppRoute =

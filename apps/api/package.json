@@ -13,6 +13,9 @@
     "action-registry:certify": "node --import tsx src/action-registry-certify.ts",
     "jackrabbit:certify": "node --import tsx src/jackrabbit-certify.ts",
     "reference:certify": "node --import tsx src/reference-certification.ts",
+    "retrieval:certify": "node --import tsx src/retrieval-certification.ts",
+    "action-routing:certify": "node --import tsx src/action-routing-certification.ts",
+    "certification:pyramid": "node --import tsx src/certification-pyramid.ts",
     "benchmark:cross-site": "node --import tsx src/cross-site-benchmark.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js"
