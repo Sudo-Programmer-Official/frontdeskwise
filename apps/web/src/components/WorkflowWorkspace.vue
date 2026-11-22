@@ -1548,6 +1548,10 @@ onMounted(() => {
 .workflow-advanced-row small { color: #8190a3; font-size: 11px; line-height: 1.4; }
 .workflow-advanced-row select { width: min(100%, 290px); min-height: 36px; }
 .workflow-layout-empty-state { align-content: center; justify-items: center; min-height: clamp(300px, 42vh, 500px); box-sizing: border-box; padding: 40px 24px; border: 1px solid #dfe8f3; border-radius: 16px; background: radial-gradient(circle at 50% 0%, #f7faff 0%, #fff 58%); text-align: center; }
+.workflow-workspace .workflow-step-list { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 10px; }
+.workflow-workspace .workflow-step-list > .workflow-step-card,
+.workflow-workspace .workflow-step-list > .workflow-conditional-heading,
+.workflow-workspace .workflow-step-list > .workflow-empty { grid-column: 1 / -1; }
 
 @media (max-width: 820px) {
   .workflow-sticky-header { position: static; margin: -10px 0 0; padding-inline: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
