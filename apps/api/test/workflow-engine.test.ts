@@ -50,6 +50,31 @@ test("workflow steps capture values and resolve a decision branch", () => {
   assert.equal(first.transition.state.status, "active");
 });
 
+test("workflow skips unverified pricing and keeps guided demo as a conditional branch", () => {
+  const salonWorkflow: ActionFlow = {
+    ...flow,
+    id: "salon-workflow",
+    key: "salon_workflow",
+    name: "Help me choose SalonFlow",
+    steps: [
+      { id: "pricing", type: "ask", config: { reviewStatus: "needs_owner_confirmation", requiresVerifiedData: true } },
+      { id: "try-demo", type: "redirect", config: { normalConversionEndpoint: true } },
+      { id: "request-demo", type: "redirect", config: { conditional: true, trigger: "explicit_guided_demo_request" } },
+      { id: "support", type: "handoff", config: { conditional: true, trigger: "explicit_support_or_human_request" } },
+      { id: "complete", type: "complete" },
+    ],
+  };
+  const state = createActionState(salonWorkflow);
+
+  assert.equal(currentWorkflowStep(salonWorkflow, state)?.id, "try-demo");
+  state.workflowTrigger = "explicit_guided_demo_request";
+  state.currentStepId = "request-demo";
+  assert.equal(currentWorkflowStep(salonWorkflow, state)?.id, "request-demo");
+  state.workflowTrigger = undefined;
+  state.currentStepId = "request-demo";
+  assert.equal(currentWorkflowStep(salonWorkflow, state)?.id, "complete");
+});
+
 test("workflow interruptions preserve the cursor and resume", () => {
   const state = createActionState(flow);
   pushWorkflowInterruption(state, { intent: "pricing", question: "How much?", returnStepId: "name" }, "2026-01-01T00:00:00.000Z");

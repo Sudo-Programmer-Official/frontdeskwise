@@ -84,6 +84,29 @@ test("workflow answers containing knowledge keywords are not misrouted as interr
   assert.equal(decision.interruptionIntent, null);
 });
 
+test("normal conversion and guided demo requests stay inside the active workflow", () => {
+  const salonWorkflow = {
+    ...action,
+    id: "salon-workflow",
+    key: "salon_workflow",
+    actionType: "open_link",
+    name: "Help me choose SalonFlow",
+    steps: [
+      { id: "try-demo", type: "redirect", config: { normalConversionEndpoint: true } },
+      { id: "request-demo", type: "redirect", config: { conditional: true, trigger: "explicit_guided_demo_request" } },
+    ],
+  } as ActionFlow;
+
+  assert.equal(
+    decideConversationRoute({ message: "Okay, I want to try it.", activeAction: salonWorkflow, actionState: createActionState(salonWorkflow) }).route,
+    "WORKFLOW_CONTINUATION",
+  );
+  assert.equal(
+    decideConversationRoute({ message: "I want a guided demo.", activeAction: salonWorkflow, actionState: createActionState(salonWorkflow) }).route,
+    "WORKFLOW_CONTINUATION",
+  );
+});
+
 test("workflow answers stay on the journey while explicit handoff takes priority", () => {
   const state = createActionState(action);
   const continuation = decideConversationRoute({ message: "Saturday mornings", activeAction: action, actionState: state });

@@ -47,15 +47,21 @@ function hasActiveWorkflow(action?: ActionFlow | null, state?: ConversationActio
   return Boolean(action?.steps?.length && state && state.status === "active");
 }
 
-function workflowMatchesActionIntent(action: ActionFlow, actionIntent: string): boolean {
+function workflowMatchesActionIntent(action: ActionFlow, actionIntent: string, message: string): boolean {
   const haystack = `${action.key} ${action.actionType} ${action.name}`.toLowerCase();
   if (actionIntent === "plan_selection") return isPlanSelectionWorkflow(action);
   if (actionIntent === "enrollment") return /enroll|registration|student|lesson/.test(haystack);
   if (actionIntent === "booking") return /book|appointment|schedule|tour/.test(haystack);
   if (actionIntent === "quote") return /quote|estimate/.test(haystack);
-  if (actionIntent === "demo") return /demo|trial/.test(haystack);
+  if (actionIntent === "demo") {
+    return /demo|trial/.test(haystack)
+      || (action.steps ?? []).some((step) => step.config?.trigger === "explicit_guided_demo_request");
+  }
   if (actionIntent === "waitlist") return /waitlist|wait/.test(haystack);
   if (actionIntent === "lead") return /lead|contact|team/.test(haystack);
+  if (actionIntent === "general" && /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(message)) {
+    return (action.steps ?? []).some((step) => step.type === "redirect" && step.config?.normalConversionEndpoint === true);
+  }
   return false;
 }
 
@@ -128,7 +134,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
     };
   }
 
-  if (active && (request.mode !== "transactional" || workflowMatchesActionIntent(input.activeAction!, request.actionIntent))) {
+  if (active && (request.mode !== "transactional" || workflowMatchesActionIntent(input.activeAction!, request.actionIntent, message))) {
     return {
       route: "WORKFLOW_CONTINUATION",
       conversationalIntent,

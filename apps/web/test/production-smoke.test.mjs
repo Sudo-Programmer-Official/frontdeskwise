@@ -20,6 +20,7 @@ const feedback = await readFile(resolve(here, "../src/AppFeedback.vue"), "utf8")
 const widget = await readFile(resolve(here, "../public/widget.js"), "utf8");
 const widgetShell = await readFile(resolve(here, "../public/widget-shell.js"), "utf8");
 const router = await readFile(resolve(here, "../src/router/index.ts"), "utf8");
+const actionFlowMigration = await readFile(resolve(here, "../../../infra/db/019_action_flows.sql"), "utf8");
 const marketing = JSON.parse(await readFile(resolve(here, "../src/marketing-pages.json"), "utf8"));
 const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vue"), "utf8");
 const metadataScript = await readFile(resolve(here, "../scripts/generate-site-metadata.mjs"), "utf8");
@@ -531,6 +532,13 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   }
   assert.match(workflowWorkspace, /workflow-isolation-warning/);
   assert.match(workflowWorkspace, /overflow-wrap: anywhere/);
+  assert.match(workflowWorkspace, /View full goal/);
+  assert.match(workflowWorkspace, /workflowGoalExpanded/);
+  assert.match(workflowWorkspace, /resizeWorkflowGoalEditor/);
+  assert.match(workflowWorkspace, /characters/);
+  assert.match(apiServer, /preserveWorkflowGoal\(body\.description\)/);
+  assert.doesNotMatch(apiServer, /description: optionalString\(body\.description, 1_000\)/);
+  assert.match(actionFlowMigration, /description text not null/);
   assert.match(apiServer, /validateWorkflowTenantIsolation/);
   assert.match(apiServer, /workflowContextBusinessId/);
   assert.match(app, /Replay workflow/);

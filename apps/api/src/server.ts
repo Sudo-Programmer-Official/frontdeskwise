@@ -124,6 +124,7 @@ import {
   type LifecycleEventType,
 } from "./lifecycle-messaging.js";
 import { decideConversationRoute } from "./conversation-orchestrator.js";
+import { isExplicitHumanRequest } from "./handoff-policy.js";
 import {
   providerTrace,
   snapshotConversationWorkflowState,
@@ -178,6 +179,7 @@ import {
 import { buildWorkflowContext } from "./workflow-context.js";
 import { validateWorkflowTenantIsolation, workflowIsolationMessage, type WorkflowIsolationResult } from "./workflow-isolation.js";
 import { buildCanonicalBusinessModel, createBusinessContextSnapshot, type BusinessContextSnapshot } from "./business-context.js";
+import { preserveWorkflowGoal } from "./workflow-goal.js";
 
 const app = Fastify({ logger: true, trustProxy: true });
 await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
@@ -4273,7 +4275,7 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     actionType,
     businessId: base.businessId,
     name: optionalString(body.name, 160) ?? base.name,
-    description: optionalString(body.description, 1_000) ?? base.description,
+    description: preserveWorkflowGoal(body.description) ?? base.description,
     triggerPhrases: (Array.isArray(body.triggerPhrases) ? body.triggerPhrases : base.triggerPhrases)
       .filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 200)).slice(0, 30),
     triggerIntents: (Array.isArray(body.triggerIntents) ? body.triggerIntents : base.triggerIntents)
@@ -7338,7 +7340,10 @@ function planRecommendationInState(state: ConversationActionState): PlanRecommen
 
 function workflowCtaForStep(business: Business, action: ActionFlow, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): PrimaryCta | null {
   if (step.type !== "redirect") return null;
-  const configured = primaryActionForBusiness(business);
+  const actionKey = actionConfigString(step.config ?? {}, "actionKey");
+  const configured = actionKey
+    ? business.actions.find((candidate) => candidate.key === actionKey && candidate.enabled && candidate.lifecycleStatus !== "disabled")
+    : primaryActionForBusiness(business);
   return primaryCtaForAction(configured ?? action);
 }
 
@@ -7455,6 +7460,13 @@ function wantsAnotherParticipant(question: string): boolean {
   return /\b(another|add|different)\b.{0,24}\b(child|student|participant|person|guest|member)\b|\b(i have|we have)\s+(another|one more)\b/i.test(question);
 }
 
+function explicitGuidedDemoRequest(question: string): boolean {
+  const normalizedQuestion = question.toLowerCase();
+  if (/\btry\b/.test(normalizedQuestion)) return false;
+  return /\b(request|book|schedule|guided|team|live|walk me through|speak with|talk to)\b.{0,36}\bdemo\b|\bdemo\b.{0,36}\b(request|book|schedule|guided|team|live|walk me through|speak with|talk to)\b/i.test(question)
+    || /\b(i want|i'd like|id like|please|need)\b.{0,24}\b(a )?(guided|team|live|product)?\s*demo\b/i.test(question);
+}
+
 function startAnotherWorkflowParticipant(state: ConversationActionState, config: ReturnType<typeof repeatableWorkflowConfig>, action: ActionFlow): boolean {
   if (!config || !action.steps?.length) return false;
   const participants = state.participants ?? [];
@@ -7486,6 +7498,18 @@ async function continueWorkflowActionConversation(
   // question can mention a competing audience (for example, "what does the
   // team plan cost?") without being an answer to the paused field.
   const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state });
+  const guidedDemo = explicitGuidedDemoRequest(question);
+  const normalConversion = /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question) && !guidedDemo;
+  if (guidedDemo && action.steps?.some((step) => step.config?.trigger === "explicit_guided_demo_request")) {
+    state.workflowTrigger = "explicit_guided_demo_request";
+    state.currentStepId = action.steps.find((step) => step.config?.trigger === "explicit_guided_demo_request")?.id ?? state.currentStepId;
+  } else if (normalConversion && action.steps?.some((step) => step.config?.normalConversionEndpoint === true)) {
+    state.workflowTrigger = undefined;
+    state.currentStepId = action.steps.find((step) => step.config?.normalConversionEndpoint === true)?.id ?? state.currentStepId;
+  } else if (isExplicitHumanRequest(question) && action.steps?.some((step) => step.config?.trigger === "explicit_support_or_human_request")) {
+    state.workflowTrigger = "explicit_support_or_human_request";
+    state.currentStepId = action.steps.find((step) => step.config?.trigger === "explicit_support_or_human_request")?.id ?? state.currentStepId;
+  }
   const preserveWorkflowState = initialOrchestration.route === "INTERRUPTION"
     || initialOrchestration.route === "EXPLICIT_ACTION"
     || initialOrchestration.route === "HUMAN_HANDOFF";
@@ -7565,6 +7589,11 @@ async function continueWorkflowActionConversation(
     }
   }
 
+  if (step.type === "redirect") {
+    const prompt = workflowPrompt(action, state, step);
+    return actionAnswer(action, state, starting ? "Sure — I can help with " + action.name.toLowerCase() + ". " + prompt : prompt, workflowCtaForStep(business, action, step));
+  }
+
   if (starting) {
     if (step.type === "form") {
       state.formShown = true;
@@ -7627,6 +7656,9 @@ async function continueWorkflowActionConversation(
   step = await advanceWorkflowAutomation(business, action, state);
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
   state.currentStepId = step.id;
+  if (step.type === "redirect") {
+    return actionAnswer(action, state, workflowPrompt(action, state, step), workflowCtaForStep(business, action, step));
+  }
   if (step.type === "form") {
     state.formShown = true;
     await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });

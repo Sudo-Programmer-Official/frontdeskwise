@@ -83,6 +83,17 @@ export function conditionMatches(condition: { field: string; equals?: string; no
   return Boolean(current);
 }
 
+function workflowStepIsAvailable(step: ActionStep, state: ConversationActionState): boolean {
+  const config = step.config ?? {};
+  const trigger = typeof config.trigger === "string" ? config.trigger : null;
+  if (trigger && state.workflowTrigger !== trigger) return false;
+  // Owner-confirmed facts such as pricing must never be surfaced until the
+  // business has verified them. The step remains visible in the owner editor,
+  // but the runtime skips it and continues to the safe next step.
+  if (config.requiresVerifiedData === true && config.reviewStatus === "needs_owner_confirmation") return false;
+  return true;
+}
+
 export function workflowStep(action: ActionFlow, stepId: string | undefined): ActionStep | null {
   if (!action.steps?.length || !stepId) return null;
   return action.steps.find((step) => step.id === stepId) ?? null;
@@ -111,6 +122,10 @@ export function currentWorkflowStep(action: ActionFlow, state: ConversationActio
   const visited = new Set<string>();
   while (step && !visited.has(step.id)) {
     visited.add(step.id);
+    if (!workflowStepIsAvailable(step, state)) {
+      step = nextSequentialStep(action, step);
+      continue;
+    }
     if (step.condition && !conditionMatches(step.condition, state.values)) {
       step = nextSequentialStep(action, step);
       continue;

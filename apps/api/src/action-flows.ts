@@ -192,6 +192,8 @@ export type ConversationActionState = {
   values: Record<string, string>;
   /** Current V2 workflow cursor. Legacy flows continue to use field order. */
   currentStepId?: string;
+  /** One-turn/branch context used by trigger-gated workflow steps. */
+  workflowTrigger?: string;
   completedStepIds?: string[];
   lookupResults?: Record<string, unknown>;
   selectedActionResourceId?: string;

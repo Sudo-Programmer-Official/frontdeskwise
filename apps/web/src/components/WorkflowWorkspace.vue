@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Save, Sparkles, Trash2, X } from "@lucide/vue";
-import { generateWorkflow, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
+import { generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
 
 type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
 
@@ -57,6 +57,7 @@ const showModelBanner = ref(true);
 const showTemplatePicker = ref(false);
 const workflowAssistInput = ref<HTMLTextAreaElement | null>(null);
 const workflowStepList = ref<HTMLElement | null>(null);
+const workflowGoalExpanded = ref(false);
 const draftIsDirty = ref(false);
 const workflowGenerationKey = ref("");
 const createWorkflowOpen = ref(false);
@@ -188,6 +189,7 @@ function syncDraft(force = false) {
   workflowDraft.value.steps ??= [];
   draftSourceId = selected.id;
   draftIsDirty.value = false;
+  workflowGoalExpanded.value = false;
   selectedStepIndex.value = -1;
   if (selected.workflowSafety?.status === "blocked") {
     const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "Business";
@@ -197,6 +199,19 @@ function syncDraft(force = false) {
   } else {
     workflowDescription.value = selected.description ?? "";
   }
+}
+
+function resizeWorkflowGoalEditor(target: HTMLTextAreaElement | null = workflowAssistInput.value): void {
+  if (!target) return;
+  const maxHeight = 280;
+  target.style.height = "auto";
+  const height = Math.min(target.scrollHeight, maxHeight);
+  target.style.height = `${height}px`;
+  target.style.overflowY = target.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+function syncWorkflowGoalEditor(): void {
+  void nextTick(() => resizeWorkflowGoalEditor());
 }
 
 function defaultBusinessWorkflowDescription(): string {
@@ -306,10 +321,10 @@ function generatedWorkflowFor(action: WorkflowAction): { name: string; descripti
       provider: generated.provider,
     };
   }
-  const description = createWorkflowDescription.value.trim() || defaultBusinessWorkflowDescription();
+  const description = preserveWorkflowGoal(createWorkflowDescription.value) ?? defaultBusinessWorkflowDescription();
   const generated = generateWorkflow(description, [], workflowGenerationContext(action));
   return {
-    name: generated.name || description.slice(0, 160),
+    name: generated.name || "Workflow",
     description: generated.description,
     steps: generated.steps as unknown as WorkflowStep[],
     fields: generated.fields as Array<WorkflowFieldDraft & { id?: string; visibility?: string }>,
@@ -433,6 +448,11 @@ watch(selectedWorkflowId, () => {
   workflowSaveError.value = "";
   workflowSaveMessage.value = "";
   syncDraft(true);
+});
+
+watch(workflowDescription, syncWorkflowGoalEditor);
+watch(createWorkflowOpen, (isOpen) => {
+  if (isOpen) void nextTick(() => resizeWorkflowGoalEditor());
 });
 
 function markDirty() {
@@ -580,7 +600,8 @@ function generateStarter() {
     businessContext: props.businessContext ?? undefined,
   };
   workflowGenerationKey.value = workflowGenerationCacheKey(generationContext);
-  const result = generateWorkflow(workflowDescription.value || defaultBusinessWorkflowDescription(), [], generationContext);
+  const ownerGoal = preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
+  const result = generateWorkflow(ownerGoal, [], generationContext);
   workflowDraft.value.description = result.description;
   workflowDraft.value.steps = result.steps as unknown as Array<Record<string, unknown>>;
   workflowDraft.value.fields = result.fields as unknown as WorkflowAction["fields"];
@@ -654,6 +675,7 @@ function configureProvider() {
 }
 
 onMounted(() => {
+  void nextTick(() => resizeWorkflowGoalEditor());
   try {
     showModelBanner.value = window.localStorage.getItem("frontdeskwise:workflow-model-banner-dismissed") !== "1";
   } catch {
@@ -691,9 +713,9 @@ onMounted(() => {
       </aside>
 
       <main v-if="workflowDraft" class="workflow-builder">
-        <div class="workflow-builder-heading"><div><p class="eyebrow">Workflow</p><h2>{{ workflowTitle }}</h2><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p><div class="workflow-link-summary"><span><strong>Action</strong>{{ linkedAction?.name || workflowDraft.name }}</span><span><strong>Workflow</strong>{{ workflowTitle }}</span></div><div v-if="workflowDraft.workflowSafety?.status === 'blocked'" class="workflow-isolation-warning" role="alert"><strong>Previous draft blocked for safety.</strong><span>It referenced a different business context. Regenerate from the active Business Brain before saving.</span></div></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><div class="workflow-status-group"><span class="workflow-mode-label">{{ formatLabel(workflowDraft.executionMode || 'FORM_FLOW') }}</span><span class="status-pill new">Needs testing</span></div></div></div>
+        <div class="workflow-builder-heading"><div><p class="eyebrow">Workflow</p><h2>{{ workflowTitle }}</h2><div class="workflow-goal-preview"><p :class="{ expanded: workflowGoalExpanded }">{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p><button v-if="workflowDraft.description && (workflowDraft.description.length > 320 || workflowDraft.description.includes('\n'))" class="text-button" type="button" @click="workflowGoalExpanded = !workflowGoalExpanded">{{ workflowGoalExpanded ? 'Show compact goal' : 'View full goal' }}</button></div><div class="workflow-link-summary"><span><strong>Action</strong>{{ linkedAction?.name || workflowDraft.name }}</span><span><strong>Workflow</strong>{{ workflowTitle }}</span></div><div v-if="workflowDraft.workflowSafety?.status === 'blocked'" class="workflow-isolation-warning" role="alert"><strong>Previous draft blocked for safety.</strong><span>It referenced a different business context. Regenerate from the active Business Brain before saving.</span></div></div><div class="workflow-builder-actions"><button class="outline-button small" type="button" @click="openAction">Action settings</button><div class="workflow-status-group"><span class="workflow-mode-label">{{ formatLabel(workflowDraft.executionMode || 'FORM_FLOW') }}</span><span class="status-pill new">Needs testing</span></div></div></div>
 
-        <section class="workflow-assist-card" aria-labelledby="workflow-assist-heading"><div class="workflow-assist-heading"><div class="workflow-assist-icon"><Sparkles :size="18" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-assist-copy"><p class="eyebrow">Start here</p><h3 id="workflow-assist-heading">What should this workflow accomplish?</h3><p>Describe the customer outcome in plain English. FrontDeskWise will suggest the steps for you to review.</p></div></div><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="4" placeholder="Example: Ask the child’s age, swimming ability, location, and preferred days, then show available classes." @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><div class="workflow-assist-footer"><span>Tip: include what the customer needs and what should happen next.</span><button class="primary-button" type="button" aria-label="Generate steps" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="15" :stroke-width="1.8" aria-hidden="true" />Generate workflow</button></div><div class="workflow-template-flow"><button class="text-button workflow-template-trigger" type="button" @click="showTemplatePicker = !showTemplatePicker">Start with a template <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="showTemplatePicker" class="workflow-template-picker"><p>Choose a starting point</p><button v-for="template in workflowTemplates" :key="template.key" type="button" @click="applyTemplate(template.key)"><strong>{{ template.label }}</strong><small>{{ template.description }}</small></button></div></div></section>
+        <section class="workflow-assist-card" aria-labelledby="workflow-assist-heading"><div class="workflow-assist-heading"><div class="workflow-assist-icon"><Sparkles :size="18" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-assist-copy"><p class="eyebrow">Start here</p><h3 id="workflow-assist-heading">What should this workflow accomplish?</h3><p>Describe the customer outcome in plain English. FrontDeskWise will suggest the steps for you to review.</p></div></div><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="4" placeholder="Example: Ask the child’s age, swimming ability, location, and preferred days, then show available classes." @input="resizeWorkflowGoalEditor($event.target as HTMLTextAreaElement)" @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><div class="workflow-assist-footer"><span>Tip: include what the customer needs and what should happen next. · {{ workflowDescription.length.toLocaleString() }} characters</span><button class="primary-button" type="button" aria-label="Generate steps" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="15" :stroke-width="1.8" aria-hidden="true" />Generate workflow</button></div><div class="workflow-template-flow"><button class="text-button workflow-template-trigger" type="button" @click="showTemplatePicker = !showTemplatePicker">Start with a template <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="showTemplatePicker" class="workflow-template-picker"><p>Choose a starting point</p><button v-for="template in workflowTemplates" :key="template.key" type="button" @click="applyTemplate(template.key)"><strong>{{ template.label }}</strong><small>{{ template.description }}</small></button></div></div></section>
 
         <section class="workflow-readiness-card" aria-labelledby="workflow-setup-heading"><span class="workflow-sr-only">Choose what happens if unavailable</span><div class="workflow-readiness-heading"><p class="eyebrow">Setup status</p><h3 id="workflow-setup-heading">Workflow setup</h3><span :class="['workflow-configuration-label', { complete: configurationComplete }]">{{ configurationLabel }}</span></div><div class="workflow-readiness-list"><span v-for="item in readiness" :key="item.label" :class="{ complete: item.complete, incomplete: !item.complete }"><Check v-if="item.complete" :size="14" :stroke-width="2" aria-hidden="true" /><i v-else aria-hidden="true">○</i>{{ readinessLabel(item.label) }}</span><span class="workflow-test-status"><i aria-hidden="true">○</i>Test workflow before publishing</span></div><button v-if="readinessRemaining.length" class="text-button" type="button" @click="continueSetup">Continue setup <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></section>
 
@@ -703,7 +725,7 @@ onMounted(() => {
             <div class="workflow-step-rail"><span>{{ index + 1 }}</span><i v-if="index < draftSteps.length - 1"></i></div>
             <div class="workflow-step-body">
               <div class="workflow-step-toolbar"><div class="workflow-step-title"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-if="selectedStepIndex === index" v-model="step.label" type="text" aria-label="Workflow step label" @input="markDirty" /><strong v-else>{{ step.label || stepTypeLabel(step.type) }}</strong><span class="status-pill qualified">{{ stepTypeLabel(step.type) }}</span></div><div class="workflow-step-actions"><button class="workflow-edit-button" type="button" @click.stop="selectedStepIndex = selectedStepIndex === index ? -1 : index">{{ selectedStepIndex === index ? 'Done' : 'Edit' }}</button></div></div>
-              <div v-if="selectedStepIndex !== index" class="workflow-step-summary"><span>{{ step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
+              <div v-if="selectedStepIndex !== index" class="workflow-step-summary"><span>{{ step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.config?.trigger" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
               <div v-else>
                 <div class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="markDirty"><option v-for="type in stepTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'capture' || step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
@@ -743,7 +765,7 @@ onMounted(() => {
           <div v-if="!eligibleActions.length" class="workflow-create-empty"><strong>No eligible actions yet.</strong><span>Create one inline, then continue without leaving Workflows.</span></div>
           <button class="workflow-inline-action-button" type="button" @click="openNewActionFlow"><Plus :size="15" :stroke-width="1.9" aria-hidden="true" /> Create new action</button>
           <label v-if="createWorkflowMode === 'template'">Template <select v-model="createWorkflowTemplateKey" @change="createWorkflowDescription = workflowNameForTemplate(createWorkflowTemplateKey)"><option v-for="template in workflowTemplates" :key="template.key" :value="template.key">{{ template.label }}</option></select></label>
-          <label v-if="createWorkflowMode === 'describe' || createWorkflowMode === 'action'">Workflow goal <textarea v-model="createWorkflowDescription" rows="4" placeholder="Help salon owners decide if SalonFlow is right for them…"></textarea></label>
+          <label v-if="createWorkflowMode === 'describe' || createWorkflowMode === 'action'">Workflow goal <textarea v-model="createWorkflowDescription" rows="4" placeholder="Help salon owners decide if SalonFlow is right for them…" @input="resizeWorkflowGoalEditor($event.target as HTMLTextAreaElement)"></textarea><small class="workflow-goal-count">{{ createWorkflowDescription.length.toLocaleString() }} characters</small></label>
         </div>
 
         <div v-if="createNewActionOpen" class="workflow-new-action-panel">
@@ -783,6 +805,10 @@ onMounted(() => {
 .workflow-template-chips button:hover { border-color: #8eb0ec; color: #1f4da4; }
 .workflow-builder { min-width: 0; }
 .workflow-builder-heading { padding: 4px 2px 12px; }
+.workflow-goal-preview { max-width: 68ch; margin: 0; }
+.workflow-goal-preview p { max-width: none !important; max-height: none !important; margin: 0 !important; overflow: hidden !important; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.workflow-goal-preview p.expanded { display: block; max-height: 260px !important; overflow: auto !important; }
+.workflow-goal-preview .text-button { margin-top: 7px; padding: 0; color: #315ba9; font-size: 11px; }
 .workflow-link-summary { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 .workflow-link-summary span { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid #dce6f2; border-radius: 7px; background: #f8fbff; color: #4f6682; font-size: 11px; }
 .workflow-link-summary strong { color: #263f65; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
@@ -975,9 +1001,10 @@ onMounted(() => {
 .workflow-assist-copy { min-width: 0; }
 .workflow-assist-copy h3 { margin: 2px 0 5px; color: #243758; font-size: 18px; letter-spacing: -.025em; }
 .workflow-assist-copy p:not(.eyebrow) { color: #717d91; font-size: 12px; line-height: 1.5; }
-.workflow-assist-card textarea { min-height: 112px; padding: 13px 14px; border-color: #cec5ed; border-radius: 10px; color: #263950; font-size: 13px; line-height: 1.5; resize: vertical; }
+.workflow-assist-card textarea { min-height: 112px; max-height: 280px; padding: 13px 14px; border-color: #cec5ed; border-radius: 10px; color: #263950; font-size: 13px; line-height: 1.5; overflow-y: hidden; resize: none; }
 .workflow-assist-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .workflow-assist-footer > span { color: #7f8aa0; font-size: 11px; line-height: 1.4; }
+.workflow-goal-count { color: #7f8aa0; font-size: 11px; font-weight: 500; }
 .workflow-assist-footer .primary-button { min-height: 40px; white-space: nowrap; }
 .workflow-template-flow { padding-top: 14px; border-top: 1px solid rgba(131, 109, 198, .16); }
 .workflow-template-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 0; color: #5e4bb0; font-size: 11px; }

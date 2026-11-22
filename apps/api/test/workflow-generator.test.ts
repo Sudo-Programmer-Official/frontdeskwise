@@ -60,8 +60,10 @@ test("SalonFlow prompt is generated from the active business context", () => {
     businessContext: {
       businessId: "salonflow-business",
       contextVersion: 4,
-      businessName: "SalonFlow",
-      businessType: "Salon and beauty business",
+      businessName: "Salon Management Software for More Bookings",
+      businessType: "local_business",
+      summary: "SalonFlow helps salons and beauty businesses manage bookings and reminders.",
+      knowledgeSummary: [{ value: "Canonical brand: SalonFlow" }],
       approvedActions: [
         { key: "try_demo", name: "Try the demo", actionType: "open_link" },
         { key: "request_demo", name: "Request a demo", actionType: "request_demo" },
@@ -73,7 +75,21 @@ test("SalonFlow prompt is generated from the active business context", () => {
 
   assert.equal(result.intent, "business_fit");
   assert.deepEqual(result.steps.slice(0, 5).map((step) => step.label), ["Business type", "Main goal", "Relevant capabilities", "Fit explanation", "Pricing"]);
+  assert.equal(result.steps[0].question, "What kind of salon or beauty business do you run?");
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.destinationUrl, "https://www.salonflow.studio/start");
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.reviewStatus, "needs_owner_confirmation");
+  assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.requiresVerifiedData, true);
+  assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.normalConversionEndpoint, true);
+  assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.actionKey, "try_demo");
+  assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.trigger, undefined);
+  assert.equal(result.steps.find((step) => step.id === "request-demo")?.config?.trigger, "explicit_guided_demo_request");
+  assert.equal(result.steps.find((step) => step.id === "request-demo")?.config?.actionKey, "request_demo");
+  assert.equal(result.steps.find((step) => step.id === "request-demo")?.config?.conditional, true);
+  assert.equal(result.steps.find((step) => step.id === "support-handoff")?.config?.trigger, "explicit_support_or_human_request");
+  assert.equal(result.steps.find((step) => step.id === "support-handoff")?.config?.conditional, true);
+  assert.equal(JSON.stringify(result).includes("local_business"), false);
+  assert.equal(JSON.stringify(result).includes("Salon Management Software for More Bookings"), false);
+  assert.match(JSON.stringify(result), /SalonFlow/);
   assert.equal(result.steps.some((step) => JSON.stringify(step).includes("PlanCraftAI")), false);
   assert.equal(result.fields.some((field) => field.question.includes("PlanCraftAI")), false);
   assert.equal(result.fields.some((field) => field.key === "usage_type"), false);

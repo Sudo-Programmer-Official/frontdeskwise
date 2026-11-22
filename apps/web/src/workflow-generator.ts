@@ -77,6 +77,15 @@ export type WorkflowGenerationResult = {
   provider?: string;
 };
 
+/**
+ * Workflow goals are owner-authored instructions. Use trim only to determine
+ * whether the value is blank; never rewrite the value that is stored or sent
+ * to generation.
+ */
+export function preserveWorkflowGoal(value: string): string | null {
+  return value.trim() ? value : null;
+}
+
 export function workflowGenerationCacheKey(context: Pick<WorkflowGenerationContext, "organizationId" | "businessId" | "workflowId" | "actionId" | "contextVersion">): string {
   return [
     "workflow_generation_context",
@@ -146,15 +155,39 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
     ];
   }
   if (intent === "business_fit") {
-    const businessType = context.businessContext?.businessType?.trim() && context.businessContext.businessType !== "Unknown"
-      ? context.businessContext.businessType.trim().toLowerCase()
-      : "business";
+    const businessType = naturalBusinessType(context);
     return [
       field("business_type", "Business type", "select", `What kind of ${businessType} do you run?`, true, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
       field("main_goal", "Main goal", "select", "What are you mainly trying to improve?", true, ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
     ];
   }
   return [];
+}
+
+function canonicalBusinessName(context: WorkflowGenerationContext): string {
+  const business = context.businessContext;
+  const declared = business?.businessName?.trim() || "";
+  const evidence = [
+    business?.summary,
+    ...(business?.knowledgeSummary ?? []).map((item) => item.value),
+    ...(business?.services ?? []).map((item) => item.value),
+    ...(business?.products ?? []).map((item) => item.value),
+    ...(context.knownBusinessKnowledge ?? []),
+    ...(business?.approvedActions ?? []).map((item) => `${item.key} ${item.name}`),
+    ...(business?.discoveredCtas ?? []).flatMap((item) => [item.label, item.url]),
+  ].filter(Boolean).join(" ");
+  const brandCandidates = [...evidence.matchAll(/\b([A-Z][A-Za-z0-9]*(?:Flow|AI|CRM|Hub|Works|Labs|Studio))\b/g)].map((match) => match[1]);
+  const brand = brandCandidates.find((candidate) => !/^business$/i.test(candidate));
+  const declaredIsDescriptor = !declared || /local[_ -]?business|software|management|more bookings|^business$/i.test(declared);
+  return declaredIsDescriptor ? (brand || "this business") : declared;
+}
+
+function naturalBusinessType(context: WorkflowGenerationContext): string {
+  const raw = context.businessContext?.businessType?.trim() || "";
+  const evidence = `${raw} ${context.businessContext?.businessName ?? ""} ${context.businessContext?.summary ?? ""}`;
+  if (/salon|beauty|spa|barber/i.test(evidence)) return "salon or beauty business";
+  if (!raw || /^unknown$|local[_ -]?business/i.test(raw)) return "business";
+  return raw.toLowerCase();
 }
 
 function planSelectionSteps(): WorkflowStepDraft[] {
@@ -265,17 +298,17 @@ function enrollmentSteps(): WorkflowStepDraft[] {
 
 function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft[] {
   const business = context.businessContext;
-  const businessName = business?.businessName?.trim() || context.actionName?.trim() || "this business";
-  const businessType = business?.businessType?.trim() && business.businessType !== "Unknown"
-    ? business.businessType.trim()
-    : "business";
+  const businessName = canonicalBusinessName(context);
+  const businessType = naturalBusinessType(context);
   const primaryCta = business?.discoveredCtas?.find((cta) => cta.url && /try|demo|book|start/i.test(`${cta.label} ${cta.url}`))
     ?? business?.discoveredCtas?.find((cta) => Boolean(cta.url));
   const primaryLabel = primaryCta?.label?.trim() || "Try the demo";
-  const hasRequestDemoAction = business?.approvedActions?.some((action) => /request.?demo|demo/i.test(`${action.key} ${action.name}`))
-    || business?.discoveredCtas?.some((cta) => /request.?demo/i.test(cta.label));
+  const requestDemoAction = business?.approvedActions?.find((action) => action.actionType === "request_demo" || /request.?demo/i.test(`${action.key} ${action.name}`));
+  const hasRequestDemoAction = Boolean(requestDemoAction || business?.discoveredCtas?.some((cta) => /request.?demo/i.test(cta.label)));
+  const primaryAction = business?.approvedActions?.find((action) => action.key === "try_demo")
+    ?? business?.approvedActions?.find((action) => !/request.?demo/i.test(`${action.key} ${action.name}`) && /try|start|see|view|demo|trial/i.test(`${action.key} ${action.name}`));
   return [
-    capture("business-type", "Business type", "business_type", `What kind of ${businessType.toLowerCase()} do you run?`, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
+    capture("business-type", "Business type", "business_type", `What kind of ${businessType} do you run?`, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
     capture("main-goal", "Main goal", "main_goal", "What are you mainly trying to improve?", ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
     {
       id: "relevant-capabilities",
@@ -303,21 +336,21 @@ function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft
       type: "redirect",
       label: primaryLabel,
       question: `Ready to see how ${businessName} can help?`,
-      config: { ...interruptionConfig, buttonLabel: primaryLabel, destinationSource: "approved_action", ...(primaryCta?.url ? { destinationUrl: primaryCta.url } : {}) },
+      config: { ...interruptionConfig, buttonLabel: primaryLabel, destinationSource: "approved_action", normalConversionEndpoint: true, ...(primaryAction?.key ? { actionKey: primaryAction.key } : {}), ...(primaryCta?.url ? { destinationUrl: primaryCta.url } : {}) },
     },
     ...(hasRequestDemoAction ? [{
       id: "request-demo",
       type: "redirect",
       label: "Request a demo",
       question: "If you would like the team to walk you through it, request a demo.",
-      config: { ...interruptionConfig, buttonLabel: "Request a demo", destinationSource: "approved_action", explicitRequestOnly: true },
+      config: { ...interruptionConfig, buttonLabel: "Request a demo", destinationSource: "approved_action", explicitRequestOnly: true, conditional: true, trigger: "explicit_guided_demo_request", ...(requestDemoAction?.key ? { actionKey: requestDemoAction.key } : {}) },
     } satisfies WorkflowStepDraft] : []),
     {
       id: "support-handoff",
       type: "handoff",
       label: "Support / handoff",
       question: "If you need account help or a person, I’ll connect you with the team.",
-      config: { ...interruptionConfig, trigger: "explicit_support_or_human_request", failureBehavior: "handoff" },
+      config: { ...interruptionConfig, trigger: "explicit_support_or_human_request", conditional: true, failureBehavior: "handoff" },
     },
   ];
 }
@@ -388,12 +421,12 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
             { id: "complete", type: "complete", label: "Confirm follow-up", config: { ...interruptionConfig } },
           ];
   const generated = generatedFields(intent, context);
-  const businessName = context.businessContext?.businessName?.trim() || (context.actionName && /plan/i.test(context.actionName) ? context.actionName.trim() : "");
+  const businessName = canonicalBusinessName(context);
   const pricingVerified = context.businessContext?.pricing?.verified === true;
   const providers = context.availableProviders !== undefined
     ? context.availableProviders.map((provider) => provider.toLowerCase())
     : context.businessContext?.providers?.map((provider) => provider.value.toLowerCase()) ?? [];
-  const normalizedDescription = description.trim();
+  const normalizedDescription = description;
   if (intent === "plan_selection") {
     const planRecommendation = steps.find((step) => step.id === "recommend-plan");
     if (planRecommendation) {
