@@ -229,6 +229,13 @@ test("widget reconciles stale action state and never shows a global CTA over an 
   assert.match(leadSubmit, /Thanks — your details were sent to the team\./);
 });
 
+test("qualified affirmative conversion replies keep the workflow CTA", () => {
+  assert.match(apiServer, /const explicitConversionIntent = \(/);
+  assert.match(apiServer, /Boolean\(activeWorkflow && affirmativeConversionRequest\(/);
+  assert.match(apiServer, /currentWorkflowStep\(activeWorkflow\.action, activeWorkflow\.state\)/);
+  assert.match(apiServer, /engine correctly attaches its CTA/);
+});
+
 test("embedded widget keeps knowledge gaps optional and exposes contact action", () => {
   assert.match(widgetEmbed, /updateState\(\{ quickActions: \[\], leadVisible: false/);
   assert.match(widgetEmbed, /leadCaptured: true, leadVisible: false/);

@@ -9765,6 +9765,16 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
     (orchestration.requestMode === "transactional"
       && /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question))
     || explicitGuidedDemoRequest(question)
+    // A qualified visitor may answer the redirect step with a short
+    // affirmation ("Yes, show me.", "Sure", "Go ahead"). The workflow
+    // engine correctly attaches its CTA for that turn, but this outer guard
+    // also runs before the response is sent. Treat the affirmative as a real
+    // conversion intent so it cannot strip the CTA that the workflow just
+    // produced.
+    || Boolean(activeWorkflow && affirmativeConversionRequest(
+      question,
+      currentWorkflowStep(activeWorkflow.action, activeWorkflow.state),
+    ))
   );
   const workflowOwnsTurn = Boolean(activeWorkflow && conversation.actionState?.status === "active");
   if (workflowOwnsTurn && result.primaryCta && !explicitConversionIntent) {
