@@ -7895,7 +7895,8 @@ function workflowCtaForStep(business: Business, action: ActionFlow, step: NonNul
     ? business.actions.find((candidate) => candidate.key === actionKey && candidate.enabled && candidate.lifecycleStatus !== "disabled")
     : primaryActionForBusiness(business);
   const buttonLabel = actionConfigString(config, "buttonLabel");
-  const cta = primaryCtaForAction(configured ?? action);
+  const businessPrimary = actionKey ? primaryActionForBusiness(business) : null;
+  const cta = primaryCtaForAction(configured ?? businessPrimary ?? action);
   const configuredDestination = actionConfigString(config, "destinationUrl");
   const fallbackCta: PrimaryCta | null = configuredDestination
     && validActionDestinationUrl(configuredDestination)

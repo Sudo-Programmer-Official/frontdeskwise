@@ -175,9 +175,10 @@ type FrontDeskWiseWindow = Window & {
         leadVisible: false,
       });
     } else if (remoteAction.status === "active") {
-      // An active workflow owns the turn. A CTA or generic lead form restored
-      // from an older browser state must not compete with it.
-      updateState({ primaryCta: null, leadVisible: false });
+      // An active workflow owns the turn. The status/conversation endpoints do
+      // not include answer-level CTA data, so preserve the CTA already shown
+      // for the current redirect step while hiding only generic lead capture.
+      updateState({ leadVisible: false });
     }
     if (conversation.leadCaptured === true) updateState({ leadCaptured: true, leadVisible: false });
     else if (state.leadCaptured) updateState({ leadCaptured: false });

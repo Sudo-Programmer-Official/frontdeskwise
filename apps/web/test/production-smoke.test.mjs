@@ -216,7 +216,9 @@ test("widget preserves visitor messages through send and history reconciliation"
 test("widget reconciles stale action state and never shows a global CTA over an active workflow", () => {
   assert.match(widgetEmbed, /function reconcileRemoteConversation/);
   assert.match(widgetEmbed, /remoteAction\.status === "completed"/);
-  assert.match(widgetEmbed, /updateState\(\{ primaryCta: null, leadVisible: false \}\)/);
+  assert.match(widgetEmbed, /preserve the CTA already shown/);
+  assert.match(widgetEmbed, /updateState\(\{ leadVisible: false \}\)/);
+  assert.doesNotMatch(widgetEmbed, /updateState\(\{ primaryCta: null, leadVisible: false \}\)/);
   assert.match(widgetEmbed, /const workflowActive = answer\.conversation\?\.action\?\.status === "active"/);
   assert.match(widgetEmbed, /The API only returns a CTA after workflow policy allows it/);
   assert.match(widgetEmbed, /!leadCaptured && !workflowActive && !answer\.grounded/);
