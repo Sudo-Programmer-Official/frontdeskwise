@@ -31,6 +31,25 @@ const action = {
   updatedAt: "2026-11-21T00:00:00.000Z",
 } as ActionFlow;
 
+const planAction = {
+  ...action,
+  id: "choose-plan",
+  key: "choose_plan",
+  actionType: "contact_team",
+  name: "Choose the right plan",
+  description: "Help visitors choose a plan.",
+  fields: [
+    { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?", options: ["Solo", "Team"] },
+    { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?", options: ["Planning", "Reminders", "Planning + reminders"] },
+    { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasional", "Regularly", "Every day"] },
+  ],
+  steps: [
+    { id: "usage-type", type: "capture", fieldKey: "usage_type" },
+    { id: "main-goal", type: "capture", fieldKey: "main_goal" },
+    { id: "usage-level", type: "capture", fieldKey: "usage_level" },
+  ],
+} as ActionFlow;
+
 test("side questions interrupt without losing the active workflow cursor", () => {
   const state = createActionState(action);
   const decision = decideConversationRoute({ message: "How much does it cost?", activeAction: action, actionState: state });
@@ -50,6 +69,19 @@ test("audience words in a pricing interruption do not turn it into a workflow an
   assert.equal(decision.route, "INTERRUPTION");
   assert.equal(decision.interruptionIntent, "pricing");
   assert.equal(decision.currentStepId, "preferred-days");
+});
+
+test("workflow answers containing knowledge keywords are not misrouted as interruptions", () => {
+  const state = createActionState(planAction);
+  const decision = decideConversationRoute({
+    message: "It's just for me and I mainly need planning and reminders.",
+    activeAction: planAction,
+    actionState: state,
+  });
+
+  assert.equal(decision.route, "WORKFLOW_CONTINUATION");
+  assert.equal(decision.preserveWorkflowState, true);
+  assert.equal(decision.interruptionIntent, null);
 });
 
 test("workflow answers stay on the journey while explicit handoff takes priority", () => {

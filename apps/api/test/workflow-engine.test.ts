@@ -154,6 +154,42 @@ test("plan selection extracts natural solo, paired-goal, daily, and correction l
   assert.equal(state.values.usage_type, "Team");
 });
 
+test("plan selection accepts a literal option and advances past the current step", () => {
+  const plan: ActionFlow = {
+    ...flow,
+    id: "plan-selection-literal",
+    key: "choose_plan",
+    name: "Choose the right plan",
+    fields: [
+      { id: "usage_type", key: "usage_type", label: "Usage type", type: "select", required: true, question: "Solo or team?", options: ["Solo", "Team"] },
+      { id: "main_goal", key: "main_goal", label: "Main goal", type: "select", required: true, question: "What is your goal?", options: ["Planning", "Reminders", "Planning + reminders"] },
+      { id: "usage_level", key: "usage_level", label: "Usage level", type: "select", required: true, question: "How often?", options: ["Occasional", "Regularly", "Every day"] },
+    ],
+    steps: [
+      { id: "usage-type", type: "capture", fieldKey: "usage_type" },
+      { id: "main-goal", type: "capture", fieldKey: "main_goal" },
+      { id: "usage-level", type: "capture", fieldKey: "usage_level" },
+    ],
+  };
+  const state = createActionState(plan);
+  const result = applyWorkflowValues(plan, state, extractWorkflowValues(plan, "Solo"));
+
+  assert.deepEqual(result.updated, ["usage_type"]);
+  assert.equal(state.values.usage_type, "Solo");
+  assert.equal(currentWorkflowStep(plan, state)?.id, "main-goal");
+});
+
+test("resuming an interruption does not rewind a cursor advanced by the answer", () => {
+  const state = createActionState(flow);
+  pushWorkflowInterruption(state, { intent: "pricing", question: "How much?", returnStepId: "name" }, "2026-01-01T00:00:00.000Z");
+  state.currentStepId = "email";
+
+  resumeWorkflowInterruption(state);
+
+  assert.equal(state.currentStepId, "email");
+  assert.equal(state.interruptionStack?.length, 0);
+});
+
 test("workflow summary exposes a deterministic next-best action and progress", () => {
   const action: ActionFlow = {
     ...flow,

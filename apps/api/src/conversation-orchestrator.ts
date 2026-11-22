@@ -35,6 +35,14 @@ function questionLike(message: string): boolean {
   return /^(how|what|when|where|why|who|is|are|can|could|does|do|tell me|explain)\b/i.test(message.trim());
 }
 
+function standaloneKnowledgeQuestion(message: string, intent: RetrievalIntent): boolean {
+  if (!interruptionIntents.has(intent)) return false;
+  // Keep this list disjoint from common workflow option labels such as
+  // "Reminders" and "Team". Those should remain answers when they are sent
+  // as literal selections.
+  return /^(?:pricing|price|prices|cost|costs|how much|fees?|rates?|hours?|location|address|contact|support|privacy|permissions?|policy|policies|cancel(?:lation)?|refunds?)\s*[?!.]*$/i.test(message.trim());
+}
+
 function hasActiveWorkflow(action?: ActionFlow | null, state?: ConversationActionState | null): boolean {
   return Boolean(action?.steps?.length && state && state.status === "active");
 }
@@ -98,7 +106,12 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
     };
   }
 
-  const isInterruption = active && (interruptionIntents.has(conversationalIntent) || (request.mode === "informational" && questionLike(message)));
+  // Intent keywords also occur in perfectly valid workflow answers (for
+  // example, "I mainly need planning and reminders"). Only route a turn to
+  // knowledge when it is shaped like a question or a standalone side-topic;
+  // otherwise extraction must get the first chance to advance the workflow.
+  const isKnowledgeQuestion = questionLike(message) || standaloneKnowledgeQuestion(message, conversationalIntent);
+  const isInterruption = active && isKnowledgeQuestion && (interruptionIntents.has(conversationalIntent) || request.mode === "informational");
   if (isInterruption) {
     return {
       route: "INTERRUPTION",

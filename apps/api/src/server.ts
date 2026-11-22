@@ -1583,6 +1583,10 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
       ...(Object.keys(asRecord(linkTemplateSource.staticParams)).length ? { staticParams: Object.fromEntries(Object.entries(asRecord(linkTemplateSource.staticParams)).filter(([, value]) => typeof value === "string")) as Record<string, string> } : {}),
     }
     : undefined;
+  const workflowSource = asRecord(completion.workflow);
+  const workflowName = optionalString(workflowSource.name, 160);
+  const workflowActionId = optionalString(workflowSource.actionId, 120);
+  const workflow = workflowName && workflowActionId ? { name: workflowName, actionId: workflowActionId } : undefined;
   const actionKey = String(row.action_key);
   const storedName = String(row.name);
   const legacyDemoName = actionKey === "open_link" && storedName === "Send visitors to a link";
@@ -1607,6 +1611,7 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
       message: legacyDemoCopy && completion.message === "The verified link is ready."
         ? "You can try the demo here."
         : typeof completion.message === "string" ? completion.message : "Thanks — the team has your request.",
+      ...(workflow ? { workflow } : {}),
       ...(typeof completion.completionMode === "string" && completionModes.has(completion.completionMode) ? { completionMode: completion.completionMode as ActionFlow["completion"]["completionMode"] } : {}),
       ...(linkTemplate ? { linkTemplate } : {}),
       submitLabel: legacyDemoCopy ? "Try the demo" : typeof completion.submitLabel === "string" ? completion.submitLabel : undefined,
@@ -4185,6 +4190,11 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     };
   });
   const sourceCompletion = asRecord(body.completion);
+  const workflowSource = asRecord(sourceCompletion.workflow);
+  const workflowName = optionalString(workflowSource.name, 160);
+  const workflow = workflowName
+    ? { name: workflowName, actionId: existing?.id ?? base.id }
+    : base.completion.workflow;
   const leadStatus = sourceCompletion.leadStatus === "qualified" || sourceCompletion.leadStatus === "booked" ? sourceCompletion.leadStatus : base.completion.leadStatus;
   const submitLabel = optionalString(sourceCompletion.submitLabel, 160) ?? base.completion.submitLabel;
   const linkUrl = optionalString(sourceCompletion.linkUrl, 2_000) ?? base.completion.linkUrl;
@@ -4245,6 +4255,7 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     createLead: typeof sourceCompletion.createLead === "boolean" ? sourceCompletion.createLead : base.completion.createLead,
     leadStatus,
     message: optionalString(sourceCompletion.message, 1_000) ?? base.completion.message,
+    ...(workflow ? { workflow } : {}),
     ...(completionMode ? { completionMode } : {}),
     ...(linkTemplate ? { linkTemplate } : {}),
     ...(submitLabel ? { submitLabel } : {}),
@@ -6288,6 +6299,54 @@ function workflowScopedFacts(business: Business, workflow?: ActiveWorkflowAnswer
   });
 }
 
+type StructuredFactAnswer = {
+  answer: string;
+  fact: BusinessFact;
+  confidenceScore: number;
+  citations: Array<{ title: string; url: string; sourceId?: string; pageType: string }>;
+  conflicts: number;
+};
+
+function workflowPricingAnswer(
+  business: Business,
+  workflow: ActiveWorkflowAnswerContext | undefined,
+): StructuredFactAnswer | null {
+  const audience = workflowAudienceTerms(workflow);
+  if (!workflow || !audience || !workflow.state.values.usage_type) return null;
+
+  const plans = workflowScopedFacts(business, workflow)
+    .filter((fact) => fact.active && fact.kind === "pricing")
+    .filter((fact) => /\b(free|solo|individual|personal|starter|pro|premium|plan|tier|subscription)\b/i.test(`${fact.subject} ${fact.predicate} ${fact.valueText}`))
+    .filter((fact) => /\$|€|£|\/month|per month|monthly|free/i.test(fact.valueText))
+    .filter((fact, index, facts) => facts.findIndex((candidate) => `${candidate.subject}|${candidate.valueText}`.toLowerCase() === `${fact.subject}|${fact.valueText}`.toLowerCase()) === index)
+    .sort((left, right) => {
+      const leftFree = /\bfree\b/i.test(`${left.subject} ${left.valueText}`) ? 1 : 0;
+      const rightFree = /\bfree\b/i.test(`${right.subject} ${right.valueText}`) ? 1 : 0;
+      return rightFree - leftFree;
+    })
+    .slice(0, 8);
+  if (!plans.length) return null;
+
+  const audienceLabel = /team|group|multiple/i.test(workflow.state.values.usage_type) ? "For team use" : "For individual use";
+  const summary = plans.map((fact) => `${fact.subject} at ${fact.valueText}`).join("; ");
+  const citations = plans
+    .map((fact) => {
+      const source = fact.sourceId ? business.sources.find((item) => item.id === fact.sourceId) : null;
+      return source ? { title: source.title, url: source.url, sourceId: source.id, pageType: source.pageType } : null;
+    })
+    .filter((citation): citation is NonNullable<typeof citation> => Boolean(citation))
+    .filter((citation, index, list) => list.findIndex((item) => item.sourceId === citation.sourceId) === index)
+    .slice(0, 2);
+  const fact = plans[0];
+  return {
+    answer: `${audienceLabel}, ${summary}.`,
+    fact,
+    confidenceScore: Math.min(0.99, 0.72 + fact.confidence * 0.2 + (fact.authority === "owner_verified" || fact.authority === "system_of_record" ? 0.06 : 0)),
+    citations,
+    conflicts: 0,
+  };
+}
+
 function workflowScopedMatches(matches: RetrievalMatch[], workflow: ActiveWorkflowAnswerContext | undefined, intent: RetrievalIntent): RetrievalMatch[] {
   const audience = workflowAudienceTerms(workflow);
   if (!audience || intent !== "pricing") return matches;
@@ -6632,13 +6691,7 @@ function structuredFactAnswer(
   question: string,
   intent: RetrievalIntent,
   facts = business.facts,
-): {
-  answer: string;
-  fact: BusinessFact;
-  confidenceScore: number;
-  citations: Array<{ title: string; url: string; sourceId?: string; pageType: string }>;
-  conflicts: number;
-} | null {
+): StructuredFactAnswer | null {
   const kindByIntent: Partial<Record<RetrievalIntent, BusinessFact["kind"]>> = {
     hours: "hours",
     location: "location",
@@ -6751,7 +6804,9 @@ async function answerQuestion(
   }
   const scopedFacts = workflowScopedFacts(business, options.workflow);
   const primaryCtaForAnswer = options.workflow ? null : primaryCtaForQuestion(business, question, initialIntent);
-  const structured = structuredFactAnswer(business, question, initialIntent, scopedFacts);
+  const structured = initialIntent === "pricing"
+    ? workflowPricingAnswer(business, options.workflow) ?? structuredFactAnswer(business, question, initialIntent, scopedFacts)
+    : structuredFactAnswer(business, question, initialIntent, scopedFacts);
   if (structured) {
     const modelUsage: ModelUsage = {
       route: "tier0",

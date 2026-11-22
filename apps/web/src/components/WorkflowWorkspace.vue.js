@@ -18,6 +18,17 @@ const workflowAssistInput = ref(null);
 const workflowStepList = ref(null);
 const draftIsDirty = ref(false);
 const workflowGenerationKey = ref("");
+const createWorkflowOpen = ref(false);
+const createWorkflowMode = ref("action");
+const createWorkflowActionId = ref("");
+const createWorkflowTemplateKey = ref("lead");
+const createWorkflowDescription = ref("");
+const createWorkflowLoading = ref(false);
+const createWorkflowError = ref("");
+const createNewActionOpen = ref(false);
+const createNewActionName = ref("");
+const createNewActionDescription = ref("");
+const locallyCreatedAction = ref(null);
 let draftSourceId = "";
 const stepTypes = [
     { value: "capture", label: "Capture details" },
@@ -53,10 +64,21 @@ function asWorkflowAction(value) {
         return null;
     return candidate;
 }
-const allActions = computed(() => props.actions.map(asWorkflowAction).filter((action) => Boolean(action)));
+const allActions = computed(() => {
+    const actions = props.actions.map(asWorkflowAction).filter((action) => Boolean(action));
+    const localAction = locallyCreatedAction.value;
+    return localAction && !actions.some((action) => action.id === localAction.id) ? [...actions, localAction] : actions;
+});
 const workflowActions = computed(() => allActions.value.filter((action) => {
     const stepCount = Array.isArray(action.steps) ? action.steps.length : 0;
     return action.workflowSafety?.status === "blocked" || stepCount > 1 || action.executionMode === "PROVIDER_FLOW" || (action.fields?.length ?? 0) > 2;
+}));
+const eligibleActions = computed(() => allActions.value
+    .filter((action) => action.enabled !== false && action.workflowSafety?.status !== "blocked" && !actionHasWorkflow(action))
+    .sort((left, right) => {
+    const leftDemo = /try|demo|start|book|request/i.test(left.name) ? 0 : 1;
+    const rightDemo = /try|demo|start|book|request/i.test(right.name) ? 0 : 1;
+    return leftDemo - rightDemo || left.name.localeCompare(right.name);
 }));
 const selectedWorkflow = computed(() => workflowActions.value.find((action) => action.id === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
 const draftSteps = computed(() => (workflowDraft.value?.steps ?? []));
@@ -96,6 +118,19 @@ const configurationComplete = computed(() => readinessRemaining.value.length ===
 const configurationLabel = computed(() => configurationComplete.value ? "Configuration complete" : "Needs setup");
 const providerStep = computed(() => draftSteps.value.find((step) => step.type === "lookup" || step.type === "generate_link") ?? null);
 const providerFailureBehavior = computed(() => providerStep.value ? stepConfigValue(providerStep.value, "failureBehavior") : "capture_lead");
+const workflowMetadata = computed(() => {
+    const value = workflowDraft.value?.completion && typeof workflowDraft.value.completion === "object"
+        ? workflowDraft.value.completion.workflow
+        : null;
+    if (!value || typeof value !== "object")
+        return null;
+    const metadata = value;
+    return typeof metadata.name === "string" && typeof metadata.actionId === "string"
+        ? { name: metadata.name, actionId: metadata.actionId }
+        : null;
+});
+const linkedAction = computed(() => allActions.value.find((action) => action.id === (workflowMetadata.value?.actionId ?? workflowDraft.value?.id)) ?? workflowDraft.value);
+const workflowTitle = computed(() => workflowMetadata.value?.name || workflowDraft.value?.name || "Workflow");
 function clone(value) {
     return JSON.parse(JSON.stringify(value));
 }
@@ -129,6 +164,220 @@ function defaultBusinessWorkflowDescription() {
         ? props.businessContext.businessType.trim().toLowerCase()
         : "business";
     return `Help visitors understand whether ${businessName} is a good fit. First ask what kind of ${businessType} they run and what they are mainly trying to improve. Match verified capabilities, explain the fit briefly, show verified pricing when relevant, and use the approved primary conversion action. Offer a demo request only when explicitly requested and hand off account or human-help questions.`;
+}
+function workflowCompletion(action) {
+    return action.completion && typeof action.completion === "object" && !Array.isArray(action.completion) ? action.completion : {};
+}
+function ensureWorkflowCompletion(action) {
+    if (!action.completion || typeof action.completion !== "object" || Array.isArray(action.completion))
+        action.completion = {};
+    return action.completion;
+}
+function setWorkflowMetadata(action, name) {
+    ensureWorkflowCompletion(action).workflow = { name: name.trim().slice(0, 160), actionId: action.id };
+}
+function workflowNameForTemplate(key) {
+    return workflowTemplates.find((template) => template.key === key)?.label ?? "Workflow";
+}
+function workflowDisplayName(action) {
+    const value = workflowCompletion(action).workflow;
+    if (value && typeof value === "object" && typeof value.name === "string")
+        return String(value.name);
+    return action.name;
+}
+function actionHasWorkflow(action) {
+    return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
+}
+function openCreateWorkflow() {
+    createWorkflowOpen.value = true;
+    createWorkflowMode.value = "action";
+    createWorkflowError.value = "";
+    createNewActionOpen.value = false;
+    createWorkflowActionId.value = eligibleActions.value.find((action) => /try|demo/i.test(action.name))?.id
+        ?? eligibleActions.value[0]?.id
+        ?? "";
+    createWorkflowTemplateKey.value = "lead";
+    createWorkflowDescription.value = defaultBusinessWorkflowDescription();
+}
+function closeCreateWorkflow() {
+    if (createWorkflowLoading.value)
+        return;
+    createWorkflowOpen.value = false;
+    createNewActionOpen.value = false;
+    createWorkflowError.value = "";
+}
+function selectCreateWorkflowMode(mode) {
+    createWorkflowMode.value = mode;
+    createWorkflowError.value = "";
+    if (mode === "template")
+        createWorkflowDescription.value = workflowNameForTemplate(createWorkflowTemplateKey.value);
+    if (mode === "describe" && !createWorkflowDescription.value.trim())
+        createWorkflowDescription.value = defaultBusinessWorkflowDescription();
+}
+function openNewActionFlow() {
+    createNewActionOpen.value = true;
+    createWorkflowError.value = "";
+    createNewActionName.value = "";
+    createNewActionDescription.value = "";
+}
+function closeNewActionFlow() {
+    if (createWorkflowLoading.value)
+        return;
+    createNewActionOpen.value = false;
+    createWorkflowError.value = "";
+}
+function workflowGenerationContext(action) {
+    const businessName = props.businessContext?.businessName?.trim() || props.businessName?.trim() || "";
+    return {
+        organizationId: props.organizationId ?? props.businessContext?.organizationId,
+        businessId: props.businessContext?.businessId,
+        workflowId: action.id,
+        actionId: action.id,
+        contextVersion: props.businessContext?.contextVersion,
+        actionType: action.actionType,
+        actionName: action.name,
+        actionDescription: action.description,
+        availableActionTypes: allActions.value.map((candidate) => candidate.actionType || candidate.key),
+        availableProviders: props.integrations.filter((integration) => integration.connectionStatus === "active").map((integration) => String(integration.provider ?? "")).filter(Boolean),
+        knownBusinessKnowledge: props.businessContext?.knowledgeSummary?.map((item) => item.value) ?? [],
+        completionGoal: String(action.completion && (action.completion.message ?? action.completion.linkLabel ?? "")),
+        businessContext: props.businessContext ?? undefined,
+        businessName,
+    };
+}
+function generatedWorkflowFor(action) {
+    if (createWorkflowMode.value === "template") {
+        const template = workflowTemplates.find((candidate) => candidate.key === createWorkflowTemplateKey.value) ?? workflowTemplates[0];
+        const generated = generateWorkflow(template.description, [], workflowGenerationContext(action));
+        return {
+            name: template.label,
+            description: template.description,
+            steps: templateSteps(template.key),
+            fields: generated.fields,
+            executionMode: generated.executionMode,
+            provider: generated.provider,
+        };
+    }
+    const description = createWorkflowDescription.value.trim() || defaultBusinessWorkflowDescription();
+    const generated = generateWorkflow(description, [], workflowGenerationContext(action));
+    return {
+        name: generated.name || description.slice(0, 160),
+        description: generated.description,
+        steps: generated.steps,
+        fields: generated.fields,
+        executionMode: generated.executionMode,
+        provider: generated.provider,
+    };
+}
+async function createInlineAction() {
+    const name = createNewActionName.value.trim();
+    if (!name || createWorkflowLoading.value)
+        return;
+    const duplicate = allActions.value.find((action) => action.name.trim().toLowerCase() === name.toLowerCase());
+    if (duplicate) {
+        createWorkflowActionId.value = duplicate.id;
+        createNewActionOpen.value = false;
+        createWorkflowError.value = "That action already exists, so it has been selected instead of duplicated.";
+        return;
+    }
+    createWorkflowLoading.value = true;
+    createWorkflowError.value = "";
+    try {
+        const keyBase = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "custom_action";
+        const key = allActions.value.some((action) => action.key === keyBase) ? `${keyBase}_${Date.now()}` : keyBase;
+        const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions`), {
+            method: "POST",
+            headers: { "content-type": "application/json", ...props.ownerHeaders() },
+            body: JSON.stringify({
+                key,
+                actionType: "contact_team",
+                name,
+                description: createNewActionDescription.value.trim() || `Help visitors with ${name.toLowerCase()}.`,
+                captureMode: "auto",
+                fields: [
+                    { id: "name", key: "name", label: "Name", type: "text", required: true, visibility: "visible", question: "What’s your name?" },
+                    { id: "email", key: "email", label: "Email", type: "email", required: true, visibility: "visible", question: "What email address should we use?" },
+                ],
+                completion: { createLead: true, leadStatus: "new", message: "Thanks — I’ve sent your request to the team.", notifyStaff: true, notifyChannels: ["in_app", "email"], notifyTargets: ["business_team"] },
+                enabled: true,
+            }),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.action)
+            throw new Error(payload.error ?? "Could not create the action.");
+        locallyCreatedAction.value = payload.action;
+        createWorkflowActionId.value = payload.action.id;
+        createWorkflowMode.value = "describe";
+        createWorkflowDescription.value = defaultBusinessWorkflowDescription();
+        createNewActionOpen.value = false;
+        emit("refresh");
+    }
+    catch (error) {
+        createWorkflowError.value = error instanceof Error ? error.message : "Could not create the action.";
+    }
+    finally {
+        createWorkflowLoading.value = false;
+    }
+}
+async function createWorkflow() {
+    if (createWorkflowLoading.value)
+        return;
+    const action = allActions.value.find((candidate) => candidate.id === createWorkflowActionId.value);
+    if (!action) {
+        createWorkflowError.value = "Choose an action to connect to this workflow, or create one inline.";
+        return;
+    }
+    if (actionHasWorkflow(action)) {
+        selectedWorkflowId.value = action.id;
+        workflowDraft.value = clone(action);
+        draftSourceId = action.id;
+        draftIsDirty.value = false;
+        createWorkflowOpen.value = false;
+        return;
+    }
+    createWorkflowLoading.value = true;
+    createWorkflowError.value = "";
+    try {
+        const generated = generatedWorkflowFor(action);
+        const nextAction = clone(action);
+        nextAction.steps = generated.steps;
+        nextAction.description = generated.description;
+        nextAction.fields = generated.fields.length ? generated.fields : nextAction.fields;
+        setWorkflowMetadata(nextAction, generated.name);
+        if (generated.executionMode)
+            nextAction.executionMode = generated.executionMode;
+        if (generated.provider)
+            nextAction.provider = generated.provider;
+        const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(action.id)}`), {
+            method: "PUT",
+            headers: { "content-type": "application/json", ...props.ownerHeaders() },
+            body: JSON.stringify({
+                ...nextAction,
+                ...(props.businessContext?.businessId ? { businessId: props.businessContext.businessId, workflowContextBusinessId: props.businessContext.businessId } : {}),
+                ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
+            }),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.action)
+            throw new Error(payload.error ?? "Could not create this workflow.");
+        const savedWorkflow = payload.action;
+        locallyCreatedAction.value = savedWorkflow;
+        selectedWorkflowId.value = savedWorkflow.id;
+        workflowDraft.value = clone(savedWorkflow);
+        workflowDraft.value.steps ??= [];
+        draftSourceId = savedWorkflow.id;
+        draftIsDirty.value = false;
+        selectedStepIndex.value = savedWorkflow.steps?.length ? 0 : -1;
+        workflowSaveMessage.value = `Workflow created and linked to ${action.name}.`;
+        createWorkflowOpen.value = false;
+        emit("refresh");
+    }
+    catch (error) {
+        createWorkflowError.value = error instanceof Error ? error.message : "Could not create this workflow.";
+    }
+    finally {
+        createWorkflowLoading.value = false;
+    }
 }
 watch(workflowActions, () => {
     if (!workflowActions.value.some((action) => action.id === selectedWorkflowId.value)) {
@@ -256,6 +505,7 @@ function applyTemplate(key) {
     if (!workflowDraft.value)
         return;
     workflowDraft.value.steps = templateSteps(key);
+    setWorkflowMetadata(workflowDraft.value, workflowNameForTemplate(key));
     if (key === "enrollment") {
         workflowDraft.value.executionMode = "PROVIDER_FLOW";
         workflowDraft.value.provider = "jackrabbit";
@@ -285,10 +535,10 @@ function generateStarter() {
     };
     workflowGenerationKey.value = workflowGenerationCacheKey(generationContext);
     const result = generateWorkflow(workflowDescription.value || defaultBusinessWorkflowDescription(), [], generationContext);
-    workflowDraft.value.name = result.name;
     workflowDraft.value.description = result.description;
     workflowDraft.value.steps = result.steps;
     workflowDraft.value.fields = result.fields;
+    setWorkflowMetadata(workflowDraft.value, result.name);
     if (result.executionMode)
         workflowDraft.value.executionMode = result.executionMode;
     if (result.provider)
@@ -387,6 +637,7 @@ const __VLS_template = () => {
     __VLS_withDotValue(showModelBanner, {});
     __VLS_withDotValue(workflowActions, {});
     __VLS_withDotValue(selectedWorkflowId, {});
+    __VLS_withDotValue(linkedAction, {});
     __VLS_withDotValue(workflowDescription, {});
     __VLS_withDotValue(showTemplatePicker, {});
     __VLS_withDotValue(readinessRemaining, {});
@@ -399,6 +650,15 @@ const __VLS_template = () => {
     __VLS_withDotValue(previewStep, {});
     __VLS_withDotValue(workflowSaveError, {});
     __VLS_withDotValue(workflowSaveMessage, {});
+    __VLS_withDotValue(createWorkflowOpen, {});
+    __VLS_withDotValue(createWorkflowMode, {});
+    __VLS_withDotValue(eligibleActions, {});
+    __VLS_withDotValue(createWorkflowDescription, {});
+    __VLS_withDotValue(createNewActionOpen, {});
+    __VLS_withDotValue(createWorkflowLoading, {});
+    __VLS_withDotValue(createNewActionName, {});
+    __VLS_withDotValue(createWorkflowError, {});
+    __VLS_withDotValue(createWorkflowActionId, {});
     void {};
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
@@ -423,6 +683,8 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-template-chips']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-template-chips']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-link-summary']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-link-summary']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
@@ -507,6 +769,30 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-preview-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-modal-close']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-modal']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+    /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+    /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-choice-radio']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-fields']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-fields']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-fields']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-fields']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-inline-action-button']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-empty']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+    /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-assist-card']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
@@ -527,6 +813,8 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-provider-summary-detail']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-builder-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-modal-backdrop']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-create-modal']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
@@ -882,12 +1170,7 @@ const __VLS_template = () => {
     __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
     (workflowActions.value.length);
     __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-        ...{ onClick: (...[$event]) => {
-                void $event;
-                return (__VLS_unwrap(emit, {})('open-action', ''));
-                // @ts-ignore
-                [emit, draftIsDirty, draftIsDirty, draftIsDirty, workflowDraft, workflowSaveLoading, workflowSaveLoading, showModelBanner, workflowActions,];
-            } },
+        ...{ onClick: (openCreateWorkflow) },
         ...{ class: "outline-button small" },
         type: "button",
     });
@@ -919,9 +1202,9 @@ const __VLS_template = () => {
             key: (action.id),
             value: (action.id),
         });
-        (action.name);
+        (workflowDisplayName(action));
         // @ts-ignore
-        [workflowActions, selectedWorkflowId,];
+        [draftIsDirty, draftIsDirty, draftIsDirty, workflowDraft, workflowSaveLoading, workflowSaveLoading, showModelBanner, workflowActions, workflowActions, selectedWorkflowId,];
     }
     if (!workflowActions.value.length) {
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
@@ -948,22 +1231,15 @@ const __VLS_template = () => {
         __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
-            ...{ onClick: (...[$event]) => {
-                    void $event;
-                    if (!(!workflowActions.value.length))
-                        throw 0;
-                    return (__VLS_unwrap(emit, {})('open-action', ''));
-                    // @ts-ignore
-                    [emit, workflowActions,];
-                } },
+            ...{ onClick: (openCreateWorkflow) },
             ...{ class: "primary-button small" },
             type: "button",
         });
         /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
         /** @type {__VLS_StyleScopedClasses['small']} */ ;
         let __VLS_21;
-        /** @ts-ignore @type { | typeof ArrowRight} */
-        ArrowRight;
+        /** @ts-ignore @type { | typeof Plus} */
+        Plus;
         // @ts-ignore
         const __VLS_22 = __VLS_asFunctionalComponent1(__VLS_21, new __VLS_21({
             // @ts-ignore
@@ -982,7 +1258,7 @@ const __VLS_template = () => {
                     void $event;
                     return (selectedWorkflowId.value = action.id);
                     // @ts-ignore
-                    [workflowActions, selectedWorkflowId,];
+                    [workflowActions, workflowActions, selectedWorkflowId,];
                 } },
             key: (action.id),
             type: "button",
@@ -1009,7 +1285,7 @@ const __VLS_template = () => {
         }, ...__VLS_functionalComponentArgsRest(__VLS_28));
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
         __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
-        (action.name);
+        (workflowDisplayName(action));
         __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
         (action.steps?.length ?? 0);
         (formatLabel(action.executionMode || 'FORM_FLOW'));
@@ -1044,9 +1320,19 @@ const __VLS_template = () => {
         });
         /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
         __VLS_asFunctionalElement1(__VLS_intrinsics.h2, __VLS_intrinsics.h2)({});
-        (workflowDraft.value.name);
+        (__VLS_unwrap(workflowTitle, {}));
         __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
         (workflowDraft.value.description || 'Describe the customer outcome this workflow owns.');
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-link-summary" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-link-summary']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+        (linkedAction.value?.name || workflowDraft.value.name);
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+        (__VLS_unwrap(workflowTitle, {}));
         if (workflowDraft.value.workflowSafety?.status === 'blocked') {
             __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
                 ...{ class: "workflow-isolation-warning" },
@@ -1164,7 +1450,7 @@ const __VLS_template = () => {
                         throw 0;
                     return (showTemplatePicker.value = !showTemplatePicker.value);
                     // @ts-ignore
-                    [workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDescription, workflowDescription, showTemplatePicker, showTemplatePicker,];
+                    [workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowDraft, workflowTitle, workflowTitle, linkedAction, workflowDescription, workflowDescription, showTemplatePicker, showTemplatePicker,];
                 } },
             ...{ class: "text-button workflow-template-trigger" },
             type: "button",
@@ -2154,8 +2440,285 @@ const __VLS_template = () => {
             'aria-hidden': "true",
         }, ...__VLS_functionalComponentArgsRest(__VLS_110));
     }
+    if (createWorkflowOpen.value) {
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ onClick: (closeCreateWorkflow) },
+            ...{ class: "workflow-modal-backdrop" },
+            role: "presentation",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-modal-backdrop']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.section, __VLS_intrinsics.section)({
+            ...{ class: "workflow-create-modal" },
+            role: "dialog",
+            'aria-modal': "true",
+            'aria-labelledby': "create-workflow-title",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-create-modal']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (closeCreateWorkflow) },
+            ...{ class: "workflow-modal-close" },
+            type: "button",
+            'aria-label': "Close",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-modal-close']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+            ...{ class: "eyebrow" },
+        });
+        /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.h2, __VLS_intrinsics.h2)({
+            id: "create-workflow-title",
+        });
+        __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({
+            ...{ class: "workflow-modal-question" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-modal-question']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+            ...{ class: "workflow-modal-copy" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-modal-copy']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-create-choice-list" },
+            role: "tablist",
+            'aria-label': "Workflow starting point",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-create-choice-list']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (...[$event]) => {
+                    void $event;
+                    if (!(createWorkflowOpen.value))
+                        throw 0;
+                    return (selectCreateWorkflowMode('action'));
+                    // @ts-ignore
+                    [workflowDraft, workflowDraft, configurationLabel, draftSteps, draftSteps, selectedStepIndex, workflowProvider, workflowProvider, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, workflowSaveError, workflowSaveError, workflowSaveMessage, workflowSaveMessage, createWorkflowOpen,];
+                } },
+            type: "button",
+            ...{ class: (['workflow-create-choice', { selected: createWorkflowMode.value === 'action' }]) },
+        });
+        /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+        /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: "workflow-choice-radio" },
+            'aria-hidden': "true",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-choice-radio']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (...[$event]) => {
+                    void $event;
+                    if (!(createWorkflowOpen.value))
+                        throw 0;
+                    return (selectCreateWorkflowMode('template'));
+                    // @ts-ignore
+                    [createWorkflowMode,];
+                } },
+            type: "button",
+            ...{ class: (['workflow-create-choice', { selected: createWorkflowMode.value === 'template' }]) },
+        });
+        /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+        /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: "workflow-choice-radio" },
+            'aria-hidden': "true",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-choice-radio']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (...[$event]) => {
+                    void $event;
+                    if (!(createWorkflowOpen.value))
+                        throw 0;
+                    return (selectCreateWorkflowMode('describe'));
+                    // @ts-ignore
+                    [createWorkflowMode,];
+                } },
+            type: "button",
+            ...{ class: (['workflow-create-choice', { selected: createWorkflowMode.value === 'describe' }]) },
+        });
+        /** @type {__VLS_StyleScopedClasses['selected']} */ ;
+        /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+            ...{ class: "workflow-choice-radio" },
+            'aria-hidden': "true",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-choice-radio']} */ ;
+        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
+        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+            ...{ class: "workflow-create-fields" },
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-create-fields']} */ ;
+        if (createWorkflowMode.value === 'action' || createWorkflowMode.value === 'template' || createWorkflowMode.value === 'describe') {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+                ...{ class: "optional" },
+            });
+            /** @type {__VLS_StyleScopedClasses['optional']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
+                value: (createWorkflowActionId.value),
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                value: "",
+                disabled: true,
+            });
+            const __VLS_114 = __VLS_tryAsConstant((eligibleActions.value));
+            for (const [action] of __VLS_vFor(__VLS_nonNull(__VLS_114))) {
+                __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                    key: (action.id),
+                    value: (action.id),
+                });
+                (action.name);
+                // @ts-ignore
+                [createWorkflowMode, createWorkflowMode, createWorkflowMode, createWorkflowMode, createWorkflowActionId, eligibleActions,];
+            }
+        }
+        if (!eligibleActions.value.length) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-create-empty" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-create-empty']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        }
+        __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+            ...{ onClick: (openNewActionFlow) },
+            ...{ class: "workflow-inline-action-button" },
+            type: "button",
+        });
+        /** @type {__VLS_StyleScopedClasses['workflow-inline-action-button']} */ ;
+        let __VLS_115;
+        /** @ts-ignore @type { | typeof Plus} */
+        Plus;
+        // @ts-ignore
+        const __VLS_116 = __VLS_asFunctionalComponent1(__VLS_115, new __VLS_115({
+            // @ts-ignore
+            size: (15), strokeWidth: (1.9), 'aria-hidden': "true",
+        }));
+        const __VLS_117 = __VLS_116({
+            size: (15),
+            strokeWidth: (1.9),
+            'aria-hidden': "true",
+        }, ...__VLS_functionalComponentArgsRest(__VLS_116));
+        if (createWorkflowMode.value === 'template') {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.select, __VLS_intrinsics.select)({
+                ...{ onChange: (...[$event]) => {
+                        void $event;
+                        if (!(createWorkflowOpen.value))
+                            throw 0;
+                        if (!(createWorkflowMode.value === 'template'))
+                            throw 0;
+                        return (createWorkflowDescription.value = workflowNameForTemplate(__VLS_unwrap(createWorkflowTemplateKey, {})));
+                        // @ts-ignore
+                        [createWorkflowMode, eligibleActions, createWorkflowDescription, createWorkflowTemplateKey,];
+                    } },
+                value: (__VLS_unwrap(createWorkflowTemplateKey, {})),
+            });
+            const __VLS_120 = __VLS_tryAsConstant((__VLS_unwrap(workflowTemplates, {})));
+            for (const [template] of __VLS_vFor(__VLS_nonNull(__VLS_120))) {
+                __VLS_asFunctionalElement1(__VLS_intrinsics.option, __VLS_intrinsics.option)({
+                    key: (template.key),
+                    value: (template.key),
+                });
+                (template.label);
+                // @ts-ignore
+                [workflowTemplates, createWorkflowTemplateKey,];
+            }
+        }
+        if (createWorkflowMode.value === 'describe' || createWorkflowMode.value === 'action') {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.textarea, __VLS_intrinsics.textarea)({
+                value: (createWorkflowDescription.value),
+                rows: "4",
+                placeholder: "Help salon owners decide if SalonFlow is right for them…",
+            });
+        }
+        if (createNewActionOpen.value) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-new-action-panel" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-new-action-panel']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+                ...{ class: "eyebrow" },
+            });
+            /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.h3, __VLS_intrinsics.h3)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.input)({
+                value: (createNewActionName.value),
+                type: "text",
+                maxlength: "120",
+                placeholder: "Request a quote",
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.label, __VLS_intrinsics.label)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+                ...{ class: "optional" },
+            });
+            /** @type {__VLS_StyleScopedClasses['optional']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.textarea, __VLS_intrinsics.textarea)({
+                value: (__VLS_unwrap(createNewActionDescription, {})),
+                rows: "2",
+                placeholder: "What should the assistant do when the visitor is ready?",
+            });
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-modal-actions" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-modal-actions']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (closeNewActionFlow) },
+                ...{ class: "outline-button small" },
+                type: "button",
+            });
+            /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['small']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (createInlineAction) },
+                ...{ class: "primary-button small" },
+                type: "button",
+                disabled: (createWorkflowLoading.value || !createNewActionName.value.trim()),
+            });
+            /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['small']} */ ;
+            (createWorkflowLoading.value ? 'Creating…' : 'Create action');
+        }
+        if (createWorkflowError.value) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+                ...{ class: "form-error" },
+            });
+            /** @type {__VLS_StyleScopedClasses['form-error']} */ ;
+            (createWorkflowError.value);
+        }
+        if (!createNewActionOpen.value) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-modal-actions" },
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-modal-actions']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (closeCreateWorkflow) },
+                ...{ class: "outline-button small" },
+                type: "button",
+            });
+            /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['small']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
+                ...{ onClick: (createWorkflow) },
+                ...{ class: "primary-button small" },
+                type: "button",
+                disabled: (createWorkflowLoading.value || !createWorkflowActionId.value),
+            });
+            /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+            /** @type {__VLS_StyleScopedClasses['small']} */ ;
+            (createWorkflowLoading.value ? 'Creating…' : 'Create workflow');
+        }
+    }
     // @ts-ignore
-    [workflowDraft, workflowDraft, configurationLabel, draftSteps, draftSteps, selectedStepIndex, workflowProvider, workflowProvider, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, previewStep, workflowSaveError, workflowSaveError, workflowSaveMessage, workflowSaveMessage,];
+    [createWorkflowMode, createWorkflowMode, createWorkflowActionId, createWorkflowDescription, createNewActionOpen, createNewActionOpen, createNewActionName, createNewActionName, createNewActionDescription, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createWorkflowError, createWorkflowError,];
     return {};
 };
 void [__VLS_template];

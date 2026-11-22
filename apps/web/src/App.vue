@@ -317,6 +317,7 @@ interface ActionFlow {
     createLead: boolean;
     leadStatus: "new" | "qualified" | "booked";
     message: string;
+    workflow?: { name: string; actionId: string };
     completionMode?: CompletionMode;
     linkTemplate?: { baseUrl: string; fieldMappings: Record<string, string>; staticParams?: Record<string, string> };
     submitLabel?: string;

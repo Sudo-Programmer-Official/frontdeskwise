@@ -482,6 +482,12 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(app, /Open workflow/);
   for (const marker of [
     "Actions are what · Workflows are how",
+    "Create workflow",
+    "Use an existing action",
+    "Start from a template",
+    "Describe it in plain English",
+    "Create new action",
+    "Action",
     "Generate steps",
     "Choose what happens if unavailable",
     "Provider",
@@ -493,6 +499,10 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   ]) {
     assert.ok(workflowWorkspace.includes(marker), `missing workflow builder marker: ${marker}`);
   }
+  assert.match(workflowWorkspace, /@click="openCreateWorkflow"/);
+  assert.doesNotMatch(workflowWorkspace, /@click="emit\('open-action', ''\)"/);
+  assert.match(workflowWorkspace, /actions\/\$\{encodeURIComponent\(action\.id\)\}/);
+  assert.match(apiServer, /workflowActionId/);
   for (const marker of [
     "WorkflowBusinessContext",
     "plan_selection",

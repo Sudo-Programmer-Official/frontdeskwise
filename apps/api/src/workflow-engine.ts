@@ -483,7 +483,11 @@ export function resumeWorkflowInterruption(state: ConversationActionState): Acti
   if (!stack.length) return null;
   const interruption = stack[stack.length - 1];
   state.interruptionStack = stack.slice(0, -1);
-  if (interruption.returnStepId) state.currentStepId = interruption.returnStepId;
+  // The workflow cursor may have advanced while the interruption was being
+  // answered (for example, a visitor can answer the paused field on the same
+  // turn that the interruption stack is popped). Do not rewind that progress;
+  // only restore a cursor when an older/legacy state has no cursor at all.
+  if (interruption.returnStepId && !state.currentStepId) state.currentStepId = interruption.returnStepId;
   return interruption;
 }
 

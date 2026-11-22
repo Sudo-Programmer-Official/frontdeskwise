@@ -125,6 +125,11 @@ export type ActionCompletion = {
   createLead: boolean;
   leadStatus: "new" | "qualified" | "booked";
   message: string;
+  /** Owner-facing metadata for the workflow builder. Runtime ignores this link. */
+  workflow?: {
+    name: string;
+    actionId: string;
+  };
   completionMode?: CompletionMode;
   linkTemplate?: CompletionLinkTemplate;
   submitLabel?: string;
