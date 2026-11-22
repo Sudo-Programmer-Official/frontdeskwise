@@ -32,6 +32,7 @@ import {
   nextActionField,
   nextConversationalField,
   normalizeCanonicalEnrollmentWorkflow,
+  validActionDestinationUrl,
   validateFieldValue,
   type ActionFlow,
   type ActionAttachmentPolicy,
@@ -7888,13 +7889,27 @@ function persistPlanRecommendation(state: ConversationActionState, recommendatio
 
 function workflowCtaForStep(business: Business, action: ActionFlow, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): PrimaryCta | null {
   if (step.type !== "redirect") return null;
-  const actionKey = actionConfigString(step.config ?? {}, "actionKey");
+  const config = step.config ?? {};
+  const actionKey = actionConfigString(config, "actionKey");
   const configured = actionKey
     ? business.actions.find((candidate) => candidate.key === actionKey && candidate.enabled && candidate.lifecycleStatus !== "disabled")
     : primaryActionForBusiness(business);
+  const buttonLabel = actionConfigString(config, "buttonLabel");
   const cta = primaryCtaForAction(configured ?? action);
-  const buttonLabel = actionConfigString(step.config ?? {}, "buttonLabel");
-  return customerPrimaryCta(business, cta && buttonLabel ? { ...cta, label: buttonLabel } : cta);
+  const configuredDestination = actionConfigString(config, "destinationUrl");
+  const fallbackCta: PrimaryCta | null = configuredDestination
+    && validActionDestinationUrl(configuredDestination)
+    && config.destinationSource === "approved_action"
+    ? {
+      actionId: configured?.id ?? action.id,
+      key: actionKey ?? configured?.key ?? action.key,
+      label: buttonLabel ?? step.label ?? action.name,
+      executionMode: "DIRECT_LINK",
+      trackingKey: configured?.trackingKey ?? action.trackingKey ?? action.key,
+      url: configuredDestination,
+    }
+    : null;
+  return customerPrimaryCta(business, cta && buttonLabel ? { ...cta, label: buttonLabel } : cta ?? fallbackCta);
 }
 
 async function resolveWorkflowActionResources(
@@ -8021,6 +8036,16 @@ function explicitGuidedDemoRequest(question: string): boolean {
     || /\b(i want|i'd like|id like|please|need)\b.{0,24}\b(a )?(guided|team|live|product)?\s*demo\b/i.test(question);
 }
 
+function affirmativeConversionRequest(
+  question: string,
+  step: NonNullable<ReturnType<typeof currentWorkflowStep>> | null,
+): boolean {
+  if (step?.type !== "redirect" || step.config?.normalConversionEndpoint !== true) return false;
+  const normalizedQuestion = question.trim().toLowerCase();
+  return /^(?:yes|yeah|yep|sure|okay|ok|please|go ahead)\s*[.!?]*$/.test(normalizedQuestion)
+    || /\b(?:show me|let(?:'|’)s see|let me see|try it|open it)\b/i.test(normalizedQuestion);
+}
+
 function startAnotherWorkflowParticipant(state: ConversationActionState, config: ReturnType<typeof repeatableWorkflowConfig>, action: ActionFlow): boolean {
   if (!config || !action.steps?.length) return false;
   const participants = state.participants ?? [];
@@ -8052,15 +8077,17 @@ async function continueWorkflowActionConversation(
   // question can mention a competing audience (for example, "what does the
   // team plan cost?") without being an answer to the paused field.
   const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
+  const currentStepBeforeConversion = currentWorkflowStep(action, state);
   const guidedDemo = explicitGuidedDemoRequest(question);
   const normalConversion = initialOrchestration.requestMode === "transactional"
     && /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question)
     && !guidedDemo;
-  const explicitConversionRequest = guidedDemo || normalConversion;
+  const affirmativeConversion = affirmativeConversionRequest(question, currentStepBeforeConversion);
+  const explicitConversionRequest = guidedDemo || normalConversion || affirmativeConversion;
   if (guidedDemo && action.steps?.some((step) => step.config?.trigger === "explicit_guided_demo_request")) {
     state.workflowTrigger = "explicit_guided_demo_request";
     state.currentStepId = action.steps.find((step) => step.config?.trigger === "explicit_guided_demo_request")?.id ?? state.currentStepId;
-  } else if (normalConversion && action.steps?.some((step) => step.config?.normalConversionEndpoint === true)) {
+  } else if ((normalConversion || affirmativeConversion) && action.steps?.some((step) => step.config?.normalConversionEndpoint === true)) {
     state.workflowTrigger = undefined;
     state.currentStepId = action.steps.find((step) => step.config?.normalConversionEndpoint === true)?.id ?? state.currentStepId;
   } else if (isExplicitHumanRequest(question) && action.steps?.some((step) => step.config?.trigger === "explicit_support_or_human_request")) {
