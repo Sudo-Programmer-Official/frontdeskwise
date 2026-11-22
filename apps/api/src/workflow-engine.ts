@@ -401,6 +401,15 @@ function optionForField(field: ActionField, input: string): string | null {
   return null;
 }
 
+function multiSelectForField(field: ActionField, input: string): string | null {
+  const requested = input.split(/[,;]|\s+and\s+/i).map((item) => item.trim()).filter(Boolean);
+  if (!requested.length) return null;
+  const choices = requested.map((item) => field.options?.find((option) => normalizedPhrase(option) === normalizedPhrase(item))
+    ?? field.options?.find((option) => normalizedPhrase(option).includes(normalizedPhrase(item)) || normalizedPhrase(item).includes(normalizedPhrase(option))));
+  if (choices.some((choice): choice is undefined => !choice)) return null;
+  return [...new Set(choices as string[])].join(", ");
+}
+
 function fieldLooksLike(field: ActionField, ...terms: string[]): boolean {
   const haystack = `${field.key} ${field.label}`.toLowerCase();
   return terms.some((term) => haystack.includes(term));
@@ -439,7 +448,11 @@ export function extractWorkflowValues(action: ActionFlow, input: string): Record
     else if (field.key === "name" || field.key === "parent_name" || fieldLooksLike(field, "guardian")) {
       if (name) extracted[field.key] = name;
     }
-    const option = field.type === "select" ? optionForField(field, value) : null;
+    const option = field.type === "select"
+      ? optionForField(field, value)
+      : field.type === "multi_select"
+        ? multiSelectForField(field, value)
+        : null;
     if (option) extracted[field.key] = option;
     if (field.key === "program") {
       const namedProgram = program ?? value.match(/\b(?:turtle|level|program)\s*[-#]?\s*[a-z0-9]+\b/i)?.[0];

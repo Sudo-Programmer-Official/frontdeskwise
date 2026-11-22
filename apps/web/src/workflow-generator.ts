@@ -1,7 +1,7 @@
 export type WorkflowFieldDraft = {
   key: string;
   label: string;
-  type: "text" | "email" | "phone" | "select" | "date" | "number";
+  type: "text" | "email" | "phone" | "select" | "multi_select" | "date" | "number";
   required: boolean;
   question: string;
   options?: string[];
@@ -12,6 +12,7 @@ export type WorkflowStepDraft = {
   type: string;
   label?: string;
   fieldKey?: string;
+  answerType?: WorkflowFieldDraft["type"];
   question?: string;
   required?: boolean;
   options?: string[];

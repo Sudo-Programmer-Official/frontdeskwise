@@ -40,7 +40,7 @@ export type ActionEvidence = {
   confidence: number;
 };
 
-export type ActionFieldType = "text" | "email" | "phone" | "select" | "date" | "number";
+export type ActionFieldType = "text" | "email" | "phone" | "select" | "multi_select" | "date" | "number";
 export type ActionCaptureMode = "auto" | "conversational" | "form" | "hybrid";
 export type ResolvedActionCaptureMode = Exclude<ActionCaptureMode, "auto">;
 
@@ -937,6 +937,13 @@ export function validateFieldValue(field: ActionField, rawValue: string): { valu
   if (field.type === "phone" && value.replace(/\D/g, "").length < 7) return { value: null, error: "Please share a phone number with at least 7 digits." };
   if (field.type === "number" && !/^\d+(?:\.\d+)?$/.test(value)) return { value: null, error: "Please share a number for " + field.label.toLowerCase() + "." };
   if (field.type === "date" && Number.isNaN(Date.parse(value))) return { value: null, error: "Please share a date for " + field.label.toLowerCase() + "." };
+  if (field.type === "multi_select" && field.options?.length) {
+    const requested = value.split(/[,;]|\s+and\s+/i).map((item) => item.trim()).filter(Boolean);
+    const choices = requested.map((item) => field.options?.find((option) => normalize(option) === normalize(item))
+      ?? field.options?.find((option) => normalize(option).includes(normalize(item)) || normalize(item).includes(normalize(option))));
+    if (!choices.length || choices.some((choice): choice is undefined => !choice)) return { value: null, error: "Please choose one or more of: " + field.options.join(", ") + "." };
+    return { value: [...new Set(choices)].join(", ") };
+  }
   if (field.type === "select" && field.options?.length) {
     const exact = field.options.find((option) => normalize(option) === normalize(value));
     const choice = exact ?? (!["usage_type", "main_goal", "usage_level"].includes(field.key)
@@ -954,6 +961,7 @@ export function validateFieldValue(field: ActionField, rawValue: string): { valu
 }
 
 export function fieldPrompt(field: ActionField): string {
+  if (field.type === "multi_select" && field.options?.length) return field.question + " (choose one or more: " + field.options.join(", ") + ")";
   return field.type === "select" && field.options?.length
     ? field.question + " (" + field.options.join(", ") + ")"
     : field.question;

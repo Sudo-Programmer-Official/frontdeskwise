@@ -212,20 +212,33 @@ function element(documentRef, tag, className) {
     return node;
 }
 function renderFormControl(documentRef, field, valueOverride) {
-    if (field.type === "select") {
+    if (field.type === "select" || field.type === "multi_select") {
         const select = element(documentRef, "select");
         select.name = field.key;
-        const empty = element(documentRef, "option");
-        empty.value = "";
-        empty.textContent = "Select…";
-        select.appendChild(empty);
+        const multiple = field.type === "multi_select";
+        select.multiple = multiple;
+        if (multiple)
+            select.size = Math.min(Math.max(field.options?.length ?? 2, 2), 5);
+        if (!multiple) {
+            const empty = element(documentRef, "option");
+            empty.value = "";
+            empty.textContent = "Select…";
+            select.appendChild(empty);
+        }
         for (const optionValue of field.options ?? []) {
             const option = element(documentRef, "option");
             option.value = optionValue;
             option.textContent = optionValue;
             select.appendChild(option);
         }
-        select.value = valueOverride ?? field.value ?? "";
+        const value = valueOverride ?? field.value ?? "";
+        if (multiple) {
+            const selected = new Set(value.split(",").map((item) => item.trim()).filter(Boolean));
+            for (const option of Array.from(select.options))
+                option.selected = selected.has(option.value);
+        }
+        else
+            select.value = value;
         return select;
     }
     const input = element(documentRef, "input");
@@ -627,7 +640,9 @@ export function createWidgetRenderer(mount, options) {
         for (const field of Array.from(actionForm.elements)) {
             const control = field;
             if (control.name)
-                values[control.name] = control.type === "checkbox" ? String(control.checked) : control.value;
+                values[control.name] = control instanceof HTMLSelectElement && control.multiple
+                    ? Array.from(control.selectedOptions).map((option) => option.value).join(", ")
+                    : control.type === "checkbox" ? String(control.checked) : control.value;
         }
         if (config.requireLeadConsent && state.consentGiven)
             values.consent = "true";

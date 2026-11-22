@@ -227,6 +227,16 @@ test("plan selection accepts a literal option and advances past the current step
   assert.equal(currentWorkflowStep(plan, state)?.id, "main-goal");
 });
 
+test("workflow extraction keeps multiple configured choices in order", () => {
+  const action: ActionFlow = {
+    ...flow,
+    fields: [{ id: "goals", key: "goals", label: "Goals", type: "multi_select", required: true, question: "What should we help with?", options: ["Planning", "Reminders", "Focus"] }],
+    steps: [{ id: "goals", type: "capture", fieldKey: "goals" }],
+  };
+  const values = extractWorkflowValues(action, "Planning, reminders and focus");
+  assert.equal(values.goals, "Planning, Reminders, Focus");
+});
+
 test("resuming an interruption does not rewind a cursor advanced by the answer", () => {
   const state = createActionState(flow);
   pushWorkflowInterruption(state, { intent: "pricing", question: "How much?", returnStepId: "name" }, "2026-01-01T00:00:00.000Z");

@@ -12,6 +12,7 @@ import {
   actionTemplate,
   actionReadiness,
 } from "../src/action-flows.js";
+import type { ActionField } from "../src/action-flows.js";
 
 const ids = (key: string) => key + "-id";
 
@@ -78,6 +79,21 @@ test("field validation keeps the backend in control of structured answers", () =
   }
   state.skipped = [phone.key];
   assert.equal(nextActionField(enrollment, state), null);
+});
+
+test("multi-select fields accept multiple configured options", () => {
+  const field: ActionField = {
+    id: "main_goal",
+    key: "main_goal",
+    label: "Main goal",
+    type: "multi_select",
+    required: true,
+    question: "What would you like help with?",
+    options: ["Planning", "Reminders", "Focus", "Research", "Calendar", "Team collaboration"],
+  };
+  assert.equal(validateFieldValue(field, "Planning, reminders and focus").value, "Planning, Reminders, Focus");
+  assert.equal(validateFieldValue(field, "Planning, unknown").value, null);
+  assert.match(fieldPrompt(field), /Planning, Reminders, Focus/);
 });
 
 test("capture mode minimizes friction for simple leads and preserves qualification for enrollment", () => {

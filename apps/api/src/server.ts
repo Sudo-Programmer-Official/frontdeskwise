@@ -4124,7 +4124,7 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     });
   }
 
-  const allowedTypes = new Set(["text", "email", "phone", "select", "date", "number"]);
+  const allowedTypes = new Set(["text", "email", "phone", "select", "multi_select", "date", "number"]);
   const fieldsProvided = Array.isArray(body.fields);
   const sourceFields: unknown[] = fieldsProvided && Array.isArray(body.fields) ? body.fields : base.fields;
   const fields: ActionFlow["fields"] = sourceFields.map((value: unknown, index: number) => {
