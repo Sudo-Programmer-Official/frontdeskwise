@@ -104,8 +104,8 @@ const sites: BenchmarkSite[] = [
     ],
   },
   {
-    id: "mtv-nails-salonflow",
-    url: "https://mtvnails.salonflow.studio/",
+    id: "salonflow",
+    url: "https://salonflow.studio/",
     archetypes: ["SaaS/product", "appointment-based", "local service"],
     questions: [
       { question: "What is SalonFlow?", expectedMode: "informational" },
@@ -275,6 +275,7 @@ async function answerQuestion(
   return {
     question: question.question,
     expectedMode: question.expectedMode,
+    expectedFallback: question.expectedFallback ?? null,
     classification,
     intent,
     topEvidence,
@@ -287,6 +288,7 @@ async function answerQuestion(
     fallbackCorrect,
     answer,
     fallbackReason,
+    generationEvaluated: llmConfigured(),
     latencyMs: Number((performance.now() - startedAt).toFixed(1)),
     pass,
   };
@@ -389,7 +391,12 @@ async function main(): Promise<void> {
           active: actions.filter((action) => action.enabled).map((action) => ({ actionType: action.actionType, name: action.name, destination: action.destination, provider: action.provider, confidence: action.confidence, sourceUrl: action.sourceUrl, origin: action.origin, lifecycleStatus: action.lifecycleStatus })),
         },
         questions: questionReports,
-        score: { passed, total: questionReports.length, passRate: questionReports.length ? Number((passed / questionReports.length).toFixed(4)) : 0 },
+        score: {
+          passed,
+          total: questionReports.length,
+          passRate: questionReports.length ? Number((passed / questionReports.length).toFixed(4)) : 0,
+          evaluation: benchmarkKey ? "full" : "retrieval-routing-only",
+        },
         error,
       });
     }
@@ -402,13 +409,16 @@ async function main(): Promise<void> {
     report.summary = {
       totalQuestions: questions.length,
       expectedQuestions: 72,
+      evaluation: benchmarkKey ? "full" : "retrieval-routing-only",
+      generationEvaluated: Boolean(benchmarkKey),
       crawlDurationMs: Date.now() - startedAt,
       crawlerHighValuePageCoverage: highValueCoverage.length ? Number((highValueCoverage.reduce((total, value) => total + value, 0) / highValueCoverage.length).toFixed(4)) : 0,
       top3RetrievalRelevance: metric("retrievalRelevant"),
-      groundedCorrectness: metric("grounding"),
+      groundedCorrectness: benchmarkKey ? metric("grounding") : null,
       citationCorrectness: metric("citationCorrect"),
       fallbackCorrectness: metric("fallbackCorrect"),
       actionRoutingCorrectness: metric("actionCorrect"),
+      overallQuestionPassRate: benchmarkKey ? metric("pass") : null,
       criticalHallucinations: questions.filter((question) => question.grounding === false && question.expectedFallback !== true && question.answer && question.fallbackReason === null).length,
     };
   } finally {

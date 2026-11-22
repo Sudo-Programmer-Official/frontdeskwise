@@ -707,7 +707,7 @@ export function defaultActionFlows(
     if (key) keys.add(key);
   }
   if (keys.size === 1 && /daycare|childcare|preschool|nursery|tour/.test(value)) keys.add("book_tour");
-  else if (/swim|lesson|student|school|class/.test(value)) keys.add("enroll_child");
+  else if (/swim|lesson|student/.test(value)) keys.add("enroll_child");
   else if (/salon|stylist|barber|spa|appointment/.test(value)) keys.add("book_appointment");
   else if (/hvac|air condition|heating|cooling|plumb|roof|repair/.test(value)) keys.add("request_quote");
   else if (/dental|dentist|clinic|medical|health/.test(value)) keys.add("schedule_consultation");

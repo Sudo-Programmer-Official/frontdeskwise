@@ -9031,8 +9031,14 @@ async function recordConversionEvent(
       [event.id, organizationId, business.id, event.conversationId, event.flowId, event.fieldId, event.event, event.timestamp, event.sourcePage, event.device, JSON.stringify(event.metadata)],
     );
   } catch (error) {
-    if (!isMissingDatabaseTable(error)) throw error;
-    app.log.warn({ businessId: business.id }, "Conversion events table is not available yet");
+    // Conversion telemetry is diagnostic data. A rolling deploy can briefly
+    // run the new API against an older event constraint, and that must never
+    // turn an otherwise valid customer response into a 500.
+    app.log.warn({
+      error: error instanceof Error ? error.message : "unknown conversion event persistence error",
+      businessId: business.id,
+      event: event.event,
+    }, "Conversion event was not persisted");
   }
 }
 

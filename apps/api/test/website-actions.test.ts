@@ -174,6 +174,15 @@ test("demo actions are created from evidence and do not trigger on explanatory q
   assert.equal(detectAction(actions, "Book a demo"), null);
 });
 
+test("generic classes do not create a cross-tenant swim enrollment action", () => {
+  const actions = defaultActionFlows(
+    "Munchkin Town",
+    "open play, birthday parties, memberships, and classes for children",
+    (key) => key,
+  );
+  assert.equal(actions.some((action) => action.key === "enroll_child"), false);
+});
+
 test("action registry lifecycle controls runtime availability and primary precedence", () => {
   const candidates = extractWebsiteActions('<a href="/demo">Request a demo</a><a href="/book">Book now</a>', "https://example.test/");
   const actions = defaultActionFlows("Example SaaS", "demo and booking", (key) => key, candidates);
