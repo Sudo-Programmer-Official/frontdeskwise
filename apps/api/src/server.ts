@@ -8227,6 +8227,11 @@ async function continueActionConversation(
       flowId: action.id,
       metadata: { flowKey: action.key },
     });
+    // A workflow may retain the DIRECT_LINK completion mode so its final
+    // step can still expose the verified destination. The workflow engine
+    // must own the opening turn, though; otherwise the direct-link shortcut
+    // completes the action before qualification ever starts.
+    if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, true);
     const directCta = primaryCtaForAction(action);
     if (action.executionMode === "DIRECT_LINK" && directCta?.url) {
       state.status = "completed";
@@ -8242,7 +8247,6 @@ async function continueActionConversation(
       const { action: _action, ...answerWithoutAction } = directAnswer;
       return { ...answerWithoutAction, primaryCta: directCta };
     }
-    if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, true);
     const next = nextConversationalField(action, state);
     if (state.captureMode === "form" || !next) {
       state.formShown = true;

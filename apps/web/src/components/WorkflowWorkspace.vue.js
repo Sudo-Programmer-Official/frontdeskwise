@@ -1,5 +1,3 @@
-/// <reference types="../../node_modules/@vue/language-core/types/template-helpers.d.ts" />
-/// <reference types="../../node_modules/@vue/language-core/types/props-fallback.d.ts" />
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Sparkles, X } from "@lucide/vue";
 import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey } from "../workflow-generator.js";
@@ -164,7 +162,11 @@ const workflowMetadata = computed(() => {
         : null;
 });
 const workflowTitle = computed(() => workflowMetadata.value?.name || workflowDraft.value?.name || "Workflow");
-const workflowStatusSummary = computed(() => `Draft · ${draftSteps.value.length} step${draftSteps.value.length === 1 ? "" : "s"} · ${providerSummary.value}`);
+const workflowStatusSummary = computed(() => {
+    const published = props.publishingStatus === "LIVE" && !draftIsDirty.value;
+    const status = published ? "Published" : "Draft";
+    return `${status} · ${draftSteps.value.length} step${draftSteps.value.length === 1 ? "" : "s"} · ${providerSummary.value}`;
+});
 function isConditionalStep(step) {
     const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
         ? step.config
@@ -1347,6 +1349,7 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-page-heading']} */ ;
     /** @type {__VLS_StyleScopedClasses['eyebrow']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-status-dot']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-layout']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-selector-copy']} */ ;
@@ -1421,6 +1424,17 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-row']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-row']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-row']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-card']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-conditional-heading']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-workspace']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-step-list']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-empty']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-sticky-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-header']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-page-actions']} */ ;
@@ -1469,9 +1483,10 @@ const __VLS_template = () => {
     });
     /** @type {__VLS_StyleScopedClasses['workflow-header-status']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-        ...{ class: "workflow-status-dot" },
+        ...{ class: (['workflow-status-dot', { published: props.publishingStatus === 'LIVE' && !draftIsDirty.value }]) },
         'aria-hidden': "true",
     });
+    /** @type {__VLS_StyleScopedClasses['published']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-status-dot']} */ ;
     (__VLS_unwrap(workflowStatusSummary, {}));
     __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
@@ -1489,7 +1504,7 @@ const __VLS_template = () => {
                 void $event;
                 return (__VLS_unwrap(emit, {})('refresh'));
                 // @ts-ignore
-                [workflowGenerationKey, workflowTitle, workflowStatusSummary, draftIsDirty, emit,];
+                [workflowGenerationKey, workflowTitle, draftIsDirty, draftIsDirty, workflowStatusSummary, emit,];
             } },
         ...{ class: "text-button workflow-header-secondary-action" },
         type: "button",
@@ -1514,6 +1529,15 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
     /** @type {__VLS_StyleScopedClasses['small']} */ ;
     (workflowSaveLoading.value ? 'Saving…' : 'Publish');
+    if (__VLS_ctx.publishError) {
+        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
+            ...{ class: "form-error workflow-publish-error" },
+            role: "alert",
+        });
+        /** @type {__VLS_StyleScopedClasses['form-error']} */ ;
+        /** @type {__VLS_StyleScopedClasses['workflow-publish-error']} */ ;
+        (__VLS_ctx.publishError);
+    }
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: (['workflow-layout', { 'workflow-layout-empty': !workflowActions.value.length }]) },
     });
@@ -1549,7 +1573,7 @@ const __VLS_template = () => {
             });
             (workflowDisplayName(action));
             // @ts-ignore
-            [workflowDraft, workflowDraft, workflowSaveLoading, workflowSaveLoading, workflowActions, workflowActions, workflowActions, workflowActions, selectedWorkflowId,];
+            [workflowDraft, workflowDraft, workflowSaveLoading, workflowSaveLoading, publishError, publishError, workflowActions, workflowActions, workflowActions, workflowActions, selectedWorkflowId,];
         }
         __VLS_asFunctionalElement1(__VLS_intrinsics.button, __VLS_intrinsics.button)({
             ...{ onClick: (openCreateWorkflow) },
@@ -1806,6 +1830,15 @@ const __VLS_template = () => {
                 }
             }
         }
+        if (workflowDraft.value.workflowSafety?.status === 'blocked') {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-isolation-warning" },
+                role: "alert",
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-isolation-warning']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        }
         __VLS_asFunctionalElement1(__VLS_intrinsics.section, __VLS_intrinsics.section)({
             ...{ class: "workflow-readiness-card" },
             'aria-labelledby': "workflow-setup-heading",
@@ -1859,7 +1892,7 @@ const __VLS_template = () => {
                         throw 0;
                     return (setupStatusOpen.value = !setupStatusOpen.value);
                     // @ts-ignore
-                    [configurationComplete, configurationComplete, configurationLabel, setupProgressLabel, setupStatusOpen, setupStatusOpen,];
+                    [workflowDraft, configurationComplete, configurationComplete, configurationLabel, setupProgressLabel, setupStatusOpen, setupStatusOpen,];
                 } },
             ...{ class: "text-button workflow-readiness-toggle" },
             type: "button",

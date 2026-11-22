@@ -43,6 +43,8 @@ const props = defineProps<{
   ownerHeaders: () => Record<string, string>;
   businessName?: string;
   businessContext?: WorkflowBusinessContext | null;
+  publishingStatus?: "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  publishError?: string;
 }>();
 
 const emit = defineEmits<{
@@ -207,7 +209,11 @@ const workflowMetadata = computed(() => {
     : null;
 });
 const workflowTitle = computed(() => workflowMetadata.value?.name || workflowDraft.value?.name || "Workflow");
-const workflowStatusSummary = computed(() => `Draft · ${draftSteps.value.length} step${draftSteps.value.length === 1 ? "" : "s"} · ${providerSummary.value}`);
+const workflowStatusSummary = computed(() => {
+  const published = props.publishingStatus === "LIVE" && !draftIsDirty.value;
+  const status = published ? "Published" : "Draft";
+  return `${status} · ${draftSteps.value.length} step${draftSteps.value.length === 1 ? "" : "s"} · ${providerSummary.value}`;
+});
 
 function isConditionalStep(step: WorkflowStep): boolean {
   const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
@@ -958,7 +964,7 @@ onMounted(() => {
       <div class="workflow-page-heading">
         <p class="eyebrow">Workflow</p>
         <h2>{{ workflowTitle }}</h2>
-        <p class="workflow-header-status"><span class="workflow-status-dot" aria-hidden="true"></span>{{ workflowStatusSummary }}<span class="workflow-header-separator">·</span>{{ draftIsDirty ? 'Unsaved changes' : 'Last saved' }}</p>
+        <p class="workflow-header-status"><span :class="['workflow-status-dot', { published: props.publishingStatus === 'LIVE' && !draftIsDirty }]" aria-hidden="true"></span>{{ workflowStatusSummary }}<span class="workflow-header-separator">·</span>{{ draftIsDirty ? 'Unsaved changes' : 'Last saved' }}</p>
       </div>
       <div class="toolbar-actions workflow-page-actions">
         <button class="text-button workflow-header-secondary-action" type="button" @click="emit('refresh')">Refresh</button>
@@ -966,6 +972,7 @@ onMounted(() => {
         <button class="primary-button small" type="button" :disabled="!workflowDraft || workflowSaveLoading" @click="publishWorkflow">{{ workflowSaveLoading ? 'Saving…' : 'Publish' }}</button>
       </div>
     </div>
+    <p v-if="publishError" class="form-error workflow-publish-error" role="alert">{{ publishError }}</p>
 
     <div :class="['workflow-layout', { 'workflow-layout-empty': !workflowActions.length }]">
       <div v-if="workflowActions.length" class="workflow-selector-bar">
@@ -1470,6 +1477,8 @@ onMounted(() => {
 .workflow-page-heading h2 { margin: 0; color: #243758; font-size: 23px; letter-spacing: -.04em; }
 .workflow-header-status { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 6px 0 0; color: #77889e; font-size: 11px; }
 .workflow-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #efb44e; box-shadow: 0 0 0 3px #fff4da; }
+.workflow-status-dot.published { background: #1da875; box-shadow: 0 0 0 3px #e8f8f1; }
+.workflow-publish-error { margin: 12px 0 0; }
 .workflow-header-separator { color: #b6c1cf; }
 .workflow-page-actions { gap: 8px; }
 .workflow-header-secondary-action { padding: 7px 2px; color: #7b8b9f; font-size: 11px; }

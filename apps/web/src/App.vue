@@ -1191,6 +1191,7 @@ const widgetVerificationMessage = ref("");
 const widgetVerificationLoading = ref(false);
 const agentPublishing = ref<AgentPublishing>({ status: "NOT_PUBLISHED", domain: null, publishedAt: null, configVersion: null });
 const agentPublishingLoading = ref(false);
+const agentPublishingError = ref("");
 const widgetPreviewMode = ref<"desktop" | "mobile">("desktop");
 const ownershipVerification = ref<WorkspacePayload["ownership"] | null>(null);
 const verificationMethod = ref<VerificationMethod>("meta_tag");
@@ -2213,6 +2214,14 @@ function actionCustomerMessage(action: ActionFlow): string {
 }
 
 function actionTestQuestion(action: ActionFlow): string {
+  if (action.steps?.length) {
+    const fieldKeys = new Set((action.fields ?? []).map((field) => field.key));
+    if (fieldKeys.has("business_type")) return "I run a small salon and I'm looking for software.";
+    if (fieldKeys.has("customer_type") || fieldKeys.has("child_age")) return "I want to find swim lessons for my child.";
+    if (fieldKeys.has("usage_type") || fieldKeys.has("usage_level")) return "I'm choosing a plan for my business.";
+    const firstTrigger = action.triggerPhrases.find((phrase) => phrase.trim());
+    if (firstTrigger) return firstTrigger;
+  }
   if (action.executionMode === "DIRECT_LINK") {
     const label = action.completion.linkLabel?.trim() || action.name.trim();
     return `I'd like to ${label.toLowerCase()}`;
@@ -2792,6 +2801,7 @@ function clearWorkspaceState() {
   widgetVerificationMessage.value = "";
   agentPublishing.value = { status: "NOT_PUBLISHED", domain: null, publishedAt: null, configVersion: null };
   agentPublishingLoading.value = false;
+  agentPublishingError.value = "";
   ownershipVerification.value = null;
   verificationToken.value = "";
   verificationInstructions.value = "";
@@ -6676,6 +6686,7 @@ async function saveAgent(...args: Array<AgentSaveModel | Event>) {
 async function publishAgent(model: AgentSaveModel): Promise<void> {
   if (!requireAccountForPublish() || agentPublishingLoading.value) return;
   agentPublishingLoading.value = true;
+  agentPublishingError.value = "";
   try {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/agent-config`), {
       method: "POST",
@@ -6688,6 +6699,7 @@ async function publishAgent(model: AgentSaveModel): Promise<void> {
     await refreshWorkspaceSummary(false);
     notifySuccess("Your AI front desk is live.");
   } catch (error) {
+    agentPublishingError.value = error instanceof Error ? error.message : "Could not publish the AI front desk.";
     notifyError(error, "Could not publish the AI front desk.");
   } finally {
     agentPublishingLoading.value = false;
@@ -7385,7 +7397,7 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'workflows'" class="workflow-workspace-shell">
           <p v-if="workflowContextRefreshMessage" class="form-error workflow-context-refresh-message" role="status">{{ workflowContextRefreshMessage }}</p>
-          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
+          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
