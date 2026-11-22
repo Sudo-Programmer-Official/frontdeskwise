@@ -67,6 +67,7 @@ test("owner UI uses the shared product design language", () => {
   assert.match(styles, /mobile-preview/);
   assert.match(agent, /aria-label="Widget preview"|Customer view/);
   assert.match(widgetPreview, /class="preview-website-frame"/);
+  assert.match(widgetPreview, /\.preview-site-state[^}]*left: 20px[^}]*transform: none/);
   assert.match(widgetPreview, /@load="markWebsitePreviewReady"/);
   assert.match(widgetPreview, /websitePreviewEndpoint/);
   assert.match(widgetPreview, /connected to knowledge/);

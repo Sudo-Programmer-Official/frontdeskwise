@@ -358,7 +358,7 @@ onBeforeUnmount(() => {
 .preview-mobile .preview-site-body { min-height: 640px; }
 .preview-site-body-fallback { display: grid; place-items: center; }
 .preview-website-frame { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
-.preview-site-state { position: absolute; z-index: 1; top: 20px; left: 20px; display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 7px; color: #58728f; background: rgba(255,255,255,.84); font-size: 10px; }
+.preview-site-state { position: absolute; z-index: 1; top: 20px; left: 20px; display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 7px; color: #58728f; background: rgba(255,255,255,.84); font-size: 10px; transform: none; }
 .preview-site-state-dot { width: 7px; height: 7px; border-radius: 50%; background: #2f80ed; animation: preview-pulse 1s infinite ease-in-out; }
 .preview-site-error { position: relative; z-index: 1; width: min(270px, calc(100% - 44px)); padding: 18px; border: 1px solid rgba(205,225,239,.95); border-radius: 12px; color: #4d7897; background: rgba(255,255,255,.82); box-shadow: 0 12px 30px rgba(20,42,74,.08); font-size: 11px; line-height: 1.45; }
 .preview-site-error strong { display: block; overflow: hidden; color: #164c86; text-overflow: ellipsis; white-space: nowrap; }
