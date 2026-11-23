@@ -10,7 +10,7 @@ services:
     healthCheckPath: /ready
     envVars:
       - key: NODE_VERSION
-        value: 20.19.0
+        value: 20.19.5
       - key: NODE_ENV
         value: production
       - key: HOST
@@ -25,12 +25,24 @@ services:
         value: /etc/secrets/rds-ca.pem
       - key: FRONTDESKWISE_CREDENTIAL_KEY
         sync: false
+      - key: FRONTDESKWISE_RELEASE_VERSION
+        sync: false
+      - key: FRONTDESKWISE_DEPLOYMENT_VERSION
+        sync: false
+      - key: FRONTDESKWISE_MODEL_ROUTING_VERSION
+        value: model-routing-v1
       - key: FRONTDESKWISE_JACKRABBIT_API_BASE_URL
         sync: false
       - key: WEB_ORIGIN
         value: https://frontdeskwise.com,https://www.frontdeskwise.com,https://app.frontdeskwise.com
       - key: FRONTDESKWISE_PUBLIC_API_ORIGIN
         value: https://api.frontdeskwise.com
+      - key: FRONTDESKWISE_WEB_PUSH_PUBLIC_KEY
+        sync: false
+      - key: FRONTDESKWISE_WEB_PUSH_PRIVATE_KEY
+        sync: false
+      - key: FRONTDESKWISE_WEB_PUSH_SUBJECT
+        value: mailto:support@frontdeskwise.com
       - key: FRONTDESKWISE_WIDGET_ORIGIN
         value: https://www.frontdeskwise.com
       - key: FRONTDESKWISE_WIDGET_URL

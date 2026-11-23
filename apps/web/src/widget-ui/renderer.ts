@@ -100,7 +100,7 @@ export interface WidgetConfig {
   fallbackContacts?: WidgetFallbackContacts;
 }
 
-export type WidgetHandoffStatus = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "HANDOFF_REQUESTED" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
+export type WidgetHandoffStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "CONTACT_REQUIRED" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
 
 export interface WidgetState {
   isOpen: boolean;
@@ -287,6 +287,7 @@ const WIDGET_STYLES = `
   .fdw-lead-heading { display: grid; gap: 4px; margin-bottom: 2px; }
   .fdw-lead-heading strong { color: #1f3658; font-size: 13px; letter-spacing: -.01em; }
   .fdw-lead-heading small { color: #687b94; font-size: 10px; line-height: 1.4; }
+  .fdw-lead-contact-hint { color: #687b94; font-size: 10px; line-height: 1.4; }
   .fdw-action-form label.fdw-consent-row, .fdw-lead label.fdw-consent-row { display: flex; width: 100%; min-width: 0; gap: 7px; align-items: flex-start; color: #687b94; font-size: 10px; font-weight: 500; line-height: 1.4; }
   .fdw-consent-row > span { display: block; min-width: 0; flex: 1; overflow-wrap: anywhere; }
   .fdw-action-form .fdw-consent-row input, .fdw-lead .fdw-consent-row input { width: 15px; height: 15px; min-width: 15px; min-height: 15px; flex: 0 0 15px; margin: 1px 0 0; padding: 0; border: 0; border-radius: 3px; accent-color: var(--fdw-accent, #0d6efd); }
@@ -443,7 +444,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       <div class="fdw-handoff-status" role="status" aria-live="polite"><div class="fdw-handoff-content"><span class="fdw-handoff-copy"></span><div class="fdw-handoff-actions" hidden><button class="fdw-handoff-continue" type="button">Continue conversation</button><button class="fdw-handoff-new" type="button">Ask a new question</button></div></div><button class="fdw-handoff-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button></div>
       <div class="fdw-quick-actions"></div>
       <form class="fdw-action-form"></form>
-      <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong>Let's get your details</strong><small>We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><div class="fdw-consent-saved" hidden><span class="fdw-consent-saved-mark" aria-hidden="true">✓</span><span>Consent saved for this visit.</span></div><button type="submit">Continue</button></form>
+      <form class="fdw-lead" hidden><div class="fdw-lead-heading"><strong class="fdw-lead-heading-title">Let's get your details</strong><small class="fdw-lead-heading-copy">We’ll only use this to follow up on your question.</small></div><label><span>Name <b>*</b></span><input class="fdw-lead-name" name="name" type="text" autocomplete="name" placeholder="Your name" required></label><label><span>Email <b>*</b></span><input class="fdw-lead-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label><span>Phone <em>Optional</em></span><input class="fdw-lead-phone" name="phone" type="tel" autocomplete="tel" placeholder="(555) 555-0123"></label><small class="fdw-lead-contact-hint" hidden>Email or phone is enough — whichever is best for you.</small><label class="fdw-consent-row" hidden><input class="fdw-lead-consent" type="checkbox" name="consent"><span>I agree to share my details with this business. <a class="fdw-privacy-link" target="_blank" rel="noreferrer" hidden>Privacy notice</a></span></label><div class="fdw-consent-saved" hidden><span class="fdw-consent-saved-mark" aria-hidden="true">✓</span><span>Consent saved for this visit.</span></div><button type="submit">Continue</button></form>
       <form class="fdw-composer"><input placeholder="Ask a question…" aria-label="Ask a question"><button aria-label="Send" type="submit">➤</button></form>
       <div class="fdw-powered-by" aria-label="Powered by FrontDeskWise"><span class="fdw-powered-by-label">Powered by ${SYMBOL}<strong>FrontDeskWise</strong></span></div>
     </section>`;
@@ -465,6 +466,14 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   const quickActions = root.querySelector<HTMLElement>(".fdw-quick-actions")!;
   const actionForm = root.querySelector<HTMLFormElement>(".fdw-action-form")!;
   const lead = root.querySelector<HTMLFormElement>(".fdw-lead")!;
+  const leadHeadingTitle = root.querySelector<HTMLElement>(".fdw-lead-heading-title")!;
+  const leadHeadingCopy = root.querySelector<HTMLElement>(".fdw-lead-heading-copy")!;
+  const leadContactHint = root.querySelector<HTMLElement>(".fdw-lead-contact-hint")!;
+  const leadNameLabel = root.querySelector<HTMLElement>(".fdw-lead-name")!.closest("label")!;
+  const leadEmailLabel = root.querySelector<HTMLElement>(".fdw-lead-email")!.closest("label")!;
+  const leadNameInput = root.querySelector<HTMLInputElement>(".fdw-lead-name")!;
+  const leadEmailInput = root.querySelector<HTMLInputElement>(".fdw-lead-email")!;
+  const leadPhoneInput = root.querySelector<HTMLInputElement>(".fdw-lead-phone")!;
   const composer = root.querySelector<HTMLFormElement>(".fdw-composer")!;
   const composerInput = composer.querySelector<HTMLInputElement>("input")!;
   const handoffStatus = root.querySelector<HTMLElement>(".fdw-handoff-status")!;
@@ -693,7 +702,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
 
   function renderHandoff(): void {
     const status = state.handoffStatus;
-    const waiting = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+    const waiting = status === "CONTACT_REQUIRED" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
     const followUpPending = status === "FOLLOW_UP_PENDING";
     const waitingSince = state.handoffRequestedAt ? Date.parse(state.handoffRequestedAt) : NaN;
     const waitingLong = waiting && Number.isFinite(waitingSince) && Date.now() - waitingSince >= 10 * 60 * 1_000;
@@ -781,10 +790,21 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     const aiSuppressed = isAiSuppressed(state.handoffStatus);
     lead.hidden = aiSuppressed || !(state.leadVisible && config.showLeadCapture !== false);
     lead.classList.toggle("fdw-visible", !aiSuppressed && state.leadVisible === true && config.showLeadCapture !== false);
+    const handoffContact = state.handoffStatus === "CONTACT_REQUIRED";
+    leadHeadingTitle.textContent = handoffContact ? "Keep your place while you wait" : "Let's get your details";
+    leadHeadingCopy.textContent = handoffContact
+      ? "The team has been notified. Share the best email or phone so we can reach you if you step away — you can keep chatting here."
+      : "We’ll only use this to follow up on your question.";
+    leadContactHint.hidden = !handoffContact;
+    leadNameInput.required = !handoffContact;
+    leadEmailInput.required = !handoffContact;
+    leadNameLabel.querySelector("span")!.innerHTML = handoffContact ? "Name <em>Optional</em>" : "Name <b>*</b>";
+    leadEmailLabel.querySelector("span")!.innerHTML = handoffContact ? "Email <em>Optional</em>" : "Email <b>*</b>";
+    leadPhoneInput.placeholder = handoffContact ? "Best phone number" : "(555) 555-0123";
     const submit = lead.querySelector<HTMLButtonElement>("button[type=submit]");
     if (submit) {
       submit.disabled = Boolean(state.leadSubmitting);
-      submit.textContent = state.leadSubmitting ? "Sending…" : "Continue";
+      submit.textContent = state.leadSubmitting ? "Saving…" : handoffContact ? "Save details" : "Continue";
     }
   }
 

@@ -23,7 +23,7 @@ export function knowledgeGapReason(args: {
   answerable: boolean;
   hasMatch: boolean;
   modelGenerationFailed: boolean;
-  groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed";
+  groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" | "skipped";
 }): KnowledgeGapReason {
   if (!args.answerable || !args.hasMatch) return "no_authoritative_source";
   if (args.groundingCheckStatus === "failed") return "grounding_check_failed";

@@ -7,13 +7,17 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
 import Stripe from "stripe";
+import webpush from "web-push";
 import { createPoolFromEnv } from "./database.js";
-import { CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
+import { assertPublicUrl, CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
+import { assessOnboardingKnowledge, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
 import { createRenderedPageAdapter } from "./rendered-crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
 import { verifyFirebaseIdToken } from "./firebase-auth.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
+import { validateActionExecutionPolicy } from "./action-policy.js";
+import { boundedSecurityMetadata, firebaseEmailVerifiedClaim, hashSecurityIdentifier, looksLikePromptInjection, securityRiskForPromptInjection, type SecurityEventRisk } from "./security.js";
 import { generateGroundedAnswer, hasDirectSensitiveEvidence, routeQuestion, verifyGroundedAnswer, type ModelUsage } from "./model-routing.js";
 import { shapeCustomerAnswer, type AnswerTone } from "./answer-shaping.js";
 import {
@@ -133,6 +137,7 @@ import {
 } from "./lifecycle-messaging.js";
 import { decideConversationRoute } from "./conversation-orchestrator.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
+import { extractHandoffContact, hasHandoffContactChannel, mergeHandoffContacts, type HandoffContact } from "./handoff-contact.js";
 import {
   assertConversationRuntimeState,
   buildConversationRuntimeState,
@@ -148,6 +153,12 @@ import {
 } from "./conversation-decision-trace.js";
 import { observeWorkflowLoop } from "./workflow-loop-guard.js";
 import { deriveImprovementSignals, normalizeImprovementQuestion } from "./improvement-signals.js";
+import {
+  assessExperienceSignals,
+  type ExperienceSignal,
+  type ExperienceSignalAssessment,
+} from "./experience-signals.js";
+import { syncOnboardingRecovery } from "./onboarding-recovery.js";
 import { verifyWorkflowSet } from "./workflow-verifier.js";
 import {
   createActionConnector,
@@ -199,12 +210,61 @@ import { buildWorkflowContext } from "./workflow-context.js";
 import { validateWorkflowTenantIsolation, workflowIsolationMessage, type WorkflowIsolationResult } from "./workflow-isolation.js";
 import { buildCanonicalBusinessModel, createBusinessContextSnapshot, type BusinessContextSnapshot } from "./business-context.js";
 import { preserveWorkflowGoal } from "./workflow-goal.js";
+import { extractWebsitePricingCandidates } from "./pricing-extraction.js";
+import { answerConversationStateQuestion, type ConversationStateSnapshot } from "./conversation-state.js";
+import { buildExecutiveAnalytics } from "./executive-analytics.js";
+import {
+  customerSafeFallbacks,
+  shouldRunSemanticVerifier,
+  validateCustomerResponse,
+} from "./response-validation.js";
+import {
+  buildObservabilityContext,
+  observabilityMetadata,
+  runtimeObservabilityVersions,
+  type ObservabilityContext,
+  type ObservabilityModel,
+  type ObservabilityWorkflow,
+} from "./observability-context.js";
+import {
+  evaluateFeatureFlag,
+  normalizeFeatureFlagKey,
+  normalizeFeatureFlagStage,
+  normalizeRolloutPercentage,
+  type FeatureFlagConfig,
+  type FeatureFlagDecision,
+  type FeatureFlagOverrideState,
+  type FeatureFlagStage,
+} from "./feature-flags.js";
 
-const app = Fastify({ logger: true, trustProxy: true });
+const trustProxy = process.env.FRONTDESKWISE_TRUST_PROXY?.trim().toLowerCase() === "true";
+const app = Fastify({
+  logger: {
+    base: {
+      service: "frontdeskwise-api",
+      release_version: runtimeObservabilityVersions.releaseVersion,
+      deployment_version: runtimeObservabilityVersions.deploymentVersion,
+      model_routing_version: runtimeObservabilityVersions.modelRoutingVersion,
+    },
+  },
+  trustProxy,
+});
 await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true });
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const pool = createPoolFromEnv();
+const webPushPublicKey = process.env.FRONTDESKWISE_WEB_PUSH_PUBLIC_KEY?.trim() ?? "";
+const webPushPrivateKey = process.env.FRONTDESKWISE_WEB_PUSH_PRIVATE_KEY?.trim() ?? "";
+const webPushSubject = process.env.FRONTDESKWISE_WEB_PUSH_SUBJECT?.trim() || "mailto:support@frontdeskwise.com";
+let webPushConfigured = Boolean(webPushPublicKey && webPushPrivateKey);
+if (webPushConfigured) {
+  try {
+    webpush.setVapidDetails(webPushSubject, webPushPublicKey, webPushPrivateKey);
+  } catch (error) {
+    webPushConfigured = false;
+    app.log.error({ error: error instanceof Error ? error.message : "invalid VAPID configuration" }, "Web Push is disabled because the VAPID configuration is invalid");
+  }
+}
 const configuredWebOrigins = (process.env.WEB_ORIGIN ?? "*").split(",").map((origin) => origin.trim().replace(/\/$/, "")).filter(Boolean);
 const allowedWebOrigins = Array.from(new Set([
   ...configuredWebOrigins,
@@ -219,6 +279,18 @@ const apiRateLimiter = new FixedWindowRateLimiter(
 const demoRateLimiter = new FixedWindowRateLimiter(
   Number(process.env.FRONTDESKWISE_DEMO_RATE_LIMIT_MAX ?? 10),
   Number(process.env.FRONTDESKWISE_DEMO_RATE_LIMIT_WINDOW_MS ?? 3_600_000),
+);
+const widgetMessageRateLimiter = new FixedWindowRateLimiter(
+  Number(process.env.FRONTDESKWISE_WIDGET_MESSAGE_RATE_LIMIT_MAX ?? 30),
+  Number(process.env.FRONTDESKWISE_WIDGET_MESSAGE_RATE_LIMIT_WINDOW_MS ?? 300_000),
+);
+const widgetActionRateLimiter = new FixedWindowRateLimiter(
+  Number(process.env.FRONTDESKWISE_WIDGET_ACTION_RATE_LIMIT_MAX ?? 12),
+  Number(process.env.FRONTDESKWISE_WIDGET_ACTION_RATE_LIMIT_WINDOW_MS ?? 600_000),
+);
+const promptInjectionRateLimiter = new FixedWindowRateLimiter(
+  Number(process.env.FRONTDESKWISE_PROMPT_INJECTION_RATE_LIMIT_MAX ?? 5),
+  Number(process.env.FRONTDESKWISE_PROMPT_INJECTION_RATE_LIMIT_WINDOW_MS ?? 600_000),
 );
 const stripe = process.env.STRIPE_SECRET_KEY?.trim() ? new Stripe(process.env.STRIPE_SECRET_KEY.trim()) : null;
 const stripeAppMetadata = "frontdeskwise";
@@ -283,17 +355,28 @@ async function probeWebsitePreview(websiteUrl: string, previewOrigin: string | n
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { "user-agent": "FrontDeskWise-PreviewProbe/1.0", accept: "text/html,application/xhtml+xml" },
-      redirect: "follow",
-    });
+    let currentUrl = url;
+    let response: Response | null = null;
+    for (let redirects = 0; redirects <= 5; redirects += 1) {
+      await assertPublicUrl(currentUrl);
+      response = await fetch(currentUrl, {
+        signal: controller.signal,
+        headers: { "user-agent": "FrontDeskWise-PreviewProbe/1.0", accept: "text/html,application/xhtml+xml" },
+        redirect: "manual",
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => undefined);
+      if (!location || redirects === 5) throw new CrawlError("The website redirected too many times");
+      currentUrl = new URL(location, currentUrl).toString();
+    }
+    if (!response) throw new CrawlError("The website preview could not be loaded");
     const policy = response.ok
-      ? websitePreviewPolicy(response, url, previewOrigin)
+      ? websitePreviewPolicy(response, currentUrl, previewOrigin)
       : { embeddable: false, reason: "unavailable" as const };
     const result = {
       url,
-      finalUrl: response.url || url,
+      finalUrl: currentUrl,
       status: response.status,
       ...policy,
     };
@@ -312,6 +395,71 @@ function firstCrawledPageOrError(crawled: { pages: CrawledPage[] }): CrawledPage
     throw httpError(422, "We couldn't read that website yet. Check that the URL is public and try again.");
   }
   return firstPage;
+}
+
+function websiteValidationForCrawl(
+  crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } },
+  expectedBusinessName?: string | null,
+): OnboardingValidation {
+  return assessOnboardingKnowledge({
+    pages: crawled.pages,
+    expectedBusinessName,
+    crawlPartial: crawled.audit.failureCode === "CRAWL_PARTIAL" || Boolean(crawled.audit.rejectedInternalLinks?.length),
+  });
+}
+
+function websiteValidationFromCrawlError(error: CrawlError, expectedBusinessName?: string | null): OnboardingValidation {
+  return validationFromFailure({
+    code: error.code,
+    expectedBusinessName,
+    reachable: ["NO_USEFUL_CONTENT", "ROBOTS_BLOCKED", "AUTH_REQUIRED", "SPA_RENDER_FAILURE"].includes(error.code),
+    signals: error.audit
+      ? [
+          `response_status:${error.audit.responseStatus ?? "unknown"}`,
+          `visible_characters:${error.audit.extractedVisibleTextSize}`,
+          ...Object.entries(error.audit.rejectionReasons).slice(0, 8).map(([reason, count]) => `${reason}:${count}`),
+        ]
+      : [],
+  });
+}
+
+function businessNameFromWebsite(websiteUrl: string): string {
+  try {
+    return new URL(websiteUrl).hostname.replace(/^www\./i, "").split(".")[0].replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  } catch {
+    return "New business";
+  }
+}
+
+function sourceFromCrawlFailure(websiteUrl: string, error: CrawlError): Source {
+  const audit = error.audit;
+  const route = audit?.routes[0];
+  return {
+    id: randomUUID(),
+    url: websiteUrl,
+    canonicalUrl: audit?.finalCanonicalUrl ?? websiteUrl,
+    title: "Website validation",
+    contentType: "web_page",
+    pageType: "web_page",
+    crawlStatus: "failed",
+    contentHash: contentHash(`website-validation:${websiteUrl}:${error.code}`),
+    lastCrawledAt: new Date().toISOString(),
+    httpStatus: route?.status ?? audit?.responseStatus ?? null,
+    rawHtmlBytes: audit?.rawHtmlBytes ?? null,
+    extractedCharacterCount: route?.extractedCharacters ?? audit?.extractedVisibleTextSize ?? null,
+    discoveredLinkCount: route?.discoveredLinks.length ?? audit?.discoveredInternalLinks.length ?? null,
+    crawlMode: route?.crawlMode ?? (audit?.renderedCrawl.attempted ? "rendered" : "static"),
+    renderAttempted: route?.renderAttempted ?? audit?.renderedCrawl.attempted ?? false,
+    renderSuccess: route?.renderSuccess ?? false,
+    renderDurationMs: route?.renderDurationMs ?? null,
+    renderDiagnostics: route?.renderDiagnostics ?? null,
+    errorMessage: error.message.slice(0, 1_000),
+    errorCode: error.code,
+  };
+}
+
+function canProvisionAttentionBusiness(error: unknown): error is CrawlError {
+  return error instanceof CrawlError && ["NO_USEFUL_CONTENT", "ROBOTS_BLOCKED", "AUTH_REQUIRED", "SPA_RENDER_FAILURE"].includes(error.code);
 }
 
 function trialEndFromNow(): string {
@@ -414,6 +562,7 @@ type Source = {
   crawlDepth?: number | null;
   discoveryParentUrl?: string | null;
   errorMessage?: string | null;
+  errorCode?: OnboardingFailureCode | null;
 };
 
 type KnowledgeChunk = {
@@ -452,6 +601,7 @@ type FirebaseAuthUser = {
   identitySubject: string;
   email: string;
   name: string;
+  emailVerified: boolean;
 };
 
 type AppUser = FirebaseAuthUser & { id: string };
@@ -483,7 +633,7 @@ type DemoAuditInput = {
   metadata?: Record<string, unknown>;
 };
 
-type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
+type ConversationStatus = "AI_ACTIVE" | "HANDOFF_REQUESTED" | "CONTACT_REQUIRED" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
 type HandoffNotificationStatus = "sent" | "pending" | "failed" | null;
 const CONVERSATION_RESUME_WINDOW_MS = 24 * 60 * 60 * 1_000;
 // Visitor turns for one conversation must be processed in arrival order. The
@@ -533,6 +683,11 @@ type Message = {
     inputTokens?: number;
     outputTokens?: number;
     estimatedCostUsd?: number | null;
+    conflictCount?: number;
+    validationTier?: 1 | 2 | 3;
+    validationStatus?: "accepted" | "fallback";
+    validationReason?: string | null;
+    validationLatencyMs?: number;
   };
   createdAt: string;
 };
@@ -797,6 +952,7 @@ type EvaluationResult = {
 type Business = {
   id: string;
   organizationId?: string | null;
+  isInternalDemo?: boolean;
   name: string;
   slug: string;
   vertical: string;
@@ -809,6 +965,7 @@ type Business = {
   ownershipVerifiedAt: string | null;
   ownershipVerifiedByUserId: string | null;
   agentPublishedAt: string | null;
+  onboardingValidation: OnboardingValidation;
   primaryActionId: string | null;
   sources: Source[];
   chunks: KnowledgeChunk[];
@@ -819,6 +976,7 @@ type Business = {
   conversations: Map<string, Conversation>;
   conversationEvents: ConversationEvent[];
   conversionEvents: ConversionEvent[];
+  experienceSignals: StoredExperienceSignal[];
   notifications: Notification[];
   internalNotes: InternalNote[];
   leads: Lead[];
@@ -841,8 +999,34 @@ type Business = {
   createdAt: string;
 };
 
+type StoredExperienceSignal = ExperienceSignal & {
+  id: string;
+  organizationId: string | null;
+  businessId: string;
+  conversationId: string | null;
+  publicationVersion: number | null;
+  modelRole: string | null;
+  providerState: Record<string, unknown>;
+  validationResult: Record<string, unknown>;
+  sessionTrace: Record<string, unknown>;
+  status: "open" | "reviewed" | "resolved" | "ignored";
+  occurredAt: string;
+};
+
 const businesses = new Map<string, Business>();
 const memoryDemoAccess = new Map<string, { slug: string; businessId: string; expiresAt: string }>();
+type StoredFeatureFlag = FeatureFlagConfig & {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  overrides: Record<string, { state: FeatureFlagOverrideState; reason: string }>;
+};
+const featureFlagCache: { expiresAt: number; flags: StoredFeatureFlag[] | null } = { expiresAt: 0, flags: null };
+const FEATURE_FLAG_CACHE_TTL_MS = 5_000;
+const FEATURE_FLAG_RESPONSE_VALIDATION_SEMANTIC_VERIFIER = "response_validation.semantic_verifier";
+const DEFAULT_FEATURE_FLAG_FALLBACKS: Record<string, boolean> = {
+  [FEATURE_FLAG_RESPONSE_VALIDATION_SEMANTIC_VERIFIER]: true,
+};
 const DEMO_ACCESS_TTL_MS = 48 * 60 * 60 * 1_000;
 const INTERNAL_DEMO_SLUGS = new Set([
   "british-swim-school-tampa-bay",
@@ -1145,6 +1329,159 @@ function optionalString(value: unknown, maxLength: number): string | null {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, maxLength) : null;
 }
 
+type ObservabilityOverrides = {
+  workflow?: ObservabilityWorkflow | null;
+  model?: ObservabilityModel | null;
+  correlationId?: string | null;
+};
+
+function observabilityForBusiness(business: Business, overrides: ObservabilityOverrides = {}): ObservabilityContext {
+  return buildObservabilityContext({
+    business,
+    workflow: overrides.workflow,
+    model: overrides.model,
+    correlationId: overrides.correlationId,
+  });
+}
+
+function observabilityForIdentifiers(input: {
+  organizationId?: string | null;
+  businessId?: string | null;
+  correlationId?: string | null;
+}): ObservabilityContext {
+  return buildObservabilityContext({
+    business: { id: input.businessId, organizationId: input.organizationId },
+    correlationId: input.correlationId,
+  });
+}
+
+async function recordSecurityEvent(input: {
+  eventType: string;
+  risk?: SecurityEventRisk;
+  request?: FastifyRequest;
+  organizationId?: string | null;
+  businessId?: string | null;
+  actorUserId?: string | null;
+  actorType?: string | null;
+  metadata?: Record<string, unknown>;
+  correlationId?: string | null;
+}): Promise<void> {
+  if (!pool) return;
+  const correlation = observabilityForIdentifiers({ ...input, correlationId: input.correlationId ?? input.request?.id ?? null });
+  const metadata = {
+    ...(input.metadata ?? {}),
+    correlation: observabilityMetadata(correlation),
+  };
+  try {
+    await pool.query(
+      `insert into security_events
+         (event_type, risk, organization_id, business_id, actor_user_id, actor_type, request_id, route, method, status_code, ip_hash, user_agent_hash, metadata, release_version, deployment_version, correlation_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      [
+        input.eventType.slice(0, 120),
+        input.risk ?? "medium",
+        input.organizationId ?? null,
+        input.businessId ?? null,
+        input.actorUserId ?? null,
+        input.actorType?.slice(0, 40) ?? null,
+        input.request?.id ?? null,
+        input.request?.url?.split("?", 1)[0]?.slice(0, 500) ?? null,
+        input.request?.method ?? null,
+        null,
+        hashSecurityIdentifier(input.request?.ip),
+        hashSecurityIdentifier(input.request?.headers["user-agent"]),
+        JSON.stringify(boundedSecurityMetadata(metadata)),
+        correlation.releaseVersion,
+        correlation.deploymentVersion,
+        correlation.correlationId ?? input.request?.id ?? null,
+      ],
+    );
+  } catch (error) {
+    if (isMissingDatabaseColumn(error)) {
+      await pool.query(
+        `insert into security_events
+           (event_type, risk, organization_id, business_id, actor_user_id, actor_type, request_id, route, method, status_code, ip_hash, user_agent_hash, metadata)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [
+          input.eventType.slice(0, 120), input.risk ?? "medium", input.organizationId ?? null, input.businessId ?? null,
+          input.actorUserId ?? null, input.actorType?.slice(0, 40) ?? null, input.request?.id ?? null,
+          input.request?.url?.split("?", 1)[0]?.slice(0, 500) ?? null, input.request?.method ?? null, null,
+          hashSecurityIdentifier(input.request?.ip), hashSecurityIdentifier(input.request?.headers["user-agent"]),
+          JSON.stringify(boundedSecurityMetadata(input.metadata)),
+        ],
+      ).catch((fallbackError) => {
+        if (!isMissingDatabaseTable(fallbackError)) throw fallbackError;
+      });
+      return;
+    }
+    if (!isMissingDatabaseTable(error)) app.log.warn({ error: error instanceof Error ? error.message : "unknown security event error" }, "Security event was not persisted");
+  }
+}
+
+async function recordPrivilegedAudit(input: {
+  action: string;
+  resourceType: string;
+  resourceId?: string | null;
+  request?: FastifyRequest;
+  organizationId?: string | null;
+  businessId?: string | null;
+  actorUserId?: string | null;
+  actorType?: string | null;
+  before?: unknown;
+  after?: unknown;
+  metadata?: Record<string, unknown>;
+  correlationId?: string | null;
+}): Promise<void> {
+  if (!pool) return;
+  const correlation = observabilityForIdentifiers({ ...input, correlationId: input.correlationId ?? input.request?.id ?? null });
+  const metadata = {
+    ...(input.metadata ?? {}),
+    correlation: observabilityMetadata(correlation),
+  };
+  try {
+    await pool.query(
+      `insert into privileged_audit_events
+         (action, resource_type, resource_id, organization_id, business_id, actor_user_id, actor_type, request_id, ip_hash, before_value, after_value, metadata, release_version, deployment_version, correlation_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        input.action.slice(0, 120),
+        input.resourceType.slice(0, 80),
+        input.resourceId ?? null,
+        input.organizationId ?? null,
+        input.businessId ?? null,
+        input.actorUserId ?? null,
+        input.actorType?.slice(0, 40) ?? null,
+        input.request?.id ?? null,
+        hashSecurityIdentifier(input.request?.ip),
+        input.before === undefined ? null : JSON.stringify(boundedSecurityMetadata(input.before)),
+        input.after === undefined ? null : JSON.stringify(boundedSecurityMetadata(input.after)),
+        JSON.stringify(boundedSecurityMetadata(metadata)),
+        correlation.releaseVersion,
+        correlation.deploymentVersion,
+        correlation.correlationId ?? input.request?.id ?? null,
+      ],
+    );
+  } catch (error) {
+    if (isMissingDatabaseColumn(error)) {
+      await pool.query(
+        `insert into privileged_audit_events
+           (action, resource_type, resource_id, organization_id, business_id, actor_user_id, actor_type, request_id, ip_hash, before_value, after_value, metadata)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          input.action.slice(0, 120), input.resourceType.slice(0, 80), input.resourceId ?? null, input.organizationId ?? null,
+          input.businessId ?? null, input.actorUserId ?? null, input.actorType?.slice(0, 40) ?? null, input.request?.id ?? null,
+          hashSecurityIdentifier(input.request?.ip), input.before === undefined ? null : JSON.stringify(boundedSecurityMetadata(input.before)),
+          input.after === undefined ? null : JSON.stringify(boundedSecurityMetadata(input.after)), JSON.stringify(boundedSecurityMetadata(input.metadata)),
+        ],
+      ).catch((fallbackError) => {
+        if (!isMissingDatabaseTable(fallbackError)) throw fallbackError;
+      });
+      return;
+    }
+    if (!isMissingDatabaseTable(error)) app.log.warn({ error: error instanceof Error ? error.message : "unknown audit event error" }, "Privileged audit event was not persisted");
+  }
+}
+
 function lifecycleAppUrl(path: string): string {
   const origin = process.env.FRONTDESKWISE_APP_URL?.trim() || process.env.WEB_ORIGIN?.split(",")[0]?.trim() || "https://app.frontdeskwise.com";
   return `${origin.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
@@ -1231,7 +1568,8 @@ function safeLeadMetadata(value: unknown, body: Record<string, unknown>): Record
   const metadata: Record<string, unknown> = {};
   const allowedKeys = new Set([
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid",
-    "landing_page", "form_name", "campaign", "referral_code",
+    "landing_page", "form_name", "campaign", "referral_code", "conversation_summary", "workflow_state",
+    "handoff_reason", "last_intent", "source_page",
   ]);
   for (const [key, item] of Object.entries({ ...source, ...body })) {
     if (!allowedKeys.has(key) || Object.keys(metadata).length >= 20) continue;
@@ -1255,6 +1593,7 @@ function firebaseAuthUserFromClaims(claims: Record<string, unknown>): FirebaseAu
     identitySubject,
     email,
     name: nameClaim.slice(0, 160) || email.split("@", 1)[0].slice(0, 160) || "FrontDeskWise user",
+    emailVerified: firebaseEmailVerifiedClaim(claims),
   };
 }
 
@@ -1267,17 +1606,37 @@ async function requireFirebaseAuth(request: FastifyRequest): Promise<FirebaseAut
     return firebaseAuthUserFromClaims(claims);
   } catch (error) {
     if ((error as { statusCode?: number }).statusCode) throw error;
+    void recordSecurityEvent({
+      eventType: "authentication_failed",
+      risk: "medium",
+      request,
+      metadata: { reason: error instanceof Error ? error.message : "token_verification_failed" },
+    });
     throw httpError(401, error instanceof Error ? error.message : "Firebase token verification failed");
   }
 }
 
+async function requireVerifiedFirebaseAuth(request: FastifyRequest): Promise<FirebaseAuthUser> {
+  const authUser = await requireFirebaseAuth(request);
+  if (!authUser.emailVerified) {
+    void recordSecurityEvent({
+      eventType: "unverified_privileged_access",
+      risk: "low",
+      request,
+      metadata: { emailHash: hashSecurityIdentifier(authUser.email) },
+    });
+    throw httpError(403, "Verify your email before using workspace actions");
+  }
+  return authUser;
+}
+
 async function ensureAppUser(client: PoolClient, authUser: FirebaseAuthUser): Promise<AppUser> {
   const bySubject = await client.query<Record<string, unknown>>(
-    "select id, identity_subject, email, name from app_users where identity_subject = $1 for update",
+    "select id, identity_subject, email, name, email_verified from app_users where identity_subject = $1 for update",
     [authUser.identitySubject],
   );
   const byEmail = await client.query<Record<string, unknown>>(
-    "select id, identity_subject, email, name from app_users where email_normalized = $1 for update",
+    "select id, identity_subject, email, name, email_verified from app_users where email_normalized = $1 for update",
     [authUser.email],
   );
   if (bySubject.rowCount && byEmail.rowCount && bySubject.rows[0].id !== byEmail.rows[0].id) {
@@ -1291,23 +1650,23 @@ async function ensureAppUser(client: PoolClient, authUser: FirebaseAuthUser): Pr
     }
     const updated = await client.query<Record<string, unknown>>(
       `update app_users
-       set identity_subject = $2, email = $3, email_normalized = $3, name = $4, status = 'active', updated_at = now()
+       set identity_subject = $2, email = $3, email_normalized = $3, name = $4, email_verified = $5, status = 'active', updated_at = now()
        where id = $1
-       returning id, identity_subject, email, name`,
-      [existing.id, authUser.identitySubject, authUser.email, authUser.name],
+       returning id, identity_subject, email, name, email_verified`,
+      [existing.id, authUser.identitySubject, authUser.email, authUser.name, authUser.emailVerified],
     );
     const row = updated.rows[0];
-    return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) };
+    return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name), emailVerified: row.email_verified === true };
   }
 
   const created = await client.query<Record<string, unknown>>(
-    `insert into app_users (identity_subject, email, email_normalized, name)
-     values ($1, $2, $2, $3)
-     returning id, identity_subject, email, name`,
-    [authUser.identitySubject, authUser.email, authUser.name],
+    `insert into app_users (identity_subject, email, email_normalized, name, email_verified)
+     values ($1, $2, $2, $3, $4)
+     returning id, identity_subject, email, name, email_verified`,
+    [authUser.identitySubject, authUser.email, authUser.name, authUser.emailVerified],
   );
   const row = created.rows[0];
-  return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) };
+  return { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name), emailVerified: row.email_verified === true };
 }
 
 function nullableIso(value: unknown): string | null {
@@ -1374,17 +1733,17 @@ function organizationBillingPayload(row: Record<string, unknown>): Record<string
 }
 
 async function authenticatedAppUser(request: FastifyRequest): Promise<{ authUser: FirebaseAuthUser; appUser: AppUser }> {
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
   const result = await pool.query<Record<string, unknown>>(
-    "select id, identity_subject, email, name from app_users where identity_subject = $1 and status = 'active'",
+    "select id, identity_subject, email, name, email_verified from app_users where identity_subject = $1 and status = 'active'",
     [authUser.identitySubject],
   );
   if (!result.rowCount) throw httpError(404, "FrontDeskWise account has not been bootstrapped");
   const row = result.rows[0];
   return {
     authUser,
-    appUser: { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name) },
+    appUser: { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name), emailVerified: row.email_verified === true },
   };
 }
 
@@ -1444,7 +1803,7 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
   if (!pool) throw httpError(503, "Account authentication requires PostgreSQL storage");
   const [userResult, organizationResult, businessResult] = await Promise.all([
     pool.query<Record<string, unknown>>(
-      `select u.id, u.email, u.name,
+      `select u.id, u.email, u.name, u.email_verified,
               exists (select 1 from super_admin_users sa where sa.user_id = u.id and sa.status = 'active') as is_super_admin
        from app_users u where u.id = $1 and u.status = 'active'`,
       [userId],
@@ -1540,12 +1899,287 @@ async function authSnapshot(userId: string, activeOrganizationId: string | null 
   return {
     user: {
       id: String(userResult.rows[0].id), email: String(userResult.rows[0].email), name: String(userResult.rows[0].name),
+      emailVerified: userResult.rows[0].email_verified === true,
+      accessState: userResult.rows[0].email_verified === true ? "verified" : "email_verification_required",
       isSuperAdmin: Boolean(userResult.rows[0].is_super_admin),
     },
     organizations,
     activeOrganizationId: activeOrganizationId && organizations.some((organization) => organization.id === activeOrganizationId)
       ? activeOrganizationId
       : (organizations[0]?.id ?? null),
+  };
+}
+
+type PartnerAccount = {
+  id: string;
+  userId: string;
+  companyName: string;
+  slug: string;
+  websiteUrl: string | null;
+  partnerType: string;
+  status: string;
+  commissionRate: number;
+  commissionWindowMonths: number;
+  referralCode: string;
+};
+
+function partnerAccountPayload(row: Record<string, unknown>): PartnerAccount {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    companyName: String(row.company_name),
+    slug: String(row.slug),
+    websiteUrl: typeof row.website_url === "string" ? row.website_url : null,
+    partnerType: String(row.partner_type ?? "agency"),
+    status: String(row.status ?? "active"),
+    commissionRate: Number(row.commission_rate ?? 20),
+    commissionWindowMonths: Number(row.commission_window_months ?? 12),
+    referralCode: String(row.referral_code),
+  };
+}
+
+async function partnerAccountForUser(userId: string): Promise<PartnerAccount | null> {
+  if (!pool) throw httpError(503, "Partner operations require PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select id, user_id, company_name, slug, website_url, partner_type, status,
+            commission_rate, commission_window_months, referral_code
+     from partner_accounts where user_id = $1 limit 1`,
+    [userId],
+  );
+  return result.rowCount ? partnerAccountPayload(result.rows[0]) : null;
+}
+
+async function partnerAuthenticatedAppUser(request: FastifyRequest, verified = false): Promise<{ authUser: FirebaseAuthUser; appUser: AppUser }> {
+  const authUser = verified ? await requireVerifiedFirebaseAuth(request) : await requireFirebaseAuth(request);
+  if (!pool) throw httpError(503, "Partner operations require PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    "select id, identity_subject, email, name, email_verified from app_users where identity_subject = $1 and status = 'active'",
+    [authUser.identitySubject],
+  );
+  if (!result.rowCount) throw httpError(404, "FrontDeskWise account has not been bootstrapped");
+  const row = result.rows[0];
+  return {
+    authUser,
+    appUser: { id: String(row.id), identitySubject: String(row.identity_subject), email: String(row.email), name: String(row.name), emailVerified: row.email_verified === true },
+  };
+}
+
+async function requirePartnerAccount(request: FastifyRequest, verified = true): Promise<{ authUser: FirebaseAuthUser; appUser: AppUser; partner: PartnerAccount }> {
+  const { authUser, appUser } = await partnerAuthenticatedAppUser(request, verified);
+  const partner = await partnerAccountForUser(appUser.id);
+  if (!partner) throw httpError(404, "Create a partner profile before opening the partner workspace");
+  if (partner.status !== "active") throw httpError(403, "This partner account is paused");
+  return { authUser, appUser, partner };
+}
+
+async function partnerDashboardPayload(partner: PartnerAccount): Promise<Record<string, unknown>> {
+  if (!pool) throw httpError(503, "Partner operations require PostgreSQL storage");
+  const [clientsResult, referralsResult] = await Promise.all([
+    pool.query<Record<string, unknown>>(
+      `select pcl.id as client_link_id, pcl.relationship_status, pcl.pricing_tier,
+              pcl.activated_at, pcl.last_seen_at, o.id as organization_id, o.name as organization_name,
+              o.slug as organization_slug, o.billing_status, o.plan_key, o.updated_at,
+              count(distinct b.id)::integer as business_count,
+              count(distinct b.id) filter (where coalesce(b.widget_load_count, 0) > 0)::integer as live_business_count,
+              count(distinct c.id)::integer as conversation_count,
+              count(distinct l.id)::integer as lead_count,
+              max(coalesce(b.updated_at, o.updated_at)) as last_active_at,
+              coalesce(opo.amount_cents, bp.monthly_amount_cents, o.billing_amount_cents, 0)::integer as monthly_amount_cents
+       from partner_client_links pcl
+       join organizations o on o.id = pcl.organization_id
+       left join businesses b on b.organization_id = o.id and b.is_internal_demo = false
+       left join conversations c on c.business_id = b.id
+       left join leads l on l.business_id = b.id
+       left join billing_plans bp on bp.plan_key = o.plan_key
+       left join organization_plan_overrides opo on opo.organization_id = o.id and (opo.ends_at is null or opo.ends_at > now())
+       where pcl.partner_id = $1
+       group by pcl.id, o.id, o.name, o.slug, o.billing_status, o.plan_key, o.updated_at,
+                pcl.relationship_status, pcl.pricing_tier, pcl.activated_at, pcl.last_seen_at,
+                opo.amount_cents, bp.monthly_amount_cents, o.billing_amount_cents
+       order by coalesce(pcl.last_seen_at, o.updated_at) desc`,
+      [partner.id],
+    ),
+    pool.query<Record<string, unknown>>(
+      `select id, prospect_name, prospect_email, website_url, demo_url, status, created_at, converted_at
+       from partner_referrals where partner_id = $1 order by created_at desc limit 50`,
+      [partner.id],
+    ),
+  ]);
+
+  const clients = clientsResult.rows.map((row) => {
+    const billingStatus = String(row.billing_status ?? "trial");
+    const monthlyAmountCents = Number(row.monthly_amount_cents ?? 0);
+    const isLive = billingStatus === "active" && String(row.relationship_status) === "active";
+    const commissionCents = Math.round(monthlyAmountCents * partner.commissionRate / 100);
+    return {
+      id: String(row.client_link_id),
+      organizationId: String(row.organization_id),
+      organizationName: String(row.organization_name),
+      organizationSlug: String(row.organization_slug),
+      relationshipStatus: String(row.relationship_status),
+      pricingTier: String(row.pricing_tier),
+      billingStatus,
+      planKey: String(row.plan_key ?? "starter"),
+      businessCount: Number(row.business_count ?? 0),
+      liveBusinessCount: Number(row.live_business_count ?? 0),
+      conversationCount: Number(row.conversation_count ?? 0),
+      leadCount: Number(row.lead_count ?? 0),
+      monthlyAmountCents,
+      estimatedCommissionCents: isLive ? commissionCents : 0,
+      pipelineCommissionCents: billingStatus === "paused" || billingStatus === "cancelled" ? 0 : commissionCents,
+      lastActiveAt: nullableIso(row.last_active_at),
+      activatedAt: nullableIso(row.activated_at),
+    };
+  });
+  const activeClients = clients.filter((client) => client.relationshipStatus === "active");
+  const liveClients = activeClients.filter((client) => client.billingStatus === "active");
+  const trialClients = activeClients.filter((client) => client.billingStatus === "trial");
+  const estimatedCommissionCents = clients.reduce((sum, client) => sum + client.estimatedCommissionCents, 0);
+  const pipelineCommissionCents = clients.reduce((sum, client) => sum + client.pipelineCommissionCents, 0);
+  const referrals = referralsResult.rows.map((row) => ({
+    id: String(row.id),
+    prospectName: typeof row.prospect_name === "string" ? row.prospect_name : null,
+    prospectEmail: typeof row.prospect_email === "string" ? row.prospect_email : null,
+    websiteUrl: String(row.website_url),
+    demoUrl: typeof row.demo_url === "string" ? row.demo_url : null,
+    status: String(row.status),
+    createdAt: nullableIso(row.created_at),
+    convertedAt: nullableIso(row.converted_at),
+  }));
+  return {
+    partner: {
+      ...partner,
+      referralLink: `${publicWebOrigin()}/?partner=${encodeURIComponent(partner.referralCode)}`,
+    },
+    summary: {
+      clients: activeClients.length,
+      liveClients: liveClients.length,
+      trialClients: trialClients.length,
+      activeBusinesses: activeClients.reduce((sum, client) => sum + client.businessCount, 0),
+      leads: clients.reduce((sum, client) => sum + client.leadCount, 0),
+      conversations: clients.reduce((sum, client) => sum + client.conversationCount, 0),
+      estimatedCommissionCents,
+      pipelineCommissionCents,
+      referralCount: referrals.length,
+      convertedReferralCount: referrals.filter((referral) => referral.status === "converted").length,
+    },
+    clients,
+    referrals,
+  };
+}
+
+async function createPartnerClient(input: {
+  partner: PartnerAccount;
+  appUser: AppUser;
+  websiteUrl: string;
+  businessName?: string | null;
+  clientEmail?: string | null;
+  clientName?: string | null;
+}): Promise<Record<string, unknown>> {
+  if (!pool) throw httpError(503, "Client provisioning requires PostgreSQL storage");
+  const expectedBusinessName = input.businessName?.trim() || null;
+  let crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } };
+  let onboardingValidation: OnboardingValidation;
+  let crawlFailure: CrawlError | null = null;
+  try {
+    crawled = await crawlConfiguredWebsite(input.websiteUrl);
+    onboardingValidation = websiteValidationForCrawl(crawled, expectedBusinessName);
+  } catch (error) {
+    if (!canProvisionAttentionBusiness(error)) throw error;
+    crawlFailure = error;
+    onboardingValidation = websiteValidationFromCrawlError(error, expectedBusinessName);
+    crawled = { pages: [], audit: error.audit ?? { failureCode: error.code, rejectedInternalLinks: [] } };
+  }
+  const firstPage = crawled.pages[0];
+  const name = expectedBusinessName ?? (firstPage ? businessNameFromTitle(firstPage.title, input.websiteUrl) : businessNameFromWebsite(input.websiteUrl));
+  const clientSlug = slugify(name);
+  const organizationSlug = `client-${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+  const organizationResult = await pool.query<{ id: string }>(
+    `insert into organizations
+       (name, slug, billing_mode, billing_status, plan_key, billing_interval, trial_start_at, trial_end_at)
+     values ($1, $2, 'live', 'trial', 'starter', 'month', now(), $3)
+     returning id`,
+    [`${name} · Client`, organizationSlug, trialEndFromNow()],
+  );
+  const organizationId = organizationResult.rows[0].id;
+  let uniqueSlug = clientSlug;
+  while (businesses.has(uniqueSlug) || await loadBusinessFromDatabase(uniqueSlug)) uniqueSlug = `${clientSlug}-${Math.random().toString(36).slice(2, 7)}`;
+  const business = makeBusiness({ name, slug: uniqueSlug, websiteUrl: input.websiteUrl, pages: crawled.pages, onboardingValidation });
+  if (!crawled.pages.length && crawlFailure) business.sources = [sourceFromCrawlFailure(input.websiteUrl, crawlFailure)];
+  business.billing = { ...business.billing, mode: "live", isDemo: false, status: "trial", planKey: "starter", trialEndsAt: trialEndFromNow() };
+  await persistBusiness(business, organizationId);
+  await syncWebsitePricingFacts(business);
+  businesses.set(uniqueSlug, business);
+  await pool.query(
+    `insert into partner_client_links (partner_id, organization_id, relationship_status, pricing_tier)
+     values ($1, $2, 'active', 'standard')`,
+    [input.partner.id, organizationId],
+  );
+  await pool.query(
+    `update partner_referrals
+     set business_id = $2, status = 'converted', converted_at = coalesce(converted_at, now())
+     where partner_id = $1 and website_url = $3 and status in ('demo_created', 'claimed')`,
+    [input.partner.id, business.id, input.websiteUrl],
+  );
+  let invitedUserId: string | null = null;
+  if (input.clientEmail) {
+    const clientEmail = input.clientEmail.trim().toLowerCase();
+    const clientName = input.clientName?.trim() || clientEmail.split("@", 1)[0];
+    const clientUser = await pool.query<{ id: string }>(
+      `insert into app_users (email, email_normalized, name, status)
+       values ($1, $1, $2, 'invited')
+       on conflict (email_normalized) do update set name = excluded.name,
+         status = case when app_users.status = 'disabled' then 'invited' else app_users.status end,
+         updated_at = now()
+       returning id`,
+      [clientEmail, clientName],
+    );
+    invitedUserId = clientUser.rows[0].id;
+    await pool.query(
+      `insert into organization_members (organization_id, user_id, role)
+       values ($1, $2, 'owner') on conflict (organization_id, user_id) do nothing`,
+      [organizationId, clientUser.rows[0].id],
+    );
+    await pool.query(
+      `insert into business_members (business_id, user_id, role)
+       values ($1, $2, 'admin') on conflict (business_id, user_id) do nothing`,
+      [business.id, clientUser.rows[0].id],
+    );
+  }
+  if (input.clientEmail && invitedUserId) {
+    await queueLifecycleEvent({
+      eventType: "TEAM_INVITED",
+      eventKey: `partner.client.invited:${organizationId}:${invitedUserId}`,
+      organizationId,
+      businessId: business.id,
+      recipientUserId: invitedUserId,
+      recipientEmail: input.clientEmail,
+      payload: {
+        inviter_name: input.appUser.name,
+        business_name: business.name,
+        dashboard_url: lifecycleAppUrl(`/app/${business.slug}`),
+      },
+    });
+  }
+  await queueLifecycleEvent({
+    eventType: "TRIAL_STARTED",
+    eventKey: `partner.client.trial.started:${organizationId}`,
+    organizationId,
+    businessId: business.id,
+    payload: {
+      business_name: business.name,
+      trial_days: defaultTrialDays,
+      dashboard_url: lifecycleAppUrl(`/app/${business.slug}`),
+      billing_url: lifecycleAppUrl("/app/settings/billing"),
+    },
+  });
+  return {
+    id: organizationId,
+    organizationId,
+    organizationName: `${name} · Client`,
+    business: { id: business.id, name: business.name, slug: business.slug, websiteUrl: business.websiteUrl },
+    onboarding: business.onboardingValidation,
+    clientInviteEmail: input.clientEmail ?? null,
   };
 }
 
@@ -1579,7 +2213,7 @@ async function bootstrapAuthenticatedUser(
       );
       if (!session.rowCount) throw httpError(401, "The demo session is invalid or expired");
       const demo = session.rows[0];
-      if (demo.is_internal_demo !== true) {
+      if (demo.is_internal_demo !== true && authUser.emailVerified) {
         if (!organizationId) {
           const organizationName = options.organizationName || `${authUser.name}'s Businesses`;
           const organization = await client.query<{ id: string }>(
@@ -1996,6 +2630,120 @@ function leadInput(body: Record<string, unknown>, source: string, request?: Fast
   };
 }
 
+function knownHandoffContact(business: Business, conversation: Conversation, currentMessage?: string): HandoffContact {
+  const existingLead = business.leads.find((lead) => lead.conversationId === conversation.id);
+  const workflowValues = conversation.actionState?.values ?? {};
+  const workflowContact = {
+    name: typeof workflowValues.name === "string" ? workflowValues.name : typeof workflowValues.full_name === "string" ? workflowValues.full_name : null,
+    email: typeof workflowValues.email === "string" ? workflowValues.email : null,
+    phone: typeof workflowValues.phone === "string" ? workflowValues.phone : typeof workflowValues.phone_number === "string" ? workflowValues.phone_number : null,
+  } satisfies Partial<HandoffContact>;
+  const messageContacts = conversation.messages
+    .filter((message) => message.role === "user")
+    .slice(-12)
+    .map((message) => extractHandoffContact(message.content));
+  return mergeHandoffContacts(
+    existingLead,
+    workflowContact,
+    ...messageContacts,
+    currentMessage ? extractHandoffContact(currentMessage) : null,
+  );
+}
+
+function conversationStateSnapshot(
+  business: Business,
+  conversation: Conversation,
+  currentMessage?: string,
+): ConversationStateSnapshot {
+  const contact = knownHandoffContact(business, conversation, currentMessage);
+  const values = conversation.actionState?.values ?? {};
+  const selectedClass = Object.entries(values)
+    .filter(([key, value]) => /class|lesson|program|course|session/i.test(key) && typeof value === "string" && value.trim())
+    .map(([, value]) => String(value).trim())
+    .find(Boolean) ?? null;
+  return {
+    name: contact.name,
+    email: contact.email,
+    phone: contact.phone,
+    handoffState: conversation.status,
+    collectedFields: values,
+    selectedClass,
+  };
+}
+
+function handoffConversationSummary(conversation: Conversation, lastMessage?: string): string {
+  const messages = conversation.messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .slice(-8)
+    .map((message) => `${message.role === "user" ? "Visitor" : "Assistant"}: ${message.content}`);
+  if (lastMessage && !messages.some((message) => message === `Visitor: ${lastMessage}`)) messages.push(`Visitor: ${lastMessage}`);
+  return messages.join("\n").slice(-2_000);
+}
+
+function handoffLeadInput(
+  business: Business,
+  conversation: Conversation,
+  contact: HandoffContact,
+  reason: string,
+  lastMessage?: string,
+  sourcePage?: string | null,
+): Lead {
+  const intent = lastMessage ? classifyQuestionIntent(lastMessage) : null;
+  const metadata = safeLeadMetadata({
+    conversation_summary: handoffConversationSummary(conversation, lastMessage),
+    workflow_state: conversation.status,
+    handoff_reason: reason,
+    last_intent: intent,
+    source_page: sourcePage,
+  }, {});
+  const idempotencyKey = `handoff:${contentHash(`${business.id}|${conversation.id}|${contact.email ?? ""}|${contact.phone ?? ""}`)}`;
+  return {
+    id: randomUUID(),
+    conversationId: conversation.id,
+    name: contact.name,
+    email: contact.email,
+    phone: contact.phone,
+    intent,
+    status: "new",
+    source: "handoff",
+    pageUrl: sourcePage ?? null,
+    referrer: null,
+    consentAt: new Date().toISOString(),
+    idempotencyKey,
+    metadata,
+    notes: reason.slice(0, 500),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+async function captureHandoffLead(
+  business: Business,
+  conversation: Conversation,
+  contact: HandoffContact,
+  reason: string,
+  lastMessage?: string,
+  sourcePage?: string | null,
+): Promise<{ lead: Lead; created: boolean }> {
+  const existing = business.leads.find((lead) => lead.conversationId === conversation.id && Boolean(lead.email || lead.phone));
+  if (existing) return { lead: existing, created: false };
+  const leadInputValue = handoffLeadInput(business, conversation, contact, reason, lastMessage, sourcePage);
+  const lead = await persistLead(business, leadInputValue);
+  const created = lead.id === leadInputValue.id;
+  const existingIndex = business.leads.findIndex((item) => item.id === lead.id || (lead.idempotencyKey && item.idempotencyKey === lead.idempotencyKey));
+  if (existingIndex >= 0) business.leads.splice(existingIndex, 1);
+  business.leads.unshift(lead);
+  conversation.leadCaptured = true;
+  conversation.actionTaken = "human_handoff_lead_capture";
+  conversation.updatedAt = lead.createdAt;
+  await persistConversation(business, conversation);
+  await recordConversionEvent(business, {
+    event: "LEAD_CAPTURED",
+    conversationId: conversation.id,
+    metadata: { leadId: lead.id, source: lead.source, handoff: true },
+  });
+  return { lead, created };
+}
+
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 56) || "business-demo";
 }
@@ -2012,6 +2760,7 @@ function makeBusiness(input: {
   websiteUrl: string;
   pages: CrawledPage[];
   location?: string;
+  onboardingValidation?: OnboardingValidation;
 }): Business {
   const now = new Date().toISOString();
   const sources: Source[] = input.pages.map((page) => ({
@@ -2035,6 +2784,7 @@ function makeBusiness(input: {
     renderDiagnostics: page.renderDiagnostics ? { ...page.renderDiagnostics } : null,
     crawlDepth: page.crawlDepth ?? null,
     discoveryParentUrl: page.discoveryParentUrl ?? null,
+    errorCode: null,
   }));
   const chunks: KnowledgeChunk[] = input.pages.flatMap((page, index) => page.chunks.map((chunk) => ({
     id: randomUUID(),
@@ -2048,6 +2798,7 @@ function makeBusiness(input: {
 
   return {
     id: randomUUID(),
+    isInternalDemo: isInternalDemoSlug(input.slug),
     name: input.name,
     slug: input.slug,
     vertical: "local_business",
@@ -2060,6 +2811,7 @@ function makeBusiness(input: {
     ownershipVerifiedAt: null,
     ownershipVerifiedByUserId: null,
     agentPublishedAt: null,
+    onboardingValidation: input.onboardingValidation ?? assessOnboardingKnowledge({ pages: input.pages }),
     primaryActionId: null,
     sources,
     chunks,
@@ -2070,6 +2822,7 @@ function makeBusiness(input: {
     conversations: new Map(),
     conversationEvents: [],
     conversionEvents: [],
+    experienceSignals: [],
     notifications: [],
     internalNotes: [],
     leads: [],
@@ -2127,6 +2880,7 @@ function websiteSourcesFromPages(pages: CrawledPage[]): { sources: Source[]; chu
     crawlDepth: page.crawlDepth ?? null,
     discoveryParentUrl: page.discoveryParentUrl ?? null,
     errorMessage: null,
+    errorCode: null,
   }));
   const chunks = pages.flatMap((page, index) => page.chunks.map((chunk) => ({
     id: randomUUID(),
@@ -2136,6 +2890,74 @@ function websiteSourcesFromPages(pages: CrawledPage[]): { sources: Source[]; chu
     metadata: chunk.metadata,
   })));
   return { sources, chunks };
+}
+
+function websitePricingFactsForBusiness(
+  business: Business,
+  sources = business.sources,
+  chunks = business.chunks,
+): BusinessFact[] {
+  const trustedWebsite = business.ownershipStatus === "verified" || isInternalDemoSlug(business.slug);
+  return extractWebsitePricingCandidates({
+    sources: sources
+      .filter((source) => source.contentType === "web_page")
+      .map((source) => ({
+        id: source.id,
+        url: source.url,
+        title: source.title,
+        pageType: source.pageType,
+        lastCrawledAt: source.lastCrawledAt,
+      })),
+    chunks: chunks
+      .filter((chunk) => sources.some((source) => source.id === chunk.sourceId && source.contentType === "web_page"))
+      .map((chunk) => ({ sourceId: chunk.sourceId, content: chunk.content, metadata: chunk.metadata })),
+  }).map((candidate) => normalizeBusinessFact({
+    id: randomUUID(),
+    businessId: business.id,
+    kind: candidate.kind,
+    subject: candidate.subject,
+    predicate: candidate.predicate,
+    value: candidate.value,
+    valueText: candidate.valueText,
+    sourceType: "website",
+    authority: trustedWebsite ? "owner_verified" : "website",
+    sourceId: candidate.sourceId,
+    sourceLabel: candidate.sourceLabel,
+    confidence: candidate.confidence,
+    freshnessPolicy: "daily",
+    observedAt: candidate.observedAt,
+  }));
+}
+
+/**
+ * Keep website-derived pricing facts in the structured Business Brain. The
+ * source remains website evidence; only an owned/verified business is allowed
+ * to promote those facts to owner_verified for critical pricing answers.
+ */
+async function syncWebsitePricingFacts(business: Business): Promise<void> {
+  const existing = business.facts.filter((fact) => fact.sourceType === "website" && fact.kind === "pricing");
+  const next = websitePricingFactsForBusiness(business);
+  const signature = (fact: BusinessFact): string => [
+    fact.subject.toLowerCase(),
+    fact.predicate.toLowerCase(),
+    fact.valueText.toLowerCase(),
+    fact.sourceId ?? "",
+    fact.authority,
+    fact.observedAt,
+  ].join("|");
+  const existingSignatures = new Set(existing.map(signature));
+  if (next.length === existing.length && next.every((fact) => existingSignatures.has(signature(fact)))) return;
+
+  business.facts = business.facts.filter((fact) => !(fact.sourceType === "website" && fact.kind === "pricing"));
+  business.facts.push(...next);
+  if (!pool) return;
+  try {
+    await pool.query("delete from business_facts where business_id = $1 and source_type = 'website' and kind = 'pricing'", [business.id]);
+    for (const fact of next) await persistBusinessFact(business, fact);
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId: business.id }, "Website pricing facts are not persisted until the business facts table is available");
+  }
 }
 
 async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): Promise<void> {
@@ -2249,6 +3071,7 @@ async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): 
   );
   await pool.query("delete from business_sources where business_id = $1 and content_type = 'web_page'", [business.id]);
   await persistBusiness(business);
+  await syncWebsitePricingFacts(business);
 }
 
 function seedDefaultBusiness(): Business {
@@ -2587,8 +3410,9 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
                               ownership_verification_expires_at, ownership_verified_at, ownership_verified_by_user_id,
                               trial_ends_at, current_period_ends_at, grace_ends_at, billing_provider,
                               provider_customer_id, provider_subscription_id, public_site_key,
-                              widget_enabled, widget_last_loaded_at, widget_load_count)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+                              widget_enabled, widget_last_loaded_at, widget_load_count,
+                              onboarding_status, onboarding_failure_code, onboarding_validation, onboarding_validated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
        on conflict (slug) do update set
          name = excluded.name,
          vertical = excluded.vertical,
@@ -2617,6 +3441,10 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
          widget_enabled = excluded.widget_enabled,
          widget_last_loaded_at = excluded.widget_last_loaded_at,
          widget_load_count = excluded.widget_load_count,
+         onboarding_status = excluded.onboarding_status,
+         onboarding_failure_code = excluded.onboarding_failure_code,
+         onboarding_validation = excluded.onboarding_validation,
+         onboarding_validated_at = excluded.onboarding_validated_at,
          updated_at = now()
        returning id`,
       [
@@ -2651,6 +3479,10 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         business.widget.enabled,
         business.widget.lastLoadedAt,
         business.widget.loadCount,
+        business.onboardingValidation.status,
+        business.onboardingValidation.code,
+        JSON.stringify(business.onboardingValidation),
+        business.onboardingValidation.checkedAt,
       ],
     );
     business.id = businessResult.rows[0].id;
@@ -2683,8 +3515,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
         `insert into business_sources
            (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at,
             http_status, raw_html_bytes, extracted_character_count, discovered_link_count, crawl_mode, render_attempted,
-            render_success, render_duration_ms, render_diagnostics, crawl_depth, discovery_parent_url, error_message)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+            render_success, render_duration_ms, render_diagnostics, crawl_depth, discovery_parent_url, error_message, error_code)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          on conflict (business_id, content_hash) do update set
            source_url = excluded.source_url,
            canonical_url = excluded.canonical_url,
@@ -2703,7 +3535,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            render_diagnostics = excluded.render_diagnostics,
            crawl_depth = excluded.crawl_depth,
            discovery_parent_url = excluded.discovery_parent_url,
-           error_message = excluded.error_message
+           error_message = excluded.error_message,
+           error_code = excluded.error_code
          returning id`,
         [
           source.id,
@@ -2728,6 +3561,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           source.crawlDepth ?? null,
           source.discoveryParentUrl ?? null,
           source.errorMessage ?? null,
+          source.errorCode ?? null,
         ],
       );
       source.id = sourceResult.rows[0].id;
@@ -3153,6 +3987,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   const loaded: Business = {
     id: businessId,
     organizationId: typeof row.organization_id === "string" ? row.organization_id : null,
+    isInternalDemo: row.is_internal_demo === true,
     name: String(row.name),
     slug: String(row.slug),
     vertical: String(row.vertical),
@@ -3170,6 +4005,23 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     ownershipVerifiedAt: row.ownership_verified_at ? toIso(row.ownership_verified_at) : null,
     ownershipVerifiedByUserId: typeof row.ownership_verified_by_user_id === "string" ? row.ownership_verified_by_user_id : null,
     agentPublishedAt: row.agent_published_at ? toIso(row.agent_published_at) : null,
+    onboardingValidation: (() => {
+      const value = asRecord(row.onboarding_validation);
+      const code = ONBOARDING_FAILURE_CODES.includes(value.code as OnboardingFailureCode) ? value.code as OnboardingFailureCode : null;
+      return {
+        status: value.status === "valid" ? "valid" : "needs_attention",
+        code,
+        reachable: value.reachable === true,
+        knowledgeReady: value.knowledgeReady === true,
+        readinessScore: Number(value.readinessScore ?? 0),
+        expectedBusinessName: typeof value.expectedBusinessName === "string" ? value.expectedBusinessName : null,
+        detectedBusinessName: typeof value.detectedBusinessName === "string" ? value.detectedBusinessName : null,
+        message: typeof value.message === "string" ? value.message : "We couldn't validate this website yet.",
+        suggestedAction: typeof value.suggestedAction === "string" ? value.suggestedAction : "Check the URL and try again.",
+        signals: Array.isArray(value.signals) ? value.signals.filter((item): item is string => typeof item === "string").slice(0, 12) : [],
+        checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : toIso(row.created_at),
+      } satisfies OnboardingValidation;
+    })(),
     primaryActionId: typeof row.primary_action_id === "string" ? row.primary_action_id : null,
     sources: sourceResult.rows.map((source) => ({
       id: String(source.id),
@@ -3193,6 +4045,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
       crawlDepth: source.crawl_depth === null || source.crawl_depth === undefined ? null : Number(source.crawl_depth),
       discoveryParentUrl: typeof source.discovery_parent_url === "string" ? source.discovery_parent_url : null,
       errorMessage: typeof source.error_message === "string" ? source.error_message : null,
+      errorCode: ONBOARDING_FAILURE_CODES.includes(source.error_code as OnboardingFailureCode) ? source.error_code as OnboardingFailureCode : null,
     })),
     chunks: chunkResult.rows.map((chunk) => ({
       id: String(chunk.id),
@@ -3220,7 +4073,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         sessionId: String(conversation.session_id),
         leadCaptured: Boolean(conversation.lead_captured),
         actionTaken: typeof conversation.action_taken === "string" ? conversation.action_taken : null,
-        status: conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING"
+        status: conversation.status === "HANDOFF_REQUESTED" || conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING"
           || conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "RESOLVED" || conversation.status === "EXPIRED"
           ? conversation.status : "AI_ACTIVE",
         assignedUserId: typeof conversation.assigned_user_id === "string" ? conversation.assigned_user_id : null,
@@ -3244,6 +4097,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     })),
     conversationEvents: [],
     conversionEvents,
+    experienceSignals: [],
     notifications: [],
     internalNotes: [],
     leads: leadResult.rows.map(leadFromRow),
@@ -3333,6 +4187,17 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     },
     createdAt: toIso(row.created_at),
   };
+  if (!row.onboarding_validation || !["valid", "needs_attention"].includes(String(asRecord(row.onboarding_validation).status))) {
+    const websiteSourceIds = new Set(loaded.sources.filter((source) => source.contentType === "web_page" && source.crawlStatus === "ready").map((source) => source.id));
+    loaded.onboardingValidation = assessOnboardingKnowledge({
+      expectedBusinessName: loaded.name,
+      pages: loaded.sources.filter((source) => websiteSourceIds.has(source.id)).map((source) => ({
+        title: source.title,
+        extractedCharacterCount: source.extractedCharacterCount,
+        content: loaded.chunks.filter((chunk) => chunk.sourceId === source.id).map((chunk) => chunk.content).join(" "),
+      })),
+    });
+  }
   // Businesses published by the previous timestamp-only implementation keep
   // their live state until the first explicit publish writes a snapshot.
   if (loaded.agentPublishedAt && !loaded.publishedAgentConfig) {
@@ -3422,6 +4287,39 @@ async function recordOrganizationUsage(business: Business, metric: UsageMetric):
   );
 }
 
+async function enforceConversationAllowance(business: Business): Promise<void> {
+  if (!pool) return;
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      `select o.plan_key,
+              nullif(entitlement.entitlement_value->>'included', '')::integer as included_conversations,
+              coalesce(sum(u.conversations), 0)::integer as used_conversations
+       from organizations o
+       left join billing_plan_entitlements entitlement
+         on entitlement.plan_key = o.plan_key and entitlement.entitlement_key = 'ai_conversations'
+       left join organization_usage_daily u
+         on u.organization_id = o.id and u.usage_date >= date_trunc('month', current_date)::date
+       where o.id = (select organization_id from businesses where id = $1)
+       group by o.plan_key, entitlement.entitlement_value`,
+      [business.id],
+    );
+    if (!result.rowCount) return;
+    const row = result.rows[0];
+    const included = row.included_conversations === null || row.included_conversations === undefined
+      ? null
+      : Number(row.included_conversations);
+    const used = Number(row.used_conversations ?? 0);
+    if (included === null || !Number.isFinite(included) || !Number.isFinite(used) || used < included) return;
+    throw httpError(429, `This ${String(row.plan_key ?? "plan")} plan has reached its included AI conversation allowance for this month. Contact FrontDeskWise to increase capacity.`);
+  } catch (error) {
+    if (error && typeof error === "object" && "statusCode" in error) throw error;
+    // Keep the API compatible with rolling deployments where the entitlement
+    // catalog or usage table has not been migrated yet.
+    if (isMissingDatabaseColumn(error) || isMissingDatabaseTable(error)) return;
+    throw error;
+  }
+}
+
 async function recordModelUsage(business: Business, usage: ModelUsage): Promise<void> {
   if (!pool || usage.inputTokens <= 0 && usage.outputTokens <= 0 && usage.estimatedCostUsd === null) return;
   try {
@@ -3492,10 +4390,18 @@ async function recordActionRegistryAudit(input: {
   }
 }
 
-async function persistMessage(conversation: Conversation, message: Message): Promise<void> {
+async function persistMessage(business: Business, conversation: Conversation, message: Message, correlationId: string | null = null): Promise<void> {
   if (!pool) return;
   message.id ??= randomUUID();
   const retrieval = message.retrieval;
+  const workflowAction = conversation.actionState
+    ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
+    : null;
+  const correlation = observabilityForBusiness(business, {
+    workflow: workflowAction,
+    model: { route: retrieval?.route ?? null, name: retrieval?.model ?? null },
+    correlationId,
+  });
   const params = [
     message.id,
     conversation.id,
@@ -3516,14 +4422,23 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
     message.authorUserId ?? null,
     message.kind ?? "message",
     message.createdAt,
+    correlation.releaseVersion,
+    correlation.deploymentVersion,
+    correlation.publicationVersion,
+    correlation.workflowId,
+    correlation.workflowKey,
+    correlation.workflowVersion,
+    correlation.modelRoutingVersion,
+    correlation.correlationId,
   ];
 
   try {
     await pool.query(
       `insert into conversation_messages
          (id, conversation_id, role, content, grounded, source_url, confidence_score, confidence_band, citations, retrieval,
-          model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, author_user_id, kind, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+          model_route, model_name, input_tokens, output_tokens, estimated_cost_usd, model_latency_ms, author_user_id, kind, created_at,
+          release_version, deployment_version, publication_version, workflow_action_id, workflow_key, workflow_version, model_routing_version, correlation_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
       params,
     );
     return;
@@ -3534,7 +4449,7 @@ async function persistMessage(conversation: Conversation, message: Message): Pro
 
   // Keep message persistence compatible with a rolling deployment where the
   // API has been updated before migrations 007/018 have reached the database.
-  const legacyParams = [...params];
+  const legacyParams = params.slice(0, 19);
   legacyParams[2] = message.role === "user" ? "user" : "assistant";
   try {
     await pool.query(
@@ -4241,7 +5156,7 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
 
   let authUser: FirebaseAuthUser;
   try {
-    authUser = await requireFirebaseAuth(request);
+    authUser = await requireVerifiedFirebaseAuth(request);
   } catch (error) {
     if ((error as { statusCode?: number }).statusCode === 503) {
       throw httpError(401, "Demo owner access token is invalid or expired");
@@ -4264,7 +5179,7 @@ async function requireDemoOwner(business: Business, request: FastifyRequest): Pr
 
 async function requireAuthenticatedBusinessOwner(business: Business, request: FastifyRequest): Promise<void> {
   if (!pool) throw httpError(503, "Authenticated business access requires PostgreSQL storage");
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   const result = await pool.query(
     `select 1
      from app_users u
@@ -4319,7 +5234,7 @@ async function requireBusinessTeamAccess(
     };
   }
 
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   const result = await pool.query<Record<string, unknown>>(
     `select u.id, u.email, u.name, b.organization_id,
             case when om.role = 'owner' then 'owner'
@@ -4995,7 +5910,18 @@ async function fetchVerificationPage(url: string): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetch(url, { signal: controller.signal, redirect: "follow", headers: { accept: "text/html,text/plain" } });
+    let currentUrl = url;
+    let response: Response | null = null;
+    for (let redirects = 0; redirects <= 5; redirects += 1) {
+      await assertPublicUrl(currentUrl);
+      response = await fetch(currentUrl, { signal: controller.signal, redirect: "manual", headers: { accept: "text/html,text/plain" } });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => undefined);
+      if (!location || redirects === 5) throw new Error("Verification page redirected too many times");
+      currentUrl = new URL(location, currentUrl).toString();
+    }
+    if (!response) throw new Error("Verification page could not be loaded");
     if (!response.ok) throw new Error(`Verification fetch returned ${response.status}`);
     return (await response.text()).slice(0, 2_000_000);
   } finally {
@@ -5145,7 +6071,7 @@ async function syncStripePlanPrices(): Promise<void> {
 }
 
 async function billingSnapshotForUser(userId: string, organizationId: string | null): Promise<Record<string, unknown>> {
-  const organization = await organizationForUser(userId, organizationId);
+  const organization = await organizationForUser(userId, organizationId, ["owner"]);
   if (!pool) throw httpError(503, "Billing requires PostgreSQL storage");
   const [plans, usage] = await Promise.all([
     pool.query<Record<string, unknown>>(
@@ -5201,7 +6127,7 @@ async function billingSnapshotForUser(userId: string, organizationId: string | n
       currency: String(plan.currency),
       maxBusinesses: Number(plan.effective_max_businesses ?? plan.max_businesses ?? 1),
       entitlements: plan.entitlements && typeof plan.entitlements === "object" ? plan.entitlements : {},
-      checkoutReady: Boolean(plan.stripe_monthly_price_id || plan.stripe_yearly_price_id),
+      checkoutReady: plan.monthly_amount_cents !== null && Boolean(plan.stripe_monthly_price_id || plan.stripe_yearly_price_id),
     })),
     usageLast30Days: {
       conversations: Number(usage.rows[0]?.conversations ?? 0),
@@ -5229,6 +6155,9 @@ async function resolveStripePrice(organizationId: string, planKey: string, inter
   );
   if (!result.rowCount) throw httpError(404, "That billing plan is not available");
   const row = result.rows[0];
+  if (row.monthly_amount_cents === null || row.monthly_amount_cents === undefined) {
+    throw httpError(409, "This plan uses custom pricing. Contact FrontDeskWise for a portfolio or agency quote.");
+  }
   const priceId = typeof row.override_price_id === "string" && row.override_price_id.trim()
     ? row.override_price_id
     : (interval === "year" ? row.stripe_yearly_price_id : row.stripe_monthly_price_id);
@@ -5247,8 +6176,8 @@ function billingPlanDisplayName(planKey: string): string {
     demo: "Demo",
     starter: "Starter",
     growth: "Growth",
-    multi_business: "Multi-Business",
-    portfolio: "Portfolio",
+    multi_business: "Business Plus",
+    portfolio: "Portfolio / Agency",
   };
   return labels[planKey] ?? planKey.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
@@ -5493,10 +6422,12 @@ async function getBusiness(slug: unknown): Promise<Business> {
   const loaded = await loadBusinessFromDatabase(value);
   if (loaded) {
     businesses.set(value, loaded);
+    await syncWebsitePricingFacts(loaded);
     return loaded;
   }
   const business = businesses.get(value);
   if (!business) throw httpError(404, "Demo workspace not found");
+  await syncWebsitePricingFacts(business);
   return business;
 }
 
@@ -5794,6 +6725,17 @@ async function enqueueActionExecution(
   state: ConversationActionState,
   lead: Lead | null,
 ): Promise<void> {
+  const policy = validateActionExecutionPolicy(action, state, business.id);
+  if (!policy.allowed) {
+    void recordSecurityEvent({
+      eventType: "action_policy_denied",
+      risk: policy.risk === "HIGH_RISK" ? "high" : "medium",
+      organizationId: business.organizationId,
+      businessId: business.id,
+      metadata: { actionId: action.id, actionKey: action.key, reason: policy.reason, connector: action.completion.connector?.provider ?? null },
+    });
+    throw new Error(`Action blocked by policy: ${policy.reason ?? "not authorized"}`);
+  }
   const settings = action.completion.connector;
   if (!settings) return;
   const input = actionInputFromCompletion(business, action, conversation, state, lead);
@@ -6216,6 +7158,95 @@ function isLowQualityWebChunk(business: Business, chunk: KnowledgeChunk): boolea
     && chunk.content.trim().length < 120;
 }
 
+async function ownerExperienceInsights(business: Business): Promise<{
+  totalSignals: number;
+  affectedSessions: number;
+  topFriction: Array<{ type: string; count: number; sessions: number }>;
+  topSteps: Array<{ step: string; count: number }>;
+  headline: string | null;
+  suggestedImprovement: string | null;
+}> {
+  if (!pool) {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1_000;
+    const recent = business.experienceSignals.filter((signal) => signal.status !== "ignored" && Date.parse(signal.occurredAt) >= cutoff);
+    const byType = new Map<string, { count: number; sessions: Set<string> }>();
+    const byStep = new Map<string, number>();
+    for (const signal of recent) {
+      const type = byType.get(signal.type) ?? { count: 0, sessions: new Set<string>() };
+      type.count += 1;
+      if (signal.conversationId) type.sessions.add(signal.conversationId);
+      byType.set(signal.type, type);
+      if (signal.workflowStep) byStep.set(signal.workflowStep, (byStep.get(signal.workflowStep) ?? 0) + 1);
+    }
+    return ownerExperienceInsightPayload(recent.length, new Set(recent.map((signal) => signal.conversationId).filter(Boolean)).size, byType, byStep);
+  }
+  try {
+    const [typeResult, stepResult, sessionResult] = await Promise.all([
+      pool.query<Record<string, unknown>>(
+        `select type, count(*)::integer as count, count(distinct conversation_id)::integer as sessions
+         from experience_signals
+         where business_id = $1 and status <> 'ignored' and occurred_at >= now() - interval '30 days'
+         group by type order by count desc`,
+        [business.id],
+      ),
+      pool.query<Record<string, unknown>>(
+        `select workflow_step, count(*)::integer as count
+         from experience_signals
+         where business_id = $1 and status <> 'ignored' and workflow_step is not null and occurred_at >= now() - interval '30 days'
+         group by workflow_step order by count desc limit 5`,
+        [business.id],
+      ),
+      pool.query<{ sessions: string; signals: string }>(
+        `select count(distinct conversation_id)::integer as sessions, count(*)::integer as signals
+         from experience_signals
+         where business_id = $1 and status <> 'ignored' and occurred_at >= now() - interval '30 days'`,
+        [business.id],
+      ),
+    ]);
+    const topFriction = typeResult.rows.map((row) => ({ type: String(row.type), count: Number(row.count ?? 0), sessions: Number(row.sessions ?? 0) }));
+    const topSteps = stepResult.rows.map((row) => ({ step: String(row.workflow_step), count: Number(row.count ?? 0) }));
+    const totalSignals = Number(sessionResult.rows[0]?.signals ?? 0);
+    const affectedSessions = Number(sessionResult.rows[0]?.sessions ?? 0);
+    return ownerExperienceInsightPayload(totalSignals, affectedSessions, new Map(topFriction.map((item) => [item.type, { count: item.count, sessions: new Set(Array.from({ length: item.sessions }, (_, index) => String(index))) }])), new Map(topSteps.map((item) => [item.step, item.count])));
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    return { totalSignals: 0, affectedSessions: 0, topFriction: [], topSteps: [], headline: null, suggestedImprovement: null };
+  }
+}
+
+function ownerExperienceInsightPayload(
+  totalSignals: number,
+  affectedSessions: number,
+  byType: Map<string, { count: number; sessions: Set<string> }>,
+  byStep: Map<string, number>,
+) {
+  const topFriction = [...byType.entries()]
+    .map(([type, value]) => ({ type, count: value.count, sessions: value.sessions.size }))
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 5);
+  const topSteps = [...byStep.entries()]
+    .map(([step, count]) => ({ step, count }))
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 5);
+  const top = topFriction[0];
+  const step = topSteps[0]?.step;
+  const headline = affectedSessions > 0
+    ? `${affectedSessions} visitor${affectedSessions === 1 ? " had" : "s had"} difficulty completing the experience in the last 30 days.`
+    : null;
+  const suggestedImprovement = top?.type === "repeated_question" || top?.type === "correction_loop" || top?.type === "confusing_workflow"
+    ? `Simplify the question${step ? ` at the ${step} step` : ""} and preserve previous answers.`
+    : top?.type === "provider_error" || top?.type === "failed_action"
+      ? `Review the connected provider${step ? ` used by the ${step} step` : ""} and add a fallback path.`
+      : top?.type === "wrong_answer"
+        ? "Review the supporting knowledge and validation rule for this answer."
+        : top?.type === "handoff_request"
+          ? "Make the human-help path more visible and keep the visitor's context intact."
+          : top?.type === "abandonment"
+            ? "Reduce the number of steps before the visitor reaches a useful next action."
+            : null;
+  return { totalSignals, affectedSessions, topFriction, topSteps, headline, suggestedImprovement };
+}
+
 async function workspacePayload(business: Business) {
   const workspaceOrganizationId = business.organizationId ?? await businessOrganizationId(business);
   const conversations = [...business.conversations.values()];
@@ -6292,10 +7323,13 @@ async function workspacePayload(business: Business) {
   for (const conversation of conversations) {
     for (const message of conversation.messages) {
       if (message.role !== "user" || !message.content.trim()) continue;
-      const key = message.content.toLowerCase().replace(/\s+/g, " ").trim();
+      const experience = assessExperienceSignals({ message: message.content });
+      const isSensitiveExperienceText = experience.signals.some((signal) => ["frustration", "correction_loop", "handoff_request", "abandonment"].includes(signal.type));
+      const ownerSafeQuestion = isSensitiveExperienceText ? "Visitor experienced difficulty completing the assistant flow" : message.content.trim();
+      const key = ownerSafeQuestion.toLowerCase().replace(/\s+/g, " ").trim();
       const existing = questionCounts.get(key);
       if (existing) existing.count += 1;
-      else questionCounts.set(key, { question: message.content.trim(), count: 1 });
+      else questionCounts.set(key, { question: ownerSafeQuestion, count: 1 });
     }
   }
   const topQuestions = [...questionCounts.values()]
@@ -6310,6 +7344,18 @@ async function workspacePayload(business: Business) {
       conversations: conversations.filter((conversation) => conversation.createdAt.slice(0, 10) === day).length,
       leads: business.leads.filter((lead) => lead.createdAt.slice(0, 10) === day).length,
     };
+  });
+  const experienceInsights = await ownerExperienceInsights(business);
+  const executiveAnalytics = buildExecutiveAnalytics({
+    businessCreatedAt: business.createdAt,
+    verified: business.ownershipStatus === "verified",
+    published: Boolean(business.agentPublishedAt || business.publishedAgentConfig),
+    widgetInstalled: business.widget.loadCount > 0,
+    knowledgeReadinessScore: readinessScore,
+    conversations,
+    leads: business.leads,
+    conversionEvents: business.conversionEvents,
+    experience: experienceInsights,
   });
   return {
     slug: business.slug,
@@ -6337,6 +7383,7 @@ async function workspacePayload(business: Business) {
       method: business.ownershipVerificationMethod,
       verifiedAt: business.ownershipVerifiedAt,
     },
+    onboarding: business.onboardingValidation,
     publishing: agentPublishingPayload(business),
     publishedAt: business.agentPublishedAt,
     billing: {
@@ -6381,6 +7428,7 @@ async function workspacePayload(business: Business) {
         renderDiagnostics: source.renderDiagnostics ?? null,
         crawlDepth: source.crawlDepth ?? null,
         discoveryParentUrl: source.discoveryParentUrl ?? null,
+        errorCode: source.errorCode ?? null,
       })),
       readiness: {
         score: readinessScore,
@@ -6430,6 +7478,8 @@ async function workspacePayload(business: Business) {
       })),
       handoffs: conversations.filter((conversation) => conversation.status !== "AI_ACTIVE").length,
       humanActive: conversations.filter((conversation) => conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED").length,
+      experienceInsights,
+      executive: executiveAnalytics,
       setup: {
         completed: setupSteps.filter((step) => step.complete).length,
         total: setupSteps.length,
@@ -6441,8 +7491,96 @@ async function workspacePayload(business: Business) {
   };
 }
 
+async function teamWorkspacePayload(
+  business: Business,
+  access: { id: string; role: TeamRole; organizationId: string | null },
+) {
+  const organizationId = business.organizationId ?? access.organizationId ?? await businessOrganizationId(business);
+  const conversations = [...business.conversations.values()];
+  const assignedLeads = business.leads.filter((lead) => {
+    if (access.role === "owner" || access.role === "admin") return true;
+    const conversation = lead.conversationId ? business.conversations.get(lead.conversationId) : null;
+    return conversation?.assignedUserId === access.id;
+  });
+  const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
+  const pendingSources = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling");
+  const failedSources = business.sources.filter((source) => source.crawlStatus === "failed");
+  const today = new Date();
+  const trend = Array.from({ length: 30 }, (_, index) => {
+    const date = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (29 - index)));
+    const day = date.toISOString().slice(0, 10);
+    return {
+      label: date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
+      conversations: conversations.filter((conversation) => conversation.createdAt.slice(0, 10) === day).length,
+      leads: assignedLeads.filter((lead) => lead.createdAt.slice(0, 10) === day).length,
+    };
+  });
+  return {
+    slug: business.slug,
+    status: business.billing.mode,
+    business: {
+      id: business.id,
+      organizationId,
+      name: business.name,
+      location: business.location,
+      vertical: business.vertical,
+      websiteUrl: business.websiteUrl,
+    },
+    // Staff can see the context needed to work the front desk, but not the
+    // owner configuration, workflow definitions, integrations, or secrets.
+    agent: {
+      assistantName: business.agentConfig.assistantName,
+      welcomeMessage: business.agentConfig.welcomeMessage,
+      humanHandoffEnabled: business.agentConfig.humanHandoffEnabled,
+    },
+    branding: { colors: websiteBrandColors(business), source: "website" },
+    suggestedQuestions: [],
+    knowledge: {
+      sourceCount: readySources.length,
+      chunkCount: business.chunks.length,
+      openGaps: 0,
+      pendingSources: pendingSources.length,
+      failedSources: failedSources.length,
+      status: failedSources.length ? "review_recommended" : pendingSources.length ? "indexing" : "ready",
+      indexed: readySources.length > 0 && business.chunks.length > 0,
+      sources: business.sources.map((source) => ({
+        id: source.id,
+        title: source.title,
+        url: source.url,
+        contentType: source.contentType,
+        pageType: source.pageType,
+        crawlStatus: source.crawlStatus,
+        lastCrawledAt: source.lastCrawledAt,
+      })),
+      readiness: {
+        score: readySources.length > 0 && business.chunks.length > 0 ? 100 : 0,
+        sources: readySources.length,
+        chunks: business.chunks.length,
+        openGaps: 0,
+        pendingSources: pendingSources.length,
+        failedSources: failedSources.length,
+      },
+    },
+    stats: {
+      conversations: conversations.length,
+      leads: assignedLeads.length,
+      bookingClicks: conversations.filter((conversation) => conversation.actionTaken === "booking").length,
+      unansweredQuestions: 0,
+      widgetLoads: business.widget.loadCount,
+      trend,
+      topQuestions: [],
+      actions: [],
+      handoffs: conversations.filter((conversation) => conversation.status !== "AI_ACTIVE").length,
+      humanActive: conversations.filter((conversation) => conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED").length,
+      setup: { completed: 0, total: 0, percent: 100, steps: [], nextRequiredStep: null },
+    },
+    teamAccess: { id: access.id, role: access.role },
+  };
+}
+
 async function publicWorkspacePayload(business: Business) {
   const payload = await workspacePayload(business);
+  const { experienceInsights: _experienceInsights, executive: _executive, ...publicStats } = payload.stats;
   return {
     slug: payload.slug,
     status: payload.status,
@@ -6451,7 +7589,7 @@ async function publicWorkspacePayload(business: Business) {
     branding: payload.branding,
     suggestedQuestions: payload.suggestedQuestions,
     knowledge: payload.knowledge,
-    stats: payload.stats,
+    stats: publicStats,
   };
 }
 
@@ -6493,11 +7631,25 @@ function inboxConversationPayload(business: Business, conversation: Conversation
       completedAt: actionState.completedAt ?? null,
       values: Object.fromEntries(Object.entries(actionState.values).filter(([, value]) => typeof value === "string").slice(0, 50)),
       handoffRequired: action.completion.requiresStaff,
-          handoffState: conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
+          handoffState: conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
       ...(action.steps?.length ? { workflow: workflowSummary(action, actionState) } : {}),
     } : null,
     lastMessage: latestMessage ? inboxMessagePayload(latestMessage) : null,
   };
+}
+
+async function conversationAssignees(conversations: Conversation[]): Promise<Map<string, { name: string; email: string }>> {
+  const ids = [...new Set(conversations.map((conversation) => conversation.assignedUserId).filter((id): id is string => Boolean(id)))];
+  const assignees = new Map<string, { name: string; email: string }>();
+  if (!pool || !ids.length) return assignees;
+  const result = await pool.query<Record<string, unknown>>(
+    "select id, name, email from app_users where id = any($1::uuid[])",
+    [ids],
+  );
+  for (const row of result.rows) {
+    assignees.set(String(row.id), { name: String(row.name ?? "Team member"), email: String(row.email ?? "") });
+  }
+  return assignees;
 }
 
 function tokenise(value: string): string[] {
@@ -6763,6 +7915,7 @@ type StructuredFactAnswer = {
 
 function workflowPricingAnswer(
   business: Business,
+  question: string,
   workflow: ActiveWorkflowAnswerContext | undefined,
 ): StructuredFactAnswer | null {
   const audience = workflowAudienceTerms(workflow);
@@ -6779,10 +7932,28 @@ function workflowPricingAnswer(
     .slice(0, 8);
   if (!plans.length) return null;
 
+  const amountFor = (fact: BusinessFact): number => {
+    const match = /(?:[$€£])\s*([\d,]+(?:\.\d{1,2})?)/.exec(fact.valueText);
+    return match ? Number(match[1].replace(/,/g, "")) : Number.POSITIVE_INFINITY;
+  };
+  const questionValue = question.toLowerCase();
+  const cheapest = /\b(?:cheapest|lowest(?:-priced)?|least expensive|most affordable)\b/.test(questionValue);
+  const namedPlan = plans.find((plan) => {
+    const subject = plan.subject.trim().toLowerCase();
+    return subject.length >= 2 && questionValue.includes(subject);
+  });
+
   const audienceLabel = workflow && audience
     ? /team|group|multiple/i.test(workflow.state.values.usage_type) ? "For team use" : "For individual use"
     : null;
-  const summary = plans.map((fact) => `${canonicalizeCustomerCopy(business, fact.subject)} at ${fact.valueText}`).join("; ");
+  const selectedPlan = cheapest
+    ? [...plans].sort((left, right) => amountFor(left) - amountFor(right))[0]
+    : namedPlan;
+  const summary = selectedPlan
+    ? cheapest
+      ? `${canonicalizeCustomerCopy(business, selectedPlan.subject)} is the lowest-priced plan at ${selectedPlan.valueText}`
+      : `${canonicalizeCustomerCopy(business, selectedPlan.subject)} costs ${selectedPlan.valueText}`
+    : plans.map((fact) => `${canonicalizeCustomerCopy(business, fact.subject)} at ${fact.valueText}`).join("; ");
   const citations = plans
     .map((fact) => {
       const source = fact.sourceId ? business.sources.find((item) => item.id === fact.sourceId) : null;
@@ -6791,9 +7962,9 @@ function workflowPricingAnswer(
     .filter((citation): citation is NonNullable<typeof citation> => Boolean(citation))
     .filter((citation, index, list) => list.findIndex((item) => item.sourceId === citation.sourceId) === index)
     .slice(0, 2);
-  const fact = plans[0];
+  const fact = selectedPlan ?? plans[0];
   return {
-    answer: audienceLabel ? `${audienceLabel}, ${summary}.` : `${customerBusinessName(business)} pricing: ${summary}.`,
+    answer: audienceLabel ? `${audienceLabel}, ${summary}.` : selectedPlan ? `${summary}.` : `${customerBusinessName(business)} pricing: ${summary}.`,
     fact,
     confidenceScore: Math.min(0.99, 0.72 + fact.confidence * 0.2 + (fact.authority === "owner_verified" || fact.authority === "system_of_record" ? 0.06 : 0)),
     citations,
@@ -7216,6 +8387,7 @@ async function answerQuestion(
   const performanceTiming = {
     retrievalMs: 0,
     rerankMs: 0,
+    validationMs: 0,
     modelRequestStartedMs: null as number | null,
     llmFirstTokenMs: null as number | null,
     llmTotalMs: 0,
@@ -7272,7 +8444,7 @@ async function answerQuestion(
   const primaryCtaForAnswer = options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, initialIntent));
   const allowedFacts = typeof workflowStep?.config?.allowedFacts === "string" ? workflowStep.config.allowedFacts : "all";
   const structured = initialIntent === "pricing"
-    ? (allowedFacts === "pricing" || allowedFacts === "all" ? workflowPricingAnswer(business, options.workflow) : null)
+    ? (allowedFacts === "pricing" || allowedFacts === "all" ? workflowPricingAnswer(business, question, options.workflow) : null)
       ?? structuredFactAnswer(business, question, initialIntent, allowedFacts === "pricing" || allowedFacts === "all" ? canonicalVerifiedPricingFactsForAnswer(business) : scopedFacts)
     : structuredFactAnswer(business, question, initialIntent, scopedFacts);
   if (structured) {
@@ -7390,7 +8562,7 @@ async function answerQuestion(
   let generated: Awaited<ReturnType<typeof generateGroundedAnswer>> = null;
   let generationUsage: ModelUsage | null = null;
   let groundingCheckUsage: ModelUsage | null = null;
-  let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" = "not_run";
+  let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" | "skipped" = "not_run";
   if (materiallyRelevant && match && confidenceBand !== "low" && decision.model) {
     try {
       performanceTiming.modelRequestStartedMs = performance.now() - answerStartedAt;
@@ -7407,16 +8579,47 @@ async function answerQuestion(
       performanceTiming.llmFirstTokenMs = generated?.usage.latencyMs ?? null;
       performanceTiming.llmTotalMs += generated?.usage.latencyMs ?? 0;
       if (generated) {
-        const groundingCheck = await verifyGroundedAnswer({ question, answer: generated.answer, context });
-        groundingCheckUsage = groundingCheck.usage;
-        performanceTiming.llmTotalMs += groundingCheck.usage.latencyMs;
-        groundingCheckStatus = groundingCheck.grounded ? "passed" : "rejected";
-        if (!groundingCheck.grounded) generated = null;
+        const deterministicValidation = validateCustomerResponse({
+          question,
+          answer: generated.answer,
+          route: "generative",
+          grounded: true,
+          confidenceScore,
+          hasReliableEvidence: materiallyRelevant,
+          evidence: context,
+        });
+        performanceTiming.validationMs += deterministicValidation.latencyMs;
+        if (!deterministicValidation.accepted) {
+          generated = null;
+          groundingCheckStatus = "rejected";
+        } else if (shouldRunSemanticVerifier({
+          question,
+          confidenceScore,
+          hasReliableEvidence: materiallyRelevant,
+          highRisk: /\b(?:enterprise|sell|selling|payment|credit card|security|privacy|cancellation|refund)\b/i.test(question),
+        }) && (await evaluateServerFeatureFlag(FEATURE_FLAG_RESPONSE_VALIDATION_SEMANTIC_VERIFIER, {
+          organizationId: business.organizationId,
+          businessId: business.id,
+          isInternal: business.isInternalDemo === true || isInternalDemoSlug(business.slug),
+        })).enabled) {
+          const groundingCheck = await verifyGroundedAnswer({ question, answer: generated.answer, context });
+          groundingCheckUsage = groundingCheck.usage;
+          performanceTiming.llmTotalMs += groundingCheck.usage.latencyMs;
+          groundingCheckStatus = groundingCheck.grounded ? "passed" : "rejected";
+          if (!groundingCheck.grounded) generated = null;
+        } else {
+          groundingCheckStatus = "skipped";
+        }
       }
     } catch (error) {
       groundingCheckStatus = "failed";
       generated = null;
-      app.log.warn({ error: error instanceof Error ? error.message : "unknown model error", businessId: business.id, route: decision.route }, "Grounded synthesis or verification failed; refusing to answer from unverified evidence");
+      app.log.warn({
+        error: error instanceof Error ? error.message : "unknown model error",
+        businessId: business.id,
+        route: decision.route,
+        ...observabilityMetadata(observabilityForBusiness(business, { model: { route: decision.route, name: decision.model } })),
+      }, "Grounded synthesis or verification failed; refusing to answer from unverified evidence");
     }
   }
   const fallbackUsage: ModelUsage = {
@@ -7447,7 +8650,7 @@ async function answerQuestion(
       : (baseUsage.estimatedCostUsd ?? 0) + (groundingCheckUsage?.estimatedCostUsd ?? 0),
     latencyMs: baseUsage.latencyMs + (groundingCheckUsage?.latencyMs ?? 0),
   };
-  const modelGenerationFailed = Boolean(decision.model && (!generated || groundingCheckStatus !== "passed"));
+  const modelGenerationFailed = Boolean(decision.model && (!generated || groundingCheckStatus === "rejected" || groundingCheckStatus === "failed"));
   const enrichedRetrieval = {
     ...retrievalContract,
     groundingCheckStatus,
@@ -7472,7 +8675,7 @@ async function answerQuestion(
 
   if (modelGenerationFailed && materiallyRelevant && match) {
     return {
-      answer: "I found relevant information, but I’m having trouble formatting the answer right now.",
+      answer: customerSafeFallbacks.temporary_technical_failure,
       grounded: false,
       citations,
       knowledgeGap: null,
@@ -7544,6 +8747,7 @@ async function answerQuestion(
 type WidgetAnswerTiming = {
   retrievalMs: number;
   rerankMs: number;
+  validationMs: number;
   modelRequestStartedMs: number | null;
   llmFirstTokenMs: number | null;
   llmTotalMs: number;
@@ -7624,9 +8828,7 @@ function temporaryConversationAnswer(
     latencyMs: 0,
   };
   return {
-    answer: retrievedEvidence
-      ? "I found relevant information, but I’m having trouble formatting the answer right now."
-      : "I’m having trouble responding right now.",
+    answer: customerSafeFallbacks.temporary_technical_failure,
     grounded: false,
     citations,
     knowledgeGap: null,
@@ -7636,6 +8838,102 @@ function temporaryConversationAnswer(
     modelUsage,
     quickActions: [{ label: "Try again", question }, knowledgeGapContactAction],
     failure: { kind, retryable: true, retrievedEvidence },
+  };
+}
+
+function conversationStateAnswer(
+  answer: string,
+  kind: string,
+): ConversationAnswerResult {
+  const modelUsage: ModelUsage = {
+    route: "tier0",
+    model: null,
+    reason: "conversation_state_lookup",
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+    latencyMs: 0,
+  };
+  return {
+    answer,
+    grounded: false,
+    citations: [],
+    knowledgeGap: null,
+    confidenceScore: 1,
+    confidenceBand: "high",
+    retrieval: {
+      mode: "conversation_state",
+      intent: "general",
+      candidateCount: 0,
+      topScore: 1,
+      ...modelUsage,
+    },
+    modelUsage,
+  };
+}
+
+function finalizeCustomerResponse(
+  question: string,
+  input: ConversationAnswerResult,
+): ConversationAnswerResult {
+  const route: "state" | "workflow" | "provider" | "knowledge" | "generative" | "handoff" | "system" =
+    input.retrieval.mode === "conversation_state"
+      ? "state"
+      : input.handoff
+        ? "handoff"
+        : input.action
+          ? "workflow"
+          : input.failure?.kind === "temporary_ai"
+            ? "generative"
+            : input.failure
+              ? "system"
+              : input.knowledgeGap
+                ? "system"
+                : "knowledge";
+  const validation = validateCustomerResponse({
+    question,
+    answer: input.answer,
+    route,
+    grounded: input.grounded,
+    confidenceScore: input.confidenceScore,
+    citations: input.citations,
+    hasReliableEvidence: route === "knowledge" || route === "generative"
+      ? input.grounded === true || input.citations.length > 0
+      : undefined,
+    conflictCount: typeof (input.retrieval as { conflictCount?: unknown }).conflictCount === "number"
+      ? (input.retrieval as { conflictCount: number }).conflictCount
+      : undefined,
+    semanticVerified: (input.retrieval as { groundingCheckStatus?: string }).groundingCheckStatus === "passed",
+  });
+  const retrieval = {
+    ...input.retrieval,
+    validationTier: validation.tier,
+    validationStatus: validation.accepted && !input.failure ? "accepted" as const : "fallback" as const,
+    validationReason: validation.reason
+      ?? (input.failure?.kind === "temporary_ai"
+        ? "MODEL_FAILURE"
+        : input.failure?.kind === "retrieval"
+          ? "RETRIEVAL_LOW_CONFIDENCE"
+          : input.failure?.kind === "backend"
+            ? "ANSWER_RENDER_FAILURE"
+            : null),
+    validationLatencyMs: validation.latencyMs,
+  };
+  if (validation.accepted) return { ...input, retrieval };
+  return {
+    ...input,
+    answer: validation.answer,
+    grounded: false,
+    citations: [],
+    confidenceScore: 0,
+    confidenceBand: "low",
+    retrieval,
+    quickActions: input.quickActions?.length ? input.quickActions : [{ label: "Try again", question }, knowledgeGapContactAction],
+    failure: {
+      kind: validation.fallbackKind === "temporary_technical_failure" ? "temporary_ai" : "retrieval",
+      retryable: true,
+      retrievedEvidence: input.citations.length > 0,
+    },
   };
 }
 
@@ -8094,7 +9392,11 @@ async function resolveWorkflowActionResources(
         includeWaitlist: config.includeWaitlist === true,
       });
     } catch (error) {
-      app.log.warn({ businessId: business.id, error: error instanceof Error ? error.message : "provider lookup failed" }, "Action provider lookup failed");
+      app.log.warn({
+        businessId: business.id,
+        error: error instanceof Error ? error.message : "provider lookup failed",
+        ...observabilityMetadata(observabilityForBusiness(business, { workflow: action })),
+      }, "Action provider lookup failed");
       return { status: "not_found", matches: [] };
     }
   }
@@ -8106,7 +9408,7 @@ async function resolveWorkflowActionResources(
 }
 
 function waitingForStaff(conversation: Conversation): boolean {
-  return conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED" || conversation.status === "FOLLOW_UP_PENDING";
+  return conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "HANDOFF_REQUESTED" || conversation.status === "FOLLOW_UP_PENDING";
 }
 
 function staffSensitiveWorkflowStep(action: ActionFlow, step: NonNullable<ReturnType<typeof currentWorkflowStep>>): boolean {
@@ -8649,6 +9951,17 @@ async function completeActionConversation(
   action: ActionFlow,
   state: ConversationActionState,
 ): Promise<ConversationAnswerResult> {
+  const policy = validateActionExecutionPolicy(action, state, business.id);
+  if (!policy.allowed) {
+    void recordSecurityEvent({
+      eventType: "action_policy_denied",
+      risk: policy.risk === "HIGH_RISK" ? "high" : "medium",
+      organizationId: business.organizationId,
+      businessId: business.id,
+      metadata: { actionId: action.id, actionKey: action.key, reason: policy.reason },
+    });
+    return actionAnswer(action, state, "This action is not available right now. I can help you contact the team instead.");
+  }
   const summary = action.steps?.length ? workflowSummary(action, state) : null;
   const resolutions = workflowLookupResolutions(state);
   const candidates = resolutions.flatMap((resolution) => resolution.matches);
@@ -8893,23 +10206,24 @@ async function submitActionForm(
   return completeActionConversation(business, conversation, action, state);
 }
 
-function customerAnswerPayload(result: ConversationAnswerResult) {
+function customerAnswerPayload(result: ConversationAnswerResult, question?: string) {
+  const safeResult = question ? finalizeCustomerResponse(question, result) : result;
   return {
-    answer: result.answer,
-    grounded: result.grounded,
-    citations: result.citations,
-    ...(result.recommendation ? {
-      recommendation: result.recommendation,
-      recommendedPlan: result.recommendation.recommendedPlan,
-      verifiedPrice: result.recommendation.verifiedPrice,
-      reason: result.recommendation.reason,
+    answer: safeResult.answer,
+    grounded: safeResult.grounded,
+    citations: safeResult.citations,
+    ...(safeResult.recommendation ? {
+      recommendation: safeResult.recommendation,
+      recommendedPlan: safeResult.recommendation.recommendedPlan,
+      verifiedPrice: safeResult.recommendation.verifiedPrice,
+      reason: safeResult.recommendation.reason,
     } : {}),
-    ...(result.primaryCta ? { primaryCta: result.primaryCta } : {}),
-    ...(result.quickActions?.length ? { quickActions: result.quickActions } : {}),
-    ...(result.handoff ? { handoff: result.handoff } : {}),
-    ...(result.failure ? { failure: result.failure } : {}),
-    ...(result.actionDelivery ? { actionDelivery: result.actionDelivery } : {}),
-    ...(result.action ? { action: result.action } : {}),
+    ...(safeResult.primaryCta ? { primaryCta: safeResult.primaryCta } : {}),
+    ...(safeResult.quickActions?.length ? { quickActions: safeResult.quickActions } : {}),
+    ...(safeResult.handoff ? { handoff: safeResult.handoff } : {}),
+    ...(safeResult.failure ? { failure: safeResult.failure } : {}),
+    ...(safeResult.actionDelivery ? { actionDelivery: safeResult.actionDelivery } : {}),
+    ...(safeResult.action ? { action: safeResult.action } : {}),
   };
 }
 
@@ -9250,7 +10564,24 @@ async function recordConversationEvent(
   actorType: ConversationEvent["actorType"],
   actorUserId: string | null = null,
   metadata: Record<string, unknown> = {},
+  overrides: ObservabilityOverrides = {},
 ): Promise<void> {
+  const metadataRecord = asRecord(metadata);
+  const actionId = overrides.workflow?.id
+    ?? optionalString(metadataRecord.actionId, 120)
+    ?? conversation.actionState?.actionId
+    ?? null;
+  const workflowAction = overrides.workflow
+    ?? (actionId ? business.actions.find((candidate) => candidate.id === actionId) ?? null : null);
+  const correlation = observabilityForBusiness(business, {
+    workflow: workflowAction,
+    model: overrides.model,
+    correlationId: overrides.correlationId ?? optionalString(metadataRecord.turn_id, 160),
+  });
+  const enrichedMetadata = {
+    ...metadata,
+    correlation: observabilityMetadata(correlation),
+  };
   const event: ConversationEvent = {
     id: randomUUID(),
     businessId: business.id,
@@ -9258,7 +10589,7 @@ async function recordConversationEvent(
     eventType,
     actorUserId,
     actorType,
-    metadata,
+    metadata: enrichedMetadata,
     createdAt: new Date().toISOString(),
   };
   business.conversationEvents.unshift(event);
@@ -9266,14 +10597,32 @@ async function recordConversationEvent(
   try {
     await pool.query(
       `insert into conversation_events
-         (id, business_id, conversation_id, event_type, actor_user_id, actor_type, metadata, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [event.id, business.id, conversation.id, event.eventType, actorUserId, actorType, JSON.stringify(metadata), event.createdAt],
+         (id, business_id, conversation_id, event_type, actor_user_id, actor_type, metadata, created_at,
+          organization_id, release_version, deployment_version, publication_version, workflow_action_id, workflow_key,
+          workflow_version, model_routing_version, model_route, model_name, correlation_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+      [
+        event.id, business.id, conversation.id, event.eventType, actorUserId, actorType, JSON.stringify(enrichedMetadata), event.createdAt,
+        business.organizationId ?? null, correlation.releaseVersion, correlation.deploymentVersion, correlation.publicationVersion,
+        correlation.workflowId, correlation.workflowKey, correlation.workflowVersion, correlation.modelRoutingVersion,
+        correlation.modelRoute, correlation.modelName, correlation.correlationId,
+      ],
     );
   } catch (error) {
     const errorCode = asRecord(error).code;
-    const rollingTraceSchema = eventType === "CONVERSATION_DECISION_TRACE" && errorCode === "23514";
-    if (!isMissingDatabaseTable(error) && !rollingTraceSchema) throw error;
+    const rollingEventSchema = ["CONVERSATION_DECISION_TRACE", "LOOP_GUARD_TRIGGERED", "HANDOFF_FOLLOW_UP_PENDING"].includes(eventType) && errorCode === "23514";
+    if (isMissingDatabaseColumn(error)) {
+      await pool.query(
+        `insert into conversation_events
+           (id, business_id, conversation_id, event_type, actor_user_id, actor_type, metadata, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [event.id, business.id, conversation.id, event.eventType, actorUserId, actorType, JSON.stringify(enrichedMetadata), event.createdAt],
+      ).catch((fallbackError) => {
+        if (!isMissingDatabaseTable(fallbackError) && !(["CONVERSATION_DECISION_TRACE", "LOOP_GUARD_TRIGGERED", "HANDOFF_FOLLOW_UP_PENDING"].includes(eventType) && asRecord(fallbackError).code === "23514")) throw fallbackError;
+      });
+      return;
+    }
+    if (!isMissingDatabaseTable(error) && !rollingEventSchema) throw error;
     app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error" }, "Conversation event table is not available yet");
   }
 }
@@ -9287,6 +10636,19 @@ async function cancelPendingHandoffReminders(conversationId: string): Promise<vo
        and event_key like '%:reminder'
        and status in ('queued', 'deferred')
        and payload->>'conversation_id' = $1`,
+    [conversationId],
+  ).catch((error) => {
+    if (!isMissingDatabaseTable(error)) throw error;
+  });
+  // A claim is the point at which the shared handoff alert is no longer
+  // actionable. Clear the in-app copy for every teammate, not just the person
+  // who won the race to take over.
+  await pool.query(
+    `update notifications
+     set read_at = coalesce(read_at, now())
+     where conversation_id = $1
+       and type in ('handoff_requested', 'action_staff_required')
+       and read_at is null`,
     [conversationId],
   ).catch((error) => {
     if (!isMissingDatabaseTable(error)) throw error;
@@ -9310,11 +10672,27 @@ async function recordConversionEvent(
     device?: string | null;
     metadata?: Record<string, unknown>;
     timestamp?: string | null;
+    workflow?: ObservabilityWorkflow | null;
+    model?: ObservabilityModel | null;
+    correlationId?: string | null;
   },
 ): Promise<void> {
   if (!conversionEventTypes.has(input.event)) return;
   const timestampCandidate = input.timestamp ? Date.parse(input.timestamp) : NaN;
   const timestamp = Number.isNaN(timestampCandidate) ? new Date().toISOString() : new Date(timestampCandidate).toISOString();
+  const conversationActionId = input.conversationId ? business.conversations.get(input.conversationId)?.actionState?.actionId : null;
+  const workflowAction = input.workflow
+    ?? (input.flowId ? business.actions.find((candidate) => candidate.id === input.flowId) ?? null : null)
+    ?? (conversationActionId ? business.actions.find((candidate) => candidate.id === conversationActionId) ?? null : null);
+  const correlation = observabilityForBusiness(business, {
+    workflow: workflowAction,
+    model: input.model,
+    correlationId: input.correlationId ?? null,
+  });
+  const metadata = {
+    ...(input.metadata ?? {}),
+    correlation: observabilityMetadata(correlation),
+  };
   const event: ConversionEvent = {
     id: randomUUID(),
     organizationId: null,
@@ -9326,30 +10704,58 @@ async function recordConversionEvent(
     timestamp,
     sourcePage: input.sourcePage?.slice(0, 2_000) ?? null,
     device: normalizeTelemetryDevice(input.device),
-    metadata: input.metadata ?? {},
+    metadata,
   };
   business.conversionEvents.unshift(event);
   if (business.conversionEvents.length > 10_000) business.conversionEvents.length = 10_000;
-  if (!pool) return;
+  if (!pool) {
+    if (event.event === "CONVERSATION_ABANDONED") {
+      void recordExperienceSignalsForTelemetry(business, event.conversationId, event.event).catch(() => undefined);
+    }
+    return;
+  }
+  const organizationId = await businessOrganizationId(business);
+  event.organizationId = organizationId;
+  if (!organizationId) return;
   try {
-    const organizationId = await businessOrganizationId(business);
-    event.organizationId = organizationId;
-    if (!organizationId) return;
     await pool.query(
       `insert into conversion_events
-         (id, organization_id, business_id, conversation_id, flow_id, field_id, event, occurred_at, source_page, device, metadata)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [event.id, organizationId, business.id, event.conversationId, event.flowId, event.fieldId, event.event, event.timestamp, event.sourcePage, event.device, JSON.stringify(event.metadata)],
+         (id, organization_id, business_id, conversation_id, flow_id, field_id, event, occurred_at, source_page, device, metadata,
+          release_version, deployment_version, publication_version, workflow_key, workflow_version, model_routing_version,
+          model_route, model_name, correlation_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+      [
+        event.id, organizationId, business.id, event.conversationId, event.flowId, event.fieldId, event.event, event.timestamp,
+        event.sourcePage, event.device, JSON.stringify(event.metadata), correlation.releaseVersion, correlation.deploymentVersion,
+        correlation.publicationVersion, correlation.workflowKey, correlation.workflowVersion, correlation.modelRoutingVersion,
+        correlation.modelRoute, correlation.modelName, correlation.correlationId,
+      ],
     );
   } catch (error) {
     // Conversion telemetry is diagnostic data. A rolling deploy can briefly
     // run the new API against an older event constraint, and that must never
     // turn an otherwise valid customer response into a 500.
-    app.log.warn({
-      error: error instanceof Error ? error.message : "unknown conversion event persistence error",
-      businessId: business.id,
-      event: event.event,
-    }, "Conversion event was not persisted");
+    if (isMissingDatabaseColumn(error)) {
+      await pool.query(
+        `insert into conversion_events
+           (id, organization_id, business_id, conversation_id, flow_id, field_id, event, occurred_at, source_page, device, metadata)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [event.id, organizationId, business.id, event.conversationId, event.flowId, event.fieldId, event.event, event.timestamp, event.sourcePage, event.device, JSON.stringify(event.metadata)],
+      ).catch((fallbackError) => {
+        if (!isMissingDatabaseTable(fallbackError)) throw fallbackError;
+      });
+    } else {
+      app.log.warn({
+        error: error instanceof Error ? error.message : "unknown conversion event persistence error",
+        businessId: business.id,
+        event: event.event,
+      }, "Conversion event was not persisted");
+    }
+  }
+  if (event.event === "CONVERSATION_ABANDONED") {
+    void recordExperienceSignalsForTelemetry(business, event.conversationId, event.event).catch((error) => {
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown abandonment signal error", businessId: business.id, conversationId: event.conversationId }, "Abandonment experience signal failed");
+    });
   }
 }
 
@@ -9376,9 +10782,11 @@ async function recordWidgetPerformance(
     sourcePage?: string | null;
     device?: string | null;
     metrics?: Record<string, string | number | boolean | null>;
+    correlationId?: string | null;
   },
 ): Promise<void> {
   if (!widgetPerformanceEventTypes.has(input.event) || !pool) return;
+  const correlation = observabilityForBusiness(business, { correlationId: input.correlationId ?? input.requestId ?? null });
   const event: WidgetPerformanceEvent = {
     id: randomUUID(),
     organizationId: input.organizationId ?? await businessOrganizationId(business),
@@ -9396,11 +10804,27 @@ async function recordWidgetPerformance(
   try {
     await pool.query(
       `insert into widget_performance_events
-         (id, organization_id, business_id, conversation_id, request_id, event_type, duration_ms, occurred_at, source_page, device, metrics)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [event.id, event.organizationId, event.businessId, event.conversationId, event.requestId, event.event, event.durationMs, event.occurredAt, event.sourcePage, event.device, JSON.stringify(event.metrics)],
+         (id, organization_id, business_id, conversation_id, request_id, event_type, duration_ms, occurred_at, source_page, device, metrics,
+          release_version, deployment_version, publication_version, correlation_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        event.id, event.organizationId, event.businessId, event.conversationId, event.requestId, event.event, event.durationMs,
+        event.occurredAt, event.sourcePage, event.device, JSON.stringify(event.metrics), correlation.releaseVersion,
+        correlation.deploymentVersion, correlation.publicationVersion, correlation.correlationId,
+      ],
     );
   } catch (error) {
+    if (isMissingDatabaseColumn(error)) {
+      await pool.query(
+        `insert into widget_performance_events
+           (id, organization_id, business_id, conversation_id, request_id, event_type, duration_ms, occurred_at, source_page, device, metrics)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [event.id, event.organizationId, event.businessId, event.conversationId, event.requestId, event.event, event.durationMs, event.occurredAt, event.sourcePage, event.device, JSON.stringify(event.metrics)],
+      ).catch((fallbackError) => {
+        if (!isMissingDatabaseTable(fallbackError)) throw fallbackError;
+      });
+      return;
+    }
     if (!isMissingDatabaseTable(error)) throw error;
     app.log.warn({ businessId: business.id }, "Widget performance table is not available yet");
   }
@@ -9421,6 +10845,56 @@ async function staffRecipients(business: Business): Promise<Array<{ id: string; 
     [business.id],
   );
   return result.rows.map((row) => ({ id: String(row.id), email: String(row.email), name: String(row.name ?? "Team member"), role: row.effective_role === "owner" ? "owner" : row.effective_role === "admin" ? "admin" : "staff" }));
+}
+
+type StoredWebPushSubscription = {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys: { p256dh: string; auth: string };
+};
+
+async function sendWebPushNotifications(input: {
+  businessId: string;
+  recipientUserIds: string[];
+  title: string;
+  body: string;
+  url: string;
+  conversationId: string;
+  notificationId?: string;
+  type: string;
+}): Promise<void> {
+  if (!webPushConfigured || !pool || !input.recipientUserIds.length) return;
+  try {
+    const result = await pool.query<{ id: string; endpoint: string; subscription: StoredWebPushSubscription }>(
+      `select id, endpoint, subscription
+         from web_push_subscriptions
+        where business_id = $1 and user_id = any($2::uuid[])`,
+      [input.businessId, input.recipientUserIds],
+    );
+    await Promise.all(result.rows.map(async (row) => {
+      try {
+        await webpush.sendNotification(row.subscription, JSON.stringify({
+          type: "frontdeskwise-push",
+          title: input.title,
+          body: input.body,
+          url: input.url,
+          conversationId: input.conversationId,
+          notificationId: input.notificationId ?? null,
+          notificationType: input.type,
+        }), { TTL: 60, urgency: "high" });
+      } catch (error) {
+        const statusCode = Number(asRecord(error).statusCode ?? 0);
+        if (statusCode === 404 || statusCode === 410) {
+          await pool?.query("delete from web_push_subscriptions where id = $1", [row.id]).catch(() => undefined);
+          return;
+        }
+        app.log.warn({ error: error instanceof Error ? error.message : "unknown web push error", businessId: input.businessId, endpoint: row.endpoint.slice(0, 80) }, "Web Push delivery failed");
+      }
+    }));
+  } catch (error) {
+    if (isMissingDatabaseTable(error)) return;
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown web push subscription error", businessId: input.businessId }, "Web Push delivery was skipped");
+  }
 }
 
 async function notifyStaff(
@@ -9469,6 +10943,17 @@ async function notifyStaff(
         app.log.warn({ error: error instanceof Error ? error.message : "unknown schema error" }, "Notification table is not available yet");
       }
     }
+  }
+  if (channels.includes("in_app")) {
+    void sendWebPushNotifications({
+      businessId: business.id,
+      recipientUserIds: filteredRecipients.map((recipient) => recipient.id),
+      title: input.title,
+      body: input.body,
+      url: lifecycleAppUrl(`/app/${business.slug}/inbox?conversation=${encodeURIComponent(conversation.id)}`),
+      conversationId: conversation.id,
+      type: input.type,
+    });
   }
   if (channels.includes("email")) {
     const eventType: LifecycleEventType | null = input.type === "handoff_requested"
@@ -9537,7 +11022,12 @@ async function notifyStaff(
   return filteredRecipients.length ? "sent" : "failed";
 }
 
-function handoffAnswer(business: Business, reason: string, notificationStatus: Exclude<HandoffNotificationStatus, null> = "sent"): ConversationAnswerResult {
+function handoffAnswer(
+  business: Business,
+  reason: string,
+  notificationStatus: Exclude<HandoffNotificationStatus, null> = "sent",
+  contactRequired = false,
+): ConversationAnswerResult {
   const modelUsage: ModelUsage = {
     route: "tier0",
     model: null,
@@ -9548,9 +11038,13 @@ function handoffAnswer(business: Business, reason: string, notificationStatus: E
     latencyMs: 0,
   };
   return {
-    answer: notificationStatus === "sent"
-      ? "Your message has been sent to the team. A team member will reply here shortly. I’m still here if you have another question while you wait."
-      : "Your message has been saved for the team. A team member will reply here shortly. I’m still here if you have another question while you wait.",
+    answer: contactRequired
+      ? notificationStatus === "failed"
+        ? "Your request is saved for the team. While we wait for someone to join here, what’s the best email or phone number to reach you if you step away? You can stay here and keep chatting with me while we wait."
+        : "Absolutely — I’ve notified the team. While we wait for someone to join here, what’s the best email or phone number to reach you if you step away? You can stay here and keep chatting with me while we wait."
+      : notificationStatus === "sent"
+        ? "Your message has been sent to the team. A team member will reply here shortly. I’m still here if you have another question while you wait."
+        : "Your message has been saved for the team. A team member will reply here shortly. I’m still here if you have another question while you wait.",
     grounded: false,
     citations: [],
     knowledgeGap: null,
@@ -9558,11 +11052,17 @@ function handoffAnswer(business: Business, reason: string, notificationStatus: E
     confidenceBand: "high",
     retrieval: { mode: "handoff", candidateCount: 0, topScore: 1, ...modelUsage },
     modelUsage,
-    handoff: { status: "WAITING_FOR_STAFF", reason, notificationStatus },
+    handoff: { status: contactRequired ? "CONTACT_REQUIRED" : "WAITING_FOR_STAFF", reason, notificationStatus },
   };
 }
 
-async function requestHandoff(business: Business, conversation: Conversation, reason: string, lastMessage?: string): Promise<ConversationAnswerResult> {
+async function requestHandoff(
+  business: Business,
+  conversation: Conversation,
+  reason: string,
+  lastMessage?: string,
+  sourcePage?: string | null,
+): Promise<ConversationAnswerResult> {
   const now = new Date().toISOString();
   conversation.status = "HANDOFF_REQUESTED";
   conversation.handoffReason = reason;
@@ -9590,10 +11090,47 @@ async function requestHandoff(business: Business, conversation: Conversation, re
     app.log.warn({ error: error instanceof Error ? error.message : "unknown handoff notification failure", businessId: business.id, conversationId: conversation.id }, "Handoff saved but staff notification failed");
   }
   conversation.handoffNotificationStatus = notificationStatus;
+  const contact = knownHandoffContact(business, conversation, lastMessage);
+  const contactRequired = !hasHandoffContactChannel(contact) || (business.agentConfig.requireLeadConsent && !business.leads.some((lead) => lead.conversationId === conversation.id));
+  conversation.status = contactRequired ? "CONTACT_REQUIRED" : "WAITING_FOR_STAFF";
+  if (!contactRequired) {
+    try {
+      await captureHandoffLead(business, conversation, contact, reason, lastMessage, sourcePage);
+    } catch (error) {
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown handoff lead capture failure", businessId: business.id, conversationId: conversation.id }, "Handoff notification succeeded but contact capture was deferred");
+    }
+  }
+  conversation.lastActivityAt = new Date().toISOString();
+  await persistConversation(business, conversation);
+  return handoffAnswer(business, reason, notificationStatus, contactRequired);
+}
+
+async function completeHandoffContactCapture(
+  business: Business,
+  conversation: Conversation,
+  question: string,
+  sourcePage?: string | null,
+): Promise<ConversationAnswerResult | null> {
+  const contact = knownHandoffContact(business, conversation, question);
+  if (!hasHandoffContactChannel(contact)) return null;
+  if (business.agentConfig.requireLeadConsent && !business.leads.some((lead) => lead.conversationId === conversation.id)) return null;
+  const reason = conversation.handoffReason ?? "Visitor explicitly requested a team member";
+  try {
+    await captureHandoffLead(business, conversation, contact, reason, question, sourcePage);
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown handoff contact capture failure", businessId: business.id, conversationId: conversation.id }, "Handoff contact capture failed after visitor reply");
+    return null;
+  }
   conversation.status = "WAITING_FOR_STAFF";
   conversation.lastActivityAt = new Date().toISOString();
   await persistConversation(business, conversation);
-  return handoffAnswer(business, reason, notificationStatus);
+  const notificationStatus = conversation.handoffNotificationStatus ?? "sent";
+  const result = handoffAnswer(business, reason, notificationStatus);
+  return {
+    ...result,
+    answer: "Got it — I’ve saved your details. You can stay here and keep chatting with me while we wait for a team member to join.",
+    handoff: { status: "WAITING_FOR_STAFF", reason, notificationStatus },
+  };
 }
 
 async function refreshHandoffLifecycle(
@@ -9652,6 +11189,7 @@ async function startConversation(business: Business, sessionId: string | null, o
     const recentConversation = sessionConversations.find((conversation) => conversation.status !== "EXPIRED" && conversationIsWithinResumeWindow(conversation));
     if (recentConversation) return recentConversation;
   }
+  await enforceConversationAllowance(business);
   const conversation: Conversation = {
     id: randomUUID(),
     sessionId: normalizedSessionId ?? randomUUID(),
@@ -9704,11 +11242,266 @@ async function purgeExpiredCustomerData(): Promise<void> {
     try {
       await pool.query("delete from conversations where business_id = $1 and last_activity_at < $2", [business.id, new Date(cutoff).toISOString()]);
       await pool.query("delete from leads where business_id = $1 and created_at < $2", [business.id, new Date(cutoff).toISOString()]);
+      await pool.query("delete from experience_signals where business_id = $1 and occurred_at < $2", [business.id, new Date(cutoff).toISOString()]).catch((error) => {
+        if (!isMissingDatabaseTable(error)) throw error;
+      });
     } catch (error) {
       if (!isMissingDatabaseColumn(error) && !isMissingDatabaseTable(error)) throw error;
       app.log.warn({ businessId: business.id }, "Retention cleanup skipped until the latest schema is available");
     }
   }
+}
+
+function recentExperienceBehavior(business: Business, conversationId: string): {
+  failedCtaClicks: number;
+  failedActions: number;
+  abandonedAfterError: boolean;
+} {
+  const recent = business.conversionEvents
+    .filter((event) => event.conversationId === conversationId)
+    .slice(0, 20);
+  return {
+    failedCtaClicks: recent.filter((event) => event.event === "CTA_CLICKED" && /fail|retry|error/i.test(String(event.metadata.action ?? event.metadata.status ?? ""))).length,
+    failedActions: recent.filter((event) => event.event === "ACTION_FAILED").length,
+    abandonedAfterError: recent[0]?.event === "CONVERSATION_ABANDONED"
+      && recent.slice(1, 4).some((event) => event.event === "ACTION_FAILED" || event.event === "IMPROVEMENT_SIGNAL"),
+  };
+}
+
+function experienceAssessmentForTurn(
+  business: Business,
+  conversation: Conversation,
+  userContent: string,
+  result: ConversationAnswerResult,
+  traceContext?: ConversationDecisionTraceContext,
+): ExperienceSignalAssessment {
+  const retrieval = asRecord(result.retrieval);
+  const currentStepId = conversation.actionState?.currentStepId ?? traceContext?.stateBefore?.currentStepId ?? null;
+  const priorTraceCount = currentStepId
+    ? business.conversationEvents
+      .filter((event) => event.conversationId === conversation.id && event.eventType === "CONVERSATION_DECISION_TRACE")
+      .filter((event) => asRecord(asRecord(event.metadata).workflow_state_after).currentStepId === currentStepId)
+      .length
+    : 0;
+  const behavior = recentExperienceBehavior(business, conversation.id);
+  return assessExperienceSignals({
+    message: userContent,
+    previousUserMessages: conversation.messages.filter((message) => message.role === "user").map((message) => message.content),
+    workflow: {
+      stepId: currentStepId,
+      sameStepAttempts: priorTraceCount,
+      unchangedTurns: conversation.actionState?.loopGuard?.consecutiveUnchangedTurns ?? 0,
+      loopGuardTriggered: conversation.actionState?.loopGuard?.triggered === true,
+    },
+    behavior,
+    result: {
+      grounded: result.grounded,
+      confidenceBand: result.confidenceBand,
+      retrievalMode: typeof retrieval.mode === "string" ? retrieval.mode : null,
+      retrievalReason: typeof retrieval.reason === "string" ? retrieval.reason : null,
+      validationStatus: retrieval.validationStatus === "accepted" || retrieval.validationStatus === "fallback" ? retrieval.validationStatus : null,
+      providerStatus: result.actionDelivery?.status === "failed" ? "failed" : result.actionDelivery ? "succeeded" : "idle",
+      actionDeliveryStatus: result.actionDelivery?.status ?? null,
+      handoff: Boolean(result.handoff),
+    },
+  });
+}
+
+function applyExperienceRuntimeAdaptation(
+  result: ConversationAnswerResult,
+  assessment: ExperienceSignalAssessment,
+): ConversationAnswerResult {
+  if (!assessment.signals.length || result.silent || result.handoff) return result;
+  let adapted = result;
+  if (assessment.runtimeAdaptation.acknowledge && adapted.answer.trim()) {
+    const prefix = assessment.runtimeAdaptation.offerHumanHelp
+      ? "I can see this isn’t getting you where you need to go. "
+      : "Let me simplify this. ";
+    if (!adapted.answer.startsWith(prefix.trim())) adapted = { ...adapted, answer: `${prefix}${adapted.answer}` };
+  }
+  if (assessment.runtimeAdaptation.suppressCtas) {
+    const { primaryCta: _primaryCta, ...withoutCta } = adapted;
+    adapted = {
+      ...withoutCta,
+      quickActions: [
+        { label: "Simplify this", question: "Please simplify that." },
+        ...(assessment.runtimeAdaptation.offerHumanHelp ? [{ label: "Talk to someone", question: "Can I talk to someone?" }] : []),
+      ],
+    };
+  }
+  return adapted;
+}
+
+function experienceTraceForTurn(
+  business: Business,
+  conversation: Conversation,
+  context: ConversationDecisionTraceContext | null,
+  result: ConversationAnswerResult,
+): { trace: Record<string, unknown>; providerState: Record<string, unknown>; validationResult: Record<string, unknown>; workflowStep: string | null; modelRole: string | null } {
+  const retrieval = asRecord(result.retrieval);
+  const actionAfter = conversation.actionState
+    ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
+    : null;
+  const provider = providerTrace(actionAfter ?? context?.actionBefore, conversation.actionState, result.actionDelivery);
+  const workflowStep = conversation.actionState?.currentStepId ?? context?.stateBefore?.currentStepId ?? null;
+  const validationResult = {
+    grounded: result.grounded,
+    confidenceBand: result.confidenceBand,
+    status: retrieval.validationStatus ?? null,
+    reason: retrieval.validationReason ?? retrieval.reason ?? null,
+    mode: retrieval.mode ?? null,
+  };
+  const providerState = provider
+    ? { provider: provider.provider, operations: provider.operations, lookupSteps: provider.lookupSteps, actionDelivery: provider.actionDelivery }
+    : { provider: null, operations: [], lookupSteps: [], actionDelivery: null };
+  const trace: Record<string, unknown> = {
+    traceVersion: 1,
+    conversationId: conversation.id,
+    lastEvents: [
+      { type: "route", route: context?.orchestration.route ?? null, confidence: context?.orchestration.confidence ?? null },
+      { type: "workflow", step: workflowStep, stateBefore: context ? snapshotConversationWorkflowState(context.stateBefore) : null, stateAfter: snapshotConversationWorkflowState(conversation.actionState) },
+      { type: "retrieval", mode: retrieval.mode ?? null, intent: retrieval.intent ?? null, candidateCount: retrieval.candidateCount ?? 0, topScore: retrieval.topScore ?? null },
+      { type: "provider", state: providerState },
+      { type: "validation", result: validationResult },
+      { type: "cta", selected: result.primaryCta ? { key: result.primaryCta.key, executionMode: result.primaryCta.executionMode } : null },
+    ],
+  };
+  return {
+    trace,
+    providerState,
+    validationResult,
+    workflowStep,
+    modelRole: typeof retrieval.model === "string" ? retrieval.model : typeof retrieval.route === "string" ? retrieval.route : null,
+  };
+}
+
+async function persistExperienceSignals(
+  business: Business,
+  conversation: Conversation | null,
+  assessment: ExperienceSignalAssessment,
+  context: ConversationDecisionTraceContext | null,
+  result: ConversationAnswerResult | null,
+  fallbackMessage = "",
+): Promise<void> {
+  if (!assessment.signals.length) return;
+  const now = new Date().toISOString();
+  const organizationId = business.organizationId ?? await businessOrganizationId(business);
+  const traceData = conversation && result
+    ? experienceTraceForTurn(business, conversation, context, result)
+    : {
+        trace: { traceVersion: 1, lastEvents: [{ type: "telemetry", event: fallbackMessage || "experience_signal" }] },
+        providerState: {},
+        validationResult: {},
+        workflowStep: null,
+        modelRole: null,
+      };
+  const workflowAction = conversation?.actionState
+    ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
+    : context?.actionBefore ?? null;
+  const correlation = observabilityForBusiness(business, {
+    workflow: workflowAction,
+    model: result ? { route: result.modelUsage.route, name: result.modelUsage.model } : null,
+    correlationId: context?.turnId ?? null,
+  });
+  for (const signal of assessment.signals) {
+    const stored: StoredExperienceSignal = {
+      ...signal,
+      id: randomUUID(),
+      organizationId,
+      businessId: business.id,
+      conversationId: conversation?.id ?? null,
+      publicationVersion: business.publishedConfigVersion,
+      modelRole: traceData.modelRole,
+      providerState: traceData.providerState,
+      validationResult: traceData.validationResult,
+      sessionTrace: traceData.trace,
+      status: "open",
+      occurredAt: now,
+    };
+    business.experienceSignals.unshift(stored);
+    if (business.experienceSignals.length > 10_000) business.experienceSignals.length = 10_000;
+    if (!pool || !organizationId) continue;
+    try {
+      await pool.query(
+        `insert into experience_signals
+           (id, organization_id, business_id, conversation_id, type, severity, confidence,
+            likely_layer, reason, message_excerpt_redacted, workflow_step, publication_version,
+            model_role, provider_state, validation_result, session_trace, cluster_key,
+            status, occurred_at, release_version, deployment_version, workflow_action_id,
+            workflow_key, workflow_version, model_routing_version, model_route, model_name, correlation_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
+        [
+          stored.id,
+          organizationId,
+          stored.businessId,
+          stored.conversationId,
+          stored.type,
+          stored.severity,
+          stored.confidence,
+          stored.likelyLayer,
+          stored.reason,
+          stored.messageExcerptRedacted || null,
+          stored.workflowStep,
+          stored.publicationVersion,
+          stored.modelRole,
+          JSON.stringify(stored.providerState),
+          JSON.stringify(stored.validationResult),
+          JSON.stringify(stored.sessionTrace),
+          stored.clusterKey,
+          stored.status,
+          stored.occurredAt,
+          correlation.releaseVersion,
+          correlation.deploymentVersion,
+          correlation.workflowId,
+          correlation.workflowKey,
+          correlation.workflowVersion,
+          correlation.modelRoutingVersion,
+          correlation.modelRoute,
+          correlation.modelName,
+          correlation.correlationId,
+        ],
+      );
+    } catch (error) {
+      if (isMissingDatabaseColumn(error)) {
+        await pool.query(
+          `insert into experience_signals
+             (id, organization_id, business_id, conversation_id, type, severity, confidence,
+              likely_layer, reason, message_excerpt_redacted, workflow_step, publication_version,
+              model_role, provider_state, validation_result, session_trace, cluster_key,
+              status, occurred_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+          [
+            stored.id, organizationId, stored.businessId, stored.conversationId, stored.type, stored.severity,
+            stored.confidence, stored.likelyLayer, stored.reason, stored.messageExcerptRedacted || null,
+            stored.workflowStep, stored.publicationVersion, stored.modelRole, JSON.stringify(stored.providerState),
+            JSON.stringify(stored.validationResult), JSON.stringify(stored.sessionTrace), stored.clusterKey, stored.status, stored.occurredAt,
+          ],
+        ).catch((fallbackError) => {
+          if (!isMissingDatabaseTable(fallbackError)) throw fallbackError;
+        });
+        continue;
+      }
+      if (!isMissingDatabaseTable(error)) throw error;
+      app.log.warn({ businessId: business.id }, "Experience signal table is not available yet");
+    }
+  }
+}
+
+async function recordExperienceSignalsForTelemetry(
+  business: Business,
+  conversationId: string | null,
+  event: "CONVERSATION_ABANDONED",
+): Promise<void> {
+  const conversation = conversationId ? business.conversations.get(conversationId) ?? null : null;
+  const lastUserMessage = conversation?.messages.filter((message) => message.role === "user").at(-1)?.content ?? "Visitor left after an error";
+  const behavior = recentExperienceBehavior(business, conversationId ?? "");
+  const assessment = assessExperienceSignals({
+    message: lastUserMessage,
+    previousUserMessages: conversation?.messages.filter((message) => message.role === "user").slice(0, -1).map((message) => message.content),
+    behavior: { ...behavior, abandonedAfterError: true },
+    result: { providerStatus: behavior.failedActions > 0 ? "failed" : "idle" },
+  });
+  await persistExperienceSignals(business, conversation, assessment, null, null, event);
 }
 
 async function recordConversationDecisionTrace(
@@ -9788,6 +11581,10 @@ async function recordConversationDecisionTrace(
       action_delivery: result.actionDelivery?.status ?? null,
     },
     latency_ms: Math.max(0, Math.round(performance.now() - context.startedAt)),
+  }, {
+    workflow: actionAfter ?? context.actionBefore,
+    model: { route: result.modelUsage.route, name: result.modelUsage.model },
+    correlationId: context.turnId,
   });
 }
 
@@ -9799,6 +11596,17 @@ async function persistConversationExchange(
   clientMessageId?: string,
   traceContext?: ConversationDecisionTraceContext,
 ): Promise<ConversationAnswerResult> {
+  result = finalizeCustomerResponse(userContent, result);
+  const experienceAssessment = experienceAssessmentForTurn(business, conversation, userContent, result, traceContext);
+  result = applyExperienceRuntimeAdaptation(result, experienceAssessment);
+  const exchangeWorkflow = conversation.actionState
+    ? business.actions.find((candidate) => candidate.id === conversation.actionState?.actionId) ?? null
+    : traceContext?.actionBefore ?? null;
+  const exchangeCorrelation = observabilityForBusiness(business, {
+    workflow: exchangeWorkflow,
+    model: { route: result.modelUsage.route, name: result.modelUsage.model },
+    correlationId: traceContext?.turnId ?? null,
+  });
   recordAnswer(result.modelUsage.latencyMs);
   if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer") recordLowConfidenceFallback();
   const now = new Date().toISOString();
@@ -9830,11 +11638,13 @@ async function persistConversationExchange(
       conversationId: conversation.id,
       flowId: result.action?.id ?? null,
       metadata: { signalType: signal.type, reason: signal.reason, normalizedQuestion: signal.normalizedQuestion },
+      model: { route: result.modelUsage.route, name: result.modelUsage.model },
+      correlationId: traceContext?.turnId ?? null,
     });
   }
   conversation.updatedAt = now;
   conversation.lastActivityAt = now;
-  if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING") {
+  if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED" || conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING") {
     conversation.unreadCount += 1;
     await recordConversationEvent(business, conversation, "VISITOR_REPLIED", "visitor", null, { contentLength: userContent.length });
     if (conversation.status === "HUMAN_ACTIVE" && conversation.assignedUserId) {
@@ -9845,11 +11655,14 @@ async function persistConversationExchange(
       });
     }
   }
-  await persistMessage(conversation, userMessage);
-  if (assistantMessage) await persistMessage(conversation, assistantMessage);
+  await persistMessage(business, conversation, userMessage, traceContext?.turnId ?? null);
+  if (assistantMessage) await persistMessage(business, conversation, assistantMessage, traceContext?.turnId ?? null);
   await persistConversation(business, conversation);
-  if (!result.handoff && (conversation.status === "AI_ACTIVE" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING")) {
-    await recordConversationEvent(business, conversation, "AI_RESPONSE_SENT", "ai", null, { grounded: result.grounded });
+  if (!result.handoff && (conversation.status === "AI_ACTIVE" || conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING")) {
+    await recordConversationEvent(business, conversation, "AI_RESPONSE_SENT", "ai", null, { grounded: result.grounded }, {
+      model: { route: result.modelUsage.route, name: result.modelUsage.model },
+      correlationId: traceContext?.turnId ?? null,
+    });
   }
   if (traceContext) {
     try {
@@ -9857,8 +11670,15 @@ async function persistConversationExchange(
     } catch (error) {
       // Decision traces are diagnostic metadata. They must never turn a
       // successful customer response into a failed request.
-      app.log.warn({ error: error instanceof Error ? error.message : "unknown trace error", businessId: business.id, conversationId: conversation.id }, "Conversation decision trace failed");
+      app.log.warn({ error: error instanceof Error ? error.message : "unknown trace error", businessId: business.id, conversationId: conversation.id, ...observabilityMetadata(exchangeCorrelation) }, "Conversation decision trace failed");
     }
+  }
+  try {
+    await persistExperienceSignals(business, conversation, experienceAssessment, traceContext ?? null, result);
+  } catch (error) {
+    // Experience telemetry is diagnostic data. It must not make a valid
+    // visitor response fail during a rolling schema deployment.
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown experience signal error", businessId: business.id, conversationId: conversation.id, ...observabilityMetadata(exchangeCorrelation) }, "Experience signal persistence failed");
   }
   await recordOrganizationUsage(business, "llm_requests");
   await recordModelUsage(business, result.modelUsage);
@@ -9880,7 +11700,7 @@ async function persistConversationExchange(
       // Gap tracking and optional alerts are observability work; they must not
       // make the visitor-facing answer fail when a schema or mail provider is
       // temporarily unavailable.
-      app.log.error({ error, businessId: business.id }, "Knowledge-gap follow-up failed after answer was generated");
+      app.log.error({ error, businessId: business.id, ...observabilityMetadata(exchangeCorrelation) }, "Knowledge-gap follow-up failed after answer was generated");
     }
   }
   return result;
@@ -9928,9 +11748,16 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
     options.clientMessageId,
     traceContext,
   );
-  if (orchestration.route === "HUMAN_HANDOFF" && !["HUMAN_ACTIVE", "WAITING_FOR_STAFF", "HANDOFF_REQUESTED"].includes(conversation.status)) {
-    const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member", question);
+  if (conversation.status === "CONTACT_REQUIRED") {
+    const captured = await completeHandoffContactCapture(business, conversation, question, options.currentPage);
+    if (captured) return persistTurn(captured);
+  }
+  if (orchestration.route === "HUMAN_HANDOFF" && !["HUMAN_ACTIVE", "WAITING_FOR_STAFF", "HANDOFF_REQUESTED", "CONTACT_REQUIRED"].includes(conversation.status)) {
+    const result = await requestHandoff(business, conversation, "Visitor explicitly requested a team member", question, options.currentPage);
     return persistTurn(result);
+  }
+  if (orchestration.route === "HUMAN_HANDOFF" && conversation.status === "CONTACT_REQUIRED") {
+    return persistTurn(handoffAnswer(business, conversation.handoffReason ?? "Visitor explicitly requested a team member", conversation.handoffNotificationStatus ?? "sent", true));
   }
   if (conversation.status === "HUMAN_ACTIVE" || conversation.status === "AI_ASSISTED") {
     // The initial handoff response is emitted by requestHandoff. Follow-up
@@ -9943,6 +11770,18 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
     };
     return persistTurn(result);
   }
+  // Session/lead state outranks workflow, provider, retrieval, and generation.
+  // Questions about the visitor's own details must never be answered from
+  // website content or an LLM synthesis.
+  const stateAnswer = answerConversationStateQuestion(
+    question,
+    conversationStateSnapshot(business, conversation, question),
+  );
+  if (stateAnswer) {
+    const stateResult = conversationStateAnswer(stateAnswer.answer, stateAnswer.kind);
+    if (activeWorkflow) stateResult.action = actionStatePayload(activeWorkflow.action, activeWorkflow.state);
+    return persistTurn(stateResult);
+  }
   // WAITING_FOR_STAFF is a notification state, not a reply lock. The visitor
   // can continue verified questions and low-risk workflow work while waiting.
   let result: ConversationAnswerResult;
@@ -9954,7 +11793,15 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
         ...(activeWorkflow ? { workflow: activeWorkflow } : {}),
       });
   } catch (error) {
-    app.log.warn({ error: error instanceof Error ? error.message : "unknown widget answer failure", businessId: business.id, conversationId: conversation.id }, "Widget answer degraded after backend failure");
+    app.log.warn({
+      error: error instanceof Error ? error.message : "unknown widget answer failure",
+      businessId: business.id,
+      conversationId: conversation.id,
+      ...observabilityMetadata(observabilityForBusiness(business, {
+        workflow: activeWorkflow?.action ?? null,
+        correlationId: traceContext.turnId,
+      })),
+    }, "Widget answer degraded after backend failure");
     result = temporaryConversationAnswer(question, "backend");
   }
   // An incomplete workflow owns the turn. Keep a global CTA from leaking in
@@ -10105,12 +11952,17 @@ void processIntegrationOutbox();
 void processActionOutbox();
 void processLifecycleMessagingOutbox(pool);
 void scheduleNextLifecycleMessaging(pool);
+void syncOnboardingRecovery(pool, { superAdminEmails: superAdminEmails() });
 void reconcileLifecycleBillingEvents();
 void purgeExpiredCustomerData();
 const retentionCleanupTimer = setInterval(() => { void purgeExpiredCustomerData(); }, 60 * 60 * 1_000);
 retentionCleanupTimer.unref?.();
 const lifecycleBillingTimer = setInterval(() => { void reconcileLifecycleBillingEvents(); }, 60 * 60 * 1_000);
 lifecycleBillingTimer.unref?.();
+const onboardingRecoveryTimer = setInterval(() => {
+  void syncOnboardingRecovery(pool, { superAdminEmails: superAdminEmails() });
+}, 15 * 60 * 1_000);
+onboardingRecoveryTimer.unref?.();
 
 async function requireSuperAdmin(request: FastifyRequest): Promise<AppUser> {
   const { authUser, appUser } = await authenticatedAppUser(request);
@@ -10127,6 +11979,429 @@ async function requireSuperAdmin(request: FastifyRequest): Promise<AppUser> {
   );
   return appUser;
 }
+
+function featureFlagAdminPayload(flag: StoredFeatureFlag): Record<string, unknown> {
+  return {
+    id: flag.id,
+    key: flag.key,
+    description: flag.description,
+    stage: flag.stage,
+    rolloutPercentage: flag.rolloutPercentage,
+    referenceOrganizationIds: flag.referenceOrganizationIds,
+    overrides: Object.entries(flag.overrides).map(([organizationId, override]) => ({
+      organizationId,
+      state: override.state,
+      reason: override.reason,
+    })),
+    createdAt: flag.createdAt,
+    updatedAt: flag.updatedAt,
+  };
+}
+
+function featureFlagReferenceOrganizationIds(value: unknown): string[] {
+  const candidates = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\n,]+/)
+      : [];
+  const ids = [...new Set(candidates
+    .filter((candidate): candidate is string => typeof candidate === "string")
+    .map((candidate) => candidate.trim())
+    .filter(Boolean))];
+  if (ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) {
+    throw httpError(400, "referenceOrganizationIds must contain valid organization IDs");
+  }
+  return ids;
+}
+
+async function loadStoredFeatureFlags(force = false): Promise<StoredFeatureFlag[]> {
+  if (!pool) return [];
+  if (!force && featureFlagCache.flags && featureFlagCache.expiresAt > Date.now()) return featureFlagCache.flags;
+  try {
+    const [flagsResult, referencesResult, overridesResult] = await Promise.all([
+      pool.query<Record<string, unknown>>(
+        `select id, key, description, stage, rollout_percentage, created_at, updated_at
+         from feature_flags order by key`,
+      ),
+      pool.query<{ feature_flag_id: string; organization_id: string }>(
+        "select feature_flag_id, organization_id from feature_flag_reference_organizations",
+      ),
+      pool.query<{ feature_flag_id: string; organization_id: string; state: FeatureFlagOverrideState; reason: string }>(
+        "select feature_flag_id, organization_id, state, reason from feature_flag_overrides",
+      ),
+    ]);
+    const referencesByFlag = new Map<string, string[]>();
+    for (const row of referencesResult.rows) {
+      const list = referencesByFlag.get(String(row.feature_flag_id)) ?? [];
+      list.push(String(row.organization_id));
+      referencesByFlag.set(String(row.feature_flag_id), list);
+    }
+    const overridesByFlag = new Map<string, Record<string, { state: FeatureFlagOverrideState; reason: string }>>();
+    for (const row of overridesResult.rows) {
+      const overrides = overridesByFlag.get(String(row.feature_flag_id)) ?? {};
+      overrides[String(row.organization_id)] = { state: row.state === "on" ? "on" : "off", reason: String(row.reason ?? "") };
+      overridesByFlag.set(String(row.feature_flag_id), overrides);
+    }
+    const flags = flagsResult.rows.map((row) => ({
+      id: String(row.id),
+      key: String(row.key),
+      description: String(row.description ?? ""),
+      stage: normalizeFeatureFlagStage(String(row.stage)),
+      rolloutPercentage: normalizeRolloutPercentage(row.rollout_percentage),
+      referenceOrganizationIds: referencesByFlag.get(String(row.id)) ?? [],
+      overrides: overridesByFlag.get(String(row.id)) ?? {},
+      createdAt: toIso(row.created_at),
+      updatedAt: toIso(row.updated_at),
+    } satisfies StoredFeatureFlag));
+    featureFlagCache.flags = flags;
+    featureFlagCache.expiresAt = Date.now() + FEATURE_FLAG_CACHE_TTL_MS;
+    return flags;
+  } catch (error) {
+    if (isMissingDatabaseTable(error)) {
+      featureFlagCache.flags = [];
+      featureFlagCache.expiresAt = Date.now() + FEATURE_FLAG_CACHE_TTL_MS;
+      return [];
+    }
+    throw error;
+  }
+}
+
+function evaluateStoredFeatureFlag(flag: StoredFeatureFlag, context: { organizationId?: string | null; isInternal?: boolean }): FeatureFlagDecision {
+  const organizationId = context.organizationId ?? null;
+  return evaluateFeatureFlag(flag, {
+    organizationId,
+    isInternal: context.isInternal === true,
+    isReference: organizationId ? flag.referenceOrganizationIds.includes(organizationId) : false,
+    override: organizationId ? flag.overrides[organizationId]?.state ?? null : null,
+  });
+}
+
+async function evaluateServerFeatureFlag(
+  key: string,
+  context: { organizationId?: string | null; businessId?: string | null; isInternal?: boolean },
+): Promise<FeatureFlagDecision> {
+  const normalizedKey = normalizeFeatureFlagKey(key);
+  try {
+    const flag = (await loadStoredFeatureFlags()).find((candidate) => candidate.key === normalizedKey);
+    if (!flag) return { enabled: DEFAULT_FEATURE_FLAG_FALLBACKS[normalizedKey] === true, reason: "missing_flag" };
+    return evaluateStoredFeatureFlag(flag, context);
+  } catch (error) {
+    if (isMissingDatabaseTable(error)) {
+      return { enabled: DEFAULT_FEATURE_FLAG_FALLBACKS[normalizedKey] === true, reason: "missing_flag" };
+    }
+    throw error;
+  }
+}
+
+async function organizationIsInternal(organizationId: string): Promise<boolean> {
+  if (!pool) return false;
+  const result = await pool.query<{ is_internal: boolean }>(
+    `select exists(
+       select 1 from businesses b
+       where b.organization_id = $1 and b.is_internal_demo = true
+     ) as is_internal`,
+    [organizationId],
+  );
+  return result.rows[0]?.is_internal === true;
+}
+
+async function saveFeatureFlag(
+  admin: AppUser,
+  request: FastifyRequest,
+  input: { key: string; description: string; stage: FeatureFlagStage; rolloutPercentage: number; referenceOrganizationIds: string[] },
+  existingKey?: string,
+): Promise<StoredFeatureFlag> {
+  if (!pool) throw httpError(503, "Feature flag control requires PostgreSQL storage");
+  const previous = (await loadStoredFeatureFlags(true)).find((flag) => flag.key === (existingKey ?? input.key));
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    if (input.referenceOrganizationIds.length) {
+      const organizations = await client.query<{ id: string }>(
+        "select id from organizations where id = any($1::uuid[])",
+        [input.referenceOrganizationIds],
+      );
+      if (organizations.rowCount !== input.referenceOrganizationIds.length) {
+        throw httpError(400, "One or more reference organizations could not be found");
+      }
+    }
+    const result = await client.query<{ id: string }>(
+      `insert into feature_flags (key, description, stage, rollout_percentage, created_by_user_id, updated_by_user_id)
+       values ($1, $2, $3, $4, $5, $5)
+       on conflict (key) do update set
+         description = excluded.description,
+         stage = excluded.stage,
+         rollout_percentage = excluded.rollout_percentage,
+         updated_by_user_id = excluded.updated_by_user_id,
+         updated_at = now()
+       returning id`,
+      [input.key, input.description, input.stage, input.rolloutPercentage, admin.id],
+    );
+    const featureFlagId = String(result.rows[0].id);
+    await client.query("delete from feature_flag_reference_organizations where feature_flag_id = $1", [featureFlagId]);
+    for (const organizationId of input.referenceOrganizationIds) {
+      await client.query(
+        `insert into feature_flag_reference_organizations (feature_flag_id, organization_id)
+         values ($1, $2) on conflict do nothing`,
+        [featureFlagId, organizationId],
+      );
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    if (isUniqueConstraintError(error, "feature_flags_key_key")) throw httpError(409, "A feature flag with this key already exists");
+    throw error;
+  } finally {
+    client.release();
+  }
+  featureFlagCache.flags = null;
+  featureFlagCache.expiresAt = 0;
+  const saved = (await loadStoredFeatureFlags(true)).find((flag) => flag.key === input.key);
+  if (!saved) throw httpError(500, "Feature flag was saved but could not be reloaded");
+  await recordPrivilegedAudit({
+    action: previous ? "feature_flag_updated" : "feature_flag_created",
+    resourceType: "feature_flag",
+    resourceId: input.key,
+    request,
+    actorUserId: admin.id,
+    actorType: "super_admin",
+    before: previous ? featureFlagAdminPayload(previous) : null,
+    after: featureFlagAdminPayload(saved),
+  });
+  return saved;
+}
+
+function featureFlagInput(body: Record<string, unknown>, existing?: StoredFeatureFlag): { key: string; description: string; stage: FeatureFlagStage; rolloutPercentage: number; referenceOrganizationIds: string[] } {
+  const key = normalizeFeatureFlagKey(body.key ?? existing?.key);
+  const description = optionalString(body.description ?? existing?.description, 500) ?? "";
+  const stage = normalizeFeatureFlagStage(body.stage ?? existing?.stage ?? "off");
+  const rolloutPercentage = normalizeRolloutPercentage(body.rolloutPercentage, existing?.rolloutPercentage ?? 0);
+  const referenceOrganizationIds = body.referenceOrganizationIds === undefined
+    ? (existing?.referenceOrganizationIds ?? [])
+    : featureFlagReferenceOrganizationIds(body.referenceOrganizationIds);
+  return { key, description, stage, rolloutPercentage, referenceOrganizationIds };
+}
+
+async function setFeatureFlagOverride(
+  admin: AppUser,
+  request: FastifyRequest,
+  flag: StoredFeatureFlag,
+  organizationId: string,
+  state: FeatureFlagOverrideState,
+  reason: string,
+): Promise<StoredFeatureFlag> {
+  if (!pool) throw httpError(503, "Feature flag control requires PostgreSQL storage");
+  const organization = await pool.query<{ id: string }>("select id from organizations where id = $1", [organizationId]);
+  if (!organization.rowCount) throw httpError(404, "Organization not found");
+  const previous = flag.overrides[organizationId] ?? null;
+  await pool.query(
+    `insert into feature_flag_overrides (feature_flag_id, organization_id, state, reason, created_by_user_id)
+     values ($1, $2, $3, $4, $5)
+     on conflict (feature_flag_id, organization_id) do update set
+       state = excluded.state, reason = excluded.reason, created_by_user_id = excluded.created_by_user_id, updated_at = now()`,
+    [flag.id, organizationId, state, reason, admin.id],
+  );
+  featureFlagCache.flags = null;
+  featureFlagCache.expiresAt = 0;
+  const saved = (await loadStoredFeatureFlags(true)).find((candidate) => candidate.key === flag.key);
+  if (!saved) throw httpError(500, "Feature flag override was saved but could not be reloaded");
+  await recordPrivilegedAudit({
+    action: "feature_flag_override_updated",
+    resourceType: "feature_flag_override",
+    resourceId: `${flag.key}:${organizationId}`,
+    request,
+    organizationId,
+    actorUserId: admin.id,
+    actorType: "super_admin",
+    before: previous,
+    after: { state, reason },
+  });
+  return saved;
+}
+
+async function removeFeatureFlagOverride(admin: AppUser, request: FastifyRequest, flag: StoredFeatureFlag, organizationId: string): Promise<StoredFeatureFlag> {
+  if (!pool) throw httpError(503, "Feature flag control requires PostgreSQL storage");
+  const previous = flag.overrides[organizationId] ?? null;
+  await pool.query("delete from feature_flag_overrides where feature_flag_id = $1 and organization_id = $2", [flag.id, organizationId]);
+  featureFlagCache.flags = null;
+  featureFlagCache.expiresAt = 0;
+  const saved = (await loadStoredFeatureFlags(true)).find((candidate) => candidate.key === flag.key);
+  if (!saved) throw httpError(500, "Feature flag override was removed but could not be reloaded");
+  await recordPrivilegedAudit({
+    action: "feature_flag_override_removed",
+    resourceType: "feature_flag_override",
+    resourceId: `${flag.key}:${organizationId}`,
+    request,
+    organizationId,
+    actorUserId: admin.id,
+    actorType: "super_admin",
+    before: previous,
+    after: null,
+  });
+  return saved;
+}
+
+app.get("/api/v1/feature-flags", async (request) => {
+  const { appUser } = await authenticatedAppUser(request);
+  if (!pool) throw httpError(503, "Feature flag evaluation requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const organizationId = optionalString(query.organizationId, 80);
+  const organization = await organizationForUser(appUser.id, organizationId, ["owner", "admin", "member", "viewer"]);
+  const flags = await loadStoredFeatureFlags();
+  const activeOrganizationId = String(organization.id);
+  const isInternal = await organizationIsInternal(activeOrganizationId);
+  return {
+    organizationId: activeOrganizationId,
+    flags: Object.fromEntries(flags.map((flag) => [flag.key, {
+      enabled: evaluateStoredFeatureFlag(flag, { organizationId: activeOrganizationId, isInternal }).enabled,
+      decision: evaluateStoredFeatureFlag(flag, { organizationId: activeOrganizationId, isInternal }).reason,
+    }])),
+    generatedAt: new Date().toISOString(),
+  };
+});
+
+app.get("/api/v1/admin/feature-flags", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Feature flag control requires PostgreSQL storage");
+  const [flags, organizations] = await Promise.all([
+    loadStoredFeatureFlags(true),
+    pool.query<Record<string, unknown>>(
+      `select o.id, o.name, o.slug,
+              exists(select 1 from businesses b where b.organization_id = o.id and b.is_internal_demo = true) as is_internal
+       from organizations o order by o.name`,
+    ),
+  ]);
+  return {
+    flags: flags.map(featureFlagAdminPayload),
+    organizations: organizations.rows.map((row) => ({
+      id: String(row.id), name: String(row.name), slug: String(row.slug), isInternal: row.is_internal === true,
+    })),
+  };
+});
+
+app.post("/api/v1/admin/feature-flags", async (request, reply) => {
+  const admin = await requireSuperAdmin(request);
+  const body = asRecord(request.body);
+  const saved = await saveFeatureFlag(admin, request, featureFlagInput(body));
+  return reply.code(201).send({ flag: featureFlagAdminPayload(saved) });
+});
+
+app.patch("/api/v1/admin/feature-flags/:flagKey", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const flagKey = normalizeFeatureFlagKey((request.params as { flagKey?: string }).flagKey);
+  const existing = (await loadStoredFeatureFlags(true)).find((flag) => flag.key === flagKey);
+  if (!existing) throw httpError(404, "Feature flag not found");
+  const saved = await saveFeatureFlag(admin, request, featureFlagInput(asRecord(request.body), existing), flagKey);
+  return { flag: featureFlagAdminPayload(saved) };
+});
+
+app.get("/api/v1/admin/feature-flags/:flagKey/evaluate", async (request) => {
+  await requireSuperAdmin(request);
+  const flagKey = normalizeFeatureFlagKey((request.params as { flagKey?: string }).flagKey);
+  const flag = (await loadStoredFeatureFlags(true)).find((candidate) => candidate.key === flagKey);
+  if (!flag) throw httpError(404, "Feature flag not found");
+  const organizationId = optionalString((request.query as Record<string, unknown> | undefined)?.organizationId, 80);
+  let organization: Record<string, unknown> | null = null;
+  if (organizationId) {
+    if (!pool) throw httpError(503, "Feature flag control requires PostgreSQL storage");
+    const result = await pool.query<Record<string, unknown>>(
+      `select o.id, o.name, o.slug,
+              exists(select 1 from businesses b where b.organization_id = o.id and b.is_internal_demo = true) as is_internal
+       from organizations o where o.id = $1`,
+      [organizationId],
+    );
+    if (!result.rowCount) throw httpError(404, "Organization not found");
+    organization = result.rows[0];
+  }
+  const decision = evaluateStoredFeatureFlag(flag, { organizationId, isInternal: organization ? await organizationIsInternal(String(organization.id)) : false });
+  return {
+    key: flag.key,
+    organization: organization ? { id: String(organization.id), name: String(organization.name), slug: String(organization.slug) } : null,
+    ...decision,
+  };
+});
+
+app.post("/api/v1/admin/feature-flags/:flagKey/overrides", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const flagKey = normalizeFeatureFlagKey((request.params as { flagKey?: string }).flagKey);
+  const flag = (await loadStoredFeatureFlags(true)).find((candidate) => candidate.key === flagKey);
+  if (!flag) throw httpError(404, "Feature flag not found");
+  const body = asRecord(request.body);
+  const organizationId = requiredString(body.organizationId, "organizationId", 80);
+  const state = body.state === "on" || body.state === "off" ? body.state as FeatureFlagOverrideState : null;
+  if (!state) throw httpError(400, "state must be on or off");
+  const reason = optionalString(body.reason, 500) ?? "admin_override";
+  const saved = await setFeatureFlagOverride(admin, request, flag, organizationId, state, reason);
+  return { flag: featureFlagAdminPayload(saved) };
+});
+
+app.delete("/api/v1/admin/feature-flags/:flagKey/overrides/:organizationId", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  const params = request.params as { flagKey?: string; organizationId?: string };
+  const flagKey = normalizeFeatureFlagKey(params.flagKey);
+  const flag = (await loadStoredFeatureFlags(true)).find((candidate) => candidate.key === flagKey);
+  if (!flag) throw httpError(404, "Feature flag not found");
+  const organizationId = requiredString(params.organizationId, "organizationId", 80);
+  const saved = await removeFeatureFlagOverride(admin, request, flag, organizationId);
+  return { flag: featureFlagAdminPayload(saved) };
+});
+
+app.get("/api/v1/admin/security-events", async (request) => {
+  const admin = await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Security events require PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const limitValue = Number(query.limit ?? 100);
+  const limit = Math.max(1, Math.min(500, Number.isFinite(limitValue) ? Math.floor(limitValue) : 100));
+  const risk = optionalString(query.risk, 20);
+  const eventType = optionalString(query.eventType, 120);
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  if (risk) {
+    values.push(risk);
+    conditions.push(`risk = $${values.length}`);
+  }
+  if (eventType) {
+    values.push(eventType);
+    conditions.push(`event_type = $${values.length}`);
+  }
+  values.push(limit);
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  try {
+    const [events, summary] = await Promise.all([
+      pool.query<Record<string, unknown>>(
+        `select id, event_type, risk, organization_id, business_id, actor_user_id, actor_type, request_id, route, method, status_code, metadata, created_at
+         from security_events ${where} order by created_at desc limit $${values.length}`,
+        values,
+      ),
+      pool.query<Record<string, unknown>>(
+        `select risk, count(*)::integer as count from security_events ${where} group by risk order by risk`,
+        values.slice(0, -1),
+      ),
+    ]);
+    return {
+      adminUserId: admin.id,
+      summary: summary.rows.map((row) => ({ risk: String(row.risk), count: Number(row.count) })),
+      events: events.rows.map((row) => ({
+        id: String(row.id),
+        eventType: String(row.event_type),
+        risk: String(row.risk),
+        organizationId: typeof row.organization_id === "string" ? row.organization_id : null,
+        businessId: typeof row.business_id === "string" ? row.business_id : null,
+        actorUserId: typeof row.actor_user_id === "string" ? row.actor_user_id : null,
+        actorType: typeof row.actor_type === "string" ? row.actor_type : null,
+        requestId: typeof row.request_id === "string" ? row.request_id : null,
+        route: typeof row.route === "string" ? row.route : null,
+        method: typeof row.method === "string" ? row.method : null,
+        statusCode: row.status_code === null || row.status_code === undefined ? null : Number(row.status_code),
+        metadata: asRecord(row.metadata),
+        createdAt: nullableIso(row.created_at),
+      })),
+    };
+  } catch (error) {
+    if (isMissingDatabaseTable(error)) return { adminUserId: admin.id, summary: [], events: [] };
+    throw error;
+  }
+});
 
 async function findOrganizationIdForStripeEvent(object: Record<string, unknown>): Promise<string | null> {
   if (!pool) return null;
@@ -10562,14 +12837,34 @@ app.addHook("onRequest", async (request, reply) => {
   reply.header("X-RateLimit-Remaining", result.remaining);
   reply.header("X-RateLimit-Reset", Math.ceil(result.resetAt / 1_000));
   if (!result.allowed) {
+    void recordSecurityEvent({ eventType: "api_rate_limited", risk: path.startsWith("/api/v1/widget/") ? "medium" : "low", request, metadata: { path, limit: result.limit } });
     reply.header("Retry-After", Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1_000)));
     return reply.code(429).send({ error: "Too many requests", requestId: request.id });
   }
 });
 
+app.addHook("onResponse", async (request, reply) => {
+  const path = request.url.split("?", 1)[0];
+  const privilegedMutation = !["GET", "HEAD", "OPTIONS"].includes(request.method)
+    && (path.startsWith("/api/v1/demo/") || path.startsWith("/api/v1/admin/") || path.startsWith("/api/v1/auth/"))
+    && !path.startsWith("/api/v1/demo-catalog")
+    && !path.startsWith("/api/v1/demo-access/");
+  if (!privilegedMutation) return;
+  await recordPrivilegedAudit({
+    action: `${request.method} ${path}`,
+    resourceType: path.startsWith("/api/v1/admin/") ? "admin_endpoint" : "tenant_endpoint",
+    request,
+    actorType: request.headers.authorization ? "authenticated_request" : "demo_or_anonymous_request",
+    metadata: { statusCode: reply.statusCode },
+  });
+});
+
 app.get("/health", async () => ({
   ok: true,
   service: "frontdeskwise-api",
+  releaseVersion: runtimeObservabilityVersions.releaseVersion,
+  deploymentVersion: runtimeObservabilityVersions.deploymentVersion,
+  modelRoutingVersion: runtimeObservabilityVersions.modelRoutingVersion,
   databaseConfigured: Boolean(pool),
   storage: pool ? "postgres" : "memory",
   embeddingProvider: "openai",
@@ -10589,6 +12884,9 @@ app.get("/ready", async (_request, reply) => {
     return {
       ok: true,
       service: "frontdeskwise-api",
+      releaseVersion: runtimeObservabilityVersions.releaseVersion,
+      deploymentVersion: runtimeObservabilityVersions.deploymentVersion,
+      modelRoutingVersion: runtimeObservabilityVersions.modelRoutingVersion,
       database: "ready",
       semanticSearch: {
         provider: "openai",
@@ -10877,7 +13175,7 @@ app.get("/api/v1/billing", async (request) => {
 app.post("/api/v1/billing/events", async (request) => {
   const { appUser } = await authenticatedAppUser(request);
   const body = asRecord(request.body);
-  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80));
+  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80), ["owner"]);
   const event = optionalString(body.event, 80);
   const allowedEvents = new Set([
     "checkout_returned",
@@ -10905,7 +13203,7 @@ app.post("/api/v1/billing/checkout-session", async (request) => {
   const { appUser } = await authenticatedAppUser(request);
   const body = asRecord(request.body);
   const organizationId = optionalString(body.organizationId, 80);
-  const organization = await organizationForUser(appUser.id, organizationId);
+  const organization = await organizationForUser(appUser.id, organizationId, ["owner"]);
   const planKey = optionalString(body.planKey, 80) ?? String(organization.plan_key ?? "starter");
   const interval = body.interval === "year" ? "year" : "month";
   const price = await resolveStripePrice(String(organization.id), planKey, interval);
@@ -11091,7 +13389,7 @@ app.post("/api/v1/billing/portal-session", async (request) => {
   const client = requireStripe();
   const { appUser } = await authenticatedAppUser(request);
   const body = asRecord(request.body);
-  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80));
+  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80), ["owner"]);
   if (typeof organization.stripe_customer_id !== "string" || !organization.stripe_customer_id) {
     throw httpError(409, "This organization does not have a Stripe customer yet");
   }
@@ -11107,7 +13405,7 @@ app.post("/api/v1/billing/resume", async (request) => {
   const client = requireStripe();
   const { appUser } = await authenticatedAppUser(request);
   const body = asRecord(request.body);
-  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80));
+  const organization = await organizationForUser(appUser.id, optionalString(body.organizationId, 80), ["owner"]);
   const subscriptionId = typeof organization.stripe_subscription_id === "string" ? organization.stripe_subscription_id : null;
   if (!subscriptionId) throw httpError(409, "This organization does not have an active Stripe subscription");
   const subscription = await client.subscriptions.retrieve(subscriptionId);
@@ -11164,8 +13462,8 @@ app.post("/api/v1/webhooks/email/ses", async (request, reply) => {
   const providerEventId = optionalString(body.eventId ?? body.providerEventId, 320) ?? `${providerMessageId ?? "unknown"}:${notificationType}:${Date.now()}`;
   const normalizedType = notificationType.toLowerCase();
   const delivery = providerMessageId
-    ? await pool.query<{ id: string }>("select id from message_deliveries where provider = 'ses' and provider_message_id = $1 limit 1", [providerMessageId])
-    : { rows: [] } as { rows: Array<{ id: string }> };
+    ? await pool.query<{ id: string; event_type: string; business_id: string | null }>("select id, event_type, business_id from message_deliveries where provider = 'ses' and provider_message_id = $1 limit 1", [providerMessageId])
+    : { rows: [] } as { rows: Array<{ id: string; event_type: string; business_id: string | null }> };
   const inserted = await pool.query(
     `insert into message_provider_events (provider, provider_event_id, delivery_id, event_type, payload)
      values ('ses', $1, $2, $3, $4)
@@ -11178,6 +13476,9 @@ app.post("/api/v1/webhooks/email/ses", async (request, reply) => {
       await pool.query("update message_deliveries set status = 'delivered', delivered_at = coalesce(delivered_at, now()), updated_at = now() where id = $1", [deliveryId]);
     } else if (normalizedType === "open") {
       await pool.query("update message_deliveries set opened_at = coalesce(opened_at, now()), updated_at = now() where id = $1", [deliveryId]);
+      if (delivery.rows[0]?.business_id && delivery.rows[0].event_type.startsWith("ONBOARDING_RECOVERY_") && delivery.rows[0].event_type !== "ONBOARDING_RECOVERY_RESCUE_ALERT") {
+        await pool.query("update onboarding_recovery set email_opened = true, updated_at = now() where business_id = $1", [delivery.rows[0].business_id]);
+      }
     } else if (normalizedType === "click") {
       await pool.query("update message_deliveries set clicked_at = coalesce(clicked_at, now()), updated_at = now() where id = $1", [deliveryId]);
     } else if (normalizedType === "bounce" || normalizedType === "complaint" || normalizedType.includes("failure")) {
@@ -11185,6 +13486,27 @@ app.post("/api/v1/webhooks/email/ses", async (request, reply) => {
     }
   }
   return { received: true, duplicate: !inserted.rowCount, providerMessageId };
+});
+
+app.get("/api/v1/onboarding-recovery/unsubscribe", async (request, reply) => {
+  if (!pool) return reply.code(503).type("text/html").send("<h1>Recovery preferences are temporarily unavailable</h1>");
+  const token = optionalString((request.query as Record<string, unknown> | undefined)?.token, 512);
+  if (!token) return reply.code(400).type("text/html").send("<h1>Invalid recovery link</h1>");
+  const result = await pool.query<{ business_id: string }>(
+    `update onboarding_recovery
+     set unsubscribed = true, updated_at = now()
+     where unsubscribe_token_hash = $1
+     returning business_id`,
+    [hashAccessToken(token)],
+  );
+  if (!result.rowCount) return reply.code(404).type("text/html").send("<h1>This recovery link has expired</h1><p>You can manage your setup from FrontDeskWise.</p>");
+  await pool.query(
+    `update message_deliveries
+     set status = 'canceled', updated_at = now()
+     where business_id = $1 and event_type like 'ONBOARDING_RECOVERY_%' and status in ('queued', 'deferred')`,
+    [result.rows[0].business_id],
+  );
+  return reply.type("text/html").send("<h1>You’re unsubscribed</h1><p>FrontDeskWise will stop sending onboarding recovery reminders for this setup.</p>");
 });
 
 app.post("/api/v1/admin/email/test", async (request) => {
@@ -11224,6 +13546,74 @@ app.get("/api/v1/admin/messaging/summary", async (request) => {
     },
     templates: { active: Number(templates.rows[0]?.active ?? 0), total: Number(templates.rows[0]?.total ?? 0) },
     provider: { name: "ses", configured: sesConfigured() },
+  };
+});
+
+app.get("/api/v1/admin/onboarding-recovery", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Onboarding recovery administration requires PostgreSQL storage");
+  const requestedLimit = Number((request.query as Record<string, unknown> | undefined)?.limit ?? 200);
+  const limit = Math.min(500, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 200));
+  const result = await pool.query<Record<string, unknown>>(
+    `select b.id as business_id, b.name as business_name, b.slug as business_slug,
+            b.agent_published_at, b.current_published_config_version,
+            r.onboarding_stage, r.completion_percent, r.last_activity_at,
+            r.last_successful_step, r.current_blocker, r.last_error,
+            r.reminder_count, r.last_reminder_at, r.last_reminder_type,
+            r.email_opened, r.returned_after_email, r.unsubscribed, r.dormant,
+            coalesce(owner_user.name, '') as owner_name,
+            coalesce(owner_user.email, '') as owner_email
+     from businesses b
+     left join onboarding_recovery r on r.business_id = b.id
+     left join lateral (
+       select u.name, u.email
+       from organization_members om
+       join app_users u on u.id = om.user_id
+       where om.organization_id = b.organization_id and om.role in ('owner', 'admin')
+         and u.status = 'active' and u.email_verified = true
+       order by (om.role = 'owner') desc, u.email
+       limit 1
+     ) owner_user on true
+     where b.is_internal_demo is not true
+     order by coalesce(r.last_activity_at, b.updated_at, b.created_at) asc
+     limit $1`,
+    [limit],
+  );
+  const records = result.rows.map((row) => {
+    const published = Boolean(row.agent_published_at || row.current_published_config_version);
+    return {
+      businessId: String(row.business_id),
+      businessName: String(row.business_name),
+      businessSlug: String(row.business_slug),
+      ownerName: String(row.owner_name ?? ""),
+      ownerEmail: String(row.owner_email ?? ""),
+      onboardingStage: published ? "complete" : String(row.onboarding_stage ?? "website"),
+      completionPercent: published ? 100 : Number(row.completion_percent ?? 0),
+      lastActivityAt: nullableIso(row.last_activity_at),
+      lastSuccessfulStep: published ? "Publish your AI front desk" : typeof row.last_successful_step === "string" ? row.last_successful_step : null,
+      currentBlocker: published ? null : typeof row.current_blocker === "string" ? row.current_blocker : null,
+      lastError: typeof row.last_error === "string" ? row.last_error : null,
+      reminderCount: Number(row.reminder_count ?? 0),
+      lastReminderAt: nullableIso(row.last_reminder_at),
+      lastReminderType: typeof row.last_reminder_type === "string" ? row.last_reminder_type : null,
+      emailOpened: row.email_opened === true,
+      returnedAfterEmail: row.returned_after_email === true,
+      unsubscribed: row.unsubscribed === true,
+      dormant: row.dormant === true,
+      published,
+    };
+  });
+  const incomplete = records.filter((record) => !record.published);
+  return {
+    generatedAt: new Date().toISOString(),
+    funnel: {
+      incompleteSignups: incomplete.length,
+      reminded: incomplete.filter((record) => record.reminderCount > 0).length,
+      returned: incomplete.filter((record) => record.returnedAfterEmail).length,
+      finishedSetup: records.filter((record) => record.completionPercent >= 80).length,
+      published: records.filter((record) => record.published).length,
+    },
+    records,
   };
 });
 
@@ -11523,6 +13913,139 @@ app.get("/api/v1/admin/certification", async (request) => {
     history: dashboardRuns.map((run) => ({ fileName: run.fileName, generatedAt: run.generatedAt, commit: run.commit, pass: run.pass, scores: run.scores, scoreDeltas: run.scoreDeltas })),
     improvementSignals: { counts, recent },
   };
+});
+
+function experienceSignalPayload(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    business: {
+      id: String(row.business_id),
+      name: String(row.business_name ?? "Unknown business"),
+      slug: String(row.business_slug ?? ""),
+    },
+    conversationId: row.conversation_id ? String(row.conversation_id) : null,
+    type: String(row.type),
+    severity: String(row.severity),
+    confidence: Number(row.confidence ?? 0),
+    likelyLayer: String(row.likely_layer),
+    messageExcerptRedacted: typeof row.message_excerpt_redacted === "string" ? row.message_excerpt_redacted : null,
+    workflowStep: typeof row.workflow_step === "string" ? row.workflow_step : null,
+    publicationVersion: row.publication_version === null || row.publication_version === undefined ? null : Number(row.publication_version),
+    releaseVersion: typeof row.release_version === "string" ? row.release_version : null,
+    deploymentVersion: typeof row.deployment_version === "string" ? row.deployment_version : null,
+    workflowActionId: typeof row.workflow_action_id === "string" ? row.workflow_action_id : null,
+    workflowKey: typeof row.workflow_key === "string" ? row.workflow_key : null,
+    workflowVersion: row.workflow_version === null || row.workflow_version === undefined ? null : Number(row.workflow_version),
+    modelRoutingVersion: typeof row.model_routing_version === "string" ? row.model_routing_version : null,
+    modelRoute: typeof row.model_route === "string" ? row.model_route : null,
+    modelName: typeof row.model_name === "string" ? row.model_name : null,
+    correlationId: typeof row.correlation_id === "string" ? row.correlation_id : null,
+    modelRole: typeof row.model_role === "string" ? row.model_role : null,
+    providerState: asRecord(row.provider_state),
+    validationResult: asRecord(row.validation_result),
+    status: String(row.status ?? "open"),
+    clusterKey: String(row.cluster_key ?? ""),
+    reason: typeof row.reason === "string" ? row.reason : null,
+    occurredAt: toIso(row.occurred_at),
+    trace: asRecord(row.session_trace),
+  };
+}
+
+app.get("/api/v1/admin/experience-signals", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Experience signal triage requires PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const businessId = optionalString(query.businessId, 80);
+  const severity = optionalString(query.severity, 20);
+  const requestedType = optionalString(query.type, 40);
+  const type = requestedType === "all" ? null : requestedType;
+  const status = optionalString(query.status, 20) ?? "open";
+  const requestedLimit = Number(query.limit ?? 100);
+  const limit = Math.min(500, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 100));
+  const daysValue = Number(query.days ?? 30);
+  const days = Math.min(90, Math.max(1, Number.isFinite(daysValue) ? Math.floor(daysValue) : 30));
+  const allowedSeverities = new Set(["low", "medium", "high", "critical"]);
+  const allowedStatuses = new Set(["open", "reviewed", "resolved", "ignored", "all"]);
+  const severityFilter = severity && allowedSeverities.has(severity) ? severity : null;
+  const statusFilter = allowedStatuses.has(status) ? status : "open";
+  const statusSql = statusFilter === "all" ? null : statusFilter;
+  try {
+    const filters = `where es.occurred_at >= now() - ($4::integer * interval '1 day')
+       and ($1::uuid is null or es.business_id = $1::uuid)
+       and ($2::text is null or es.severity = $2)
+       and ($3::text is null or es.type = $3)
+       and ($5::text is null or es.status = $5)`;
+    const [severityResult, typeResult, clusterResult, signalsResult] = await Promise.all([
+      pool.query<Record<string, unknown>>(`select es.severity, count(*)::integer as count ${filters} group by es.severity order by count desc`, [businessId, severityFilter, type, days, statusSql]),
+      pool.query<Record<string, unknown>>(`select es.type, count(*)::integer as count ${filters} group by es.type order by count desc`, [businessId, severityFilter, type, days, statusSql]),
+      pool.query<Record<string, unknown>>(
+        `select es.cluster_key, es.type, es.likely_layer, es.workflow_step,
+                count(*)::integer as count, count(distinct es.conversation_id)::integer as sessions,
+                max(es.occurred_at) as last_seen_at,
+                (array_agg(b.name order by es.occurred_at desc))[1] as business_name
+         from experience_signals es
+         join businesses b on b.id = es.business_id
+         ${filters}
+         group by es.cluster_key, es.type, es.likely_layer, es.workflow_step
+         order by count desc, last_seen_at desc
+         limit 25`,
+        [businessId, severityFilter, type, days, statusSql],
+      ),
+      pool.query<Record<string, unknown>>(
+        `select es.*, b.name as business_name, b.slug as business_slug
+         from experience_signals es
+         join businesses b on b.id = es.business_id
+         ${filters}
+         order by case es.severity when 'critical' then 0 when 'high' then 1 when 'medium' then 2 else 3 end,
+                  es.occurred_at desc
+         limit $6`,
+        [businessId, severityFilter, type, days, statusSql, limit],
+      ),
+    ]);
+    return {
+      generatedAt: new Date().toISOString(),
+      filters: { businessId, severity: severityFilter, type, status: statusFilter, days },
+      summary: {
+        total: severityResult.rows.reduce((total, row) => total + Number(row.count ?? 0), 0),
+        bySeverity: severityResult.rows.map((row) => ({ severity: String(row.severity), count: Number(row.count ?? 0) })),
+        byType: typeResult.rows.map((row) => ({ type: String(row.type), count: Number(row.count ?? 0) })),
+      },
+      clusters: clusterResult.rows.map((row) => ({
+        clusterKey: String(row.cluster_key),
+        type: String(row.type),
+        likelyLayer: String(row.likely_layer),
+        workflowStep: typeof row.workflow_step === "string" ? row.workflow_step : null,
+        count: Number(row.count ?? 0),
+        sessions: Number(row.sessions ?? 0),
+        businessName: String(row.business_name ?? "Unknown business"),
+        lastSeenAt: toIso(row.last_seen_at),
+      })),
+      signals: signalsResult.rows.map(experienceSignalPayload),
+    };
+  } catch (error) {
+    if (isMissingDatabaseTable(error)) return { generatedAt: new Date().toISOString(), filters: { businessId, severity: severityFilter, type, status: statusFilter, days }, summary: { total: 0, bySeverity: [], byType: [] }, clusters: [], signals: [] };
+    throw error;
+  }
+});
+
+app.patch("/api/v1/admin/experience-signals/:signalId", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Experience signal triage requires PostgreSQL storage");
+  const params = request.params as { signalId?: string };
+  const signalId = requiredString(params.signalId, "signalId", 80);
+  const body = asRecord(request.body);
+  const status = typeof body.status === "string" && ["open", "reviewed", "resolved", "ignored"].includes(body.status) ? body.status : null;
+  if (!status) throw httpError(400, "status must be open, reviewed, resolved, or ignored");
+  const result = await pool.query<Record<string, unknown>>(
+    `update experience_signals set status = $2 where id = $1 returning *`,
+    [signalId, status],
+  );
+  if (!result.rowCount) throw httpError(404, "Experience signal not found");
+  const business = await pool.query<Record<string, unknown>>(
+    `select b.name as business_name, b.slug as business_slug from businesses b join experience_signals es on es.business_id = b.id where es.id = $1`,
+    [signalId],
+  );
+  return { signal: experienceSignalPayload({ ...result.rows[0], ...business.rows[0] }) };
 });
 
 app.get("/api/v1/admin/organizations", async (request) => {
@@ -11911,6 +14434,7 @@ app.get("/api/v1/admin/businesses/:businessId", async (request) => {
   const businessId = requiredString(params.businessId, "businessId", 80);
   const businessResult = await pool.query<Record<string, unknown>>(
     `select b.id, b.name, b.slug, b.website_url, b.location, b.ownership_status, b.billing_status, b.plan_key, b.updated_at,
+            b.onboarding_status, b.onboarding_failure_code, b.onboarding_validation, b.onboarding_validated_at,
             (select count(*) from business_sources bs where bs.business_id = b.id)::integer as source_count,
             (select count(*) from knowledge_chunks kc where kc.business_id = b.id)::integer as chunk_count,
             (select count(*) from conversations c where c.business_id = b.id)::integer as conversation_count,
@@ -11945,6 +14469,16 @@ app.get("/api/v1/admin/businesses/:businessId", async (request) => {
   );
   if (!organizationResult.rowCount) throw httpError(404, "Organization not found");
 
+  const persistedOnboarding = asRecord(business.onboarding_validation);
+  const onboardingStatus = persistedOnboarding.status === "valid" || persistedOnboarding.status === "needs_attention"
+    ? persistedOnboarding.status
+    : "needs_attention";
+  const onboardingFailureCode = typeof business.onboarding_failure_code === "string"
+    ? business.onboarding_failure_code
+    : typeof persistedOnboarding.code === "string"
+      ? persistedOnboarding.code
+      : null;
+
   return {
     organization: {
       id: String(business.organization_id),
@@ -11959,6 +14493,10 @@ app.get("/api/v1/admin/businesses/:businessId", async (request) => {
       websiteUrl: String(business.website_url),
       location: String(business.location ?? ""),
       ownershipStatus: String(business.ownership_status ?? "pending"),
+      onboardingStatus,
+      onboardingFailureCode,
+      onboardingValidation: persistedOnboarding,
+      onboardingValidatedAt: nullableIso(business.onboarding_validated_at),
       billingStatus: String(business.billing_status ?? "trial"),
       planKey: String(business.plan_key ?? "starter"),
       sourceCount: Number(business.source_count ?? 0),
@@ -12316,6 +14854,7 @@ app.post("/api/v1/admin/businesses/:businessId/verification/approve", async (req
   business.ownershipVerificationExpiresAt = null;
   business.ownershipVerifiedAt = new Date().toISOString();
   business.ownershipVerifiedByUserId = admin.id;
+  await syncWebsitePricingFacts(business);
   return { ok: true, businessId, verification: ownershipPayload(business) };
 });
 
@@ -12727,8 +15266,102 @@ app.post("/api/v1/auth/bootstrap", async (request) => {
   });
 });
 
+app.get("/api/v1/partners/dashboard", async (request) => {
+  const { partner } = await requirePartnerAccount(request, false);
+  return partnerDashboardPayload(partner);
+});
+
+app.post("/api/v1/partners/enroll", async (request, reply) => {
+  const { appUser } = await partnerAuthenticatedAppUser(request, false);
+  if (!pool) throw httpError(503, "Partner enrollment requires PostgreSQL storage");
+  const existing = await partnerAccountForUser(appUser.id);
+  if (existing) return reply.send(await partnerDashboardPayload(existing));
+  const body = asRecord(request.body);
+  const companyName = requiredString(body.companyName, "companyName", 160);
+  const websiteUrl = optionalString(body.websiteUrl, 500);
+  const partnerType = ["referral", "agency", "reseller", "consultant"].includes(String(body.partnerType)) ? String(body.partnerType) : "agency";
+  const slugBase = slugify(companyName);
+  let slug = `partner-${slugBase}`;
+  let suffix = 0;
+  while ((await pool.query("select 1 from partner_accounts where slug = $1", [slug])).rowCount) {
+    suffix += 1;
+    slug = `partner-${slugBase}-${suffix}`;
+  }
+  const referralCode = `fdw-${slugBase}-${randomBytes(3).toString("hex")}`;
+  const result = await pool.query<Record<string, unknown>>(
+    `insert into partner_accounts
+       (user_id, company_name, slug, website_url, partner_type, referral_code)
+     values ($1, $2, $3, $4, $5, $6)
+     returning id, user_id, company_name, slug, website_url, partner_type, status,
+       commission_rate, commission_window_months, referral_code`,
+    [appUser.id, companyName, slug, websiteUrl, partnerType, referralCode],
+  );
+  const partner = partnerAccountPayload(result.rows[0]);
+  return reply.code(201).send(await partnerDashboardPayload(partner));
+});
+
+app.post("/api/v1/partners/demos", async (request, reply) => {
+  const { appUser, partner } = await requirePartnerAccount(request);
+  if (!pool) throw httpError(503, "Partner demo generation requires PostgreSQL storage");
+  const body = asRecord(request.body);
+  const websiteUrl = normalisePublicUrl(body.websiteUrl);
+  const prospectEmail = optionalString(body.prospectEmail, 240)?.toLowerCase() ?? null;
+  if (prospectEmail && (!prospectEmail.includes("@") || prospectEmail.length < 5)) throw httpError(400, "prospectEmail must be a valid email address");
+  const generated = await generateDemoFromRequest(request, {
+    source: "partner",
+    templateKey: "partner_demo",
+    websiteUrl,
+    requesterName: optionalString(body.prospectName, 160),
+    requesterEmail: prospectEmail,
+  });
+  const demoRequest = asRecord(generated.demoRequest);
+  const access = asRecord(generated.access);
+  const generatedBusiness = asRecord(generated.business);
+  const demoRequestId = typeof demoRequest.id === "string" ? demoRequest.id : null;
+  const businessId = typeof generatedBusiness.id === "string" ? generatedBusiness.id : null;
+  const accessToken = typeof access.accessToken === "string" ? access.accessToken : null;
+  const demoUrl = accessToken ? demoAccessLink(accessToken) : null;
+  const referral = await pool.query<Record<string, unknown>>(
+    `insert into partner_referrals
+       (partner_id, referral_code, demo_request_id, business_id, prospect_name, prospect_email, website_url, demo_url, status, commission_rate)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, 'demo_created', $9)
+     returning id, prospect_name, prospect_email, website_url, demo_url, status, created_at`,
+    [partner.id, partner.referralCode, demoRequestId, businessId, optionalString(body.prospectName, 160), prospectEmail, websiteUrl, demoUrl, partner.commissionRate],
+  );
+  return reply.code(201).send({
+    demo: { ...generated, url: demoUrl },
+    referral: {
+      id: String(referral.rows[0].id),
+      prospectName: referral.rows[0].prospect_name ?? null,
+      prospectEmail: referral.rows[0].prospect_email ?? null,
+      websiteUrl: String(referral.rows[0].website_url),
+      demoUrl: referral.rows[0].demo_url ?? null,
+      status: String(referral.rows[0].status),
+      createdAt: nullableIso(referral.rows[0].created_at),
+    },
+    partnerUserId: appUser.id,
+  });
+});
+
+app.post("/api/v1/partners/clients", async (request, reply) => {
+  const { appUser, partner } = await requirePartnerAccount(request);
+  const body = asRecord(request.body);
+  const websiteUrl = normalisePublicUrl(body.websiteUrl);
+  const clientEmail = optionalString(body.clientEmail, 240)?.toLowerCase() ?? null;
+  if (clientEmail && (!clientEmail.includes("@") || clientEmail.length < 5)) throw httpError(400, "clientEmail must be a valid email address");
+  const client = await createPartnerClient({
+    partner,
+    appUser,
+    websiteUrl,
+    businessName: optionalString(body.businessName, 160),
+    clientEmail,
+    clientName: optionalString(body.clientName, 160),
+  });
+  return reply.code(201).send({ client, dashboard: await partnerDashboardPayload(partner) });
+});
+
 app.post("/api/v1/auth/businesses", async (request, reply) => {
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   if (!pool) throw httpError(503, "Adding a business requires PostgreSQL storage");
   const body = asRecord(request.body);
   const websiteUrl = normalisePublicUrl(body.websiteUrl);
@@ -12808,16 +15441,30 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
     throw httpError(402, "Your current plan has reached its business limit. Upgrade to add another business.");
   }
 
-  const crawled = await crawlConfiguredWebsite(websiteUrl);
-  const firstPage = firstCrawledPageOrError(crawled);
-  const name = businessNameFromTitle(firstPage.title, websiteUrl);
+  const expectedBusinessName = optionalString(body.businessName, 160);
+  let crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } };
+  let onboardingValidation: OnboardingValidation;
+  let crawlFailure: CrawlError | null = null;
+  try {
+    crawled = await crawlConfiguredWebsite(websiteUrl);
+    onboardingValidation = websiteValidationForCrawl(crawled, expectedBusinessName);
+  } catch (error) {
+    if (!canProvisionAttentionBusiness(error)) throw error;
+    crawlFailure = error;
+    onboardingValidation = websiteValidationFromCrawlError(error, expectedBusinessName);
+    crawled = { pages: [], audit: error.audit ?? { failureCode: error.code, rejectedInternalLinks: [] } };
+  }
+  const firstPage = crawled.pages[0];
+  const name = expectedBusinessName ?? (firstPage ? businessNameFromTitle(firstPage.title, websiteUrl) : businessNameFromWebsite(websiteUrl));
   const baseSlug = slugify(name);
   let slug = baseSlug;
   while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
-  const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
+  const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages, onboardingValidation });
+  if (!crawled.pages.length && crawlFailure) business.sources = [sourceFromCrawlFailure(websiteUrl, crawlFailure)];
   business.billing = { ...business.billing, mode: "live", isDemo: false, status: "trial", planKey: "starter", trialEndsAt: trialEndFromNow() };
   try {
     await persistBusiness(business, organizationResult.rows[0].id);
+    await syncWebsitePricingFacts(business);
   } catch (error) {
     if (isUniqueConstraintError(error, "businesses_organization_website_key_idx")) {
       throw httpError(409, "This website was registered by another request. Open the existing business instead.");
@@ -12856,8 +15503,8 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   return reply.code(201).send({ business: await workspacePayload(business), auth: await authSnapshot(userResult.rows[0].id, organizationResult.rows[0].id) });
 });
 
-async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<string, unknown>> {
-  const body = asRecord(request.body);
+async function generateDemoFromRequest(request: FastifyRequest, overrides: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  const body = { ...asRecord(request.body), ...overrides };
   const websiteUrl = normalisePublicUrl(body.websiteUrl);
   const requesterName = optionalString(body.requesterName ?? body.name, 160);
   const requesterEmail = optionalString(body.requesterEmail ?? body.email, 240)?.toLowerCase() ?? null;
@@ -12875,16 +15522,30 @@ async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<
   });
 
   try {
-    const crawled = await crawlConfiguredWebsite(websiteUrl);
-    const firstPage = firstCrawledPageOrError(crawled);
-    const name = businessNameFromTitle(firstPage.title, websiteUrl);
+    const expectedBusinessName = optionalString(body.businessName, 160);
+    let crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } };
+    let onboardingValidation: OnboardingValidation;
+    let crawlFailure: CrawlError | null = null;
+    try {
+      crawled = await crawlConfiguredWebsite(websiteUrl);
+      onboardingValidation = websiteValidationForCrawl(crawled, expectedBusinessName);
+    } catch (error) {
+      if (!canProvisionAttentionBusiness(error)) throw error;
+      crawlFailure = error;
+      onboardingValidation = websiteValidationFromCrawlError(error, expectedBusinessName);
+      crawled = { pages: [], audit: error.audit ?? { failureCode: error.code, rejectedInternalLinks: [] } };
+    }
+    const firstPage = crawled.pages[0];
+    const name = expectedBusinessName ?? (firstPage ? businessNameFromTitle(firstPage.title, websiteUrl) : businessNameFromWebsite(websiteUrl));
     const baseSlug = slugify(name);
     let slug = baseSlug;
     while (businesses.has(slug) || (pool && await loadBusinessFromDatabase(slug))) slug = `${baseSlug}-${Math.random().toString(36).slice(2, 7)}`;
 
-    const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages });
+    const business = makeBusiness({ name, slug, websiteUrl, pages: crawled.pages, onboardingValidation });
+    if (!crawled.pages.length && crawlFailure) business.sources = [sourceFromCrawlFailure(websiteUrl, crawlFailure)];
     businesses.set(slug, business);
     await persistBusiness(business);
+    await syncWebsitePricingFacts(business);
     const access = await createDemoAccess(business, {
       demoRequestId: requestId,
       email: requesterEmail,
@@ -12909,7 +15570,7 @@ async function generateDemoFromRequest(request: FastifyRequest): Promise<Record<
     return {
       ...(await workspacePayload(business)),
       access: publicAccess,
-      demoRequest: requestId ? { id: requestId, status: "ready" } : null,
+      demoRequest: requestId ? { id: requestId, status: onboardingValidation.status === "valid" ? "ready" : "needs_attention" } : null,
     };
   } catch (error) {
     if (requestId && pool) {
@@ -12967,13 +15628,14 @@ app.post("/api/v1/demo/:slug/public/test", async (request) => {
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   // Public samples are intentionally read-only: prospects can test the agent,
   // but their questions do not mutate the seeded demo's conversations or gaps.
-  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false })), businessName: customerBusinessName(business) };
+  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false }), question), businessName: customerBusinessName(business) };
 });
 
 app.get("/api/v1/demo/:slug", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const access = await requireBusinessTeamAccess(business, request, "viewer");
+  if (access.role === "staff" || access.role === "viewer") return teamWorkspacePayload(business, access);
   return workspacePayload(business);
 });
 
@@ -13030,13 +15692,19 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
   try {
     const crawled = await crawlConfiguredWebsite(normalisePublicUrl(business.websiteUrl));
     await replaceWebsiteSources(business, crawled.pages);
+    business.onboardingValidation = websiteValidationForCrawl(crawled, business.onboardingValidation.expectedBusinessName ?? business.name);
     await enqueueAndRunEmbeddingJob(business);
-    return { status: "ready", sourceCount: business.sources.filter((item) => item.contentType === "web_page").length };
+    await persistBusiness(business);
+    return { status: business.onboardingValidation.status, validation: business.onboardingValidation, sourceCount: business.sources.filter((item) => item.contentType === "web_page").length };
   } catch (error) {
     const current = business.sources.find((item) => item.id === sourceId);
     if (current) {
       current.crawlStatus = "failed";
       current.errorMessage = error instanceof Error ? error.message.slice(0, 1_000) : "Website recrawl failed";
+      current.errorCode = error instanceof CrawlError ? error.code : "CRAWL_ERROR";
+      business.onboardingValidation = error instanceof CrawlError
+        ? websiteValidationFromCrawlError(error, business.onboardingValidation.expectedBusinessName ?? business.name)
+        : validationFromFailure({ code: "CRAWL_ERROR", expectedBusinessName: business.onboardingValidation.expectedBusinessName ?? business.name });
       if (error instanceof CrawlError && error.audit) {
         const route = error.audit.routes[0];
         current.httpStatus = route?.status ?? error.audit.responseStatus;
@@ -13068,6 +15736,7 @@ app.delete("/api/v1/demo/:slug/knowledge/sources/:sourceId", async (request) => 
     await pool.query("delete from knowledge_chunks where business_id = $1 and source_id = $2", [business.id, sourceId]);
     await pool.query("delete from business_sources where business_id = $1 and id = $2", [business.id, sourceId]);
   }
+  await syncWebsitePricingFacts(business);
   return { ok: true, sourceId: source.id };
 });
 
@@ -13081,7 +15750,7 @@ app.get("/api/v1/demo/:slug/verification", async (request) => {
 app.post("/api/v1/demo/:slug/verification/request", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   await requireAuthenticatedBusinessOwner(business, request);
   const body = asRecord(request.body);
   const method = body.method as OwnershipVerificationMethod;
@@ -13107,6 +15776,7 @@ app.post("/api/v1/demo/:slug/verification/request", async (request) => {
     business.ownershipVerifiedByUserId = null;
   }
   await persistBusiness(business);
+  if (business.ownershipStatus === "verified") await syncWebsitePricingFacts(business);
   return {
     verification: ownershipPayload(business),
     token: method === "email" || method === "manual" ? null : token,
@@ -13118,7 +15788,7 @@ app.post("/api/v1/demo/:slug/verification/request", async (request) => {
 app.post("/api/v1/demo/:slug/verification/check", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   await requireAuthenticatedBusinessOwner(business, request);
   if (business.ownershipVerificationMethod === "manual") return { verified: false, verification: ownershipPayload(business), message: "Manual verification is waiting for a super-admin review." };
   const token = requiredString(asRecord(request.body).token, "token", 200);
@@ -13141,6 +15811,7 @@ app.post("/api/v1/demo/:slug/verification/check", async (request) => {
   business.ownershipVerifiedAt = new Date().toISOString();
   business.ownershipVerifiedByUserId = null;
   await persistBusiness(business);
+  await syncWebsitePricingFacts(business);
   return { verified: true, verification: ownershipPayload(business), message: "Business ownership verified. Live publishing is enabled." };
 });
 
@@ -13346,7 +16017,7 @@ app.post("/api/v1/demo/:slug/support/cases", async (request, reply) => {
 app.post("/api/v1/demo/:slug/installation-support", async (request, reply) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  const authUser = await requireFirebaseAuth(request);
+  const authUser = await requireVerifiedFirebaseAuth(request);
   await requireAuthenticatedBusinessOwner(business, request);
   if (!pool) throw httpError(503, "Installation support requires PostgreSQL storage");
 
@@ -14145,11 +16816,11 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   const actor = await requireBusinessTeamAccess(business, request, "viewer");
   const handoffSettings = await loadHandoffNotificationSettings(business);
   await Promise.all([...business.conversations.values()]
-    .filter((conversation) => conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF")
+    .filter((conversation) => conversation.status === "HANDOFF_REQUESTED" || conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF")
     .map((conversation) => refreshHandoffLifecycle(business, conversation, handoffSettings)));
   const query = (request.query as Record<string, unknown> | undefined) ?? {};
   const status = optionalString(query.status, 40) as ConversationStatus | null;
-  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "FOLLOW_UP_PENDING", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED", "EXPIRED"]);
+  const allowedStatuses = new Set<ConversationStatus>(["AI_ACTIVE", "HANDOFF_REQUESTED", "CONTACT_REQUIRED", "WAITING_FOR_STAFF", "FOLLOW_UP_PENDING", "HUMAN_ACTIVE", "AI_ASSISTED", "RESOLVED", "EXPIRED"]);
   if (status && !allowedStatuses.has(status)) throw httpError(400, "Unsupported conversation status filter");
   const assignedTo = optionalString(query.assignedTo, 80);
   const search = optionalString(query.q, 160)?.toLowerCase();
@@ -14166,8 +16837,9 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   const page = Math.min(requestedPageNumber, Math.max(1, Math.ceil(total / limit)));
   const start = (page - 1) * limit;
   const conversations = filteredConversations.slice(start, start + limit);
+  const assignees = await conversationAssignees(conversations);
   const summary = filteredConversations.reduce((result, conversation) => {
-    if (conversation.status === "HANDOFF_REQUESTED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING") result.needsResponse += 1;
+    if (conversation.status === "HANDOFF_REQUESTED" || conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING") result.needsResponse += 1;
     if (conversation.status === "AI_ACTIVE" || conversation.status === "AI_ASSISTED") result.ai += 1;
     if (conversation.status === "RESOLVED") result.resolved += 1;
     result.unread += conversation.unreadCount ?? 0;
@@ -14175,7 +16847,11 @@ app.get("/api/v1/demo/:slug/inbox", async (request) => {
   }, { needsResponse: 0, unread: 0, ai: 0, resolved: 0 });
   return {
     actor: { id: actor.id, name: actor.name, role: actor.role },
-    conversations: conversations.map((conversation) => inboxConversationPayload(business, conversation)),
+    conversations: conversations.map((conversation) => ({
+      ...inboxConversationPayload(business, conversation),
+      assignedUserName: conversation.assignedUserId ? assignees.get(conversation.assignedUserId)?.name ?? null : null,
+      assignedUserEmail: conversation.assignedUserId ? assignees.get(conversation.assignedUserId)?.email ?? null : null,
+    })),
     summary,
     pagination: { page, pageSize: limit, total, hasNext: start + conversations.length < total, hasPrevious: page > 1 },
   };
@@ -14187,6 +16863,7 @@ app.get("/api/v1/demo/:slug/conversations/:conversationId", async (request) => {
   await requireBusinessTeamAccess(business, request, "viewer");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   await refreshHandoffLifecycle(business, conversation);
+  const assignees = await conversationAssignees([conversation]);
   let events = business.conversationEvents.filter((event) => event.conversationId === conversation.id);
   let notes = business.internalNotes.filter((note) => note.conversationId === conversation.id);
   if (pool) {
@@ -14197,7 +16874,16 @@ app.get("/api/v1/demo/:slug/conversations/:conversationId", async (request) => {
     if (eventResult.rows.length) events = eventResult.rows.map((row) => ({ id: String(row.id), businessId: business.id, conversationId: conversation.id, eventType: String(row.event_type) as ConversationEventType, actorUserId: typeof row.actor_user_id === "string" ? row.actor_user_id : null, actorType: String(row.actor_type) as ConversationEvent["actorType"], metadata: asRecord(row.metadata), createdAt: toIso(row.created_at) }));
     if (noteResult.rows.length) notes = noteResult.rows.map((row) => ({ id: String(row.id), businessId: business.id, conversationId: conversation.id, authorUserId: String(row.author_user_id), authorName: String(row.author_name ?? ""), content: String(row.content), createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) }));
   }
-  return { conversation: { ...inboxConversationPayload(business, conversation), messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload) }, events, notes };
+  return {
+    conversation: {
+      ...inboxConversationPayload(business, conversation),
+      assignedUserName: conversation.assignedUserId ? assignees.get(conversation.assignedUserId)?.name ?? null : null,
+      assignedUserEmail: conversation.assignedUserId ? assignees.get(conversation.assignedUserId)?.email ?? null : null,
+      messages: conversation.messages.filter((message) => message.kind !== "internal_note").map(inboxMessagePayload),
+    },
+    events,
+    notes,
+  };
 });
 
 app.post("/api/v1/demo/:slug/conversations/:conversationId/read", async (request) => {
@@ -14214,6 +16900,58 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/read", async (request
     );
   }
   return { ok: true, conversation: conversationStatusPayload(conversation, business) };
+});
+
+app.get("/api/v1/demo/:slug/push/config", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "viewer");
+  return { enabled: webPushConfigured, publicKey: webPushConfigured ? webPushPublicKey : null };
+});
+
+app.post("/api/v1/demo/:slug/push-subscriptions", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  if (!webPushConfigured) throw httpError(503, "Browser notifications are not configured for this environment");
+  const body = asRecord(request.body);
+  const subscription = asRecord(body.subscription);
+  const endpoint = requiredString(subscription.endpoint, "subscription.endpoint", 2_048);
+  if (!endpoint.startsWith("https://")) throw httpError(400, "subscription.endpoint must use HTTPS");
+  const keys = asRecord(subscription.keys);
+  const p256dh = requiredString(keys.p256dh, "subscription.keys.p256dh", 512);
+  const auth = requiredString(keys.auth, "subscription.keys.auth", 512);
+  const normalizedSubscription: StoredWebPushSubscription = {
+    endpoint,
+    expirationTime: typeof subscription.expirationTime === "number" ? subscription.expirationTime : null,
+    keys: { p256dh, auth },
+  };
+  if (pool && !actor.legacyDemo) {
+    await pool.query(
+      `insert into web_push_subscriptions (business_id, user_id, endpoint, subscription, user_agent, last_seen_at)
+       values ($1, $2, $3, $4, $5, now())
+       on conflict (endpoint) do update set
+         business_id = excluded.business_id,
+         user_id = excluded.user_id,
+         subscription = excluded.subscription,
+         user_agent = excluded.user_agent,
+         last_seen_at = now()`,
+      [business.id, actor.id, endpoint, JSON.stringify(normalizedSubscription), String(request.headers["user-agent"] ?? "").slice(0, 500) || null],
+    );
+  }
+  return { ok: true, enabled: true };
+});
+
+app.delete("/api/v1/demo/:slug/push-subscriptions", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "viewer");
+  const body = asRecord(request.body);
+  const endpoint = requiredString(body.endpoint, "endpoint", 2_048);
+  if (pool && !actor.legacyDemo) {
+    await pool.query("delete from web_push_subscriptions where business_id = $1 and user_id = $2 and endpoint = $3", [business.id, actor.id, endpoint]);
+  }
+  return { ok: true };
 });
 
 app.get("/api/v1/demo/:slug/notifications", async (request) => {
@@ -14283,7 +17021,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
       await client.query("begin");
       const update = await client.query(
         `update conversations set status = 'HUMAN_ACTIVE', assigned_user_id = $3, assigned_at = $4, human_joined_at = $4, unread_count = 0, last_activity_at = $4, updated_at = $4
-         where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'WAITING_FOR_STAFF', 'FOLLOW_UP_PENDING', 'AI_ASSISTED')
+         where id = $1 and business_id = $2 and status in ('AI_ACTIVE', 'HANDOFF_REQUESTED', 'CONTACT_REQUIRED', 'WAITING_FOR_STAFF', 'FOLLOW_UP_PENDING', 'AI_ASSISTED')
            and (assigned_user_id is null or assigned_user_id = $3 or $5 = true)
          returning id`,
         [conversation.id, business.id, persistedActorId, now, actor.role === "admin" || actor.role === "owner"],
@@ -14313,6 +17051,9 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
       conversation.humanJoinedAt = conversation.humanJoinedAt ?? now;
       conversation.unreadCount = 0;
       conversation.updatedAt = now;
+      business.notifications
+        .filter((notification) => notification.conversationId === conversation.id && !notification.readAt && (notification.type === "handoff_requested" || notification.type === "action_staff_required"))
+        .forEach((notification) => { notification.readAt = now; });
       await cancelPendingHandoffReminders(conversation.id);
       return { conversation: conversationStatusPayload(conversation, business), actor: { id: actor.id, name: actor.name, role: actor.role } };
     }
@@ -14324,6 +17065,9 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/takeover", async (req
   conversation.unreadCount = 0;
   conversation.lastActivityAt = now;
   conversation.updatedAt = now;
+  business.notifications
+    .filter((notification) => notification.conversationId === conversation.id && !notification.readAt && (notification.type === "handoff_requested" || notification.type === "action_staff_required"))
+    .forEach((notification) => { notification.readAt = now; });
   await cancelPendingHandoffReminders(conversation.id);
   await recordConversationEvent(business, conversation, "HUMAN_JOINED", "staff", persistedActorId, { name: actor.name });
   await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", persistedActorId, { name: actor.name });
@@ -14340,6 +17084,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/assign", async (reque
   if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is closed");
   const body = asRecord(request.body);
   const assigneeId = requiredString(body.userId, "userId", 80);
+  const previousAssigneeId = conversation.assignedUserId;
   const member = await pool.query("select 1 from business_members where business_id = $1 and user_id = $2 and role in ('admin', 'staff')", [business.id, assigneeId]);
   if (!member.rowCount) throw httpError(400, "That user is not an active staff member for this business");
   const now = new Date().toISOString();
@@ -14349,7 +17094,18 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/assign", async (reque
   conversation.assignedAt = now;
   conversation.lastActivityAt = now;
   await persistConversation(business, conversation);
-  await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", actor.id, { assigneeId });
+  await recordConversationEvent(business, conversation, "STAFF_ASSIGNED", "staff", actor.id, {
+    assigneeId,
+    previousAssigneeId,
+    assignmentType: previousAssigneeId ? "transfer" : "assignment",
+  });
+  await notifyStaff(business, conversation, {
+    type: "conversation_assigned",
+    title: "Conversation assigned to you",
+    body: `${actor.name} assigned a customer conversation to you.`,
+    targets: ["assigned_staff"],
+    channels: ["in_app"],
+  });
   return { conversation: conversationStatusPayload(conversation, business) };
 });
 
@@ -14410,6 +17166,9 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/resolve", async (requ
   const actor = await requireBusinessTeamAccess(business, request, "staff");
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   if (conversationIsTerminal(conversation)) throw httpError(409, "This conversation is already closed");
+  if (conversation.assignedUserId && conversation.assignedUserId !== actor.id && actor.role !== "admin" && actor.role !== "owner") {
+    throw httpError(403, "Only the assigned team member can resolve this conversation");
+  }
   conversation.status = "RESOLVED";
   conversation.assignedUserId = null;
   conversation.assignedAt = null;
@@ -14446,7 +17205,7 @@ app.post("/api/v1/demo/:slug/conversations/:conversationId/messages/human", asyn
   conversation.unreadCount = 0;
   conversation.lastActivityAt = now;
   conversation.updatedAt = now;
-  await persistMessage(conversation, message);
+  await persistMessage(business, conversation, message, null);
   await persistConversation(business, conversation);
   await recordConversationEvent(business, conversation, "MESSAGE_SENT_BY_HUMAN", "staff", actor.legacyDemo ? null : actor.id, { contentLength: content.length });
   return { message: inboxMessagePayload(message), conversation: conversationStatusPayload(conversation, business) };
@@ -14587,24 +17346,50 @@ app.post("/api/v1/widget/:siteKey/conversations", async (request, reply) => {
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const body = asRecord(request.body);
+  const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim().slice(0, 160) : "new";
+  const rate = widgetMessageRateLimiter.consume(`${request.ip}:${business.id}:${sessionId}`);
+  if (!rate.allowed) {
+    void recordSecurityEvent({ eventType: "widget_rate_limited", risk: "medium", request, businessId: business.id, organizationId: business.organizationId, metadata: { surface: "conversation_start", limit: rate.limit } });
+    reply.header("Retry-After", Math.max(1, Math.ceil((rate.resetAt - Date.now()) / 1_000)));
+    throw httpError(429, "This conversation is moving too quickly. Please try again shortly.");
+  }
   const conversation = await startConversation(
     business,
-    typeof body.sessionId === "string" ? body.sessionId : null,
+    sessionId === "new" ? null : sessionId,
     { forceNew: body.newConversation === true },
   );
   return reply.code(201).send({ conversationId: conversation.id, sessionId: conversation.sessionId, resumed: conversation.messages.length > 0 });
 });
 
-app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async (request) => {
+app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async (request, reply) => {
   const params = request.params as { siteKey?: string; conversationId?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
   const body = asRecord(request.body);
+  const sessionKey = typeof body.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim().slice(0, 160) : requiredString(params.conversationId, "conversationId", 120);
+  const rate = widgetMessageRateLimiter.consume(`${request.ip}:${business.id}:${sessionKey}`);
+  if (!rate.allowed) {
+    void recordSecurityEvent({ eventType: "widget_rate_limited", risk: "medium", request, businessId: business.id, organizationId: business.organizationId, metadata: { surface: "message", limit: rate.limit } });
+    reply.header("Retry-After", Math.max(1, Math.ceil((rate.resetAt - Date.now()) / 1_000)));
+    throw httpError(429, "This conversation is moving too quickly. Please try again shortly.");
+  }
   let conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   conversation = await conversationForIncomingMessage(business, conversation, optionalString(body.sessionId, 160));
   const question = requiredString(body.question, "question", 1_000);
+  if (looksLikePromptInjection(question)) {
+    const injectionRate = promptInjectionRateLimiter.consume(`${request.ip}:${business.id}:${sessionKey}`);
+    void recordSecurityEvent({
+      eventType: "prompt_injection_attempt",
+      risk: securityRiskForPromptInjection(question),
+      request,
+      businessId: business.id,
+      organizationId: business.organizationId,
+      metadata: { surface: "widget_message", messageLength: question.length, repeatedAttempt: !injectionRate.allowed },
+    });
+    if (!injectionRate.allowed) throw httpError(429, "Please rephrase your request and try again shortly.");
+  }
   const clientMessageId = typeof body.clientMessageId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.clientMessageId.trim())
     ? body.clientMessageId.trim()
     : undefined;
@@ -14612,7 +17397,10 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
     const existingIndex = conversation.messages.findIndex((message) => message.id === clientMessageId && message.role === "user");
     if (existingIndex >= 0) {
       const existingAnswer = conversation.messages.slice(existingIndex + 1).find((message) => message.role === "assistant");
-      const existingFailure = Boolean(existingAnswer && /I found relevant information|I’m having trouble responding right now/i.test(existingAnswer.content));
+      const existingFailure = Boolean(existingAnswer && (
+        existingAnswer.retrieval?.validationStatus === "fallback"
+        || /I’m having trouble (?:completing|responding) right now/i.test(existingAnswer.content)
+      ));
       return {
         conversationId: conversation.id,
         messageId: clientMessageId,
@@ -14647,6 +17435,9 @@ app.post("/api/v1/widget/:siteKey/conversations/:conversationId/messages", async
     metrics: {
       retrieval_ms: result.performance?.retrievalMs ?? null,
       rerank_ms: result.performance?.rerankMs ?? null,
+      validation_latency_ms: result.performance?.validationMs
+        ?? (result.retrieval as { validationLatencyMs?: number }).validationLatencyMs
+        ?? null,
       model_request_started_ms: result.performance?.modelRequestStartedMs ?? null,
       llm_first_token_ms: result.performance?.llmFirstTokenMs ?? null,
       llm_total_ms: result.performance?.llmTotalMs ?? null,
@@ -14684,12 +17475,18 @@ app.get("/api/v1/widget/:siteKey/conversations/:conversationId/status", async (r
   return { conversation: conversationStatusPayload(conversation, business) };
 });
 
-app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionId/submit", async (request) => {
+app.post("/api/v1/widget/:siteKey/conversations/:conversationId/actions/:actionId/submit", async (request, reply) => {
   const params = request.params as { siteKey?: string; conversationId?: string; actionId?: string };
   const business = await getBusinessBySiteKey(params.siteKey);
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
+  const actionRate = widgetActionRateLimiter.consume(`${request.ip}:${business.id}:${requiredString(params.conversationId, "conversationId", 120)}`);
+  if (!actionRate.allowed) {
+    void recordSecurityEvent({ eventType: "widget_action_rate_limited", risk: "high", request, businessId: business.id, organizationId: business.organizationId, metadata: { surface: "action_submit", limit: actionRate.limit } });
+    reply.header("Retry-After", Math.max(1, Math.ceil((actionRate.resetAt - Date.now()) / 1_000)));
+    throw httpError(429, "This action is being submitted too often. Please try again shortly.");
+  }
   const conversation = maybeConversation(business, requiredString(params.conversationId, "conversationId", 120));
   await refreshHandoffLifecycle(business, conversation);
   const body = asRecord(request.body);
@@ -14716,12 +17513,37 @@ app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
   if (!business.widget.enabled) throw httpError(404, "Widget is disabled");
   requireWritableBusiness(business);
   requireVerifiedBusiness(business);
+  const leadRate = widgetActionRateLimiter.consume(`${request.ip}:${business.id}:lead`);
+  if (!leadRate.allowed) {
+    void recordSecurityEvent({ eventType: "widget_action_rate_limited", risk: "high", request, businessId: business.id, organizationId: business.organizationId, metadata: { surface: "lead_capture", limit: leadRate.limit } });
+    reply.header("Retry-After", Math.max(1, Math.ceil((leadRate.resetAt - Date.now()) / 1_000)));
+    throw httpError(429, "Lead submissions are temporarily limited. Please try again shortly.");
+  }
   const body = asRecord(request.body);
   if (business.agentConfig.requireLeadConsent && body.consent !== true) {
     throw httpError(400, "Consent is required before sending your details.");
   }
   const leadInputValue = leadInput(body, "widget", request);
   const conversation = leadInputValue.conversationId ? maybeConversation(business, leadInputValue.conversationId) : null;
+  if (conversation?.status === "CONTACT_REQUIRED") {
+    const contact = mergeHandoffContacts({ name: leadInputValue.name, email: leadInputValue.email, phone: leadInputValue.phone });
+    const captured = await captureHandoffLead(
+      business,
+      conversation,
+      contact,
+      conversation.handoffReason ?? "Visitor explicitly requested a team member",
+      [...conversation.messages].reverse().find((message) => message.role === "user")?.content,
+      leadInputValue.pageUrl,
+    );
+    conversation.status = "WAITING_FOR_STAFF";
+    conversation.lastActivityAt = new Date().toISOString();
+    await persistConversation(business, conversation);
+    return reply.code(captured.created ? 201 : 200).send({
+      lead: captured.lead,
+      deduplicated: !captured.created,
+      conversation: conversationStatusPayload(conversation, business),
+    });
+  }
   const lead = await persistLead(business, leadInputValue);
   const created = lead.id === leadInputValue.id;
   const existingIndex = business.leads.findIndex((item) => item.id === lead.id || (lead.idempotencyKey && item.idempotencyKey === lead.idempotencyKey));
@@ -14738,7 +17560,7 @@ app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
       metadata: { leadId: lead.id, source: lead.source },
     });
   }
-  return reply.code(created ? 201 : 200).send({ lead, deduplicated: !created });
+  return reply.code(created ? 201 : 200).send({ lead, deduplicated: !created, ...(conversation ? { conversation: conversationStatusPayload(conversation, business) } : {}) });
 });
 
 app.get("/api/v1/demo/:slug/knowledge-gaps", async (request) => {
@@ -14889,14 +17711,16 @@ app.get("/api/v1/demo/:slug/retrieval-diagnostics", async (request) => {
 app.get("/api/v1/demo/:slug/leads", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const access = await requireBusinessTeamAccess(business, request, "viewer");
   const query = (request.query as Record<string, unknown> | undefined) ?? {};
   const status = optionalString(query.status, 40)?.toLowerCase();
   if (status && !["new", "qualified", "booked"].includes(status)) throw httpError(400, "Unsupported lead status filter");
   const search = optionalString(query.q, 160)?.toLowerCase();
   const limitValue = Number(query.limit ?? 100);
   const limit = Math.max(1, Math.min(500, Number.isFinite(limitValue) ? limitValue : 100));
+  const canSeeAllLeads = access.role === "owner" || access.role === "admin";
   const leads = business.leads
+    .filter((lead) => canSeeAllLeads || Boolean(lead.conversationId && business.conversations.get(lead.conversationId)?.assignedUserId === access.id))
     .filter((lead) => !status || lead.status === status)
     .filter((lead) => !search || [lead.name, lead.email, lead.phone, lead.intent, lead.source].some((value) => value?.toLowerCase().includes(search)))
     .slice(0, limit);
@@ -14906,11 +17730,14 @@ app.get("/api/v1/demo/:slug/leads", async (request) => {
 app.patch("/api/v1/demo/:slug/leads/:leadId", async (request) => {
   const params = request.params as { slug?: string; leadId?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const access = await requireBusinessTeamAccess(business, request, "staff");
   requireWritableBusiness(business);
   const leadId = requiredString(params.leadId, "leadId", 120);
   const lead = business.leads.find((item) => item.id === leadId);
   if (!lead) throw httpError(404, "Lead not found");
+  if (access.role !== "owner" && access.role !== "admin" && (!lead.conversationId || business.conversations.get(lead.conversationId)?.assignedUserId !== access.id)) {
+    throw httpError(403, "Staff can only update leads assigned to them");
+  }
   const body = asRecord(request.body);
   const statusValue = optionalString(body.status, 40)?.toLowerCase();
   if (statusValue && !["new", "qualified", "booked"].includes(statusValue)) throw httpError(400, "Unsupported lead status");
@@ -15452,6 +18279,9 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   const body = asRecord(request.body);
   const publish = body.publish === true;
   if (publish) {
+    if (business.onboardingValidation.status !== "valid" || !business.onboardingValidation.knowledgeReady) {
+      throw httpError(409, `${business.onboardingValidation.message} ${business.onboardingValidation.suggestedAction}`);
+    }
     requireVerifiedBusiness(business);
     if (body.tested !== true) {
       throw httpError(409, "Test the current assistant behavior before publishing a new production version");
@@ -15607,9 +18437,24 @@ app.post("/api/v1/demo/:slug/actions/booking", async (request) => {
 app.setErrorHandler((error, request: FastifyRequest, reply: FastifyReply) => {
   const typedError = error as Error & { statusCode?: unknown };
   const statusCode = typeof typedError.statusCode === "number" ? typedError.statusCode : 500;
+  if (statusCode === 401 || statusCode === 403) {
+    void recordSecurityEvent({
+      eventType: statusCode === 401 ? "authorization_failed" : "authorization_denied",
+      risk: statusCode === 403 ? "medium" : "low",
+      request,
+      metadata: { statusCode, path: request.url.split("?", 1)[0] },
+    });
+  }
   if (statusCode >= 500) app.log.error({ err: error, requestId: request.id }, "Request failed");
+  const crawlError = error instanceof CrawlError ? error : null;
+  const crawlValidation = crawlError ? websiteValidationFromCrawlError(crawlError) : null;
   return reply.code(statusCode).send({
-    error: statusCode >= 500 ? "Internal server error" : typedError.message,
+    error: statusCode >= 500 ? "Internal server error" : crawlValidation ? `${crawlValidation.message} ${crawlValidation.suggestedAction}` : typedError.message,
+    ...(crawlError ? {
+      code: crawlError.code,
+      retryable: crawlError.retryable,
+      validation: crawlValidation,
+    } : {}),
     requestId: request.id,
   });
 });

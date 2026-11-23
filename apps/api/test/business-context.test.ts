@@ -87,6 +87,31 @@ test("verified SalonFlow pricing is the only critical pricing source", () => {
   assert.equal(conflicted?.usableForCritical, false);
 });
 
+test("verified ownership can promote website pricing into usable critical knowledge", () => {
+  const model = modelWithFacts([
+    normalizeBusinessFact({
+      id: "verified-website-price",
+      businessId: "business-1",
+      kind: "pricing",
+      subject: "Core",
+      predicate: "plan price",
+      value: { plan: "Core", amount: 65, currency: "$", billingPeriod: "month" },
+      valueText: "$65/month",
+      sourceType: "website",
+      authority: "owner_verified",
+      sourceId: "website-1",
+      observedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    }, now),
+  ]);
+
+  const pricing = model.knowledge.facts.find((item) => item.kind === "pricing");
+  assert.equal(pricing?.status, "VERIFIED");
+  assert.equal(pricing?.usableForCritical, true);
+  assert.equal(pricing?.provenance.sourceType, "website");
+});
+
 test("business context snapshots advance only when material business intelligence changes", () => {
   const firstModel = modelWithFacts([fact("service", "service", "AI planning", "owner_structured")]);
   const first = createBusinessContextSnapshot(firstModel);

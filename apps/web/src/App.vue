@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Activity,
   ArrowLeft,
@@ -55,6 +55,7 @@ import {
   currentFirebaseToken,
   firebaseAuthConfigured,
   observeFirebaseUser,
+  resendFrontDeskWiseVerificationEmail,
   sendFrontDeskWisePasswordReset,
   confirmFrontDeskWisePasswordReset,
   verifyFrontDeskWisePasswordResetCode,
@@ -65,15 +66,32 @@ import {
   AuthSessionExpiredError,
   type AuthSnapshot,
 } from "./auth/firebase";
-import LegalPage from "./LegalPage.vue";
-import AgentExperience from "./AgentExperience.vue";
 import AppFeedback, { type AppToast, type AppToastKind } from "./AppFeedback.vue";
-import MarketingPage from "./MarketingPage.vue";
 import LandingVideo from "./components/LandingVideo.vue";
-import SupportCenter, { type SupportCase as SupportCaseRecord, type SupportCaseCategory, type SupportContext } from "./components/SupportCenter.vue";
-import WorkflowWorkspace from "./components/WorkflowWorkspace.vue";
+import type { SupportCase as SupportCaseRecord, SupportCaseCategory, SupportContext } from "./components/SupportCenter.vue";
 import type { WorkflowBusinessContext } from "./workflow-generator.js";
+import {
+  identifyMixpanelUser,
+  initializeMixpanel,
+  MIXPANEL_EVENTS,
+  resetMixpanelUser,
+  setMixpanelContext,
+  trackMixpanel,
+  trackMixpanelOnce,
+} from "./analytics/mixpanel";
+import { safeUrlHost } from "./analytics/mixpanel-schema";
+import type { MixpanelContext } from "./analytics/mixpanel-schema";
 import { getMarketingPageByPath } from "./marketing";
+import {
+  existingPushSubscription,
+  initializePwa,
+  installPwa,
+  isStandalonePwa,
+  notificationPermission,
+  pushSupported,
+  subscribeToPush,
+  unsubscribeFromPush,
+} from "./pwa";
 import {
   demoRoute,
   parseRoute,
@@ -89,7 +107,17 @@ import {
   type WorkspaceView,
 } from "./router";
 
-type View = "home" | "marketing" | "privacy" | "terms" | WorkspaceView | "admin";
+// Keep route-only surfaces out of the initial shell. These components carry the
+// largest editor, analytics, and support bundles and are only needed after the
+// owner navigates to the corresponding route.
+const AgentExperience = defineAsyncComponent(() => import("./AgentExperience.vue"));
+const MarketingPage = defineAsyncComponent(() => import("./MarketingPage.vue"));
+const LegalPage = defineAsyncComponent(() => import("./LegalPage.vue"));
+const PartnerPortal = defineAsyncComponent(() => import("./PartnerPortal.vue"));
+const SupportCenter = defineAsyncComponent(() => import("./components/SupportCenter.vue"));
+const WorkflowWorkspace = defineAsyncComponent(() => import("./components/WorkflowWorkspace.vue"));
+
+type View = "home" | "marketing" | "privacy" | "terms" | "partner" | WorkspaceView | "admin";
 type SettingsTab = SettingsRouteTab;
 type AgentTab = AgentRouteTab;
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
@@ -178,6 +206,8 @@ interface InboxConversation {
   id: string;
   status: "AI_ACTIVE" | "HANDOFF_REQUESTED" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | "RESOLVED" | "EXPIRED";
   assignedUserId: string | null;
+  assignedUserName?: string | null;
+  assignedUserEmail?: string | null;
   handoffReason: string | null;
   unreadCount: number;
   lastActivityAt: string;
@@ -187,6 +217,7 @@ interface InboxConversation {
   lastMessage: InboxMessage | null;
   messages?: InboxMessage[];
   notes?: InboxNote[];
+  events?: InboxEvent[];
 }
 
 interface InboxPageSummary {
@@ -204,6 +235,17 @@ interface InboxNote {
   createdAt: string;
   updatedAt: string;
 }
+
+interface InboxEvent {
+  id: string;
+  eventType: string;
+  actorUserId?: string | null;
+  actorType?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+type WorkspaceRole = "owner" | "admin" | "staff" | "viewer";
 
 interface HandoffNotificationSettings {
   enabled: boolean;
@@ -488,6 +530,44 @@ interface AgentSaveModel {
   fallbackContactUrl?: string;
 }
 
+interface ExecutiveAnalyticsStep {
+  key: string;
+  label: string;
+  value: number;
+  rate: number | null;
+  rateLabel: string;
+  detail: string;
+  status: "complete" | "attention" | "pending";
+}
+
+interface ExecutiveQualityMetric {
+  key: string;
+  label: string;
+  value: number | null;
+  unit: "percent" | "currency";
+  detail: string;
+  status: "healthy" | "watch" | "no_data";
+}
+
+interface ExecutiveAnalytics {
+  windowDays: number;
+  windowLabel: string;
+  funnel: {
+    steps: ExecutiveAnalyticsStep[];
+    qualifiedLeads: number;
+    conversions: number;
+    activityConversations: number;
+  };
+  quality: {
+    metrics: ExecutiveQualityMetric[];
+    totalConversations: number;
+    assistantResponses: number;
+    fallbackResponses: number;
+    totalLlmCostUsd: number | null;
+    costDataAvailable: boolean;
+  };
+}
+
 interface WorkspaceStats {
   conversations: number;
   leads: number;
@@ -499,6 +579,15 @@ interface WorkspaceStats {
   actions: Array<{ question: string; count: number; status: string }>;
   handoffs?: number;
   humanActive?: number;
+  experienceInsights?: {
+    totalSignals: number;
+    affectedSessions: number;
+    topFriction: Array<{ type: string; count: number; sessions: number }>;
+    topSteps: Array<{ step: string; count: number }>;
+    headline: string | null;
+    suggestedImprovement: string | null;
+  };
+  executive?: ExecutiveAnalytics;
   setup: {
     completed: number;
     total: number;
@@ -570,6 +659,20 @@ interface AgentPublishing {
   configVersion: number | null;
 }
 
+interface OnboardingValidation {
+  status: "valid" | "needs_attention";
+  code: string | null;
+  reachable: boolean;
+  knowledgeReady: boolean;
+  readinessScore: number;
+  expectedBusinessName: string | null;
+  detectedBusinessName: string | null;
+  message: string;
+  suggestedAction: string;
+  signals: string[];
+  checkedAt: string;
+}
+
 interface WorkspacePayload {
   slug: string;
   status: string;
@@ -578,6 +681,7 @@ interface WorkspacePayload {
   branding?: { colors?: string[]; source?: string };
   suggestedQuestions?: string[];
   ownership?: { status: "pending" | "verified" | "rejected"; method: VerificationMethod | null; verifiedAt: string | null };
+  onboarding?: OnboardingValidation;
   publishing?: AgentPublishing;
   publishedAt?: string | null;
   knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
@@ -734,6 +838,10 @@ interface AdminBusinessDetail {
     websiteUrl: string;
     location: string;
     ownershipStatus: string;
+    onboardingStatus?: string;
+    onboardingFailureCode?: string | null;
+    onboardingValidation?: OnboardingValidation;
+    onboardingValidatedAt?: string | null;
     billingStatus: string;
     planKey: string;
     sourceCount: number;
@@ -813,6 +921,35 @@ interface AdminCertificationPayload {
   };
 }
 
+interface AdminExperienceSignal {
+  id: string;
+  business: { id: string; name: string; slug: string };
+  conversationId: string | null;
+  type: string;
+  severity: "low" | "medium" | "high" | "critical";
+  confidence: number;
+  likelyLayer: string;
+  messageExcerptRedacted: string | null;
+  workflowStep: string | null;
+  publicationVersion: number | null;
+  modelRole: string | null;
+  providerState: Record<string, unknown>;
+  validationResult: Record<string, unknown>;
+  status: "open" | "reviewed" | "resolved" | "ignored";
+  clusterKey: string;
+  reason: string | null;
+  occurredAt: string;
+  trace: Record<string, unknown>;
+}
+
+interface AdminExperienceSignalsPayload {
+  generatedAt: string;
+  filters: { businessId: string | null; severity: string | null; type: string | null; status: string; days: number };
+  summary: { total: number; bySeverity: Array<{ severity: string; count: number }>; byType: Array<{ type: string; count: number }> };
+  clusters: Array<{ clusterKey: string; type: string; likelyLayer: string; workflowStep: string | null; count: number; sessions: number; businessName: string; lastSeenAt: string }>;
+  signals: AdminExperienceSignal[];
+}
+
 interface AdminUser {
   id: string;
   email: string;
@@ -823,6 +960,25 @@ interface AdminUser {
   organizationSummary: string;
   organizationCount: number;
   isSuperAdmin: boolean;
+}
+
+interface AdminFeatureFlag {
+  id: string;
+  key: string;
+  description: string;
+  stage: "off" | "internal" | "reference_tenants" | "percentage" | "all";
+  rolloutPercentage: number;
+  referenceOrganizationIds: string[];
+  overrides: Array<{ organizationId: string; state: "on" | "off"; reason: string }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface AdminFeatureFlagOrganization {
+  id: string;
+  name: string;
+  slug: string;
+  isInternal: boolean;
 }
 
 interface AdminDemoRequest {
@@ -948,6 +1104,40 @@ interface MessagingSummary {
   last24Hours: { queued: number; sent: number; deferred: number; failed: number };
   templates: { active: number; total: number };
   provider: { name: string; configured: boolean };
+}
+
+interface AdminRecoveryRecord {
+  businessId: string;
+  businessName: string;
+  businessSlug: string;
+  ownerName: string;
+  ownerEmail: string;
+  onboardingStage: string;
+  completionPercent: number;
+  lastActivityAt: string | null;
+  lastSuccessfulStep: string | null;
+  currentBlocker: string | null;
+  lastError: string | null;
+  reminderCount: number;
+  lastReminderAt: string | null;
+  lastReminderType: string | null;
+  emailOpened: boolean;
+  returnedAfterEmail: boolean;
+  unsubscribed: boolean;
+  dormant: boolean;
+  published: boolean;
+}
+
+interface AdminRecoveryPayload {
+  generatedAt: string;
+  funnel: {
+    incompleteSignups: number;
+    reminded: number;
+    returned: number;
+    finishedSetup: number;
+    published: number;
+  };
+  records: AdminRecoveryRecord[];
 }
 
 type AdminSection = PlatformRouteSection;
@@ -1085,6 +1275,25 @@ const demoRequesterName = ref("");
 const demoRequesterEmail = ref("");
 const isGenerating = ref(false);
 const generationError = ref("");
+type LandingAuditFinding = { label: string; detail: string; status: "attention" | "healthy" };
+interface LandingAuditResult {
+  businessName: string;
+  websiteUrl: string;
+  score: number;
+  findings: LandingAuditFinding[];
+  summary: string;
+}
+const landingAuditUrl = ref("");
+const landingAudit = ref<LandingAuditResult | null>(null);
+const landingAuditLoading = ref(false);
+const landingAuditError = ref("");
+const landingDemoQuestion = ref("");
+const landingDemoLoading = ref(false);
+const landingDemoTurns = ref<Array<{ role: "visitor" | "assistant"; content: string }>>([
+  { role: "assistant", content: "Hi! I’m the AI front desk for Harbor & Home. Ask me about services, pricing, or getting started." },
+]);
+const landingDemoInsight = ref<{ label: string; score: string; detail: string } | null>(null);
+let landingDemoTimer: number | null = null;
 type GenerationStage = "checking" | "learning" | "organizing";
 const generationStage = ref<GenerationStage>("checking");
 const generationDialogOpen = ref(false);
@@ -1104,6 +1313,8 @@ const authOrganizationName = ref("");
 const authError = ref("");
 const authSuccess = ref("");
 const authLoading = ref(false);
+const verificationEmailLoading = ref(false);
+const verificationEmailMessage = ref("");
 const authInitializing = ref(firebaseAuthConfigured());
 const resetActionCode = ref("");
 const resetEmail = ref("");
@@ -1380,6 +1591,31 @@ const adminWorkflowReplayResult = ref<Record<string, unknown> | null>(null);
 const adminCertification = ref<AdminCertificationPayload | null>(null);
 const adminCertificationLoading = ref(false);
 const adminCertificationError = ref("");
+const adminExperienceSignals = ref<AdminExperienceSignalsPayload | null>(null);
+const adminExperienceSignalsLoading = ref(false);
+const adminExperienceSignalsError = ref("");
+const adminExperienceSignalStatusFilter = ref<"open" | "reviewed" | "resolved" | "ignored" | "all">("open");
+const adminExperienceSignalSeverityFilter = ref<"all" | "low" | "medium" | "high" | "critical">("all");
+const adminExperienceSignalTypeFilter = ref("all");
+const adminExperienceSignalTraceId = ref("");
+const adminFeatureFlags = ref<AdminFeatureFlag[]>([]);
+const adminFeatureFlagOrganizations = ref<AdminFeatureFlagOrganization[]>([]);
+const adminFeatureFlagsLoading = ref(false);
+const adminFeatureFlagsError = ref("");
+const adminFeatureFlagsMessage = ref("");
+const adminFeatureFlagDraft = ref({
+  key: "",
+  description: "",
+  stage: "off" as AdminFeatureFlag["stage"],
+  rolloutPercentage: 0,
+  referenceOrganizationIds: [] as string[],
+});
+const adminFeatureFlagOverride = ref({
+  key: "",
+  organizationId: "",
+  state: "on" as "on" | "off",
+  reason: "",
+});
 const selectedAdminWorkflowAction = computed(() => adminActionRegistry.value.find((action) => action.id === adminWorkflowDetailsActionId.value) ?? null);
 const adminBillingMessage = ref("");
 const adminOverridePlanKey = ref("starter");
@@ -1400,8 +1636,12 @@ const messagingDeliveryFilter = ref("all");
 const messagingTestRecipient = ref("");
 const messagingTestLoading = ref(false);
 const messagingTab = ref<"templates" | "automations" | "delivery" | "settings">("templates");
+const adminRecovery = ref<AdminRecoveryPayload | null>(null);
+const adminRecoveryLoading = ref(false);
+const adminRecoveryError = ref("");
 const workspaceStats = ref<WorkspaceStats | null>(null);
 const workspaceKnowledge = ref<WorkspacePayload["knowledge"] | null>(null);
+const workspaceOnboarding = ref<OnboardingValidation | null>(null);
 const workflowContext = ref<WorkflowBusinessContext | null>(null);
 const workspaceBusinessId = ref<string | null>(null);
 const workspaceOrganizationId = ref<string | null>(null);
@@ -1465,6 +1705,16 @@ const notificationUnreadCount = ref(0);
 const notificationMenuOpen = ref(false);
 const notificationActionLoading = ref(false);
 const notificationActionError = ref("");
+const pwaInstallAvailable = ref(false);
+const pwaInstalled = ref(false);
+const browserNotificationPermission = ref<NotificationPermission | "unsupported">("unsupported");
+const pushConfigured = ref(false);
+const pushPublicKey = ref("");
+const pushEnabled = ref(false);
+const pushLoading = ref(false);
+const pushMessage = ref("");
+const pushError = ref("");
+let stopPwa: (() => void) | null = null;
 const notificationPreferences = ref({ newLead: true, humanHandoff: true, integrationFailure: true });
 const notificationPreferencesLoading = ref(false);
 const notificationPreferencesMessage = ref("");
@@ -1489,23 +1739,34 @@ const handoffSettingsError = ref("");
 const embeddingLoading = ref(false);
 const embeddingMessage = ref("");
 
-const navSections: Array<{ label?: string; items: Array<{ id: View; label: string; icon: LucideIcon }> }> = [
-  { items: [{ id: "overview", label: "Overview", icon: House }] },
-  { items: [{ id: "support", label: "Help & Support", icon: Headset }] },
-  { label: "Customers", items: [
-    { id: "inbox", label: "Inbox", icon: Inbox },
-    { id: "leads", label: "Leads", icon: UserRoundPlus },
-    { id: "analytics", label: "Analytics", icon: ChartNoAxesCombined },
-  ] },
-  { label: "AI front desk", items: [
-    { id: "knowledge", label: "Knowledge", icon: BookOpen },
-    { id: "actions", label: "Actions", icon: Zap },
-    { id: "workflows", label: "Workflows", icon: Workflow },
-    { id: "agent", label: "Agent", icon: Sparkles },
-  ] },
-  { label: "Business", items: [
+interface WorkspaceNavItem {
+  id: View;
+  label: string;
+  icon: LucideIcon;
+  settingsTab?: SettingsTab;
+}
+
+const navSections: Array<{ label: string; items: WorkspaceNavItem[] }> = [
+  { label: "Launch", items: [
+    { id: "overview", label: "Get started", icon: House },
     { id: "businesses", label: "Businesses", icon: Building2 },
-    { id: "settings", label: "Settings", icon: Settings },
+    { id: "agent", label: "Website & agent", icon: Sparkles },
+    { id: "knowledge", label: "Knowledge", icon: BookOpen },
+    { id: "workflows", label: "Workflows", icon: Workflow },
+    { id: "connections", label: "Integrations", icon: Cable },
+  ] },
+  { label: "Operate", items: [
+    { id: "inbox", label: "Inbox", icon: Inbox },
+    { id: "team", label: "Team", icon: UsersRound },
+    { id: "settings", label: "Handoff & alerts", icon: CircleAlert, settingsTab: "notifications" },
+  ] },
+  { label: "Convert", items: [
+    { id: "leads", label: "Leads", icon: UserRoundPlus },
+    { id: "actions", label: "Booking & CTAs", icon: CalendarCheck },
+  ] },
+  { label: "Improve", items: [
+    { id: "analytics", label: "Reports & recommendations", icon: ChartNoAxesCombined },
+    { id: "support", label: "Help & support", icon: Headset },
   ] },
 ];
 
@@ -1535,9 +1796,12 @@ const adminNavItems: Array<{ id: AdminSection; label: string; icon: LucideIcon }
   { id: "organizations", label: "Organizations", icon: Building2 },
   { id: "action-registry", label: "Action registry", icon: Zap },
   { id: "certification", label: "Certification", icon: ShieldCheck },
+  { id: "experience-signals", label: "Experience signals", icon: TriangleAlert },
+  { id: "feature-flags", label: "Feature flags", icon: Snowflake },
   { id: "users", label: "Users & access", icon: UsersRound },
   { id: "demos", label: "Demo operations", icon: Sparkles },
   { id: "messaging", label: "Messaging", icon: Mail },
+  { id: "recovery", label: "Onboarding recovery", icon: RotateCcw },
   { id: "support", label: "Support cases", icon: Headset },
   { id: "installation-support", label: "Installation support", icon: Headset },
   { id: "operations", label: "System health", icon: Activity },
@@ -1555,6 +1819,7 @@ const pageTitle = computed(() => {
   if (route.value.kind === "marketing") return getMarketingPageByPath(`/${route.value.page}`)?.title ?? "FrontDeskWise";
   if (view.value === "privacy") return "Privacy Policy";
   if (view.value === "terms") return "Terms of Service";
+  if (view.value === "partner") return "Partner workspace";
   if (route.value.kind === "auth-reset") return "Reset your password";
   if (route.value.kind === "billing-success") return "Subscription active";
   if (view.value === "admin") return "Admin control plane";
@@ -1584,6 +1849,30 @@ const adminActionRegistryPrimaryCount = computed(() => adminActionRegistry.value
 
 const activeLeads = computed(() => leads.value.filter((lead) => lead.status !== "Booked").length);
 const activeOrganization = computed(() => authSnapshot.value?.organizations.find((organization) => organization.id === authSnapshot.value?.activeOrganizationId) ?? authSnapshot.value?.organizations[0] ?? null);
+
+function currentMixpanelContext(): MixpanelContext {
+  return {
+    organization_id: activeOrganization.value?.id ?? workspaceOrganizationId.value ?? undefined,
+    business_id: workspaceBusinessId.value ?? undefined,
+    user_role: activeOrganization.value?.role ?? undefined,
+    plan: activeOrganization.value?.billing.planKey ?? undefined,
+    publication_version: agentPublishing.value.configVersion ?? undefined,
+    source: publicDemoMode.value ? "public_demo" : authSnapshot.value ? "owner_app" : "marketing_site",
+    surface: publicDemoMode.value ? "public_demo" : view.value,
+    is_public_demo: publicDemoMode.value,
+  };
+}
+
+function trackProductEvent(event: typeof MIXPANEL_EVENTS[keyof typeof MIXPANEL_EVENTS], properties: Record<string, unknown> = {}): void {
+  setMixpanelContext(currentMixpanelContext());
+  trackMixpanel(event, properties);
+}
+
+function trackProductEventOnce(key: string, event: typeof MIXPANEL_EVENTS[keyof typeof MIXPANEL_EVENTS], properties: Record<string, unknown> = {}): void {
+  setMixpanelContext(currentMixpanelContext());
+  trackMixpanelOnce(key, event, properties);
+}
+
 const availableBusinesses = computed(() => {
   const seen = new Set<string>();
   return (activeOrganization.value?.businesses ?? []).filter((business) => {
@@ -1597,6 +1886,42 @@ const availableBusinesses = computed(() => {
     return true;
   });
 });
+function roleForBusinessSlug(slug: string): WorkspaceRole {
+  const business = activeOrganization.value?.businesses.find((item) => item.slug === slug);
+  const organizationRole = activeOrganization.value?.role;
+  if (organizationRole === "owner") return "owner";
+  if (organizationRole === "admin") return "admin";
+  if (business?.role === "admin") return "admin";
+  if (business?.role === "staff") return "staff";
+  return "viewer";
+}
+const workspaceRole = computed<WorkspaceRole>(() => roleForBusinessSlug(demoSlug.value));
+const focusedTeamMode = computed(() => Boolean(authSnapshot.value && (workspaceRole.value === "staff" || workspaceRole.value === "viewer")));
+const canManageTeam = computed(() => workspaceRole.value === "owner" || workspaceRole.value === "admin");
+const canAccessBilling = computed(() => workspaceRole.value === "owner");
+const workspaceRoleLabel = computed(() => workspaceRole.value === "viewer" ? "View only" : formatLabel(workspaceRole.value));
+const visibleNavSections = computed(() => {
+  if (!focusedTeamMode.value) return navSections;
+  return [
+    { label: "Operate", items: [{ id: "inbox" as View, label: "Inbox", icon: Inbox }] },
+    { label: "Convert", items: [
+      { id: "leads" as View, label: "Assigned leads", icon: UserRoundPlus },
+    ] },
+    { label: "Improve", items: [
+      { id: "support" as View, label: "Help & support", icon: Headset },
+    ] },
+  ];
+});
+const selectedConversationReadOnly = computed(() => {
+  const conversation = selectedInboxConversation.value;
+  return Boolean(conversation?.assignedUserId && conversation.assignedUserId !== authSnapshot.value?.user.id && !canManageTeam.value);
+});
+const selectedConversationOwnerLabel = computed(() => {
+  const conversation = selectedInboxConversation.value;
+  if (!conversation?.assignedUserId) return "Unassigned";
+  if (conversation.assignedUserId === authSnapshot.value?.user.id) return "You";
+  return conversation.assignedUserName || "Another team member";
+});
 const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "?").toUpperCase());
 const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
 const inboxUnreadCount = computed(() => inboxSummary.value.unread);
@@ -1609,6 +1934,8 @@ const readinessScore = computed(() => workspaceReadiness.value);
 const semanticSearchHealthy = computed(() => workspaceKnowledge.value?.semantic?.status === "SEMANTIC_SEARCH_HEALTHY");
 const semanticSearchLabel = computed(() => semanticSearchHealthy.value ? "Semantic search ready" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_CONFIGURATION_ERROR" ? "Embedding configuration needs attention" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_BACKLOG" ? "Embeddings processing" : "Full-text fallback active");
 const knowledgeSourcesNeedAttention = computed(() => Boolean((workspaceKnowledge.value?.pendingSources ?? 0) + (workspaceKnowledge.value?.failedSources ?? 0)));
+const onboardingNeedsAttention = computed(() => workspaceOnboarding.value?.status === "needs_attention");
+const onboardingReasonLabel = computed(() => workspaceOnboarding.value?.code ? formatLabel(workspaceOnboarding.value.code) : "Website validation");
 const knowledgeWebsiteSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "web_page"));
 const knowledgeReadyWebsiteSources = computed(() => knowledgeWebsiteSources.value.filter((source) => source.crawlStatus === "ready"));
 const knowledgeManualAnswerSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "faq"));
@@ -1740,6 +2067,9 @@ const knowledgeTestAction = computed(() => {
   if ((workspaceKnowledge.value?.openGaps ?? 0) > 0) return { label: "Test assistant anyway", disabled: false };
   return { label: "Test agent", disabled: false };
 });
+const executiveAnalytics = computed(() => workspaceStats.value?.executive ?? null);
+const executiveFunnelSteps = computed(() => executiveAnalytics.value?.funnel.steps ?? []);
+const executiveQualityMetrics = computed(() => executiveAnalytics.value?.quality.metrics ?? []);
 const chartMax = computed(() => Math.max(1, ...(workspaceStats.value?.trend ?? []).flatMap((point) => [point.conversations, point.leads])));
 const trialDaysRemaining = computed(() => {
   const end = billingSnapshot.value?.billing.trialEndAt;
@@ -1769,7 +2099,7 @@ const currentSettingsTab = computed<SettingsTab>(() => {
 const setupPercent = computed(() => workspaceStats.value?.setup.percent ?? 0);
 const setupComplete = computed(() => setupPercent.value >= 100);
 const setupDismissalKey = computed(() => `frontdeskwise:setup-dismissed:${authSnapshot.value?.activeOrganizationId ?? "public"}:${demoSlug.value || "workspace"}`);
-const showSetupCard = computed(() => !adminSurfaceMode.value && Boolean(workspaceStats.value || (authSnapshot.value && !availableBusinesses.value.length)));
+const showSetupCard = computed(() => !adminSurfaceMode.value && !focusedTeamMode.value && Boolean(workspaceStats.value || (authSnapshot.value && !availableBusinesses.value.length)));
 const setupSteps = computed(() => workspaceStats.value?.setup.steps ?? []);
 const knowledgeSetupReady = computed(() => setupSteps.value.find((step) => step.id === "knowledge_ready")?.complete ?? false);
 const knowledgeHasOpenGaps = computed(() => (workspaceKnowledge.value?.openGaps ?? 0) > 0);
@@ -1962,8 +2292,13 @@ function routeForView(nextView: View): AppRoute {
   );
   if (nextView === "team") return settingsRoute("team");
   if (nextView === "connections") return settingsRoute("integrations");
-  if (nextView === "billing") return settingsRoute("billing");
+  if (nextView === "billing") return authSnapshot.value && !canAccessBilling.value
+    ? routeForView("inbox")
+    : settingsRoute("billing");
   if (nextView === "settings") return settingsRoute(settingsTab.value);
+  if (focusedTeamMode.value && !["inbox", "leads", "support"].includes(nextView)) {
+    return routeForView("inbox");
+  }
   const isAgentSurface = nextView === "agent";
   const nextAgentTab = nextView === "conversations" ? "test" : isAgentSurface ? agentTab.value : undefined;
   const canonicalView: WorkspaceView = nextView === "conversations" || isAgentSurface ? "agent" : nextView as WorkspaceView;
@@ -2008,6 +2343,14 @@ async function applyRouteState(nextRoute: AppRoute) {
     publicDemoMode.value = false;
     authModalOpen.value = false;
     await preparePasswordReset(nextRoute);
+    return;
+  }
+  if (nextRoute.kind === "partner") {
+    publicDemoMode.value = false;
+    if (!authSnapshot.value) {
+      redirectToSignIn();
+      return;
+    }
     return;
   }
   if (nextRoute.kind === "legal" || nextRoute.kind === "landing" || nextRoute.kind === "marketing") {
@@ -2061,11 +2404,14 @@ async function applyRouteState(nextRoute: AppRoute) {
       void loadAdminOrganizations();
       void loadAdminActionRegistry();
       void loadAdminCertification();
+      void loadAdminExperienceSignals();
+      void loadAdminFeatureFlags();
       void loadAdminUsers();
       void loadAdminDemoRequests();
       void loadAdminInstallationSupport();
       void loadAdminSupportCases();
       void loadAdminMessaging();
+      void loadAdminRecovery();
       void loadAdminHealth();
     }
     return;
@@ -2073,13 +2419,22 @@ async function applyRouteState(nextRoute: AppRoute) {
   if (nextRoute.kind === "workspace-settings") {
     publicDemoMode.value = false;
     settingsTab.value = nextRoute.tab;
+    if (nextRoute.tab === "billing" && authSnapshot.value && !canAccessBilling.value) {
+      commitRoute(workspaceRoute(workspaceSlugForRoute(), "inbox"), true);
+      return;
+    }
+    if (focusedTeamMode.value && nextRoute.tab !== "general") {
+      commitRoute(workspaceRoute(workspaceSlugForRoute(), "inbox"), true);
+      return;
+    }
     return;
   }
   if (nextRoute.kind === "billing-success") {
     publicDemoMode.value = false;
     settingsTab.value = "billing";
-    if (!authSnapshot.value) {
-      redirectToSignIn();
+    if (!authSnapshot.value || !canAccessBilling.value) {
+      if (authSnapshot.value) commitRoute(workspaceRoute(workspaceSlugForRoute(), "inbox"), true);
+      else redirectToSignIn();
       return;
     }
     void startBillingSuccessFlow();
@@ -2109,6 +2464,10 @@ async function applyRouteState(nextRoute: AppRoute) {
     const needsReload = demoSlug.value !== nextSlug || publicDemoMode.value !== isPublic || !workspaceStats.value;
     publicDemoMode.value = isPublic;
     demoSlug.value = nextSlug;
+    if (!isPublic && focusedTeamMode.value && !["inbox", "leads", "support"].includes(nextRoute.view)) {
+      commitRoute(workspaceRoute(nextSlug, "inbox"), true);
+      return;
+    }
     if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
     if (needsReload) await loadBusinessWorkspace(nextSlug, isPublic);
     if (nextRoute.view === "support") await loadSupport();
@@ -2238,6 +2597,12 @@ function runActionTest(action: ActionFlow) {
     actionsMessage.value = "Enable this action before testing it.";
     return;
   }
+  trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_TEST_STARTED, {
+    workflow_id: action.id,
+    workflow_key: action.key,
+    action_id: action.id,
+    action_key: action.key,
+  });
   clearSavedActionHighlight();
   resetAgentConversation();
   openAgentTest(actionTestQuestion(action));
@@ -2350,6 +2715,7 @@ function openSupportReport(category: SupportCaseCategory = "general", provider =
 function isProtectedRoute(candidate: AppRoute = route.value): boolean {
   return candidate.kind === "agent-shortcut"
     || candidate.kind === "onboarding"
+    || candidate.kind === "partner"
     || candidate.kind === "billing-success"
     || candidate.kind === "platform"
     || candidate.kind === "workspace"
@@ -2395,11 +2761,13 @@ function redirectToSignIn(returnTo = currentReturnTo()): void {
 }
 
 function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = true, requestedReturnTo?: string) {
+  const openingSignup = mode === "signup" && (!authModalOpen.value || authMode.value !== "signup");
   authMode.value = mode;
   authError.value = "";
   authSuccess.value = "";
   authPassword.value = "";
   authModalOpen.value = true;
+  if (openingSignup) trackProductEvent(MIXPANEL_EVENTS.SIGNUP_STARTED, { entrypoint: view.value });
   const returnTo = requestedReturnTo
     ?? (route.value.kind === "auth" ? route.value.returnTo : isProtectedRoute(route.value) ? currentReturnTo() : undefined);
   if (syncRoute && (route.value.kind !== "auth" || route.value.mode !== mode || route.value.returnTo !== returnTo)) {
@@ -2408,6 +2776,14 @@ function openAuth(mode: "signin" | "signup" | "forgot" = "signin", syncRoute = t
 }
 
 function openSettingsTab(tab: SettingsTab) {
+  if (tab === "billing" && authSnapshot.value && !canAccessBilling.value) {
+    navigateToWorkspaceView("inbox");
+    return;
+  }
+  if (focusedTeamMode.value && tab !== "general") {
+    navigateToWorkspaceView("inbox");
+    return;
+  }
   settingsTab.value = tab;
   profileMenuOpen.value = false;
   sidebarAccountMenuOpen.value = false;
@@ -2424,8 +2800,26 @@ function navigateToWorkspaceView(nextView: View) {
   sidebarAccountMenuOpen.value = false;
   notificationMenuOpen.value = false;
   mobileNavOpen.value = false;
+  if (focusedTeamMode.value && !["inbox", "leads", "support"].includes(nextView)) {
+    nextView = "inbox";
+  }
   if (nextView === "settings") openSettingsTab("general");
   else commitRoute(routeForView(nextView));
+}
+
+function navigateToNavItem(item: WorkspaceNavItem) {
+  if (item.settingsTab) {
+    openSettingsTab(item.settingsTab);
+    commitRoute(settingsRoute(item.settingsTab));
+    return;
+  }
+  navigateToWorkspaceView(item.id);
+}
+
+function isNavItemActive(item: WorkspaceNavItem): boolean {
+  return item.settingsTab
+    ? view.value === item.id && currentSettingsTab.value === item.settingsTab
+    : view.value === item.id;
 }
 
 function isExpiredDemoSessionError(error: unknown): boolean {
@@ -2543,6 +2937,15 @@ async function submitAuth() {
       ? signUpAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value)
       : signInAndBootstrap(authEmail.value, authPassword.value, demoToken, authOrganizationName.value));
     firebaseToken.value = await currentFirebaseToken();
+    identifyMixpanelUser(authSnapshot.value.user.id, {
+      organization_id: authSnapshot.value.activeOrganizationId ?? undefined,
+      user_role: authSnapshot.value.organizations[0]?.role,
+      plan: authSnapshot.value.organizations[0]?.billing.planKey,
+    });
+    if (mode === "signup") trackProductEvent(MIXPANEL_EVENTS.SIGNUP_COMPLETED, { method: "email" });
+    if (authSnapshot.value.user.emailVerified) {
+      trackProductEventOnce(`email-verified:${authSnapshot.value.user.id}`, MIXPANEL_EVENTS.EMAIL_VERIFIED, { method: "email" });
+    }
     await settleAuthenticatedSession(returnTo);
     authModalOpen.value = false;
     sessionRedirecting = false;
@@ -2568,6 +2971,15 @@ async function submitGoogleAuth() {
     const returnTo = route.value.kind === "auth" ? route.value.returnTo : undefined;
     authSnapshot.value = await bootstrapAccountWithDemoRecovery((demoToken) => signInWithGoogleAndBootstrap(demoToken, authOrganizationName.value));
     firebaseToken.value = await currentFirebaseToken();
+    identifyMixpanelUser(authSnapshot.value.user.id, {
+      organization_id: authSnapshot.value.activeOrganizationId ?? undefined,
+      user_role: authSnapshot.value.organizations[0]?.role,
+      plan: authSnapshot.value.organizations[0]?.billing.planKey,
+    });
+    if (authMode.value === "signup") trackProductEvent(MIXPANEL_EVENTS.SIGNUP_COMPLETED, { method: "google" });
+    if (authSnapshot.value.user.emailVerified) {
+      trackProductEventOnce(`email-verified:${authSnapshot.value.user.id}`, MIXPANEL_EVENTS.EMAIL_VERIFIED, { method: "google" });
+    }
     await settleAuthenticatedSession(returnTo);
     authModalOpen.value = false;
     sessionRedirecting = false;
@@ -2584,6 +2996,20 @@ async function submitGoogleAuth() {
   }
 }
 
+async function resendVerificationEmail() {
+  if (verificationEmailLoading.value) return;
+  verificationEmailLoading.value = true;
+  verificationEmailMessage.value = "";
+  try {
+    await resendFrontDeskWiseVerificationEmail();
+    verificationEmailMessage.value = "Verification email sent. Refresh after you confirm your address.";
+  } catch (error) {
+    verificationEmailMessage.value = friendlyAuthError(error, "Could not send a verification email. Try again shortly.");
+  } finally {
+    verificationEmailLoading.value = false;
+  }
+}
+
 async function signOut() {
   startGlobalLoading();
   try {
@@ -2591,6 +3017,7 @@ async function signOut() {
     forgetDemoAccessToken();
     authSnapshot.value = null;
     firebaseToken.value = "";
+    resetMixpanelUser();
     profileMenuOpen.value = false;
     sidebarAccountMenuOpen.value = false;
     notificationMenuOpen.value = false;
@@ -2724,6 +3151,7 @@ function clearWorkspaceState() {
   fallbackContactUrl.value = "";
   workspaceStats.value = null;
   workspaceKnowledge.value = null;
+  workspaceOnboarding.value = null;
   workflowContext.value = null;
   workspaceBusinessId.value = null;
   workspaceOrganizationId.value = null;
@@ -2878,8 +3306,16 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   };
   workspaceStats.value = payload.stats ?? null;
   workspaceKnowledge.value = payload.knowledge ?? null;
+  workspaceOnboarding.value = payload.onboarding ?? null;
   workflowContext.value = payload.workflowContext ?? null;
   workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
+  if (payload.business?.id && (payload.knowledge?.indexed === true || ((payload.knowledge?.sourceCount ?? 0) > 0 && (payload.knowledge?.pendingSources ?? 0) === 0))) {
+    trackProductEventOnce(`business-brain-ready:${payload.business.id}`, MIXPANEL_EVENTS.BUSINESS_BRAIN_READY, {
+      business_id: payload.business.id,
+      readiness_score: payload.knowledge?.readiness?.score,
+      source_count: payload.knowledge?.sourceCount,
+    });
+  }
   conversationId.value = "";
   testMessages.value = [];
 }
@@ -2955,7 +3391,9 @@ async function refreshAuthenticatedSnapshot() {
 
 async function selectBusiness(slug: string, nextViewOverride?: View) {
   if (!slug) return;
-  const nextView = nextViewOverride ?? view.value;
+  const nextView = (authSnapshot.value && (roleForBusinessSlug(slug) === "staff" || roleForBusinessSlug(slug) === "viewer"))
+    ? "inbox"
+    : nextViewOverride ?? view.value;
   publicDemoMode.value = false;
   workflowContextRefreshMessage.value = "";
   actionsLoadGeneration += 1;
@@ -3008,6 +3446,10 @@ async function syncAuthenticatedBusiness(snapshot: AuthSnapshot): Promise<boolea
 
 async function settleAuthenticatedSession(returnTo?: string): Promise<void> {
   if (!authSnapshot.value) return;
+  if (route.value.kind === "partner") {
+    publicDemoMode.value = false;
+    return;
+  }
   const legacyReturn = legacyBillingReturn();
   if (legacyReturn === "success") {
     const sessionId = typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search).get("session_id")?.trim() || undefined;
@@ -3072,6 +3514,11 @@ async function createBusiness() {
   addBusinessMessage.value = "";
   try {
     const normalizedWebsiteUrl = normalizeWebsiteUrl(addBusinessUrl.value);
+    trackProductEvent(MIXPANEL_EVENTS.WEBSITE_SUBMITTED, {
+      source: "owner_onboarding",
+      url_host: safeUrlHost(normalizedWebsiteUrl),
+      is_public_demo: false,
+    });
     const response = await trackedFetch(apiUrl("/api/v1/auth/businesses"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
@@ -3086,6 +3533,12 @@ async function createBusiness() {
       ? payload.auth.organizations.flatMap((organization) => organization.businesses).find((business) => business.slug === createdSlug)
       : undefined;
     if (nextBusiness) await selectBusiness(nextBusiness.slug);
+    trackProductEvent(MIXPANEL_EVENTS.BUSINESS_CREATED, {
+      source: "owner_onboarding",
+      url_host: safeUrlHost(normalizedWebsiteUrl),
+      success: true,
+      business_id: nextBusiness?.id ?? payload.business?.business?.id,
+    });
     notifySuccess(`${payload.business?.business?.name ?? "Your business"} was added and is ready to review.`, "Business added");
   } catch (error) {
     addBusinessError.value = error instanceof Error ? error.message : "Could not add this business.";
@@ -3129,10 +3582,11 @@ const landingFlowSteps = [
 ];
 
 const landingSampleMetrics = [
-  { value: "248", label: "conversations", trend: "+18% this week" },
-  { value: "61", label: "leads captured", trend: "with intent attached" },
-  { value: "24", label: "actions completed", trend: "bookings + requests" },
-  { value: "91%", label: "answered from knowledge", trend: "illustrative rate" },
+  { value: "142", label: "visitors assisted", trend: "+22% this week" },
+  { value: "38", label: "qualified leads", trend: "with intent attached" },
+  { value: "17", label: "human handoffs", trend: "context preserved" },
+  { value: "11", label: "bookings / demos", trend: "next steps completed" },
+  { value: "$4.8k", label: "pipeline influenced", trend: "illustrative estimate" },
 ];
 
 const landingFaqs = [
@@ -3160,11 +3614,33 @@ const landingIntegrations = [
 ];
 
 const landingPlans = [
-  { key: "starter", name: "Starter", price: "$99", description: "A grounded AI front desk for one business.", businesses: "1 business", featured: false, badge: "", bullets: ["AI answers from your website", "Lead capture", "Basic analytics", "Website widget", "Free setup help included"] },
-  { key: "growth", name: "Growth", price: "$199", description: "More volume, routing, and operating visibility.", businesses: "1 business", featured: false, badge: "", bullets: ["Everything in Starter", "Higher conversation volume", "Advanced actions", "Integrations + team handoff", "Guided setup assistance"] },
-  { key: "multi_business", name: "Multi-Business", price: "$349", description: "One organization for up to two businesses.", businesses: "Up to 2 businesses", featured: true, badge: "Built for multi-business owners", bullets: ["Everything in Growth", "Shared team workspace", "Cross-business analytics", "Shared integrations and actions"] },
-  { key: "portfolio", name: "Portfolio", price: "$499", description: "A higher-capacity operating layer for your portfolio.", businesses: "Up to 5 businesses", featured: false, badge: "", bullets: ["Everything in Multi-Business", "Higher usage limits", "Priority support", "Advanced integrations"] },
+  { key: "starter", name: "Starter", price: "$99", priceAmount: 99, description: "A grounded AI front desk for one business.", businesses: "1 business", usage: "300 AI conversations / month", featured: false, badge: "", custom: false, cta: "Start 7-day trial", bullets: ["Website knowledge", "Lead capture + email alerts", "Basic analytics", "Website widget", "Usage-aware launch checklist"] },
+  { key: "growth", name: "Growth", price: "$199", priceAmount: 199, description: "For teams turning conversations into bookings and qualified leads.", businesses: "1 business", usage: "1,000 AI conversations / month", featured: true, badge: "Most likely to fit", custom: false, cta: "Start 7-day trial", bullets: ["Everything in Starter", "Booking workflows", "CRM integrations", "Human handoff + reporting", "Guided setup path"] },
+  { key: "multi_business", name: "Business Plus", price: "$349", priceAmount: 349, description: "A shared operating layer for higher-volume operators.", businesses: "Up to 2 businesses", usage: "2,000 shared AI conversations / month", featured: false, badge: "For growing operators", custom: false, cta: "Start 7-day trial", bullets: ["Everything in Growth", "Shared team workspace", "Advanced workflows", "Cross-business analytics"] },
+  { key: "portfolio", name: "Portfolio / Agency", price: "Custom", priceAmount: null, description: "Per-location pricing for agencies and multi-business operators.", businesses: "Pooled locations", usage: "Pooled usage limits", featured: false, badge: "Talk to sales", custom: true, cta: "Talk to sales", bullets: ["Centralized administration", "Partner discounts", "Custom integrations", "Priority support"] },
 ];
+
+const pricingCalculatorPlan = ref("growth");
+const pricingCalculatorConversations = ref(1_000);
+const pricingCalculatorVariableCost = ref(0.025);
+const pricingCalculatorOtherCosts = ref(25);
+const pricingCalculatorPartnerCommission = ref(0);
+const pricingCalculatorPlans = computed(() => landingPlans.filter((plan) => plan.priceAmount !== null));
+const selectedPricingCalculatorPlan = computed(() => pricingCalculatorPlans.value.find((plan) => plan.key === pricingCalculatorPlan.value) ?? pricingCalculatorPlans.value[0]);
+const pricingCalculatorRevenue = computed(() => selectedPricingCalculatorPlan.value?.priceAmount ?? 0);
+const pricingCalculatorAiCost = computed(() => Math.max(0, Number(pricingCalculatorConversations.value) || 0) * Math.max(0, Number(pricingCalculatorVariableCost.value) || 0));
+const pricingCalculatorPaymentCost = computed(() => pricingCalculatorRevenue.value > 0 ? pricingCalculatorRevenue.value * 0.029 + 0.30 : 0);
+const pricingCalculatorPartnerCost = computed(() => pricingCalculatorRevenue.value * Math.max(0, Number(pricingCalculatorPartnerCommission.value) || 0) / 100);
+const pricingCalculatorContribution = computed(() => pricingCalculatorRevenue.value - pricingCalculatorAiCost.value - Math.max(0, Number(pricingCalculatorOtherCosts.value) || 0) - pricingCalculatorPaymentCost.value - pricingCalculatorPartnerCost.value);
+const pricingCalculatorMargin = computed(() => pricingCalculatorRevenue.value > 0 ? pricingCalculatorContribution.value / pricingCalculatorRevenue.value : 0);
+
+function formatPricingCurrency(value: number): string {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(value);
+}
+
+function formatPricingPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
 
 function normalizeWebsiteUrl(value: string): string {
   const trimmed = value.trim();
@@ -3172,6 +3648,134 @@ function normalizeWebsiteUrl(value: string): string {
   if (trimmed.startsWith("//")) return `https:${trimmed}`;
   if (/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return trimmed;
   return `https://${trimmed}`;
+}
+
+function landingAuditFinding(label: string, detail: string, status: LandingAuditFinding["status"]): LandingAuditFinding {
+  return { label, detail, status };
+}
+
+function buildLandingAudit(payload: WorkspacePayload, normalizedWebsiteUrl: string): LandingAuditResult {
+  const sourcePages = payload.knowledge?.sources ?? [];
+  const pageText = sourcePages.map((source) => `${source.title} ${source.url} ${source.pageType}`).join(" ").toLowerCase();
+  const questionText = (payload.suggestedQuestions ?? []).join(" ").toLowerCase();
+  const hasPricing = /pricing|price|cost|tuition|membership|rates?/.test(`${pageText} ${questionText}`);
+  const hasBooking = /book|booking|appointment|schedule|registration|enroll/.test(`${pageText} ${questionText}`) || Boolean(payload.stats?.bookingClicks);
+  const hasContent = Boolean((payload.knowledge?.sourceCount ?? 0) > 0 || (payload.knowledge?.chunkCount ?? 0) > 0);
+  const hasLeadCapture = payload.agent?.collectLeads !== false;
+  const openQuestions = payload.knowledge?.openGaps ?? payload.stats?.unansweredQuestions ?? 0;
+  const score = Math.max(0, Math.min(100, Math.round(payload.onboarding?.readinessScore ?? payload.knowledge?.readiness?.score ?? 62)));
+  const findings: LandingAuditFinding[] = [
+    landingAuditFinding(
+      hasContent ? "Your website content is discoverable" : "Your website content needs attention",
+      hasContent ? `${payload.knowledge?.sourceCount ?? 0} public page${(payload.knowledge?.sourceCount ?? 0) === 1 ? "" : "s"} found for the first pass.` : "We could not find enough public content to ground an AI front desk yet.",
+      hasContent ? "healthy" : "attention",
+    ),
+    landingAuditFinding(
+      hasPricing ? "Pricing answers are easier to find" : "Pricing is hard to find",
+      hasPricing ? "A visitor can get a useful starting answer without waiting for staff." : "Make pricing, ranges, or a clear quote path visible before a visitor leaves.",
+      hasPricing ? "healthy" : "attention",
+    ),
+    landingAuditFinding(
+      hasBooking ? "A booking or inquiry path is visible" : "Your booking CTA may be buried",
+      hasBooking ? "The crawl found language that can move a visitor toward the next action." : "Add one obvious next step for booking, registration, a quote, or a conversation with staff.",
+      hasBooking ? "healthy" : "attention",
+    ),
+    landingAuditFinding(
+      "After-hours response is not defined",
+      "Visitors who arrive when your team is away need an answer, a capture path, and a reason to come back.",
+      "attention",
+    ),
+    landingAuditFinding(
+      hasLeadCapture ? "Lead capture is ready to configure" : "There is no qualification path yet",
+      hasLeadCapture ? "FrontDeskWise can collect contact details and the intent behind the request." : "Give the AI a short qualification path so staff gets context, not just a name and email.",
+      hasLeadCapture ? "healthy" : "attention",
+    ),
+    landingAuditFinding(
+      openQuestions > 0 ? `${openQuestions} customer question${openQuestions === 1 ? "" : "s"} need a better answer` : "Follow-up opportunities are still invisible",
+      openQuestions > 0 ? "These are the questions most likely to create friction in a live conversation." : "A weekly owner report can surface repeat questions and missed opportunities before they become lost leads.",
+      "attention",
+    ),
+  ];
+  const attentionCount = findings.filter((finding) => finding.status === "attention").length;
+  return {
+    businessName: payload.business?.name ?? "Your business",
+    websiteUrl: normalizedWebsiteUrl,
+    score,
+    findings,
+    summary: attentionCount
+      ? `We found ${attentionCount} conversion gap${attentionCount === 1 ? "" : "s"} worth fixing first.`
+      : "Your site has a strong foundation for an AI front desk.",
+  };
+}
+
+async function runLandingAudit() {
+  const normalizedWebsiteUrl = normalizeWebsiteUrl(landingAuditUrl.value || websiteUrl.value);
+  if (!normalizedWebsiteUrl || !/^https?:\/\/.+\..+/.test(normalizedWebsiteUrl)) {
+    landingAuditError.value = "Enter a public website URL to run the audit.";
+    return;
+  }
+  landingAuditUrl.value = normalizedWebsiteUrl;
+  websiteUrl.value = normalizedWebsiteUrl;
+  landingAuditLoading.value = true;
+  landingAuditError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/demos"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        websiteUrl: normalizedWebsiteUrl,
+        requesterName: demoRequesterName.value || undefined,
+        requesterEmail: demoRequesterEmail.value || undefined,
+        source: "landing_audit",
+      }),
+    });
+    const payload = await response.json() as WorkspacePayload & { error?: string; access?: { accessToken?: string } };
+    if (!response.ok) throw new Error(payload.error ?? "We could not audit that website yet.");
+    if (payload.access?.accessToken) {
+      demoAccessToken.value = payload.access.accessToken;
+      window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.access.accessToken);
+    }
+    demoSlug.value = payload.slug ?? demoSlug.value;
+    publicDemoMode.value = true;
+    conversationId.value = "";
+    testMessages.value = [];
+    landingAudit.value = buildLandingAudit(payload, normalizedWebsiteUrl);
+    landingDemoTurns.value = [{ role: "assistant", content: `Hi! I’m the AI front desk for ${landingAudit.value.businessName}. Ask me about services, pricing, or getting started.` }];
+    landingDemoInsight.value = null;
+    requestAnimationFrame(() => document.getElementById("audit-result")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  } catch (error) {
+    landingAuditError.value = error instanceof Error ? error.message : "We could not audit that website yet.";
+  } finally {
+    landingAuditLoading.value = false;
+  }
+}
+
+function runLandingDemo(question = landingDemoQuestion.value) {
+  const normalizedQuestion = question.trim();
+  if (!normalizedQuestion || landingDemoLoading.value) return;
+  landingDemoQuestion.value = "";
+  landingDemoTurns.value.push({ role: "visitor", content: normalizedQuestion });
+  landingDemoLoading.value = true;
+  if (landingDemoTimer !== null) window.clearTimeout(landingDemoTimer);
+  landingDemoTimer = window.setTimeout(() => {
+    const normalized = normalizedQuestion.toLowerCase();
+    const bookingQuestion = /book|saturday|appointment|schedule/.test(normalized);
+    const pricingQuestion = /price|cost|membership|rate/.test(normalized);
+    const integrationQuestion = /mindbody|integrat|software|crm/.test(normalized);
+    const response = bookingQuestion
+      ? "Yes — Saturday appointments are available. I can collect your preferred time and contact details, then send the request to the team."
+      : pricingQuestion
+        ? "Our plans start at $99/month. If you tell me what you want to automate, I can recommend the right starting point and connect you with the team."
+        : integrationQuestion
+          ? "We can connect the conversation to tools like HubSpot, Zapier, Make, or a business-owned API. If you need a human, I’ll hand off with the context attached."
+          : "I can help with services, pricing, availability, and the next step. What would you like to get done today?";
+    landingDemoTurns.value.push({ role: "assistant", content: response });
+    landingDemoInsight.value = bookingQuestion || pricingQuestion
+      ? { label: "High buying intent", score: bookingQuestion ? "78%" : "64%", detail: bookingQuestion ? "Asked about availability · next action ready" : "Asked about pricing · qualification recommended" }
+      : { label: "Exploration intent", score: "42%", detail: "Education first · keep the path low-friction" };
+    landingDemoLoading.value = false;
+    landingDemoTimer = null;
+  }, 520);
 }
 
 function stopGenerationProgress() {
@@ -3203,6 +3807,11 @@ async function generateDemo() {
   const normalizedWebsiteUrl = normalizeWebsiteUrl(websiteUrl.value);
   if (!normalizedWebsiteUrl) return;
   websiteUrl.value = normalizedWebsiteUrl;
+  trackProductEvent(MIXPANEL_EVENTS.WEBSITE_SUBMITTED, {
+    source: "marketing_demo",
+    url_host: safeUrlHost(normalizedWebsiteUrl),
+    is_public_demo: true,
+  });
   isGenerating.value = true;
   generationError.value = "";
   generationDialogOpen.value = true;
@@ -3224,6 +3833,12 @@ async function generateDemo() {
       window.localStorage.setItem("frontdeskwiseDemoAccessToken", payload.access.accessToken);
     }
     generationStage.value = "organizing";
+    trackProductEvent(MIXPANEL_EVENTS.CRAWL_COMPLETED, {
+      source: "marketing_demo",
+      url_host: safeUrlHost(normalizedWebsiteUrl),
+      success: true,
+      is_public_demo: true,
+    });
     demoSlug.value = payload.slug ?? demoSlug.value;
     const generatedSlug = demoSlug.value;
     await loadBusinessWorkspace(generatedSlug, true);
@@ -3964,7 +4579,7 @@ async function refreshSelectedInboxConversation() {
   const wasNearBottom = inboxThreadIsNearBottom();
   try {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${current.id}`), { headers: ownerHeaders() }, { globalLoading: false });
-    const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[] };
+    const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[]; events?: InboxEvent[] };
     if (!response.ok || !payload.conversation || selectedInboxConversation.value?.id !== current.id) return;
     const oldMessages = current.messages ?? [];
     const nextMessages = mergeInboxMessages(payload.conversation.messages ?? [], oldMessages);
@@ -3976,8 +4591,9 @@ async function refreshSelectedInboxConversation() {
       ...payload.conversation,
       messages: nextMessages,
       notes: payload.notes ?? current.notes ?? [],
+      events: payload.events ?? current.events ?? [],
     };
-    const { messages: _messages, notes: _notes, ...conversationSummary } = payload.conversation;
+    const { messages: _messages, notes: _notes, events: _events, ...conversationSummary } = payload.conversation;
     patchInboxConversationById(current.id, conversationSummary);
     if (newServerMessages.length) {
       if (wasNearBottom) scrollInboxToLatest("smooth");
@@ -4052,6 +4668,13 @@ async function loadInbox(page = inboxPage.value, options: { globalLoading?: bool
   }
 }
 
+function setInboxQueue(status: "all" | InboxConversation["status"], assignment: "all" | "unassigned" | "mine" = "all") {
+  inboxPage.value = 1;
+  inboxStatusFilter.value = status;
+  inboxAssignmentFilter.value = assignment;
+  void loadInbox();
+}
+
 async function loadNotifications() {
   if (!firebaseToken.value && !demoAccessToken.value) return;
   notificationActionError.value = "";
@@ -4064,6 +4687,83 @@ async function loadNotifications() {
     }
   } catch {
     // Notification badges are best-effort and should not block the workspace.
+  }
+  void loadPushConfig();
+}
+
+async function loadPushConfig() {
+  browserNotificationPermission.value = notificationPermission();
+  if (!pushSupported() || !demoSlug.value || (!firebaseToken.value && !demoAccessToken.value)) return;
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${encodeURIComponent(demoSlug.value)}/push/config`), { headers: ownerHeaders() }, { globalLoading: false });
+    const payload = await response.json() as { enabled?: boolean; publicKey?: string | null };
+    pushConfigured.value = Boolean(response.ok && payload.enabled && payload.publicKey);
+    pushPublicKey.value = payload.publicKey ?? "";
+    const subscription = await existingPushSubscription();
+    pushEnabled.value = Boolean(subscription);
+  } catch {
+    pushConfigured.value = false;
+    pushPublicKey.value = "";
+    pushEnabled.value = false;
+  }
+}
+
+async function enableBrowserAlerts() {
+  if (pushLoading.value) return;
+  pushLoading.value = true;
+  pushError.value = "";
+  pushMessage.value = "";
+  try {
+    await loadPushConfig();
+    if (!pushConfigured.value || !pushPublicKey.value) throw new Error("Browser alerts are not configured for this environment yet.");
+    const subscription = await subscribeToPush(pushPublicKey.value);
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${encodeURIComponent(demoSlug.value)}/push-subscriptions`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ subscription: subscription.toJSON() }),
+    }, { globalLoading: false });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not save this device for browser alerts.");
+    pushEnabled.value = true;
+    browserNotificationPermission.value = notificationPermission();
+    pushMessage.value = "This device will receive handoff and lead alerts.";
+    trackProductEvent(MIXPANEL_EVENTS.PUSH_NOTIFICATIONS_ENABLED, { method: "web_push", success: true, platform: "browser" });
+  } catch (error) {
+    pushError.value = error instanceof Error ? error.message : "Could not enable browser alerts.";
+  } finally {
+    pushLoading.value = false;
+  }
+}
+
+async function disableBrowserAlerts() {
+  if (pushLoading.value) return;
+  pushLoading.value = true;
+  pushError.value = "";
+  try {
+    const subscription = await unsubscribeFromPush();
+    if (subscription) {
+      await trackedFetch(apiUrl(`/api/v1/demo/${encodeURIComponent(demoSlug.value)}/push-subscriptions`), {
+        method: "DELETE",
+        headers: { "content-type": "application/json", ...ownerHeaders() },
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+      }, { globalLoading: false });
+    }
+    pushEnabled.value = false;
+    pushMessage.value = "Browser alerts are off on this device.";
+  } catch (error) {
+    pushError.value = error instanceof Error ? error.message : "Could not disable browser alerts.";
+  } finally {
+    pushLoading.value = false;
+  }
+}
+
+async function installFrontDeskWisePwa() {
+  trackProductEvent(MIXPANEL_EVENTS.PWA_INSTALL_PROMPT_SHOWN, { platform: "browser" });
+  const installed = await installPwa();
+  if (installed) {
+    pwaInstallAvailable.value = false;
+    pwaInstalled.value = true;
+    trackProductEvent(MIXPANEL_EVENTS.PWA_INSTALLED, { platform: "browser", success: true });
   }
 }
 
@@ -4189,7 +4889,7 @@ async function openInboxConversation(conversation: InboxConversation) {
   const isSameConversation = previousConversation?.id === conversation.id;
   try {
     const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversation.id}`), { headers: ownerHeaders() }, { globalLoading: false });
-    const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[] };
+    const payload = await response.json() as { error?: string; conversation?: InboxConversation; notes?: InboxNote[]; events?: InboxEvent[] };
     if (!response.ok || !payload.conversation) throw new Error(payload.error ?? "Could not open this conversation.");
     selectedInboxConversation.value = {
       ...payload.conversation,
@@ -4198,6 +4898,7 @@ async function openInboxConversation(conversation: InboxConversation) {
         ...(inboxLocalMessages.value[conversation.id] ?? []),
       ]),
       notes: payload.notes ?? [],
+      events: payload.events ?? [],
     };
     if (!isSameConversation) {
       inboxReply.value = "";
@@ -4218,8 +4919,8 @@ async function openInboxConversation(conversation: InboxConversation) {
   }
 }
 
-type InboxMutationRequest = { content: string; clientMessageId?: string } | undefined;
-type InboxMutationResponse = { error?: string; conversation?: InboxConversation; message?: InboxMessage; note?: InboxNote };
+type InboxMutationRequest = { content?: string; clientMessageId?: string; userId?: string } | undefined;
+type InboxMutationResponse = { error?: string; conversation?: InboxConversation; message?: InboxMessage; note?: InboxNote; actor?: { id: string; name: string; role: WorkspaceRole } };
 
 async function inboxMutation(path: string, body?: InboxMutationRequest): Promise<InboxMutationResponse | null> {
   if (inboxActionLoading.value) return null;
@@ -4234,7 +4935,14 @@ async function inboxMutation(path: string, body?: InboxMutationRequest): Promise
     const payload = await response.json() as InboxMutationResponse;
     if (!response.ok) throw new Error(payload.error ?? "Could not update this conversation.");
     const conversationId = selectedInboxConversation.value?.id;
-    if (conversationId && payload.conversation) patchInboxConversationById(conversationId, payload.conversation);
+    if (conversationId && payload.conversation) {
+      const assignmentPatch = payload.conversation.assignedUserId === null
+        ? { assignedUserName: null, assignedUserEmail: null }
+        : payload.actor && payload.conversation.assignedUserId === payload.actor.id
+          ? { assignedUserName: payload.actor.name }
+          : {};
+      patchInboxConversationById(conversationId, { ...payload.conversation, ...assignmentPatch });
+    }
     if (conversationId && payload.note && selectedInboxConversation.value?.id === conversationId) {
       selectedInboxConversation.value = {
         ...selectedInboxConversation.value,
@@ -4255,21 +4963,57 @@ async function inboxMutation(path: string, body?: InboxMutationRequest): Promise
 
 async function takeOverConversation() {
   if (!selectedInboxConversation.value) return;
-  await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/takeover`);
+  const confirmed = typeof window === "undefined" || window.confirm("Take over this conversation? You will become the customer-facing owner until you return it to AI or resolve it.");
+  if (!confirmed) return;
+  if (typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches) {
+    trackProductEvent(MIXPANEL_EVENTS.MOBILE_TAKEOVER_CONFIRMED, {
+      conversation_status: selectedInboxConversation.value.status,
+      source: "inbox",
+      platform: "mobile",
+      success: true,
+    });
+  }
+  const result = await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/takeover`);
+  if (result?.conversation?.status === "HUMAN_ACTIVE") {
+    trackProductEvent(MIXPANEL_EVENTS.STAFF_TAKEOVER, {
+      conversation_status: result.conversation.status,
+      source: "inbox",
+      success: true,
+    });
+  }
   if (selectedInboxConversation.value?.status === "HUMAN_ACTIVE") {
     await nextTick();
     inboxComposer.value?.focus();
   }
 }
 
+async function assignInboxConversation(userId: string) {
+  if (!selectedInboxConversation.value || !userId || !canManageTeam.value) return;
+  const result = await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/assign`, { userId });
+  if (result?.conversation) {
+    const assignee = teamMembers.value.find((member) => member.id === userId);
+    patchInboxConversationById(selectedInboxConversation.value.id, {
+      assignedUserName: assignee?.name ?? null,
+      assignedUserEmail: assignee?.email ?? null,
+    });
+  }
+}
+
 async function returnConversationToAi() {
-  if (!selectedInboxConversation.value) return;
+  if (!selectedInboxConversation.value || selectedConversationReadOnly.value) return;
   await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/return-to-ai`);
 }
 
 async function resolveConversation() {
-  if (!selectedInboxConversation.value) return;
-  await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/resolve`);
+  if (!selectedInboxConversation.value || selectedConversationReadOnly.value) return;
+  const result = await inboxMutation(`/conversations/${selectedInboxConversation.value.id}/resolve`);
+  if (result?.conversation?.status === "RESOLVED") {
+    trackProductEvent(MIXPANEL_EVENTS.CONVERSATION_RESOLVED, {
+      conversation_status: result.conversation.status,
+      source: "inbox",
+      success: true,
+    });
+  }
 }
 
 function handleInboxComposerKeydown(event: KeyboardEvent) {
@@ -4279,7 +5023,7 @@ function handleInboxComposerKeydown(event: KeyboardEvent) {
 }
 
 async function sendInboxReply() {
-  if (!selectedInboxConversation.value || selectedInboxConversation.value.status !== "HUMAN_ACTIVE" || !inboxReply.value.trim()) return;
+  if (!selectedInboxConversation.value || selectedConversationReadOnly.value || selectedInboxConversation.value.status !== "HUMAN_ACTIVE" || !inboxReply.value.trim()) return;
   const content = inboxReply.value.trim();
   inboxReply.value = "";
   await sendInboxMessage(content);
@@ -4287,7 +5031,7 @@ async function sendInboxReply() {
 
 async function sendInboxMessage(content: string, existingTemporaryId?: string, existingClientMessageId?: string) {
   const conversation = selectedInboxConversation.value;
-  if (!conversation || conversation.status !== "HUMAN_ACTIVE") return;
+  if (!conversation || selectedConversationReadOnly.value || conversation.status !== "HUMAN_ACTIVE") return;
   const clientMessageId = existingClientMessageId ?? crypto.randomUUID();
   const temporaryId = existingTemporaryId ?? `temp_${clientMessageId}`;
   const optimisticMessage: InboxMessage = {
@@ -5024,6 +5768,19 @@ async function addActionTemplate(template: ActionTemplate) {
     });
     const payload = await response.json() as { error?: string; action?: ActionFlow };
     if (!response.ok) throw new Error(payload.error ?? "Could not add this flow.");
+    if (payload.action) {
+      trackProductEvent(MIXPANEL_EVENTS.ACTION_GENERATED, {
+        action_id: payload.action.id,
+        action_key: payload.action.key,
+        action_type: payload.action.actionType,
+        workflow_id: payload.action.id,
+        workflow_key: payload.action.key,
+      });
+      trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_GENERATED, {
+        workflow_id: payload.action.id,
+        workflow_key: payload.action.key,
+      });
+    }
     actionsMessage.value = "Flow added · review the questions before publishing";
     selectedActionId.value = payload.action?.id ?? "";
     actionTemplateChooserOpen.value = false;
@@ -5087,6 +5844,14 @@ async function saveAction() {
     }
 
     if (!refreshedAction) throw new Error("The action was saved, but could not be loaded again.");
+
+    trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_EDITED, {
+      workflow_id: refreshedAction.id,
+      workflow_key: refreshedAction.key,
+      action_id: refreshedAction.id,
+      action_key: refreshedAction.key,
+      status: needsMoreSetup ? "needs_setup" : "ready",
+    });
 
     highlightSavedAction(savedActionIdBeforeRefresh);
     if (savedActionEntry === "primary") {
@@ -5191,7 +5956,7 @@ async function trackBillingEvent(event: BillingAnalyticsEvent, metadata: Record<
 }
 
 async function loadBilling(showLoading = true) {
-  if (!authSnapshot.value || (billingLoading.value && showLoading)) return;
+  if (!authSnapshot.value || !canAccessBilling.value || (billingLoading.value && showLoading)) return;
   billingLoading.value = true;
   billingError.value = "";
   try {
@@ -5365,10 +6130,59 @@ function formatPlanPrice(plan: BillingPlan): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: plan.currency.toUpperCase(), maximumFractionDigits: 0 }).format(plan.amountCents / 100);
 }
 
+function planConversationAllowance(plan: BillingPlan | BillingSnapshot["billing"]["plan"] | null | undefined): number | null {
+  const entitlements = plan && "entitlements" in plan ? plan.entitlements : null;
+  const value = entitlements && typeof entitlements === "object" ? (entitlements as Record<string, unknown>).ai_conversations : null;
+  if (!value || typeof value !== "object") return null;
+  const included = (value as Record<string, unknown>).included;
+  return typeof included === "number" && Number.isFinite(included) ? included : null;
+}
+
+function planConversationLabel(plan: BillingPlan): string {
+  const allowance = planConversationAllowance(plan);
+  return allowance === null ? "Custom pooled usage" : `${allowance.toLocaleString("en-US")} AI conversations / month`;
+}
+
 function formatLabel(value: string): string {
   return value
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatExecutivePercent(value: number | null): string {
+  if (value === null) return "—";
+  return `${Number.isInteger(value) ? value : value.toFixed(1)}%`;
+}
+
+function formatExecutiveMetric(metric: ExecutiveQualityMetric): string {
+  if (metric.value === null) return "—";
+  if (metric.unit === "currency") return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(metric.value);
+  return formatExecutivePercent(metric.value);
+}
+
+function executiveMetricTone(status: ExecutiveQualityMetric["status"]): string {
+  return status === "healthy" ? "healthy" : status === "watch" ? "watch" : "no-data";
+}
+
+function executiveStepTone(status: ExecutiveAnalyticsStep["status"]): string {
+  return status === "complete" ? "complete" : status === "attention" ? "attention" : "pending";
+}
+
+function conversationEventLabel(event: InboxEvent): string {
+  if (event.eventType === "HUMAN_JOINED") return "Took over conversation";
+  if (event.eventType === "STAFF_ASSIGNED") return event.metadata?.assignmentType === "transfer" ? "Transferred conversation" : "Assigned conversation";
+  if (event.eventType === "MESSAGE_SENT_BY_HUMAN") return "Replied to visitor";
+  if (event.eventType === "RETURNED_TO_AI") return "Returned conversation to AI";
+  if (event.eventType === "CONVERSATION_RESOLVED") return "Resolved conversation";
+  if (event.eventType === "INTERNAL_NOTE_ADDED") return "Added an internal note";
+  if (event.eventType === "AI_HANDOFF_REQUESTED") return "AI requested human help";
+  return formatLabel(event.eventType);
+}
+
+function inboxAssignmentLabel(conversation: InboxConversation): string {
+  if (!conversation.assignedUserId) return "Unassigned";
+  if (conversation.assignedUserId === authSnapshot.value?.user.id) return "You";
+  return conversation.assignedUserName || "Another team member";
 }
 
 function certificationScoreLabel(key: string): string {
@@ -5392,8 +6206,8 @@ function formatPlanLabel(value: string): string {
   const labels: Record<string, string> = {
     starter: "Starter",
     growth: "Growth",
-    multi_business: "Multi-Business",
-    portfolio: "Portfolio",
+    multi_business: "Business Plus",
+    portfolio: "Portfolio / Agency",
   };
   return labels[value] ?? formatLabel(value);
 }
@@ -5598,6 +6412,170 @@ async function loadAdminCertification() {
   }
 }
 
+async function loadAdminExperienceSignals() {
+  if (!authSnapshot.value || adminExperienceSignalsLoading.value) return;
+  adminExperienceSignalsLoading.value = true;
+  adminExperienceSignalsError.value = "";
+  try {
+    const params = new URLSearchParams({ status: adminExperienceSignalStatusFilter.value, days: "30", limit: "150" });
+    if (adminExperienceSignalSeverityFilter.value !== "all") params.set("severity", adminExperienceSignalSeverityFilter.value);
+    if (adminExperienceSignalTypeFilter.value !== "all") params.set("type", adminExperienceSignalTypeFilter.value);
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/experience-signals?${params.toString()}`), { headers: ownerHeaders() });
+    const payload = await response.json() as AdminExperienceSignalsPayload & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load experience signals.");
+    adminExperienceSignals.value = payload;
+  } catch (error) {
+    adminExperienceSignalsError.value = error instanceof Error ? error.message : "Could not load experience signals.";
+  } finally {
+    adminExperienceSignalsLoading.value = false;
+  }
+}
+
+async function updateAdminExperienceSignal(signal: AdminExperienceSignal, status: AdminExperienceSignal["status"]) {
+  if (adminExperienceSignalsLoading.value) return;
+  adminExperienceSignalsLoading.value = true;
+  adminExperienceSignalsError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/experience-signals/${encodeURIComponent(signal.id)}`), {
+      method: "PATCH",
+      headers: { ...ownerHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    const payload = await response.json() as { signal?: AdminExperienceSignal; error?: string };
+    if (!response.ok || !payload.signal) throw new Error(payload.error ?? "Could not update this signal.");
+    const current = adminExperienceSignals.value?.signals.findIndex((item) => item.id === signal.id) ?? -1;
+    if (current >= 0 && adminExperienceSignals.value) {
+      if (adminExperienceSignalStatusFilter.value !== "all" && status !== adminExperienceSignalStatusFilter.value) adminExperienceSignals.value.signals.splice(current, 1);
+      else adminExperienceSignals.value.signals.splice(current, 1, payload.signal);
+    }
+  } catch (error) {
+    adminExperienceSignalsError.value = error instanceof Error ? error.message : "Could not update this signal.";
+  } finally {
+    adminExperienceSignalsLoading.value = false;
+  }
+}
+
+async function loadAdminFeatureFlags() {
+  if (!authSnapshot.value || adminFeatureFlagsLoading.value) return;
+  adminFeatureFlagsLoading.value = true;
+  adminFeatureFlagsError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/feature-flags"), { headers: ownerHeaders() });
+    const payload = await response.json() as { flags?: AdminFeatureFlag[]; organizations?: AdminFeatureFlagOrganization[]; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load feature flags.");
+    adminFeatureFlags.value = payload.flags ?? [];
+    adminFeatureFlagOrganizations.value = payload.organizations ?? [];
+    if (!adminFeatureFlagOverride.value.key && adminFeatureFlags.value[0]) adminFeatureFlagOverride.value.key = adminFeatureFlags.value[0].key;
+    if (!adminFeatureFlagOverride.value.organizationId && adminFeatureFlagOrganizations.value[0]) adminFeatureFlagOverride.value.organizationId = adminFeatureFlagOrganizations.value[0].id;
+  } catch (error) {
+    adminFeatureFlagsError.value = error instanceof Error ? error.message : "Could not load feature flags.";
+  } finally {
+    adminFeatureFlagsLoading.value = false;
+  }
+}
+
+function adminFeatureFlagOrganizationName(organizationId: string) {
+  return adminFeatureFlagOrganizations.value.find((organization) => organization.id === organizationId)?.name ?? organizationId;
+}
+
+async function saveAdminFeatureFlag(flag: AdminFeatureFlag) {
+  if (adminFeatureFlagsLoading.value) return;
+  adminFeatureFlagsLoading.value = true;
+  adminFeatureFlagsError.value = "";
+  adminFeatureFlagsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/feature-flags/${encodeURIComponent(flag.key)}`), {
+      method: "PATCH",
+      headers: { ...ownerHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({
+        description: flag.description,
+        stage: flag.stage,
+        rolloutPercentage: flag.rolloutPercentage,
+        referenceOrganizationIds: flag.referenceOrganizationIds,
+      }),
+    });
+    const payload = await response.json() as { flag?: AdminFeatureFlag; error?: string };
+    if (!response.ok || !payload.flag) throw new Error(payload.error ?? "Could not save the feature flag.");
+    const index = adminFeatureFlags.value.findIndex((candidate) => candidate.key === flag.key);
+    if (index >= 0) adminFeatureFlags.value.splice(index, 1, payload.flag);
+    adminFeatureFlagsMessage.value = `${flag.key} is now staged for ${flag.stage}.`;
+  } catch (error) {
+    adminFeatureFlagsError.value = error instanceof Error ? error.message : "Could not save the feature flag.";
+    await loadAdminFeatureFlags();
+  } finally {
+    adminFeatureFlagsLoading.value = false;
+  }
+}
+
+async function createAdminFeatureFlag() {
+  if (adminFeatureFlagsLoading.value || !adminFeatureFlagDraft.value.key.trim()) return;
+  adminFeatureFlagsLoading.value = true;
+  adminFeatureFlagsError.value = "";
+  adminFeatureFlagsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/feature-flags"), {
+      method: "POST",
+      headers: { ...ownerHeaders(), "content-type": "application/json" },
+      body: JSON.stringify(adminFeatureFlagDraft.value),
+    });
+    const payload = await response.json() as { flag?: AdminFeatureFlag; error?: string };
+    if (!response.ok || !payload.flag) throw new Error(payload.error ?? "Could not create the feature flag.");
+    adminFeatureFlags.value.push(payload.flag);
+    if (!adminFeatureFlagOverride.value.key) adminFeatureFlagOverride.value.key = payload.flag.key;
+    adminFeatureFlagDraft.value = { key: "", description: "", stage: "off", rolloutPercentage: 0, referenceOrganizationIds: [] };
+    adminFeatureFlagsMessage.value = "Feature flag created.";
+  } catch (error) {
+    adminFeatureFlagsError.value = error instanceof Error ? error.message : "Could not create the feature flag.";
+  } finally {
+    adminFeatureFlagsLoading.value = false;
+  }
+}
+
+async function saveAdminFeatureFlagOverride() {
+  const draft = adminFeatureFlagOverride.value;
+  if (adminFeatureFlagsLoading.value || !draft.key || !draft.organizationId) return;
+  adminFeatureFlagsLoading.value = true;
+  adminFeatureFlagsError.value = "";
+  adminFeatureFlagsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/feature-flags/${encodeURIComponent(draft.key)}/overrides`), {
+      method: "POST",
+      headers: { ...ownerHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: draft.organizationId, state: draft.state, reason: draft.reason || "admin_override" }),
+    });
+    const payload = await response.json() as { flag?: AdminFeatureFlag; error?: string };
+    if (!response.ok || !payload.flag) throw new Error(payload.error ?? "Could not save the tenant override.");
+    const index = adminFeatureFlags.value.findIndex((flag) => flag.key === draft.key);
+    if (index >= 0) adminFeatureFlags.value.splice(index, 1, payload.flag);
+    adminFeatureFlagsMessage.value = `Override saved for ${adminFeatureFlagOrganizations.value.find((organization) => organization.id === draft.organizationId)?.name ?? "tenant"}.`;
+  } catch (error) {
+    adminFeatureFlagsError.value = error instanceof Error ? error.message : "Could not save the tenant override.";
+  } finally {
+    adminFeatureFlagsLoading.value = false;
+  }
+}
+
+async function removeAdminFeatureFlagOverride(flag: AdminFeatureFlag, organizationId: string) {
+  if (adminFeatureFlagsLoading.value) return;
+  adminFeatureFlagsLoading.value = true;
+  adminFeatureFlagsError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/admin/feature-flags/${encodeURIComponent(flag.key)}/overrides/${encodeURIComponent(organizationId)}`), {
+      method: "DELETE",
+      headers: ownerHeaders(),
+    });
+    const payload = await response.json() as { flag?: AdminFeatureFlag; error?: string };
+    if (!response.ok || !payload.flag) throw new Error(payload.error ?? "Could not remove the tenant override.");
+    const index = adminFeatureFlags.value.findIndex((candidate) => candidate.key === flag.key);
+    if (index >= 0) adminFeatureFlags.value.splice(index, 1, payload.flag);
+    adminFeatureFlagsMessage.value = "Tenant override removed.";
+  } catch (error) {
+    adminFeatureFlagsError.value = error instanceof Error ? error.message : "Could not remove the tenant override.";
+  } finally {
+    adminFeatureFlagsLoading.value = false;
+  }
+}
+
 function adminWorkflowStats(action: AdminActionRegistryItem) {
   const steps = action.steps ?? [];
   return {
@@ -5792,6 +6770,22 @@ async function loadAdminMessaging(force = false) {
   }
 }
 
+async function loadAdminRecovery() {
+  if (!authSnapshot.value || adminRecoveryLoading.value) return;
+  adminRecoveryLoading.value = true;
+  adminRecoveryError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/onboarding-recovery?limit=500"), { headers: ownerHeaders() });
+    const payload = await response.json() as AdminRecoveryPayload & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load onboarding recovery data.");
+    adminRecovery.value = payload;
+  } catch (error) {
+    adminRecoveryError.value = error instanceof Error ? error.message : "Could not load onboarding recovery data.";
+  } finally {
+    adminRecoveryLoading.value = false;
+  }
+}
+
 function selectMessagingTemplate(template: MessagingTemplate) {
   selectedMessagingTemplateKey.value = template.templateKey;
   messagingTemplateDraft.value = JSON.parse(JSON.stringify(template)) as MessagingTemplate;
@@ -5909,6 +6903,7 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     firebaseToken.value = "";
     authSnapshot.value = null;
     isSuperAdmin.value = false;
+    resetMixpanelUser();
     authInitializing.value = false;
     if (route.value.kind === "auth") openAuth(route.value.mode, false, route.value.returnTo);
     else if (isProtectedRoute()) redirectToSignIn();
@@ -5921,6 +6916,14 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     if (!snapshot) throw new Error("Could not restore the FrontDeskWise account.");
     authSnapshot.value = snapshot;
     firebaseToken.value = await currentFirebaseToken();
+    identifyMixpanelUser(snapshot.user.id, {
+      organization_id: snapshot.activeOrganizationId ?? undefined,
+      user_role: snapshot.organizations[0]?.role,
+      plan: snapshot.organizations[0]?.billing.planKey,
+    });
+    if (snapshot.user.emailVerified) {
+      trackProductEventOnce(`email-verified:${snapshot.user.id}`, MIXPANEL_EVENTS.EMAIL_VERIFIED, { method: "restored_session" });
+    }
     const returnTo = route.value.kind === "auth" ? route.value.returnTo : undefined;
     await settleAuthenticatedSession(returnTo);
     authModalOpen.value = false;
@@ -6265,6 +7268,11 @@ async function connectIntegration() {
     });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not save this integration.");
+    trackProductEvent(MIXPANEL_EVENTS.INTEGRATION_CONNECTED, {
+      provider: integrationProvider.value,
+      source: "owner_settings",
+      success: true,
+    });
     integrationSigningSecret.value = "";
     integrationAccessToken.value = "";
     integrationMessage.value = integrationProvider.value === "jackrabbit"
@@ -6480,6 +7488,12 @@ async function verifyWidgetInstall() {
     const payload = await response.json() as { verified?: boolean; message?: string; verification?: WidgetInstall["verification"]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not verify the widget installation.");
     if (payload.verification) widgetInstall.value.verification = payload.verification;
+    if (payload.verified || payload.verification?.loadCount) {
+      trackProductEventOnce(`widget-installed:${demoSlug.value}`, MIXPANEL_EVENTS.WIDGET_INSTALLED, {
+        source: "owner_install",
+        success: true,
+      });
+    }
     widgetVerificationMessage.value = payload.message ?? (payload.verified ? "Widget detected on the website." : "No widget load detected yet.");
     await refreshWorkspaceSummary(false);
   } catch (error) {
@@ -6546,6 +7560,17 @@ async function askQuestion() {
       const conversationPayload = await conversationResponse.json() as { conversationId?: string };
       if (!conversationResponse.ok || !conversationPayload.conversationId) throw new Error("Could not start a test conversation.");
       conversationId.value = conversationPayload.conversationId;
+      trackProductEventOnce(`conversation-started:${conversationId.value}`, MIXPANEL_EVENTS.CONVERSATION_STARTED, {
+        source: "owner_test",
+        conversation_status: "AI_ACTIVE",
+      });
+    }
+    if (publicDemoMode.value) {
+      trackProductEventOnce(`public-conversation-started:${demoSlug.value}`, MIXPANEL_EVENTS.CONVERSATION_STARTED, {
+        source: "public_demo",
+        conversation_status: "AI_ACTIVE",
+        is_public_demo: true,
+      });
     }
     const endpoint = publicDemoMode.value
       ? `/api/v1/demo/${demoSlug.value}/public/test`
@@ -6567,6 +7592,15 @@ async function askQuestion() {
     answerFormValues.value = actionFormValues(payload.action);
     answerSource.value = payload.citations?.[0]?.url ?? "";
     appendTestAssistantMessage(payload);
+    if (payload.primaryCta) {
+      trackProductEvent(MIXPANEL_EVENTS.PRIMARY_CTA_SHOWN, {
+        action_id: payload.primaryCta.actionId,
+        action_key: payload.primaryCta.key,
+        execution_mode: payload.primaryCta.executionMode,
+        tracking_key: payload.primaryCta.trackingKey,
+        cta_source: "agent_test",
+      });
+    }
     if (!publicDemoMode.value) await Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot()]);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not answer that question.";
@@ -6600,6 +7634,19 @@ async function submitActionForm(messageId: string, actionId: string, values: Rec
     answerAction.value = payload.action ?? null;
     answerFormValues.value = actionFormValues(payload.action);
     appendTestAssistantMessage(payload);
+    if (payload.action?.status === "completed") {
+      trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_TEST_PASSED, {
+        action_id: actionId,
+        workflow_id: actionId,
+        source: "owner_test",
+        success: true,
+      });
+      trackProductEvent(MIXPANEL_EVENTS.CTA_CONVERSION_COMPLETED, {
+        action_id: actionId,
+        cta_source: "agent_test",
+        success: true,
+      });
+    }
     await Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot(), loadLeads(false)]);
   } catch (error) {
     leadsError.value = error instanceof Error ? error.message : "Could not submit this request.";
@@ -6724,6 +7771,11 @@ async function publishAgent(model: AgentSaveModel): Promise<void> {
     const payload = await response.json() as { agent?: WorkspacePayload["agent"]; publishing?: AgentPublishing; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not publish the AI front desk.");
     if (payload.publishing) agentPublishing.value = payload.publishing;
+    trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_PUBLISHED, {
+      status: payload.publishing?.status ?? "LIVE",
+      publication_version: payload.publishing?.configVersion ?? undefined,
+      success: true,
+    });
     await refreshWorkspaceSummary(false);
     notifySuccess("Your AI front desk is live.");
   } catch (error) {
@@ -6769,6 +7821,9 @@ watch(adminSection, (nextSection, previousSection) => {
   if (nextSection === previousSection || route.value.kind !== "platform" || route.value.section === nextSection) return;
   if (nextSection === "action-registry") void loadAdminActionRegistry();
   if (nextSection === "certification") void loadAdminCertification();
+  if (nextSection === "experience-signals") void loadAdminExperienceSignals();
+  if (nextSection === "feature-flags") void loadAdminFeatureFlags();
+  if (nextSection === "recovery") void loadAdminRecovery();
   if (nextSection === "support") void loadAdminSupportCases();
   commitRoute(platformRoute(nextSection));
 });
@@ -6777,7 +7832,7 @@ watch(view, (nextView, previousView) => {
   if (nextView === "overview") consumeBillingSuccessToast();
   if (nextView === "support") void loadSupport();
   if (previousView === "inbox" && nextView !== "inbox") stopInboxPolling();
-  if (nextView === "inbox") { startInboxPolling(); void loadInbox(); void loadNotifications(); }
+  if (nextView === "inbox") { startInboxPolling(); void loadInbox(); void loadNotifications(); if (canManageTeam.value) void loadTeam(); }
   if (nextView === "team") { settingsTab.value = "team"; void loadTeam(); }
   if (nextView === "knowledge") {
     void loadKnowledge();
@@ -6806,10 +7861,12 @@ watch(view, (nextView, previousView) => {
     void loadAdminOrganizations();
     void loadAdminActionRegistry();
     void loadAdminCertification();
+    void loadAdminExperienceSignals();
     void loadAdminUsers();
     void loadAdminDemoRequests();
     void loadAdminInstallationSupport();
     void loadAdminMessaging();
+    void loadAdminRecovery();
     void loadAdminHealth();
   }
 });
@@ -6852,6 +7909,26 @@ function updateDocumentMetadata() {
 
 watch(view, updateDocumentMetadata);
 onMounted(() => {
+  initializeMixpanel();
+  pwaInstalled.value = isStandalonePwa();
+  browserNotificationPermission.value = notificationPermission();
+  stopPwa = initializePwa({
+    onInstallAvailable: (available) => {
+      pwaInstallAvailable.value = available;
+      if (available) trackProductEventOnce("operator-pwa-install-prompt", MIXPANEL_EVENTS.PWA_INSTALL_PROMPT_SHOWN, { platform: "browser" });
+    },
+    onInstalled: () => {
+      pwaInstalled.value = true;
+      trackProductEvent(MIXPANEL_EVENTS.PWA_INSTALLED, { platform: "browser", success: true });
+    },
+    onPushMessage: (payload) => {
+      void loadNotifications();
+      if (payload.conversationId && view.value === "inbox") void loadInbox(inboxPage.value, { globalLoading: false, refreshSelected: true });
+    },
+  });
+  if (view.value === "home" || route.value.kind === "marketing") {
+    trackProductEventOnce("marketing-primary-cta-shown", MIXPANEL_EVENTS.PRIMARY_CTA_SHOWN, { cta_source: "marketing" });
+  }
   updateDocumentMetadata();
   void consumeDemoLink();
   if (view.value === "inbox") startInboxPolling();
@@ -6877,9 +7954,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopPwa?.();
   stopFirebaseObserver?.();
   stopGenerationProgress();
   stopInboxPolling();
+  if (landingDemoTimer !== null) window.clearTimeout(landingDemoTimer);
   if (landingHeroTimer !== null) window.clearInterval(landingHeroTimer);
   if (typeof document !== "undefined") document.body.style.overflow = previousBodyOverflow;
   if (typeof window !== "undefined") {
@@ -6894,7 +7973,16 @@ function openHome() {
   commitRoute({ kind: "landing" });
 }
 
+function openPartnerSection(section: "overview" | "clients" | "referrals" | "settings") {
+  commitRoute({ kind: "partner", section });
+}
+
 function startMarketingDemo() {
+  trackProductEvent(MIXPANEL_EVENTS.PRIMARY_CTA_CLICKED, { cta_source: "marketing", entrypoint: "start_demo" });
+  if (route.value.kind === "marketing" && route.value.page === "partners") {
+    openAuth("signup", true, "/partner");
+    return;
+  }
   commitRoute({ kind: "landing" });
   window.setTimeout(() => document.getElementById("final-cta")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
 }
@@ -6971,6 +8059,14 @@ function startMarketingDemo() {
         </template>
       </article>
     </section>
+    <PartnerPortal
+      v-else-if="route.kind === 'partner'"
+      :section="route.section"
+      :auth-snapshot="authSnapshot"
+      :firebase-token="firebaseToken"
+      @navigate="openPartnerSection"
+      @sign-out="signOut"
+    />
     <MarketingPage v-else-if="route.kind === 'marketing'" :page-path="`/${route.page}`" @start-demo="startMarketingDemo" />
     <section v-else-if="view === 'home'" class="marketing-shell landing-page">
       <header class="marketing-nav landing-nav">
@@ -6983,6 +8079,7 @@ function startMarketingDemo() {
           <a class="text-button" href="/features">Features</a>
           <a class="text-button" href="/industries">Industries</a>
           <a class="text-button" href="/resources">Resources</a>
+          <a class="text-button" href="/partners">Partners</a>
           <a class="text-button" href="/pricing">Pricing</a>
         </nav>
         <div class="nav-actions">
@@ -6993,22 +8090,23 @@ function startMarketingDemo() {
       <div class="landing-hero">
         <div class="landing-hero-copy">
           <div class="eyebrow"><span class="pulse-dot"></span> AI front desk for local businesses</div>
-          <h1>Turn your website into your best front desk.</h1>
-          <p class="landing-hero-subtitle"><strong>Answer every visitor. Capture every opportunity. Move more people toward booking — 24/7.</strong></p>
-          <p class="landing-hero-body">Paste your website. FrontDeskWise learns your services, pricing, policies, and locations and builds an AI front desk in minutes.</p>
+          <h1>Your AI front desk. More leads, fewer missed opportunities.</h1>
+          <p class="landing-hero-subtitle"><strong>An AI sales + front-desk employee that answers questions, qualifies intent, and moves the right people toward booking.</strong></p>
+          <p class="landing-hero-body">Start with a free AI Front Desk Audit. See where your website is losing opportunities, then test the conversation before you put it live.</p>
           <div class="url-form landing-url-form">
-            <input v-model="websiteUrl" type="url" placeholder="https://yourbusiness.com" aria-label="Business website URL" @keyup.enter="generateDemo" />
-            <button class="primary-button" type="button" :disabled="isGenerating" @click="generateDemo">
-              {{ isGenerating ? "Building demo…" : "Generate my AI front desk" }} <span aria-hidden="true">→</span>
+            <input v-model="landingAuditUrl" type="url" placeholder="https://yourbusiness.com" aria-label="Business website URL" @keyup.enter="runLandingAudit" />
+            <button class="primary-button" type="button" :disabled="landingAuditLoading" @click="runLandingAudit">
+              {{ landingAuditLoading ? "Auditing website…" : "Run my free audit" }} <span aria-hidden="true">→</span>
             </button>
           </div>
+          <button class="landing-hero-build-link" type="button" @click="websiteUrl = landingAuditUrl || websiteUrl; generateDemo()">Want to build it now? <span>Generate my AI front desk →</span></button>
           <div class="demo-requester-fields landing-requester-fields">
             <input v-model="demoRequesterName" type="text" placeholder="Your name (optional)" aria-label="Your name" />
             <input v-model="demoRequesterEmail" type="email" placeholder="Work email (optional)" aria-label="Work email" />
             <span>We’ll log the request and can send a fresh demo link later.</span>
           </div>
-          <p v-if="generationError && !generationDialogOpen" class="form-error">{{ generationError }}</p>
-          <div class="trust-row landing-trust-row"><span>✓ No credit card</span><span>✓ Built from your website</span><span>✓ Ready in minutes</span></div>
+          <p v-if="landingAuditError" class="form-error">{{ landingAuditError }}</p>
+          <div class="trust-row landing-trust-row"><span>✓ Public pages only</span><span>✓ No credit card</span><span>✓ Results in under a minute</span></div>
         </div>
 
         <div class="landing-hero-visual" aria-label="FrontDeskWise customer conversation flow">
@@ -7033,6 +8131,39 @@ function startMarketingDemo() {
         <span class="landing-story-step"><b>03</b> Action</span><i aria-hidden="true">→</i>
         <span class="landing-story-step"><b>04</b> Handoff</span>
       </div>
+
+      <section id="front-desk-audit" class="landing-section landing-magnet-section">
+        <div class="landing-section-heading landing-section-heading-row landing-magnet-heading">
+          <div><p class="eyebrow">Free AI Front Desk Audit</p><h2>Find the leaks between your website and the next customer.</h2><p>FrontDeskWise scans your public pages, scores the front-desk experience, and shows the first conversion gaps worth fixing.</p></div>
+          <span class="landing-magnet-note"><Sparkles :size="16" :stroke-width="1.8" aria-hidden="true" /> Value before signup</span>
+        </div>
+        <div class="landing-magnet-grid">
+          <form class="landing-audit-card" @submit.prevent="runLandingAudit">
+            <div class="landing-audit-card-header"><span class="landing-audit-icon"><ChartNoAxesCombined :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span><strong>Website conversion audit</strong><small>Built from your public website</small></span><span class="landing-audit-live"><i></i> Free</span></div>
+            <label class="landing-audit-label">Your website URL<input v-model="landingAuditUrl" type="url" placeholder="https://yourbusiness.com" required /></label>
+            <div class="landing-audit-promise"><span><Check :size="14" :stroke-width="2" aria-hidden="true" /> Pricing visibility</span><span><Check :size="14" :stroke-width="2" aria-hidden="true" /> Booking path</span><span><Check :size="14" :stroke-width="2" aria-hidden="true" /> After-hours capture</span><span><Check :size="14" :stroke-width="2" aria-hidden="true" /> Lead qualification</span></div>
+            <button class="primary-button landing-audit-button" type="submit" :disabled="landingAuditLoading">{{ landingAuditLoading ? "Scanning public pages…" : "Get my free audit" }} <ArrowRight :size="15" :stroke-width="1.9" aria-hidden="true" /></button>
+            <small class="landing-audit-disclaimer">No login required. We only use public pages to create your reviewable demo.</small>
+          </form>
+
+          <article id="interactive-demo" class="landing-demo-card">
+            <div class="landing-demo-card-header"><div><span class="landing-demo-kicker">INTERACTIVE DEMO BUSINESS</span><strong>Ask this business anything</strong></div><span class="landing-live-pill"><i></i> Online</span></div>
+            <div class="landing-demo-business"><span class="landing-demo-business-avatar">H</span><span><strong>Harbor &amp; Home</strong><small>Home services · sample business</small></span><span class="landing-demo-business-status">AI front desk</span></div>
+            <div class="landing-demo-conversation" aria-live="polite">
+              <div v-for="(turn, index) in landingDemoTurns" :key="`${turn.role}-${index}-${turn.content}`" :class="['landing-demo-turn', turn.role]"><span v-if="turn.role === 'assistant'" class="landing-demo-avatar"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><span class="landing-demo-bubble">{{ turn.content }}</span></div>
+              <div v-if="landingDemoLoading" class="landing-demo-turn assistant"><span class="landing-demo-avatar"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><span class="landing-demo-bubble landing-demo-typing"><i></i><i></i><i></i></span></div>
+            </div>
+            <div v-if="landingDemoInsight" class="landing-demo-intent"><span class="landing-demo-intent-icon">🔥</span><span><strong>{{ landingDemoInsight.label }} · {{ landingDemoInsight.score }}</strong><small>{{ landingDemoInsight.detail }}</small></span><button type="button" @click="websiteUrl = landingAuditUrl || websiteUrl; generateDemo()">Build this on my site →</button></div>
+            <div class="landing-demo-quick-actions"><button v-for="question in ['Can I book Saturday?', 'What does pricing look like?', 'Do you integrate with Mindbody?']" :key="question" type="button" :disabled="landingDemoLoading" @click="runLandingDemo(question)">{{ question }}</button></div>
+            <form class="landing-demo-input" @submit.prevent="runLandingDemo()"><input v-model="landingDemoQuestion" type="text" aria-label="Ask the demo business a question" placeholder="Ask this business anything…" /><button type="submit" aria-label="Send question" :disabled="landingDemoLoading || !landingDemoQuestion.trim()"><Send :size="16" :stroke-width="1.9" aria-hidden="true" /></button></form>
+            <small class="landing-demo-disclaimer">Illustrative conversation · connect your own website to use real business knowledge.</small>
+          </article>
+        </div>
+        <article v-if="landingAudit" id="audit-result" class="landing-audit-result">
+          <div class="landing-audit-score"><span class="landing-audit-score-label">FRONT DESK READINESS</span><strong>{{ landingAudit.score }}</strong><span>/100</span><small>estimated from {{ landingAudit.websiteUrl.replace(/^https?:\/\//, '').replace(/\/$/, '') }}</small></div>
+          <div class="landing-audit-result-copy"><p class="eyebrow">{{ landingAudit.businessName }} · audit complete</p><h3>{{ landingAudit.summary }}</h3><p>Here is what a visitor is likely to experience today — and where FrontDeskWise can help turn friction into a useful next step.</p><div class="landing-audit-findings"><div v-for="finding in landingAudit.findings" :key="finding.label" :class="['landing-audit-finding', finding.status]"><span class="landing-audit-finding-icon"><Check v-if="finding.status === 'healthy'" :size="13" :stroke-width="2.2" aria-hidden="true" /><TriangleAlert v-else :size="13" :stroke-width="2" aria-hidden="true" /></span><span><strong>{{ finding.label }}</strong><small>{{ finding.detail }}</small></span></div></div><div class="landing-audit-result-actions"><button class="primary-button small" type="button" @click="websiteUrl = landingAudit.websiteUrl; generateDemo()">Build my AI front desk</button><button class="outline-button small" type="button" @click="scrollLandingTo('interactive-demo')">Try the conversation</button></div></div>
+        </article>
+      </section>
 
       <section class="landing-section landing-capabilities-section">
         <div class="landing-section-heading landing-section-heading-centered landing-capabilities-heading">
@@ -7107,19 +8238,58 @@ function startMarketingDemo() {
       </section>
 
       <section class="landing-section landing-dashboard-section">
-        <div class="landing-dashboard-copy"><p class="eyebrow">A clearer owner view</p><h2>Know what your AI front desk is doing for the business.</h2><p>See conversations, leads, booking actions, handoffs, and the questions worth adding to your knowledge base.</p><span class="landing-illustrative-note">Illustrative sample workspace · not customer data</span><button class="outline-button" type="button" @click="openAuth('signup')">Create your workspace</button></div>
+        <div class="landing-dashboard-copy"><p class="eyebrow">Owner dashboard</p><h2>See the revenue signals your website used to hide.</h2><p>FrontDeskWise shows the conversations handled, buying intent detected, actions completed, and opportunities that arrived after hours.</p><span class="landing-illustrative-note">Illustrative sample workspace · not customer data</span><button class="outline-button" type="button" @click="openAuth('signup')">Create your workspace</button></div>
         <div class="landing-dashboard-card">
-          <div class="landing-dashboard-header"><div><span class="landing-dashboard-kicker">OWNER DASHBOARD · ILLUSTRATIVE SAMPLE</span><h3>Today</h3></div><span class="landing-live-pill"><i></i> Live view</span></div>
+          <div class="landing-dashboard-header"><div><span class="landing-dashboard-kicker">OWNER DASHBOARD · ILLUSTRATIVE SAMPLE</span><h3>This week</h3></div><span class="landing-live-pill"><i></i> Live view</span></div>
           <div class="landing-dashboard-metrics"><div v-for="metric in landingSampleMetrics.slice(0, 4)" :key="metric.label"><strong>{{ metric.value }}</strong><span>{{ metric.label }}</span><small>{{ metric.trend }}</small></div></div>
+          <div class="landing-dashboard-revenue-row"><span><strong>$4,800</strong><small>estimated pipeline influenced</small></span><span><strong>8</strong><small>after-hours opportunities</small></span><span><strong>12</strong><small>hot leads ready now</small></span></div>
           <div class="landing-dashboard-bottom"><div class="landing-mini-chart"><div class="landing-mini-chart-head"><strong>Conversation activity</strong><span>Illustrative last 7 days</span></div><div class="landing-bars"><i v-for="(height, index) in [32, 48, 41, 67, 54, 79, 88]" :key="index" :style="{ height: `${height}%` }"></i></div><div class="landing-chart-labels"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div></div><div class="landing-opportunity"><span class="landing-opportunity-label">TOP OPPORTUNITY</span><strong>17 visitors asked about weekend availability.</strong><p>Add weekend hours to your knowledge and turn a repeated question into a better answer.</p><span class="landing-opportunity-action">Knowledge gap</span></div></div>
         </div>
+      </section>
+
+      <section class="landing-section landing-intelligence-section">
+        <div class="landing-section-heading landing-section-heading-row"><div><p class="eyebrow">Sales intelligence</p><h2>Know who is ready to buy — and why.</h2><p>Every conversation becomes a signal your team can act on, without asking staff to read every transcript.</p></div><span class="landing-magnet-note"><Zap :size="16" :stroke-width="1.8" aria-hidden="true" /> Intent changes the next step</span></div>
+        <div class="landing-intelligence-grid"><article class="landing-intent-panel"><div class="landing-intent-panel-header"><span class="landing-hot-badge">🔥 HOT LEAD</span><span>just now</span></div><div class="landing-intent-person"><span class="landing-person-avatar">JM</span><span><strong>Jordan Miller</strong><small>Website visitor · returning</small></span><b>78%</b></div><div class="landing-intent-level"><span>Conversion probability</span><i><em style="width: 78%"></em></i><strong>High</strong></div><div class="landing-intent-signals"><p>Buying signals detected</p><span><Check :size="13" :stroke-width="2" aria-hidden="true" /> Asked about pricing</span><span><Check :size="13" :stroke-width="2" aria-hidden="true" /> Compared two plans</span><span><Check :size="13" :stroke-width="2" aria-hidden="true" /> Requested a demo</span></div><button class="primary-button small" type="button" @click="openAuth('signup')">See hot leads in your workspace →</button></article><article class="landing-weekly-report"><div class="landing-weekly-report-header"><span class="landing-report-icon"><ChartNoAxesCombined :size="18" :stroke-width="1.8" aria-hidden="true" /></span><span><p class="eyebrow">Weekly owner report</p><h3>3 things hurting conversions this week</h3></span></div><div class="landing-report-row"><span>01</span><div><strong>12 visitors asked about pricing before leaving</strong><small>Make the range visible earlier in the conversation.</small></div></div><div class="landing-report-row"><span>02</span><div><strong>7 visitors wanted Saturday appointments</strong><small>Add availability to your knowledge and booking path.</small></div></div><div class="landing-report-row"><span>03</span><div><strong>5 visitors asked about an unlisted integration</strong><small>Turn repeated demand into a useful sales answer.</small></div></div><button class="landing-text-link" type="button" @click="openAuth('signup')">Review recommendations <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></article></div>
       </section>
 
       <section class="landing-multi-business"><div><p class="eyebrow">One login. Multiple businesses.</p><h2>Grow your portfolio without adding another tool to manage.</h2><p>Keep businesses, teams, actions, and analytics organized in one shared operating layer.</p></div><div class="landing-portfolio-card"><div><span class="landing-portfolio-avatar blue">H</span><strong>Harbor &amp; Home</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar orange">N</span><strong>Northstar Studio</strong><small>Connected workspace · shared team</small></div><div><span class="landing-portfolio-avatar green">C</span><strong>ClearAir Services</strong><small>Connected workspace · shared team</small></div></div></section>
 
       <section class="landing-section landing-proof-section"><div class="landing-proof-card"><div><p class="eyebrow">Proof that compounds</p><h2>Make the numbers that matter visible.</h2><p>FrontDeskWise is built to show the conversations handled, leads captured, actions completed, and questions your team should improve next.</p><span class="landing-illustrative-note">The figures below show the kind of operating view owners get once their own workspace is live.</span></div><div class="landing-proof-stats"><span v-for="metric in landingSampleMetrics.slice(0, 3)" :key="metric.label"><strong>{{ metric.value }}</strong><small>{{ metric.label }}</small></span></div></div></section>
 
-      <section id="pricing" class="marketing-pricing landing-pricing"><div class="pricing-heading"><div><p class="eyebrow">Simple organization pricing</p><h2>Start with one business. Grow without another login.</h2></div></div><div class="pricing-grid"><article v-for="plan in landingPlans" :key="plan.key" :class="['pricing-card landing-pricing-card', { featured: plan.featured }]" tabindex="0"><span v-if="plan.badge" class="pricing-badge">{{ plan.badge }}</span><h3>{{ plan.name }}</h3><p>{{ plan.description }}</p><strong class="pricing-price">{{ plan.price }}<small>/month</small></strong><span class="pricing-businesses">{{ plan.businesses }}</span><ul class="landing-plan-bullets"><li v-for="bullet in plan.bullets" :key="bullet">✓ {{ bullet }}</li></ul><button class="primary-button small" type="button" @click="openAuth('signup')">Start free trial →</button></article></div></section>
+      <section id="pricing" class="marketing-pricing landing-pricing">
+        <div class="pricing-heading"><div><p class="eyebrow">Simple organization pricing</p><h2>Plans that scale with conversations and outcomes.</h2><p class="pricing-heading-copy">Start with one business, then add booking workflows, reporting, and shared operations as your front desk proves its value.</p></div><span class="pricing-heading-note">7-day trial · no credit card</span></div>
+        <div class="pricing-grid">
+          <article v-for="plan in landingPlans" :key="plan.key" :class="['pricing-card landing-pricing-card', { featured: plan.featured }]" tabindex="0">
+            <span v-if="plan.badge" class="pricing-badge">{{ plan.badge }}</span>
+            <h3>{{ plan.name }}</h3>
+            <p>{{ plan.description }}</p>
+            <strong class="pricing-price">{{ plan.price }}<small v-if="plan.priceAmount !== null">/month</small></strong>
+            <span class="pricing-businesses">{{ plan.businesses }}</span>
+            <span class="pricing-usage">{{ plan.usage }}</span>
+            <ul class="landing-plan-bullets"><li v-for="bullet in plan.bullets" :key="bullet">✓ {{ bullet }}</li></ul>
+            <button v-if="!plan.custom" class="primary-button small" type="button" @click="openAuth('signup')">{{ plan.cta }}</button>
+            <a v-else class="outline-button small pricing-plan-cta" href="mailto:hello@frontdeskwise.com?subject=FrontDeskWise%20Portfolio%20pricing">{{ plan.cta }}</a>
+          </article>
+        </div>
+        <p class="pricing-guardrail-note">AI conversation allowances are measured per visitor session with abuse filtering. Portfolio plans use pooled, negotiated capacity so agencies are not forced into a five-location bundle.</p>
+
+        <div class="pricing-calculator">
+          <div class="pricing-calculator-copy"><p class="eyebrow">Stress-test the economics</p><h3>See what a paying business can contribute.</h3><p>Use your own traffic and cost assumptions. This is an illustrative contribution model—not accounting profit—and helps set a safe usage ceiling before launch.</p></div>
+          <div class="pricing-calculator-controls">
+            <label>Plan<select v-model="pricingCalculatorPlan"><option v-for="plan in pricingCalculatorPlans" :key="plan.key" :value="plan.key">{{ plan.name }} · {{ plan.price }}/mo</option></select></label>
+            <label>AI conversations / month<input v-model.number="pricingCalculatorConversations" type="number" min="0" max="10000" step="100" inputmode="numeric" /></label>
+            <label>Variable cost / conversation<input v-model.number="pricingCalculatorVariableCost" type="number" min="0" step="0.001" inputmode="decimal" /></label>
+            <label>Other operating costs / customer<input v-model.number="pricingCalculatorOtherCosts" type="number" min="0" step="1" inputmode="decimal" /></label>
+            <label>Partner commission<input v-model.number="pricingCalculatorPartnerCommission" type="number" min="0" max="100" step="1" inputmode="decimal" /></label>
+          </div>
+          <div class="pricing-calculator-results" aria-live="polite">
+            <div class="pricing-calculator-contribution"><span>Monthly contribution</span><strong>{{ formatPricingCurrency(pricingCalculatorContribution) }}</strong><small>after listed costs</small></div>
+            <div><span>Contribution margin</span><strong>{{ formatPricingPercent(pricingCalculatorMargin) }}</strong></div>
+            <div><span>AI conversation cost</span><strong>{{ formatPricingCurrency(pricingCalculatorAiCost) }}</strong></div>
+            <div><span>Payment processing</span><strong>{{ formatPricingCurrency(pricingCalculatorPaymentCost) }}</strong></div>
+          </div>
+        </div>
+      </section>
 
       <section class="landing-section landing-faq-section"><div class="landing-section-heading landing-section-heading-centered"><p class="eyebrow">Questions owners ask</p><h2>A front desk that is easy to understand.</h2><p>Clear answers before you hand over your website, your customers, or your team’s time.</p></div><div class="landing-faq-list"> <details v-for="(faq, index) in landingFaqs" :key="faq.question" :open="index === 0"><summary>{{ faq.question }}</summary><p>{{ faq.answer }}</p></details></div></section>
 
@@ -7133,6 +8303,11 @@ function startMarketingDemo() {
     </section>
 
     <section v-else :class="['product-shell', { 'admin-only-mode': adminSurfaceMode, 'mobile-nav-open': mobileNavOpen }]">
+      <div v-if="authSnapshot && authSnapshot.user.emailVerified === false" class="email-verification-banner" role="status">
+        <div><strong>Verify your email to unlock workspace actions.</strong><span>You can review this account, but adding businesses, publishing, integrations, invitations, and customer data stay protected until verification.</span></div>
+        <button class="outline-button small" type="button" :disabled="verificationEmailLoading" @click="resendVerificationEmail">{{ verificationEmailLoading ? 'Sending…' : 'Resend verification email' }}</button>
+        <small v-if="verificationEmailMessage">{{ verificationEmailMessage }}</small>
+      </div>
       <div v-if="mobileNavOpen" class="mobile-nav-backdrop" aria-hidden="true" @click="closeMobileNav"></div>
       <aside id="mobile-navigation-drawer" ref="mobileDrawer" class="sidebar" aria-label="Workspace navigation">
         <div class="sidebar-brand-row">
@@ -7144,9 +8319,9 @@ function startMarketingDemo() {
           <button v-for="item in adminNavItems" :key="item.id" type="button" :class="['nav-item', { active: view === 'admin' && adminSection === item.id }]" @click="adminSection = item.id; view = 'admin'"><span class="nav-icon"><component :is="item.icon" :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>{{ item.label }}</span></button>
         </nav>
         <nav v-else class="sidebar-nav" aria-label="Workspace navigation">
-          <div v-for="section in navSections" :key="section.label || 'overview'" class="nav-section">
+          <div v-for="section in visibleNavSections" :key="section.label || 'overview'" class="nav-section">
             <p v-if="section.label" class="nav-section-label">{{ section.label }}</p>
-            <button v-for="item in section.items" :key="item.id" type="button" :disabled="publicDemoMode && !['overview', 'support'].includes(item.id)" :class="['nav-item', { active: view === item.id }]" @click="navigateToWorkspaceView(item.id)"><span class="nav-icon"><component :is="item.icon" :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>{{ item.label }}</span><b v-if="item.id === 'inbox' && inboxUnreadCount">{{ inboxUnreadCount }}</b></button>
+            <button v-for="item in section.items" :key="`${item.id}-${item.settingsTab || 'default'}`" type="button" :disabled="publicDemoMode && !['overview', 'support'].includes(item.id)" :class="['nav-item', { active: isNavItemActive(item) }]" @click="navigateToNavItem(item)"><span class="nav-icon"><component :is="item.icon" :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>{{ item.label }}</span><b v-if="item.id === 'inbox' && inboxUnreadCount">{{ inboxUnreadCount }}</b></button>
           </div>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon"><ShieldCheck :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>Admin control plane</span></button>
         </nav>
@@ -7169,7 +8344,7 @@ function startMarketingDemo() {
               <div v-if="nextSetupStep && setupProgressOpen" class="setup-progress-list"><div v-for="step in setupSteps" :key="step.id" :class="['setup-progress-step', { complete: step.complete }]" @click="step.complete ? undefined : openSetupStep(step.id)"><span>{{ step.complete ? '✓' : '○' }}</span><small>{{ step.label }}</small></div></div>
             </template>
           </div>
-          <div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ activeOrganization?.billing.plan.displayName ?? 'Workspace' }} plan</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div>
+          <div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ focusedTeamMode ? workspaceRoleLabel : `${activeOrganization?.billing.plan.displayName ?? 'Workspace'} plan` }}</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button v-if="canAccessBilling" type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div>
         </div>
       </aside>
 
@@ -7183,12 +8358,16 @@ function startMarketingDemo() {
           </div>
         </header>
         <div v-if="notificationMenuOpen && authSnapshot" class="notification-menu mobile-notification-menu"><div class="panel-heading notification-panel-heading"><strong>Notifications</strong><div class="notification-panel-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div></div><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></div>
-        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${businessName || 'Workspace'} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><div v-if="!adminSurfaceMode" class="header-workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading notification-panel-heading"><strong>Notifications</strong><div class="notification-panel-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div></div><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
+        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${businessName || 'Workspace'} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><div v-if="!adminSurfaceMode" class="header-workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading notification-panel-heading"><strong>Notifications</strong><div class="notification-panel-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div></div><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button v-if="canAccessBilling" type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && supportViewMode" class="trial-banner warning support-view-banner"><span><strong>You are viewing {{ businessName || 'this business' }} as support.</strong><small>Read-only support view · case {{ supportViewCaseId || 'linked case' }} · access expires automatically and this session is audited.</small></span><button class="primary-button small" type="button" @click="exitSupportView">Exit support view</button></div>
         <div v-else-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
         <div v-else-if="!adminSurfaceMode && billingReadOnly" class="trial-banner danger compact"><span><strong>Your workspace is read-only</strong><small>· Restore billing to resume publishing</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Restore billing →</button></div>
         <div v-if="!adminSurfaceMode && billingFlow !== 'idle'" :class="['billing-return-banner', billingFlow === 'complete' ? 'success' : billingFlow === 'cancelled' ? 'neutral' : 'warning']" role="status" aria-live="polite"><span><strong>{{ billingMessage }}</strong><small v-if="billingFlow === 'processing'">We’ll keep checking for the signed Stripe webhook.</small><small v-else-if="billingFlow === 'pending'">Your data is safe. Refresh this page to check again.</small></span><button v-if="billingFlow === 'pending'" class="outline-button small" type="button" @click="void retryBillingRefresh()">Refresh</button></div>
+        <section v-if="!adminSurfaceMode && onboardingNeedsAttention && workspaceOnboarding" class="onboarding-validation-banner" role="alert">
+          <div class="onboarding-validation-copy"><p class="eyebrow">Website status: Needs attention</p><h2>{{ workspaceOnboarding.message }}</h2><p>{{ workspaceOnboarding.suggestedAction }}</p><small>Reason: {{ onboardingReasonLabel }}</small></div>
+          <div class="onboarding-validation-actions"><button class="outline-button small" type="button" @click="view = 'knowledge'">Add source / upload document</button><button class="primary-button small" type="button" :disabled="Boolean(sourceActionLoading)" @click="refreshWebsiteKnowledge">{{ sourceActionLoading ? 'Trying again…' : 'Try again' }}</button></div>
+        </section>
 
         <div v-if="!adminSurfaceMode && settingsSurface" class="settings-tabs" role="tablist" aria-label="Settings sections">
           <button v-for="tab in settingsTabs" :key="tab.id" type="button" role="tab" :aria-selected="currentSettingsTab === tab.id" :class="['settings-tab', { active: currentSettingsTab === tab.id }]" @click="openSettingsTab(tab.id)">{{ tab.label }}</button>
@@ -7310,7 +8489,7 @@ function startMarketingDemo() {
               <div v-if="readinessEvaluation" class="evaluation-cases"><div v-for="evaluationCase in readinessEvaluation.cases" :key="evaluationCase.question" class="evaluation-case"><span :class="['answer-badge', evaluationCase.passed ? 'grounded' : 'fallback']">{{ evaluationCase.passed ? '✓ Pass' : '! Review' }}</span><div><strong>{{ evaluationCase.question }}</strong><small>{{ evaluationCase.expectation === 'grounded' ? `${evaluationCase.citationCount} citation${evaluationCase.citationCount === 1 ? '' : 's'} · ${Math.round(evaluationCase.confidenceScore * 100)}% confidence` : 'Expected safe fallback' }}</small></div><span class="evaluation-latency">{{ evaluationCase.latencyMs }}ms</span></div></div>
               <div v-else class="evaluation-empty"><span class="empty-icon"><CircleCheck :size="30" :stroke-width="1.8" aria-hidden="true" /></span><div><strong>Know whether the assistant is ready to sell.</strong><p>This check uses the business’s indexed content, measures citations and fallback behavior, and shows what needs review.</p></div></div>
             </article>
-            <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>What visitors are asking</p></div><button class="text-button" type="button" @click="view = 'conversations'">See all →</button></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Recommended actions</h2><p>Open gaps from live conversations</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Add answer</button></div></div><div v-else class="diagnostics-empty">No open actions. New low-confidence questions will appear here.</div></article></div>
+            <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>What visitors are asking</p></div><button class="text-button" type="button" @click="view = 'conversations'">See all →</button></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Recommended actions</h2><p>Open gaps from live conversations</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Add answer</button></div></div><div v-else class="diagnostics-empty">No open actions. New low-confidence questions will appear here.</div></article><article class="panel"><div class="panel-heading"><div><h2>Visitor friction</h2><p>Owner-safe experience insight · last 30 days</p></div><span v-if="workspaceStats?.experienceInsights?.totalSignals" class="status-pill qualified">{{ workspaceStats.experienceInsights.totalSignals }} signals</span></div><template v-if="workspaceStats?.experienceInsights?.headline"><strong>{{ workspaceStats.experienceInsights.headline }}</strong><p v-if="workspaceStats.experienceInsights.suggestedImprovement">Suggested improvement: {{ workspaceStats.experienceInsights.suggestedImprovement }}</p><div v-if="workspaceStats.experienceInsights.topFriction.length" class="question-list"><div v-for="item in workspaceStats.experienceInsights.topFriction.slice(0, 3)" :key="item.type"><span>{{ formatLabel(item.type) }}</span><strong>{{ item.count }}</strong></div></div></template><div v-else class="diagnostics-empty">No visitor friction pattern detected yet.</div></article></div>
           </template>
         </div>
 
@@ -7337,7 +8516,7 @@ function startMarketingDemo() {
           </div>
 
           <div class="inbox-queue-toolbar">
-            <div class="inbox-queue-view"><span class="inbox-toolbar-label">Queue view</span><div class="inbox-assignment-shortcuts" aria-label="Inbox assignment shortcuts"><button type="button" :class="{ active: inboxAssignmentFilter === 'all' }" @click="inboxPage = 1; inboxAssignmentFilter = 'all'; loadInbox()">All conversations</button><button type="button" :class="{ active: inboxAssignmentFilter === 'unassigned' }" @click="inboxPage = 1; inboxAssignmentFilter = 'unassigned'; loadInbox()">Unassigned</button><button v-if="authSnapshot?.user.id" type="button" :class="{ active: inboxAssignmentFilter === 'mine' }" @click="inboxPage = 1; inboxAssignmentFilter = 'mine'; loadInbox()">Assigned to me</button></div></div>
+            <div class="inbox-queue-view"><span class="inbox-toolbar-label">Queue view</span><div class="inbox-assignment-shortcuts" aria-label="Inbox assignment shortcuts"><button type="button" :class="{ active: inboxStatusFilter === 'all' && inboxAssignmentFilter === 'all' }" @click="setInboxQueue('all')">All</button><button v-if="authSnapshot?.user.id" type="button" :class="{ active: inboxAssignmentFilter === 'mine' }" @click="setInboxQueue('all', 'mine')">Assigned to me</button><button type="button" :class="{ active: inboxStatusFilter === 'WAITING_FOR_STAFF' }" @click="setInboxQueue('WAITING_FOR_STAFF')">Waiting</button><button type="button" :class="{ active: inboxStatusFilter === 'RESOLVED' }" @click="setInboxQueue('RESOLVED')">Resolved</button><button type="button" :class="{ active: inboxAssignmentFilter === 'unassigned' }" @click="setInboxQueue('all', 'unassigned')">Unassigned</button></div></div>
             <div class="inbox-queue-count"><strong>{{ inboxTotal }}</strong> {{ inboxTotal === 1 ? 'conversation' : 'conversations' }}<span></span><strong>{{ inboxUnreadCount }}</strong> unread</div>
           </div>
 
@@ -7345,7 +8524,35 @@ function startMarketingDemo() {
 
           <div class="panel lead-filters inbox-filter-bar"><div class="inbox-filter-copy"><span>Filter queue</span><small>Focus your next response</small></div><label><span>Status</span><select v-model="inboxStatusFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="FOLLOW_UP_PENDING">Follow-up pending</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option><option value="EXPIRED">Expired</option></select></label><label><span>Assignment</span><select v-model="inboxAssignmentFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span class="inbox-filter-result"><strong>{{ inboxTotal }}</strong> {{ inboxTotal === 1 ? 'thread' : 'threads' }}<i>·</i>{{ inboxUnreadCount }} unread</span></div>
 
-          <div :class="['dashboard-grid', 'conversation-inbox-grid', { 'inbox-detail-open': selectedInboxConversation }]" ><article class="panel table-panel inbox-table-panel"><div class="inbox-table-titlebar"><div><span class="inbox-table-kicker">Live queue</span><h3>Conversations</h3></div><span class="inbox-table-count">{{ inboxTotal }} total</span></div><div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div><div class="collection-viewport inbox-collection-viewport"><div v-if="!inboxConversations.length" class="inbox-empty-state"><span class="inbox-empty-icon"><Inbox :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No conversations in this view</strong><p>Try a different filter or check back when a visitor needs your team.</p></div><button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)"><div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small></span></div><span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'HUMAN_ACTIVE' ? 'active' : conversation.status === 'AI_ACTIVE' || conversation.status === 'AI_ASSISTED' ? 'new' : 'qualified']"><span class="status-pill-dot"></span>{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount">{{ conversation.unreadCount }}</b></span><small class="inbox-activity-time">{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small></button></div><div v-if="inboxTotal" class="collection-pagination"><span>Showing {{ inboxRangeStart }}–{{ inboxRangeEnd }} of {{ inboxTotal }}</span><div><button class="outline-button small" type="button" :disabled="inboxLoading || !inboxHasPrevious" @click="() => loadInbox(inboxPage - 1)">Previous</button><button class="outline-button small" type="button" :disabled="inboxLoading || !inboxHasNext" @click="() => loadInbox(inboxPage + 1)">Next</button></div></div></article><article v-if="selectedInboxConversation" class="panel inbox-detail-panel"><div class="panel-heading inbox-detail-heading"><div><button class="mobile-inbox-back" type="button" @click="closeInboxConversation"><ArrowLeft :size="16" :stroke-width="1.8" aria-hidden="true" /> Back to Inbox</button><div class="inbox-detail-kicker"><span class="inbox-live-dot"></span>Conversation detail</div><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} <span>·</span> {{ formatLabel(selectedInboxConversation.status) }}</p></div><div class="toolbar-actions"><button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED'" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED'" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button></div></div><div ref="inboxThread" class="inbox-message-thread" @scroll="handleInboxThreadScroll"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="message.id || `${message.createdAt}-${message.role}-${index}`" :class="['message-thread-item', message.role, { 'message-pending': message.sendStatus === 'pending', 'message-failed': message.sendStatus === 'failed' }]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}<span v-if="message.sendStatus === 'pending'"> · Sending…</span></small><p>{{ message.content }}</p><div v-if="message.sendStatus === 'failed'" class="message-send-failed"><span>Failed to send</span><button type="button" @click.stop="retryInboxReply(message)">Retry</button></div></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><button v-if="inboxNewMessageCount" class="inbox-new-message-indicator" type="button" @click="scrollInboxToLatest('smooth')">{{ inboxNewMessageCount }} new message{{ inboxNewMessageCount === 1 ? '' : 's' }} ↓</button><form class="question-form inbox-composer-form" @submit.prevent="sendInboxReply"><textarea ref="inboxComposer" v-model="inboxReply" rows="1" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE'" @keydown="handleInboxComposerKeydown"></textarea><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || selectedInboxConversation.status !== 'HUMAN_ACTIVE'"><Send :size="14" :stroke-width="1.9" aria-hidden="true" />Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form></article><article v-else class="panel workspace-message inbox-select-state"><span class="inbox-select-icon"><MessageSquare :size="22" :stroke-width="1.8" aria-hidden="true" /></span><div><span class="inbox-table-kicker">Workspace context</span><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></div></article></div>
+          <div :class="['dashboard-grid', 'conversation-inbox-grid', { 'inbox-detail-open': selectedInboxConversation }]">
+            <article class="panel table-panel inbox-table-panel">
+              <div class="inbox-table-titlebar"><div><span class="inbox-table-kicker">Live queue</span><h3>Conversations</h3></div><span class="inbox-table-count">{{ inboxTotal }} total</span></div>
+              <div class="table-heading"><span>Conversation</span><span>Status</span><span>Activity</span></div>
+              <div class="collection-viewport inbox-collection-viewport">
+                <div v-if="!inboxConversations.length" class="inbox-empty-state"><span class="inbox-empty-icon"><Inbox :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No conversations in this view</strong><p>Try a different filter or check back when a visitor needs your team.</p></div>
+                <button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)">
+                  <div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small><small class="inbox-assignee-line">{{ inboxAssignmentLabel(conversation) }}<span v-if="conversation.assignedUserId && conversation.assignedUserId !== authSnapshot?.user.id"> · View only</span></small></span></div>
+                  <span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'HUMAN_ACTIVE' ? 'active' : conversation.status === 'AI_ACTIVE' || conversation.status === 'AI_ASSISTED' ? 'new' : 'qualified']"><span class="status-pill-dot"></span>{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount">{{ conversation.unreadCount }}</b></span>
+                  <small class="inbox-activity-time">{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small>
+                </button>
+              </div>
+              <div v-if="inboxTotal" class="collection-pagination"><span>Showing {{ inboxRangeStart }}–{{ inboxRangeEnd }} of {{ inboxTotal }}</span><div><button class="outline-button small" type="button" :disabled="inboxLoading || !inboxHasPrevious" @click="() => loadInbox(inboxPage - 1)">Previous</button><button class="outline-button small" type="button" :disabled="inboxLoading || !inboxHasNext" @click="() => loadInbox(inboxPage + 1)">Next</button></div></div>
+            </article>
+            <article v-if="selectedInboxConversation" class="panel inbox-detail-panel">
+              <div class="panel-heading inbox-detail-heading">
+                <div><button class="mobile-inbox-back" type="button" @click="closeInboxConversation"><ArrowLeft :size="16" :stroke-width="1.8" aria-hidden="true" /> Back to Inbox</button><div class="inbox-detail-kicker"><span class="inbox-live-dot"></span>Conversation detail</div><h2>{{ selectedInboxConversation.lead?.name || 'Visitor' }}</h2><p>{{ selectedInboxConversation.lead?.intent || 'General inquiry' }} <span>·</span> {{ formatLabel(selectedInboxConversation.status) }}</p></div>
+                <div class="toolbar-actions">
+                  <select v-if="canManageTeam && selectedInboxConversation.status !== 'RESOLVED'" class="inbox-assignee-select" :value="selectedInboxConversation.assignedUserId || ''" aria-label="Assign conversation" @change="assignInboxConversation(($event.target as HTMLSelectElement).value)"><option value="" disabled>Assign to…</option><option v-for="member in teamMembers.filter((member) => member.role === 'owner' || member.role === 'admin' || member.role === 'staff')" :key="member.id" :value="member.id">{{ member.name }} · {{ formatLabel(member.role) }}</option></select>
+                  <span v-if="selectedConversationReadOnly" class="inbox-view-only-badge">View only · {{ selectedConversationOwnerLabel }} is handling this</span>
+                  <button v-if="selectedInboxConversation.status !== 'HUMAN_ACTIVE' && selectedInboxConversation.status !== 'RESOLVED' && !selectedConversationReadOnly" class="primary-button small" type="button" :disabled="inboxActionLoading" @click="takeOverConversation">Take over</button><button v-if="selectedInboxConversation.status === 'HUMAN_ACTIVE' && !selectedConversationReadOnly" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="returnConversationToAi">Return to AI</button><button v-if="selectedInboxConversation.status !== 'RESOLVED' && !selectedConversationReadOnly" class="outline-button small" type="button" :disabled="inboxActionLoading" @click="resolveConversation">Resolve</button>
+                </div>
+              </div>
+              <div class="inbox-ownership-state"><span :class="['inbox-ownership-dot', { active: selectedInboxConversation.assignedUserId }]" aria-hidden="true"></span><strong>{{ selectedInboxConversation.assignedUserId ? `${selectedConversationOwnerLabel} is handling this conversation` : 'Unassigned' }}</strong><small>{{ selectedInboxConversation.assignedUserId ? 'Only the owner can send customer-facing replies.' : 'The first staff member to take over becomes the owner.' }}</small></div>
+              <div v-if="selectedInboxConversation.events?.length" class="inbox-audit-trail"><div class="inbox-audit-heading"><span>Activity</span><small>Ownership and handoff history</small></div><div v-for="event in selectedInboxConversation.events.slice(0, 8)" :key="event.id" class="inbox-audit-row"><span class="inbox-audit-dot" aria-hidden="true"></span><div><strong>{{ conversationEventLabel(event) }}</strong><small>{{ event.metadata?.name || (event.actorUserId === authSnapshot?.user.id ? 'You' : 'Team member') }} · {{ new Date(event.createdAt).toLocaleString() }}</small></div></div></div>
+              <div ref="inboxThread" class="inbox-message-thread" @scroll="handleInboxThreadScroll"><div v-for="(message, index) in selectedInboxConversation.messages ?? []" :key="message.id || `${message.createdAt}-${message.role}-${index}`" :class="['message-thread-item', message.role, { 'message-pending': message.sendStatus === 'pending', 'message-failed': message.sendStatus === 'failed' }]"><small>{{ message.authorName || formatLabel(message.role) }} · {{ new Date(message.createdAt).toLocaleString() }}<span v-if="message.sendStatus === 'pending'"> · Sending…</span></small><p>{{ message.content }}</p><div v-if="message.sendStatus === 'failed'" class="message-send-failed"><span>Failed to send</span><button type="button" @click.stop="retryInboxReply(message)">Retry</button></div></div><div v-if="!(selectedInboxConversation.messages?.length)" class="diagnostics-empty">No messages to display.</div></div><button v-if="inboxNewMessageCount" class="inbox-new-message-indicator" type="button" @click="scrollInboxToLatest('smooth')">{{ inboxNewMessageCount }} new message{{ inboxNewMessageCount === 1 ? '' : 's' }} ↓</button><form class="question-form inbox-composer-form" @submit.prevent="sendInboxReply"><textarea ref="inboxComposer" v-model="inboxReply" rows="1" placeholder="Reply as your team…" :disabled="selectedInboxConversation.status !== 'HUMAN_ACTIVE' || selectedConversationReadOnly" @keydown="handleInboxComposerKeydown"></textarea><button class="primary-button small" type="submit" :disabled="!inboxReply.trim() || selectedInboxConversation.status !== 'HUMAN_ACTIVE' || selectedConversationReadOnly"><Send :size="14" :stroke-width="1.9" aria-hidden="true" />Send</button></form><form class="question-form" @submit.prevent="addInboxNote"><input v-model="inboxNote" type="text" placeholder="Add a private internal note…" /><button class="outline-button small" type="submit" :disabled="!inboxNote.trim() || inboxActionLoading">Add note</button></form>
+            </article>
+            <article v-else class="panel workspace-message inbox-select-state"><span class="inbox-select-icon"><MessageSquare :size="22" :stroke-width="1.8" aria-hidden="true" /></span><div><span class="inbox-table-kicker">Workspace context</span><strong>Select a conversation</strong><p>Choose a visitor conversation to review the thread, take over, or return it to AI.</p></div></article>
+          </div>
 
         </div>
 
@@ -7593,6 +8800,17 @@ function startMarketingDemo() {
         <div v-else-if="view === 'analytics'" class="view-content">
           <div class="section-toolbar"><div><p class="eyebrow">Live operating signals</p><h2>Analytics</h2><p>Real conversations, leads, bookings, and knowledge activity for {{ businessName || 'this business' }}.</p></div><button class="outline-button small" type="button" @click="refreshWorkspaceSummary()">Refresh data</button></div>
           <div class="metric-grid"><article class="metric-card blue-tint"><strong>{{ workspaceStats?.conversations ?? 0 }}</strong><span>Conversations</span><em>Recorded conversations</em></article><article class="metric-card green-tint"><strong>{{ workspaceStats?.leads ?? 0 }}</strong><span>Leads captured</span><em>Durable FrontDeskWise records</em></article><article class="metric-card orange-tint"><strong>{{ workspaceStats?.handoffs ?? 0 }}</strong><span>Human handoffs</span><em>{{ workspaceStats?.humanActive ?? 0 }} active with staff</em></article><article class="metric-card purple-tint"><strong>{{ workspaceStats?.widgetLoads ?? 0 }}</strong><span>Widget loads</span><em>Verified public installs</em></article></div>
+          <section v-if="executiveAnalytics" class="executive-analytics-grid" aria-label="Executive KPI and product quality metrics">
+            <article class="panel executive-funnel-panel">
+              <div class="panel-heading executive-panel-heading"><div><p class="eyebrow">Executive KPI funnel</p><h2>From signup to conversion</h2><p>One operating view for the milestones and outcomes that matter to the owner.</p></div><span class="status-pill qualified">{{ executiveAnalytics.windowLabel }}</span></div>
+              <div class="executive-funnel-grid"><article v-for="(step, index) in executiveFunnelSteps" :key="step.key" :class="['executive-funnel-step', executiveStepTone(step.status)]"><div class="executive-funnel-step-top"><span class="executive-funnel-index">{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ step.label }}</strong></div><strong class="executive-funnel-value">{{ step.value }}</strong><small>{{ step.detail }}</small><div class="executive-funnel-progress"><span :style="{ width: `${Math.min(100, Math.max(0, step.rate ?? 0))}%` }"></span></div><em>{{ step.rate === null ? '—' : `${formatExecutivePercent(step.rate)} · ${step.rateLabel}` }}</em></article></div>
+              <p class="executive-funnel-note">Signup, verification, publishing, and installation are all-time setup milestones. Qualified leads and conversions reflect {{ executiveAnalytics.windowLabel.toLowerCase() }}.</p>
+            </article>
+            <article class="panel executive-quality-panel">
+              <div class="panel-heading executive-panel-heading"><div><p class="eyebrow">Product quality</p><h2>Can the front desk be trusted?</h2><p>Quality, safety, experience, and unit economics in one scorecard.</p></div><span class="status-pill" :class="executiveAnalytics.quality.totalConversations ? 'booked' : 'qualified'">{{ executiveAnalytics.quality.totalConversations }} conversations</span></div>
+              <div class="executive-quality-grid"><article v-for="metric in executiveQualityMetrics" :key="metric.key" :class="['executive-quality-metric', executiveMetricTone(metric.status)]"><span class="executive-quality-status"></span><strong>{{ formatExecutiveMetric(metric) }}</strong><span>{{ metric.label }}</span><small>{{ metric.detail }}</small></article></div>
+            </article>
+          </section>
           <article class="panel chart-panel analytics-chart"><div class="panel-heading"><div><h2>Activity by day</h2><p>Last 30 days · live records</p></div></div><div v-if="workspaceStats?.trend?.length" class="live-chart" aria-label="Analytics activity by day"><div v-for="point in workspaceStats.trend" :key="point.label" class="live-chart-column"><div class="live-chart-bars"><span class="live-bar blue" :style="{ height: `${point.conversations / chartMax * 100}%` }"></span><span class="live-bar orange" :style="{ height: `${point.leads / chartMax * 100}%` }"></span></div><small>{{ point.label }}</small></div></div><div v-else class="diagnostics-empty">No activity recorded yet.</div></article>
           <article class="panel funnel-panel"><div class="panel-heading"><div><h2>Conversion funnels</h2><p>Flow starts, form progress, connector outcomes, and completion.</p></div></div><div v-if="workspaceStats?.conversionFunnels?.length" class="funnel-list"><div v-for="funnel in workspaceStats.conversionFunnels" :key="funnel.flowId" class="funnel-card"><div class="setup-row"><strong>{{ funnel.name }}</strong><span class="status-pill" :class="funnel.completionRate >= 60 ? 'booked' : funnel.completionRate >= 30 ? 'qualified' : 'new'">{{ funnel.completionRate }}% complete</span></div><div class="funnel-steps"><span>{{ funnel.started }} started</span><span>{{ funnel.formDisplayed }} reached form</span><span>{{ funnel.submitted }} submitted</span><span>{{ funnel.actionSucceeded }} action succeeded</span><span>{{ funnel.completed }} completed</span></div><small v-if="funnel.dropOffs.length">Biggest drop-off: {{ funnel.dropOffs[0].label }} · {{ funnel.dropOffs[0].count }}</small></div></div><div v-else class="diagnostics-empty">No action flow telemetry yet. Run a flow through the widget to see conversion data.</div></article>
           <div class="dashboard-grid bottom-grid"><article class="panel"><div class="panel-heading"><div><h2>Top questions</h2><p>Most common visitor questions</p></div></div><div v-if="workspaceStats?.topQuestions?.length" class="question-list"><div v-for="question in workspaceStats.topQuestions" :key="question.question"><span>{{ question.question }}</span><strong>{{ question.count }}</strong></div></div><div v-else class="diagnostics-empty">No visitor questions recorded yet.</div></article><article class="panel"><div class="panel-heading"><div><h2>Knowledge gaps</h2><p>Questions that need a stronger answer</p></div></div><div v-if="workspaceStats?.actions?.length" class="action-list"><div v-for="action in workspaceStats.actions" :key="action.question"><span class="action-check">!</span><span>{{ action.question }}</span><button type="button" @click="view = 'knowledge'">Review</button></div></div><div v-else class="diagnostics-empty">No open knowledge gaps.</div></article></div>
@@ -7613,7 +8831,8 @@ function startMarketingDemo() {
             <div class="section-toolbar"><div><p class="eyebrow">Website verification</p><h2>Verification</h2><p>Verify the website connected to this business before installing the live widget.</p></div></div>
           </template>
           <template v-else-if="currentSettingsTab === 'notifications'">
-            <div class="section-toolbar"><div><p class="eyebrow">Workspace updates</p><h2>Notifications</h2><p>Review operational updates for conversations, delivery, and account activity.</p></div><div class="notification-settings-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="outline-button small" type="button" @click="loadNotifications">Refresh</button></div></div>
+            <div class="section-toolbar"><div><p class="eyebrow">Workspace updates</p><h2>Notifications</h2><p>Review operational updates for conversations, delivery, and account activity.</p></div><div class="notification-settings-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button v-if="pwaInstallAvailable && !pwaInstalled" class="outline-button small" type="button" @click="installFrontDeskWisePwa">Install app</button><button class="outline-button small" type="button" @click="loadNotifications">Refresh</button></div></div>
+            <article v-if="authSnapshot" class="panel browser-alerts-card"><div class="panel-heading"><div><p class="eyebrow">Operator device</p><h3>Stay close to waiting conversations</h3><p>Install FrontDeskWise for a focused mobile shell, then enable browser alerts for handoffs and qualified leads. Notification clicks open the exact conversation.</p></div><span :class="['status-pill', pushEnabled ? 'booked' : pushConfigured ? 'qualified' : 'new']">{{ pushEnabled ? 'Alerts on' : pushConfigured ? 'Ready to enable' : 'Not configured' }}</span></div><div class="browser-alerts-actions"><button v-if="pwaInstallAvailable && !pwaInstalled" class="outline-button small" type="button" @click="installFrontDeskWisePwa">Install FrontDeskWise</button><button v-if="pushConfigured && !pushEnabled" class="primary-button small" type="button" :disabled="pushLoading" @click="enableBrowserAlerts">{{ pushLoading ? 'Enabling…' : 'Enable browser alerts' }}</button><button v-else-if="pushEnabled" class="outline-button small" type="button" :disabled="pushLoading" @click="disableBrowserAlerts">{{ pushLoading ? 'Updating…' : 'Disable on this device' }}</button><span v-if="browserNotificationPermission === 'denied'" class="form-help">Browser permission is blocked. Re-enable notifications in this device’s site settings.</span><span v-else-if="!pushConfigured" class="form-help">A workspace administrator must configure Web Push keys before device alerts can be enabled.</span><span v-else-if="pushMessage" class="saved-message">✓ {{ pushMessage }}</span></div><p v-if="pushError" class="form-error">{{ pushError }}</p></article>
             <article v-if="authSnapshot" class="panel handoff-notification-card"><div class="panel-heading"><div><p class="eyebrow">Human handoff alerts</p><h3>Tell the team when a visitor is waiting</h3><p>Explicit requests notify staff immediately by default. Knowledge gaps stay in the Inbox unless you opt them into email alerts.</p></div><button class="primary-button small" type="button" :disabled="handoffSettingsLoading" @click="saveHandoffNotificationSettings">{{ handoffSettingsLoading ? 'Saving…' : 'Save handoff alerts' }}</button></div><div class="handoff-settings-grid"><label class="handoff-toggle"><span><strong>Email handoff alerts</strong><small>Send an actionable email with a direct link to the exact conversation.</small></span><input v-model="handoffNotificationSettings.enabled" type="checkbox" /></label><label><span class="field-label">Default recipient</span><input v-model="handoffNotificationSettings.defaultRecipientEmail" type="email" placeholder="support@business.com" /></label><label><span class="field-label">Additional recipients <span class="optional">One per line or comma-separated</span></span><textarea v-model="handoffAdditionalRecipients" rows="3" placeholder="manager@business.com&#10;frontdesk@business.com"></textarea></label><fieldset><legend>Send alert</legend><label><input v-model="handoffNotificationSettings.handoffDelaySeconds" type="radio" :value="0" /> Immediately</label><label><input v-model="handoffNotificationSettings.handoffDelaySeconds" type="radio" :value="120" /> After 2 minutes</label><label><input v-model="handoffNotificationSettings.handoffDelaySeconds" type="radio" :value="300" /> After 5 minutes</label></fieldset><fieldset><legend>Move to follow-up mode after</legend><label><input v-model="handoffNotificationSettings.handoffTimeoutSeconds" type="radio" :value="120" /> 2 minutes</label><label><input v-model="handoffNotificationSettings.handoffTimeoutSeconds" type="radio" :value="300" /> 5 minutes</label><label><input v-model="handoffNotificationSettings.handoffTimeoutSeconds" type="radio" :value="600" /> 10 minutes</label><label><input v-model="handoffNotificationSettings.handoffTimeoutSeconds" type="radio" :value="900" /> 15 minutes</label><label><input v-model="handoffNotificationSettings.handoffTimeoutSeconds" type="radio" :value="1800" /> 30 minutes</label><small>AI stays available throughout. This only changes the team-facing status and follow-up wording.</small></fieldset><label class="handoff-toggle"><span><strong>Remind if unanswered</strong><small>Keep the repeat policy ready for the async delivery worker.</small></span><input v-model="handoffNotificationSettings.repeatEnabled" type="checkbox" /></label><label v-if="handoffNotificationSettings.repeatEnabled"><span class="field-label">Reminder after (minutes)</span><input v-model.number="handoffNotificationSettings.repeatAfterSeconds" type="number" min="1" max="1440" /></label></div><div class="notification-preference-list handoff-trigger-list"><label><span><strong>Visitor explicitly asks for a person</strong><small>Immediate handoff and notification.</small></span><input v-model="handoffNotificationSettings.notifyExplicitHumanRequest" type="checkbox" /></label><label><span><strong>AI cannot answer confidently</strong><small>Optional; disabled by default to avoid noisy escalation.</small></span><input v-model="handoffNotificationSettings.notifyKnowledgeGap" type="checkbox" /></label><label><span><strong>High-value lead needs staff</strong><small>Notify when a configured action requires staff.</small></span><input v-model="handoffNotificationSettings.notifyHighValueLead" type="checkbox" /></label><label><span><strong>Every lead submission</strong><small>Leave this off unless every lead needs an email.</small></span><input v-model="handoffNotificationSettings.notifyEveryLead" type="checkbox" /></label></div><p v-if="handoffSettingsMessage" class="saved-message">✓ {{ handoffSettingsMessage }}</p><p v-if="handoffSettingsError" class="form-error">{{ handoffSettingsError }}</p></article>
             <article v-if="authSnapshot" class="panel notification-preferences-card"><div class="panel-heading"><div><p class="eyebrow">Owner preferences</p><h3>Operational email</h3><p>Choose which non-mandatory team updates reach you by email. Billing and security notices always stay on.</p></div><button class="primary-button small" type="button" :disabled="notificationPreferencesLoading" @click="saveNotificationPreferences">{{ notificationPreferencesLoading ? 'Saving…' : 'Save preferences' }}</button></div><div class="notification-preference-list"><label><span><strong>New qualified leads</strong><small>Get an email when a qualified inquiry is captured.</small></span><input v-model="notificationPreferences.newLead" type="checkbox" /></label><label><span><strong>Human handoffs</strong><small>Know when a visitor is waiting for a team member.</small></span><input v-model="notificationPreferences.humanHandoff" type="checkbox" /></label><label><span><strong>Integration failures</strong><small>Get notified when a connected CRM needs attention.</small></span><input v-model="notificationPreferences.integrationFailure" type="checkbox" /></label></div><p v-if="notificationPreferencesMessage" class="saved-message">✓ {{ notificationPreferencesMessage }}</p><p v-if="notificationPreferencesError" class="form-error">{{ notificationPreferencesError }}</p></article><article class="panel notification-settings-panel"><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></article>
           </template>
@@ -7633,10 +8852,10 @@ function startMarketingDemo() {
             <div class="billing-summary-grid">
               <article class="panel billing-status-card"><p class="eyebrow">Current status</p><div class="billing-status-line"><strong>{{ billingSnapshot.billing.plan.displayName }}</strong><span :class="['status-pill', billingSnapshot.billing.status === 'active' ? 'booked' : billingSnapshot.billing.status === 'trial' ? 'qualified' : 'new']">{{ billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.status === 'active' ? 'Active · cancellation scheduled' : formatLabel(billingSnapshot.billing.status) }}</span></div><p v-if="billingSnapshot.billing.pendingPlanKey && billingSnapshot.billing.pendingPlanChangeType === 'downgrade'">{{ billingSnapshot.billing.plan.displayName }} remains active until {{ formatBillingDate(billingSnapshot.billing.pendingPlanChangeAt) }}.</p><p v-else-if="billingSnapshot.billing.status === 'active'">Your {{ billingSnapshot.billing.plan.displayName }} subscription is active.</p><p v-else-if="billingSnapshot.billing.cancelAtPeriodEnd && billingSnapshot.billing.currentPeriodEndAt">Cancels on {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else-if="billingSnapshot.billing.status === 'trial'">Trial ends {{ formatBillingDate(billingSnapshot.billing.trialEndAt) }}</p><p v-else-if="billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</p><p v-else>{{ billingSnapshot.billing.mode === 'sandbox' ? 'Sandbox billing · no charge' : 'Choose a plan to activate billing.' }}</p><small v-if="billingSnapshot.billing.status === 'active' && billingSnapshot.billing.currentPeriodEndAt">Next renewal: {{ formatBillingDate(billingSnapshot.billing.currentPeriodEndAt) }}</small><small v-if="billingSnapshot.billing.lastPaymentStatus">Payment status: {{ billingSnapshot.billing.lastPaymentStatus === 'paid' ? 'Paid' : formatLabel(billingSnapshot.billing.lastPaymentStatus) }}</small><small v-if="billingSnapshot.billing.override">{{ billingSnapshot.billing.override.reason }}</small><button v-if="billingSnapshot.billing.cancelAtPeriodEnd" class="outline-button small" type="button" :disabled="billingLoading" @click="resumeBilling">Keep my plan active</button></article>
               <article class="panel billing-status-card"><p class="eyebrow">Business capacity</p><strong class="billing-big-number">{{ availableBusinesses.length }} <span>/ {{ billingSnapshot.billing.plan.maxBusinesses }}</span></strong><p>Businesses in this organization</p><div class="metric-progress"><span :style="{ width: `${Math.min(100, (availableBusinesses.length / billingSnapshot.billing.plan.maxBusinesses) * 100)}%` }"></span></div></article>
-              <article class="panel billing-status-card"><p class="eyebrow">Last 30 days</p><div class="billing-usage-stats"><span><strong>{{ billingSnapshot.usageLast30Days.conversations }}</strong> conversations</span><span><strong>{{ billingSnapshot.usageLast30Days.leads }}</strong> leads</span><span><strong>{{ billingSnapshot.usageLast30Days.bookings }}</strong> bookings</span></div></article>
+              <article class="panel billing-status-card"><p class="eyebrow">Last 30 days</p><div class="billing-usage-stats"><span><strong>{{ billingSnapshot.usageLast30Days.conversations }}</strong> conversations</span><span><strong>{{ billingSnapshot.usageLast30Days.leads }}</strong> leads</span><span><strong>{{ billingSnapshot.usageLast30Days.bookings }}</strong> bookings</span></div><small v-if="planConversationAllowance(billingSnapshot.billing.plan) !== null" class="billing-usage-limit">{{ planConversationAllowance(billingSnapshot.billing.plan)?.toLocaleString('en-US') }} AI conversations included each month</small></article>
             </div>
             <div class="section-toolbar billing-plans-heading"><div><p class="eyebrow">Flexible plans</p><h2>Choose the right operating level</h2><p>Pricing is organization-level. Client-specific founding terms are represented as a plan override, not a special code path.</p></div></div>
-            <div class="billing-plan-grid"><article v-for="plan in billingSnapshot.plans" :key="plan.key" :class="['panel', 'billing-plan-card', { selected: plan.key === billingSnapshot.billing.planKey }]" ><div class="billing-plan-top"><h3>{{ plan.displayName }}</h3><span v-if="plan.key === billingSnapshot.billing.planKey" class="status-pill booked">Current</span></div><strong class="billing-price">{{ formatPlanPrice(plan) }}<small v-if="plan.amountCents !== null">/mo</small></strong><p>{{ plan.description }}</p><div class="billing-plan-meta">Up to {{ plan.maxBusinesses }} {{ plan.maxBusinesses === 1 ? 'business' : 'businesses' }}</div><button v-if="plan.key !== billingSnapshot.billing.planKey" class="primary-button small" type="button" :disabled="billingLoading || !billingSnapshot.stripeConfigured || !plan.checkoutReady" @click="startCheckout(plan)">{{ !billingSnapshot.stripeConfigured ? 'Contact support' : plan.checkoutReady ? (billingSnapshot.billing.status === 'active' ? 'Change to this plan →' : 'Start subscription →') : 'Unavailable' }}</button><span v-else class="saved-message">✓ Active plan</span></article></div>
+            <div class="billing-plan-grid"><article v-for="plan in billingSnapshot.plans" :key="plan.key" :class="['panel', 'billing-plan-card', { selected: plan.key === billingSnapshot.billing.planKey }]" ><div class="billing-plan-top"><h3>{{ plan.displayName }}</h3><span v-if="plan.key === billingSnapshot.billing.planKey" class="status-pill booked">Current</span></div><strong class="billing-price">{{ formatPlanPrice(plan) }}<small v-if="plan.amountCents !== null">/mo</small></strong><p>{{ plan.description }}</p><div class="billing-plan-meta">Up to {{ plan.maxBusinesses }} {{ plan.maxBusinesses === 1 ? 'business' : 'businesses' }}</div><div class="billing-plan-meta billing-plan-usage">{{ planConversationLabel(plan) }}</div><button v-if="plan.key !== billingSnapshot.billing.planKey && plan.amountCents !== null" class="primary-button small" type="button" :disabled="billingLoading || !billingSnapshot.stripeConfigured || !plan.checkoutReady" @click="startCheckout(plan)">{{ !billingSnapshot.stripeConfigured ? 'Contact support' : plan.checkoutReady ? (billingSnapshot.billing.status === 'active' ? 'Change to this plan' : 'Start subscription') : 'Unavailable' }}</button><a v-else-if="plan.key !== billingSnapshot.billing.planKey" class="outline-button small billing-plan-contact" href="mailto:hello@frontdeskwise.com?subject=FrontDeskWise%20Portfolio%20pricing">Contact support</a><span v-else class="saved-message">✓ Active plan</span></article></div>
             <p v-if="!billingSnapshot.stripeConfigured" class="billing-note">Online subscription checkout is not available for this workspace yet. <a href="mailto:hello@frontdeskwise.com">Contact support</a> to activate a plan.</p>
           </template>
           <article v-else class="panel empty-view"><div class="empty-icon"><DollarSign :size="30" :stroke-width="1.8" aria-hidden="true" /></div><h2>{{ billingError ? 'Billing unavailable' : 'Billing is loading' }}</h2><p>{{ billingError || 'Loading your organization plan and usage.' }}</p><button class="outline-button small" type="button" @click="refreshBillingPage">{{ billingError ? 'Retry' : 'Refresh' }}</button></article>
@@ -7646,6 +8865,10 @@ function startMarketingDemo() {
           <div class="section-toolbar"><div><p class="eyebrow">Internal operations</p><h2>{{ adminSectionTitle }}</h2><p>Run the platform with a consistent view of organizations, access, demos, and system health.</p></div><div class="toolbar-actions"><span v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</span><button class="outline-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Test SES email' }}</button><span v-if="adminLoading" class="conversation-status">Working…</span></div></div>
           <nav class="admin-section-tabs" aria-label="Admin sections"><button v-for="item in adminNavItems" :key="item.id" type="button" :class="{ active: adminSection === item.id }" @click="adminSection = item.id">{{ item.label }}</button></nav>
           <p v-if="adminError" class="form-error">{{ adminError }}</p>
+          <section v-if="adminSection === 'business-detail' && adminBusinessDetail" class="ds-card admin-onboarding-status-card">
+            <div class="ds-card-heading"><div><p class="eyebrow">Onboarding validation</p><h2>Website status: {{ formatLabel(adminBusinessDetail.business.onboardingStatus || 'needs_attention') }}</h2><p>{{ adminBusinessDetail.business.onboardingValidation?.message || 'This business has not completed website validation yet.' }}</p></div><span :class="['status-pill', adminBusinessDetail.business.onboardingStatus === 'valid' ? 'booked' : 'new']">{{ adminBusinessDetail.business.onboardingFailureCode ? formatLabel(adminBusinessDetail.business.onboardingFailureCode) : 'No failure code' }}</span></div>
+            <div class="health-list"><div><span>Failure classification</span><strong>{{ adminBusinessDetail.business.onboardingFailureCode || 'Not recorded' }}</strong></div><div><span>Readiness</span><strong>{{ adminBusinessDetail.business.onboardingValidation?.knowledgeReady ? 'Ready' : 'Needs attention' }}</strong></div><div><span>Last checked</span><strong>{{ adminBusinessDetail.business.onboardingValidatedAt ? new Date(adminBusinessDetail.business.onboardingValidatedAt).toLocaleString() : 'Not recorded' }}</strong></div></div>
+          </section>
           <template v-if="adminSection === 'overview'">
             <div class="ds-stat-grid admin-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Building2 :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizations.length }}</strong><small>Organizations</small><em>{{ adminTrialCount }} on trial</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><UserCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminLeadTotal }}</strong><small>Leads captured</small><em>Across all tenants</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminConversationTotal }}</strong><small>Conversations</small><em>Persisted outcomes</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminPausedCount + adminFailedDemoCount }}</strong><small>Needs attention</small><em>{{ adminDisabledUserCount }} disabled users</em></article></div>
             <div class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Platform health</p><h2>Know what is breaking</h2><p>Live checks for the API, database, storage, and email delivery.</p></div><span :class="['status-pill', adminHealth?.api === 'healthy' ? 'booked' : adminHealth?.api === 'degraded' ? 'qualified' : 'new']">{{ adminHealth?.api ?? 'checking' }}</span></div><div class="health-list"><div><span>API and database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Private storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Configured' : 'Needs setup' }}</strong></div><div><span>Email delivery</span><strong>{{ adminHealth?.emailConfigured ? 'Configured' : 'Needs setup' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Attention queue</p><h2>Operator follow-up</h2><p>Small, explicit queues keep the control plane useful.</p></div></div><div class="admin-attention-list"><button type="button" @click="adminSection = 'organizations'"><span>Paused organizations</span><strong>{{ adminPausedCount }}</strong></button><button type="button" @click="adminSection = 'demos'"><span>Failed or expired demos</span><strong>{{ adminFailedDemoCount }}</strong></button><button type="button" @click="adminSection = 'support'"><span>Open support cases</span><strong>{{ adminSupportSummary.open }}</strong></button><button type="button" @click="adminSection = 'installation-support'"><span>New installation requests</span><strong>{{ installationSupportSummary.new }}</strong></button><button type="button" @click="adminSection = 'users'"><span>Disabled users</span><strong>{{ adminDisabledUserCount }}</strong></button></div></article></div>
@@ -7660,6 +8883,27 @@ function startMarketingDemo() {
               <div class="admin-certification-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Observed production signals</p><h3>Improvement queue</h3></div><span class="status-pill qualified">{{ adminCertification.improvementSignals.recent.length }} recent</span></div><div v-if="adminCertification.improvementSignals.counts.length" class="admin-certification-score-list"><div v-for="signal in adminCertification.improvementSignals.counts" :key="signal.type"><span>{{ formatLabel(signal.type) }}</span><strong>{{ signal.count }}</strong><small>Last {{ signal.lastSeenAt ? new Date(signal.lastSeenAt).toLocaleString() : '—' }}</small></div></div><div v-else class="diagnostics-empty">No improvement signals recorded yet.</div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Recent examples</p><h3>Failure signals to review</h3></div></div><div v-if="adminCertification.improvementSignals.recent.length" class="admin-certification-signal-list"><div v-for="signal in adminCertification.improvementSignals.recent" :key="signal.id"><span class="status-pill qualified">{{ formatLabel(signal.type) }}</span><div><strong>{{ signal.businessName }}</strong><small>{{ signal.normalizedQuestion || signal.reason || 'No question captured' }}</small><em>{{ new Date(signal.occurredAt).toLocaleString() }}</em></div></div></div><div v-else class="diagnostics-empty">The platform will show redacted production examples here.</div></article></div>
             </template>
             <div v-else-if="!adminCertificationLoading" class="diagnostics-empty">No certification report is available in this deployment yet. Run the release gate and publish the report artifact.</div>
+          </article>
+          <article v-if="adminSection === 'experience-signals'" class="panel experience-signals-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Customer experience alerts</p><h2>Frustration & experience signals</h2><p>Find where visitors struggle, inspect the session trace, and turn recurring friction into a fixable product signal.</p></div><div class="toolbar-actions"><span v-if="adminExperienceSignals" class="status-pill" :class="adminExperienceSignals.summary.total ? 'new' : 'booked'">{{ adminExperienceSignals.summary.total }} open</span><button class="outline-button small" type="button" :disabled="adminExperienceSignalsLoading" @click="loadAdminExperienceSignals">{{ adminExperienceSignalsLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+            <p v-if="adminExperienceSignalsError" class="form-error">{{ adminExperienceSignalsError }}</p>
+            <div class="experience-signal-filter-row"><label>Status<select v-model="adminExperienceSignalStatusFilter" @change="loadAdminExperienceSignals"><option value="open">Open</option><option value="reviewed">Reviewed</option><option value="resolved">Resolved</option><option value="ignored">Ignored</option><option value="all">All</option></select></label><label>Severity<select v-model="adminExperienceSignalSeverityFilter" @change="loadAdminExperienceSignals"><option value="all">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label>Signal type<select v-model="adminExperienceSignalTypeFilter" @change="loadAdminExperienceSignals"><option value="all">All types</option><option v-for="item in adminExperienceSignals?.summary.byType ?? []" :key="item.type" :value="item.type">{{ formatLabel(item.type) }}</option></select></label></div>
+            <template v-if="adminExperienceSignals">
+              <div class="ds-stat-grid admin-detail-stat-grid"><article v-for="item in [{ key: 'critical', label: 'Critical', className: 'purple' }, { key: 'high', label: 'High', className: 'orange' }, { key: 'medium', label: 'Medium', className: 'blue' }, { key: 'low', label: 'Low', className: 'green' }]" :key="item.key" class="ds-stat-card"><span :class="['ds-stat-icon', item.className]"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminExperienceSignals.summary.bySeverity.find((entry) => entry.severity === item.key)?.count ?? 0 }}</strong><small>{{ item.label }} signals</small><em>Last 30 days</em></article></div>
+              <div class="admin-certification-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Recurring friction</p><h3>What to fix next</h3></div><span class="status-pill qualified">{{ adminExperienceSignals.clusters.length }} clusters</span></div><div v-if="adminExperienceSignals.clusters.length" class="admin-certification-score-list"><div v-for="cluster in adminExperienceSignals.clusters.slice(0, 8)" :key="cluster.clusterKey"><span>{{ formatLabel(cluster.type) }}<small>{{ cluster.businessName }}{{ cluster.workflowStep ? ` · ${cluster.workflowStep}` : '' }}</small></span><strong>{{ cluster.count }}</strong><small>{{ cluster.sessions }} session{{ cluster.sessions === 1 ? '' : 's' }}</small></div></div><div v-else class="diagnostics-empty">No recurring experience friction in this view.</div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Triage rule</p><h3>Trace before aggregate</h3></div></div><p>Super Admins get the redacted message and technical trace. Owners only receive the aggregate pattern and suggested improvement.</p><div class="health-list"><div><span>Language</span><strong>Redacted</strong></div><div><span>Session context</span><strong>Attached</strong></div><div><span>Owner exposure</span><strong>Aggregate only</strong></div></div></article></div>
+              <div class="experience-signal-list"><div v-if="!adminExperienceSignals.signals.length" class="diagnostics-empty">No experience signals match these filters.</div><article v-for="signal in adminExperienceSignals.signals" :key="signal.id" class="experience-signal-row"><div class="experience-signal-main"><div class="experience-signal-topline"><span :class="['status-pill', signal.severity === 'critical' || signal.severity === 'high' ? 'new' : signal.severity === 'medium' ? 'qualified' : 'booked']">{{ signal.severity }}</span><span class="status-pill qualified">{{ formatLabel(signal.type) }}</span><span class="experience-signal-confidence">{{ Math.round(signal.confidence * 100) }}% confidence</span></div><h3>{{ signal.business.name }}</h3><p>{{ signal.messageExcerptRedacted || 'Behavioral friction detected without a message excerpt.' }}</p><small>Likely layer: {{ formatLabel(signal.likelyLayer) }}<span v-if="signal.workflowStep"> · Step: {{ signal.workflowStep }}</span><span v-if="signal.publicationVersion"> · Publication: v{{ signal.publicationVersion }}</span></small><small>{{ new Date(signal.occurredAt).toLocaleString() }}<span v-if="signal.reason"> · {{ formatLabel(signal.reason) }}</span></small></div><div class="experience-signal-actions"><button class="text-button" type="button" @click="adminExperienceSignalTraceId = adminExperienceSignalTraceId === signal.id ? '' : signal.id">{{ adminExperienceSignalTraceId === signal.id ? 'Hide trace' : 'Open trace' }}</button><button v-if="signal.status === 'open'" class="outline-button small" type="button" :disabled="adminExperienceSignalsLoading" @click="updateAdminExperienceSignal(signal, 'reviewed')">Mark reviewed</button><button v-if="signal.status !== 'resolved'" class="outline-button small" type="button" :disabled="adminExperienceSignalsLoading" @click="updateAdminExperienceSignal(signal, 'resolved')">Resolve</button><button v-if="signal.status !== 'ignored'" class="text-button" type="button" :disabled="adminExperienceSignalsLoading" @click="updateAdminExperienceSignal(signal, 'ignored')">Ignore</button></div><div v-if="adminExperienceSignalTraceId === signal.id" class="experience-signal-trace"><div class="health-list"><div><span>Validation</span><strong>{{ String(signal.validationResult.status || 'not recorded') }}</strong></div><div><span>Model role</span><strong>{{ signal.modelRole || 'deterministic' }}</strong></div><div><span>Provider</span><strong>{{ String(signal.providerState.provider || 'none') }}</strong></div><div><span>Conversation</span><strong>{{ signal.conversationId || 'not linked' }}</strong></div></div><details open><summary>Attached session trace</summary><pre>{{ JSON.stringify(signal.trace, null, 2) }}</pre></details></div></article></div>
+            </template>
+            <div v-else-if="!adminExperienceSignalsLoading" class="diagnostics-empty">No experience signal data is available yet. Signals appear after visitors encounter friction in a published widget session.</div>
+          </article>
+          <article v-if="adminSection === 'feature-flags'" class="panel feature-flags-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Safe runtime rollout</p><h2>Feature flags</h2><p>Move behavior from internal tenants to reference tenants, a deterministic percentage, or everyone. Organization cohorts stay stable across requests.</p></div><div class="toolbar-actions"><span v-if="adminFeatureFlagsLoading" class="conversation-status">Working…</span><button class="outline-button small" type="button" :disabled="adminFeatureFlagsLoading" @click="loadAdminFeatureFlags">Refresh</button></div></div>
+            <p v-if="adminFeatureFlagsError" class="form-error">{{ adminFeatureFlagsError }}</p>
+            <p v-if="adminFeatureFlagsMessage" class="saved-message">✓ {{ adminFeatureFlagsMessage }}</p>
+            <div class="admin-detail-grid">
+              <article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Create a controlled rollout</p><h3>New flag</h3><p>Use a stable key such as <code>workflow.runtime_v2</code>. Keep safety-critical behavior fail-closed unless the default is explicitly verified.</p></div></div><form class="admin-detail-form" @submit.prevent="createAdminFeatureFlag"><label>Key<input v-model="adminFeatureFlagDraft.key" required maxlength="80" pattern="[a-zA-Z][a-zA-Z0-9._-]{1,79}" placeholder="workflow.runtime_v2" /></label><label>Description<textarea v-model="adminFeatureFlagDraft.description" rows="2" maxlength="500" placeholder="What behavior does this flag control?"></textarea></label><div class="admin-detail-form-grid"><label>Stage<select v-model="adminFeatureFlagDraft.stage"><option value="off">Off</option><option value="internal">Internal</option><option value="reference_tenants">Reference tenants</option><option value="percentage">Percentage</option><option value="all">All customers</option></select></label><label>Percentage<input v-model.number="adminFeatureFlagDraft.rolloutPercentage" type="number" min="0" max="100" step="0.01" :disabled="adminFeatureFlagDraft.stage !== 'percentage'" /></label></div><label>Reference tenants <span class="optional">used by the reference-tenants stage</span><select v-model="adminFeatureFlagDraft.referenceOrganizationIds" multiple size="5"><option v-for="organization in adminFeatureFlagOrganizations" :key="organization.id" :value="organization.id">{{ organization.name }} · {{ organization.slug }}{{ organization.isInternal ? ' · internal' : '' }}</option></select></label><button class="primary-button small" type="submit" :disabled="adminFeatureFlagsLoading || !adminFeatureFlagDraft.key.trim()">Create flag →</button></form></article>
+              <article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Rollout guardrails</p><h3>How cohorts work</h3><p>Stages are evaluated server-side. Tenant overrides take precedence over the stage and are recorded in the privileged audit log.</p></div></div><div class="health-list"><div><span>Internal</span><strong>Internal demo organizations</strong></div><div><span>Reference tenants</span><strong>Explicit organization list</strong></div><div><span>Percentage</span><strong>Stable SHA-256 bucket</strong></div><div><span>Kill switch</span><strong>Set stage to Off</strong></div></div><form class="feature-flag-override-form" @submit.prevent="saveAdminFeatureFlagOverride"><p class="eyebrow">Tenant override</p><div class="admin-detail-form-grid"><label>Flag<select v-model="adminFeatureFlagOverride.key" required><option v-for="flag in adminFeatureFlags" :key="flag.key" :value="flag.key">{{ flag.key }}</option></select></label><label>State<select v-model="adminFeatureFlagOverride.state"><option value="on">Force on</option><option value="off">Force off</option></select></label></div><label>Organization<select v-model="adminFeatureFlagOverride.organizationId" required><option v-for="organization in adminFeatureFlagOrganizations" :key="organization.id" :value="organization.id">{{ organization.name }} · {{ organization.slug }}</option></select></label><label>Reason<input v-model="adminFeatureFlagOverride.reason" maxlength="240" placeholder="Reference tenant validation" /></label><button class="outline-button small" type="submit" :disabled="adminFeatureFlagsLoading || !adminFeatureFlagOverride.key || !adminFeatureFlagOverride.organizationId">Save override →</button></form></article>
+            </div>
+            <div class="feature-flag-list"><div v-if="!adminFeatureFlags.length" class="diagnostics-empty">No feature flags are configured.</div><article v-for="flag in adminFeatureFlags" :key="flag.id" class="feature-flag-row"><div class="feature-flag-row-heading"><div><strong>{{ flag.key }}</strong><small>{{ flag.description || 'No description' }}</small><small>Updated {{ flag.updatedAt ? new Date(flag.updatedAt).toLocaleString() : '—' }}</small></div><span :class="['status-pill', flag.stage === 'off' ? 'new' : flag.stage === 'all' ? 'booked' : 'qualified']">{{ formatLabel(flag.stage) }}</span></div><div class="admin-detail-form-grid"><label>Stage<select v-model="flag.stage"><option value="off">Off</option><option value="internal">Internal</option><option value="reference_tenants">Reference tenants</option><option value="percentage">Percentage</option><option value="all">All customers</option></select></label><label>Percentage<input v-model.number="flag.rolloutPercentage" type="number" min="0" max="100" step="0.01" :disabled="flag.stage !== 'percentage'" /></label></div><label>Description<input v-model="flag.description" maxlength="500" /></label><label>Reference tenants<select v-model="flag.referenceOrganizationIds" multiple size="4"><option v-for="organization in adminFeatureFlagOrganizations" :key="organization.id" :value="organization.id">{{ organization.name }} · {{ organization.slug }}</option></select></label><div v-if="flag.overrides.length" class="feature-flag-overrides"><div v-for="override in flag.overrides" :key="override.organizationId" class="feature-flag-override"><span><strong>{{ adminFeatureFlagOrganizationName(override.organizationId) }}</strong><small>{{ override.state === 'on' ? 'Forced on' : 'Forced off' }} · {{ override.reason || 'No reason recorded' }}</small></span><button class="text-button" type="button" :disabled="adminFeatureFlagsLoading" @click="removeAdminFeatureFlagOverride(flag, override.organizationId)">Remove</button></div></div><div class="feature-flag-row-footer"><span>{{ flag.referenceOrganizationIds.length }} reference tenant{{ flag.referenceOrganizationIds.length === 1 ? '' : 's' }} · {{ flag.overrides.length }} override{{ flag.overrides.length === 1 ? '' : 's' }}</span><button class="primary-button small" type="button" :disabled="adminFeatureFlagsLoading" @click="saveAdminFeatureFlag(flag)">Save rollout →</button></div></article></div>
           </article>
           <article v-if="adminSection === 'overview' || adminSection === 'organizations'" class="panel table-panel admin-table-panel"><div class="table-heading admin-row"><span>Organization</span><span>Plan / status</span><span>Businesses</span><span>Outcomes</span><span>Actions</span></div><div v-if="!adminOrganizations.length" class="diagnostics-empty">No organizations found.</div><div v-for="organization in adminOrganizations" :key="organization.id" class="table-row admin-row"><div><strong>{{ organization.name }}</strong><small>{{ organization.ownerEmail ?? 'No owner email' }}</small></div><div><strong>{{ organization.planName }}</strong><small>{{ organization.status }} · {{ organization.mode }} · {{ organization.mrrAmountCents === null ? 'No MRR' : `$${(organization.mrrAmountCents / 100).toFixed(0)} MRR` }}</small><small v-if="organization.lastPaymentStatus || organization.cancelAtPeriodEnd">{{ organization.lastPaymentStatus ? `Payment ${organization.lastPaymentStatus}` : '' }}{{ organization.cancelAtPeriodEnd ? ' · cancellation scheduled' : '' }}</small></div><span>{{ organization.businessCount }}</span><span><strong>{{ organization.leadCount }}</strong> leads · {{ organization.conversationCount }} conversations</span><div class="admin-actions"><button class="outline-button small" type="button" :disabled="adminLoading || adminOrganizationDetailLoading" @click="loadAdminOrganizationDetail(organization.id)">Inspect</button><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'trial')">30-day trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminOrganizationAction(organization, 'suspend')">Suspend</button></div></div></article>
           <template v-if="adminSection === 'business-detail'">
@@ -7676,7 +8920,7 @@ function startMarketingDemo() {
               <div class="section-toolbar admin-detail-toolbar"><div><p class="eyebrow">Organization detail</p><h2>{{ adminOrganizationDetail.organization.name }}</h2><p>{{ adminOrganizationDetail.organization.slug }} · inspect business health and apply audited billing interventions.</p></div><div class="toolbar-actions"><button class="outline-button small" type="button" :disabled="adminLoading" @click="adminDetailBillingAction('trial')">Extend trial</button><button class="text-button" type="button" :disabled="adminLoading" @click="adminDetailBillingAction('suspend')">Suspend</button><button class="outline-button small" type="button" @click="adminSection = 'organizations'">← Back</button></div></div>
               <p v-if="adminBillingMessage" class="saved-message">✓ {{ adminBillingMessage }}</p>
               <div class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><DollarSign :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.organization.billing.plan.displayName }}</strong><small>Current plan</small><em>{{ adminOrganizationDetail.organization.billing.status }}</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><Building2 :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.businesses.length }} / {{ adminOrganizationDetail.organization.billing.plan.maxBusinesses }}</strong><small>Business capacity</small><em>{{ adminOrganizationDetail.organization.billing.access.allowed ? 'Write access' : 'Read-only' }}</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><UserCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.businesses.reduce((total, business) => total + business.leadCount, 0) }}</strong><small>Leads captured</small><em>Across businesses</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminOrganizationDetail.businesses.reduce((total, business) => total + business.conversationCount, 0) }}</strong><small>Conversations</small><em>{{ adminOrganizationDetail.owners.length }} members</em></article></div>
-              <div class="admin-detail-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Businesses & access</p><h2>Business health</h2><p>Review ownership, billing projection, source coverage, and activity before taking action.</p></div></div><div v-if="!adminOrganizationDetail.businesses.length" class="diagnostics-empty">No businesses are attached to this organization.</div><div v-for="business in adminOrganizationDetail.businesses" :key="business.id" class="admin-business-detail-row"><div><strong>{{ business.name }}</strong><small>{{ business.websiteUrl }} · {{ business.slug }}</small></div><div class="admin-business-metrics"><span>{{ business.sourceCount }} sources</span><span>{{ business.leadCount }} leads</span><span>{{ business.conversationCount }} conversations</span></div><div class="admin-business-status"><span :class="['status-pill', business.ownershipStatus === 'verified' ? 'booked' : 'qualified']">{{ business.ownershipStatus }}</span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ business.billingStatus }}</span></div><button v-if="business.ownershipStatus !== 'verified'" class="outline-button small" type="button" :disabled="adminLoading" @click="approveAdminBusiness(business)">Approve ownership</button><span v-else class="saved-message">✓ Verified</span></div><div class="detail-subsection"><p class="eyebrow">Organization members</p><div v-for="owner in adminOrganizationDetail.owners" :key="`${owner.email}-${owner.role}`" class="detail-list-row"><span><strong>{{ owner.name || 'Unnamed user' }}</strong><small>{{ owner.email }}</small></span><span class="status-pill qualified">{{ owner.role }}</span></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Billing intervention</p><h2>Apply a controlled override</h2><p>Use a documented reason. This updates the organization and projected business billing state.</p></div></div><form class="admin-detail-form" @submit.prevent="saveAdminPlanOverride"><label>Plan<select v-model="adminOverridePlanKey"><option value="starter">Starter</option><option value="growth">Growth</option><option value="multi_business">Multi-Business</option><option value="portfolio">Portfolio</option></select></label><div class="admin-detail-form-grid"><label>Interval<select v-model="adminOverrideInterval"><option value="month">Monthly</option><option value="year">Yearly</option></select></label><label>Amount (cents)<input v-model="adminOverrideAmountCents" type="number" min="0" step="1" inputmode="numeric" /></label><label>Max businesses<input v-model="adminOverrideMaxBusinesses" type="number" min="1" step="1" inputmode="numeric" /></label></div><label>Reason<textarea v-model="adminOverrideReason" rows="3" placeholder="Founding customer pricing, service recovery, or approved exception"></textarea></label><button class="primary-button small" type="submit" :disabled="adminLoading">{{ adminLoading ? 'Saving…' : 'Save intervention →' }}</button></form><div class="billing-intervention-note"><strong>Current billing</strong><span>{{ adminOrganizationDetail.organization.billing.status }} · {{ adminOrganizationDetail.organization.billing.plan.displayName }} · {{ adminOrganizationDetail.organization.billing.amountCents === null ? 'No amount' : `$${(adminOrganizationDetail.organization.billing.amountCents / 100).toFixed(2)}` }}</span><small v-if="adminOrganizationDetail.organization.billing.override">Existing override: {{ adminOrganizationDetail.organization.billing.override.reason }}</small><small v-if="adminOrganizationDetail.organization.billing.providerSubscriptionId">Stripe subscription {{ adminOrganizationDetail.organization.billing.providerSubscriptionId }} · {{ adminOrganizationDetail.organization.billing.lastPaymentStatus || 'payment pending' }}<span v-if="adminOrganizationDetail.organization.billing.cancelAtPeriodEnd"> · cancellation scheduled</span></small></div></article></div>
+            <div class="admin-detail-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Businesses & access</p><h2>Business health</h2><p>Review ownership, billing projection, source coverage, and activity before taking action.</p></div></div><div v-if="!adminOrganizationDetail.businesses.length" class="diagnostics-empty">No businesses are attached to this organization.</div><div v-for="business in adminOrganizationDetail.businesses" :key="business.id" class="admin-business-detail-row"><div><strong>{{ business.name }}</strong><small>{{ business.websiteUrl }} · {{ business.slug }}</small></div><div class="admin-business-metrics"><span>{{ business.sourceCount }} sources</span><span>{{ business.leadCount }} leads</span><span>{{ business.conversationCount }} conversations</span></div><div class="admin-business-status"><span :class="['status-pill', business.ownershipStatus === 'verified' ? 'booked' : 'qualified']">{{ business.ownershipStatus }}</span><span :class="['status-pill', business.billingStatus === 'active' || business.billingStatus === 'trial' ? 'booked' : 'new']">{{ business.billingStatus }}</span></div><button v-if="business.ownershipStatus !== 'verified'" class="outline-button small" type="button" :disabled="adminLoading" @click="approveAdminBusiness(business)">Approve ownership</button><span v-else class="saved-message">✓ Verified</span></div><div class="detail-subsection"><p class="eyebrow">Organization members</p><div v-for="owner in adminOrganizationDetail.owners" :key="`${owner.email}-${owner.role}`" class="detail-list-row"><span><strong>{{ owner.name || 'Unnamed user' }}</strong><small>{{ owner.email }}</small></span><span class="status-pill qualified">{{ owner.role }}</span></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Billing intervention</p><h2>Apply a controlled override</h2><p>Use a documented reason. This updates the organization and projected business billing state.</p></div></div><form class="admin-detail-form" @submit.prevent="saveAdminPlanOverride"><label>Plan<select v-model="adminOverridePlanKey"><option value="starter">Starter</option><option value="growth">Growth</option><option value="multi_business">Business Plus</option><option value="portfolio">Portfolio / Agency</option></select></label><div class="admin-detail-form-grid"><label>Interval<select v-model="adminOverrideInterval"><option value="month">Monthly</option><option value="year">Yearly</option></select></label><label>Amount (cents)<input v-model="adminOverrideAmountCents" type="number" min="0" step="1" inputmode="numeric" /></label><label>Max businesses<input v-model="adminOverrideMaxBusinesses" type="number" min="1" step="1" inputmode="numeric" /></label></div><label>Reason<textarea v-model="adminOverrideReason" rows="3" placeholder="Founding customer pricing, service recovery, or approved exception"></textarea></label><button class="primary-button small" type="submit" :disabled="adminLoading">{{ adminLoading ? 'Saving…' : 'Save intervention →' }}</button></form><div class="billing-intervention-note"><strong>Current billing</strong><span>{{ adminOrganizationDetail.organization.billing.status }} · {{ adminOrganizationDetail.organization.billing.plan.displayName }} · {{ adminOrganizationDetail.organization.billing.amountCents === null ? 'No amount' : `$${(adminOrganizationDetail.organization.billing.amountCents / 100).toFixed(2)}` }}</span><small v-if="adminOrganizationDetail.organization.billing.override">Existing override: {{ adminOrganizationDetail.organization.billing.override.reason }}</small><small v-if="adminOrganizationDetail.organization.billing.providerSubscriptionId">Stripe subscription {{ adminOrganizationDetail.organization.billing.providerSubscriptionId }} · {{ adminOrganizationDetail.organization.billing.lastPaymentStatus || 'payment pending' }}<span v-if="adminOrganizationDetail.organization.billing.cancelAtPeriodEnd"> · cancellation scheduled</span></small></div></article></div>
               <article class="panel table-panel admin-timeline-panel"><div class="panel-heading"><div><p class="eyebrow">Subscription event timeline</p><h2>Billing audit</h2><p>Internal Stripe and lifecycle milestones for troubleshooting.</p></div></div><div v-if="!adminOrganizationDetail.billingTimeline.length" class="diagnostics-empty">No billing events recorded yet.</div><div v-for="event in adminOrganizationDetail.billingTimeline" :key="event.eventKey" class="detail-list-row"><span><strong>{{ formatLabel(event.eventName) }}</strong><small>{{ event.occurredAt ? new Date(event.occurredAt).toLocaleString() : 'Unknown time' }}</small></span><span class="status-pill" :class="event.status === 'sent' ? 'booked' : event.status === 'failed' ? 'new' : 'qualified'">{{ event.status }}</span></div></article>
             </template>
           </template>
@@ -7730,6 +8974,21 @@ function startMarketingDemo() {
               <div><small>Verification: {{ item.ownershipStatus }}</small><small>Widget: {{ item.widgetDetected ? `Detected · ${item.widgetLoadCount} load${item.widgetLoadCount === 1 ? '' : 's'}` : 'Not detected' }}</small><small v-if="item.widgetLastLoadedAt">Last seen {{ new Date(item.widgetLastLoadedAt).toLocaleString() }}</small></div>
               <select v-model="item.assignedUserId" aria-label="Assign installation support request" :disabled="installationSupportLoading" @change="updateAdminInstallationSupport(item)"><option :value="null">Unassigned</option><option v-for="assignee in installationSupportAssignees" :key="assignee.id" :value="assignee.id">{{ assignee.name || assignee.email }}</option></select>
               <select v-model="item.status" aria-label="Update installation support status" :disabled="installationSupportLoading" @change="updateAdminInstallationSupport(item)"><option value="new">New</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option></select>
+            </div>
+          </article>
+          <article v-if="adminSection === 'recovery'" class="panel onboarding-recovery-admin-panel">
+            <div class="section-toolbar"><div><p class="eyebrow">Customer onboarding health</p><h2>Recovery funnel</h2><p>Recover high-intent setups with the exact progress, blocker, and next step each owner needs.</p></div><div class="toolbar-actions"><button class="outline-button small" type="button" :disabled="adminRecoveryLoading" @click="loadAdminRecovery">{{ adminRecoveryLoading ? 'Refreshing…' : 'Refresh' }}</button></div></div>
+            <p v-if="adminRecoveryError" class="form-error">{{ adminRecoveryError }}</p>
+            <div v-if="adminRecovery" class="ds-stat-grid admin-detail-stat-grid recovery-funnel-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><UsersRound :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRecovery.funnel.incompleteSignups }}</strong><small>Incomplete signups</small><em>Not published yet</em></article><article class="ds-stat-card"><span class="ds-stat-icon purple"><Mail :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRecovery.funnel.reminded }}</strong><small>Reminded</small><em>Entered recovery</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><RotateCcw :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRecovery.funnel.returned }}</strong><small>Returned</small><em>Activity after email</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><CircleCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRecovery.funnel.finishedSetup }}</strong><small>Finished setup</small><em>80%+ complete</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><BadgeCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRecovery.funnel.published }}</strong><small>Published</small><em>Live AI front desks</em></article></div>
+            <div v-if="adminRecovery" class="recovery-funnel-explainer"><span>{{ adminRecovery.funnel.incompleteSignups }} incomplete signups</span><ArrowRight :size="14" aria-hidden="true" /><span>{{ adminRecovery.funnel.reminded }} reminded</span><ArrowRight :size="14" aria-hidden="true" /><span>{{ adminRecovery.funnel.returned }} returned</span><ArrowRight :size="14" aria-hidden="true" /><span>{{ adminRecovery.funnel.finishedSetup }} finished setup</span><ArrowRight :size="14" aria-hidden="true" /><span>{{ adminRecovery.funnel.published }} published</span></div>
+            <div class="table-heading onboarding-recovery-row"><span>Business / owner</span><span>Progress</span><span>Next step / blocker</span><span>Recovery state</span><span>Activity</span></div>
+            <div v-if="!adminRecovery?.records.length" class="diagnostics-empty">No onboarding recovery records yet.</div>
+            <div v-for="item in adminRecovery?.records" :key="item.businessId" class="table-row onboarding-recovery-row">
+              <div><strong>{{ item.businessName }}</strong><small>{{ item.ownerName || 'Verified owner' }}<span v-if="item.ownerEmail"> · {{ item.ownerEmail }}</span></small><small>{{ formatLabel(item.onboardingStage) }}</small></div>
+              <div class="recovery-progress-cell"><strong>{{ item.published ? 'Published' : `${item.completionPercent}%` }}</strong><span class="progress-bar"><span :style="{ width: `${item.published ? 100 : item.completionPercent}%` }"></span></span></div>
+              <div><strong>{{ item.currentBlocker || (item.published ? 'Live' : 'No blocker recorded') }}</strong><small v-if="item.lastSuccessfulStep">Last success: {{ item.lastSuccessfulStep }}</small><small v-if="item.lastError">Error: {{ item.lastError }}</small></div>
+              <div><span :class="['status-pill', item.unsubscribed || item.dormant ? 'new' : item.reminderCount ? 'qualified' : 'booked']">{{ item.unsubscribed ? 'Unsubscribed' : item.dormant ? 'Dormant' : item.reminderCount ? `${item.reminderCount} reminder${item.reminderCount === 1 ? '' : 's'}` : 'Monitoring' }}</span><small>{{ item.returnedAfterEmail ? 'Returned after email' : item.emailOpened ? 'Email opened' : item.lastReminderType ? formatLabel(item.lastReminderType) : 'No email yet' }}</small></div>
+              <div><strong>{{ item.lastActivityAt ? new Date(item.lastActivityAt).toLocaleString() : '—' }}</strong><small v-if="item.lastReminderAt">Last reminder {{ new Date(item.lastReminderAt).toLocaleString() }}</small></div>
             </div>
           </article>
           <article v-if="adminSection === 'messaging'" class="panel messaging-admin-panel">
@@ -7795,7 +9054,7 @@ function startMarketingDemo() {
         <label>Internal notes<textarea v-model="leadDetailNotes" rows="5" placeholder="Add context for the team…"></textarea></label>
         <p class="lead-detail-meta"><span>Intent: {{ selectedLead.intent }}</span><span>Source: {{ selectedLead.source }}</span></p>
         <div v-if="selectedLead.metadata.workflow || selectedLead.metadata.selectedService || selectedLead.metadata.selectedLocation" class="lead-qualification-card"><span class="eyebrow">Qualification</span><strong>{{ formatLabel(String(selectedLead.metadata.workflow || selectedLead.intent)) }}</strong><small v-if="selectedLead.metadata.selectedService">Recommended: {{ selectedLead.metadata.selectedService }}</small><small v-if="selectedLead.metadata.selectedLocation">Location: {{ selectedLead.metadata.selectedLocation }}</small><small v-if="selectedLead.metadata.schedulePreference">Schedule: {{ selectedLead.metadata.schedulePreference }}</small><small v-if="selectedLead.metadata.providerObjectId">Provider ID: {{ selectedLead.metadata.providerObjectId }}</small><small v-if="selectedLead.metadata.conversionStage">Stage: {{ formatLabel(String(selectedLead.metadata.conversionStage)) }}</small></div>
-        <div class="lead-detail-actions"><button class="outline-button small danger-text" type="button" :disabled="leadDetailLoading" @click="deleteLead">Delete record</button><button class="primary-button auth-submit" type="submit" :disabled="leadDetailLoading">{{ leadDetailLoading ? 'Saving…' : 'Save lead →' }}</button></div>
+        <div class="lead-detail-actions"><button v-if="!focusedTeamMode" class="outline-button small danger-text" type="button" :disabled="leadDetailLoading" @click="deleteLead">Delete record</button><button class="primary-button auth-submit" type="submit" :disabled="leadDetailLoading">{{ leadDetailLoading ? 'Saving…' : 'Save lead →' }}</button></div>
       </form>
     </div>
 

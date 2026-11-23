@@ -20,5 +20,23 @@ export default defineConfig({
       "/health": "http://localhost:8787",
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("/node_modules/firebase/") || id.includes("/node_modules/@firebase/")) return "firebase";
+          if (id.includes("/node_modules/@lucide/") || id.includes("/node_modules/simple-icons/")) return "icons";
+          if (id.includes("/node_modules/mixpanel-browser/")) return "analytics";
+          if (id.includes("/src/analytics/")) return "analytics";
+          if (id.includes("/src/auth/firebase.")) return "auth";
+          if (id.includes("/src/components/ui/")) return "ui";
+          if (id.includes("/src/pwa.")) return "pwa";
+          if (id.includes("/src/router/")) return "router";
+          if (id.includes("/src/marketing.")) return "marketing-data";
+          if (id.includes("/src/workflow-generator.")) return "workflow";
+        },
+      },
+    },
+  },
 });
 

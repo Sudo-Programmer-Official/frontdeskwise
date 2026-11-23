@@ -25,7 +25,28 @@ const marketing = JSON.parse(await readFile(resolve(here, "../src/marketing-page
 const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vue"), "utf8");
 const metadataScript = await readFile(resolve(here, "../scripts/generate-site-metadata.mjs"), "utf8");
 const index = await readFile(resolve(here, "../index.html"), "utf8");
+const pwa = await readFile(resolve(here, "../src/pwa.ts"), "utf8");
+const serviceWorker = await readFile(resolve(here, "../public/sw.js"), "utf8");
 const apiServer = await readFile(resolve(here, "../../api/src/server.ts"), "utf8");
+const pushMigration = await readFile(resolve(here, "../../../infra/db/074_web_push_subscriptions.sql"), "utf8");
+
+test("Google Tag Manager is installed in the HTML shell", () => {
+  assert.match(index, /googletagmanager\.com\/gtm\.js\?id=\" \+ i/);
+  assert.match(index, /GTM-5447VNJL/);
+  assert.match(index, /googletagmanager\.com\/ns\.html\?id=GTM-5447VNJL/);
+});
+
+test("operator PWA shell and push deep links are present", () => {
+  assert.match(index, /site\.webmanifest/);
+  assert.match(pwa, /beforeinstallprompt/);
+  assert.match(pwa, /pushManager\.subscribe/);
+  assert.match(serviceWorker, /showNotification/);
+  assert.match(serviceWorker, /openWindow/);
+  assert.match(serviceWorker, /safeUrl/);
+  assert.match(apiServer, /\/push\/config/);
+  assert.match(apiServer, /\/push-subscriptions/);
+  assert.match(pushMigration, /web_push_subscriptions/);
+});
 
 test("owner production controls remain present", () => {
   const ownerSurface = `${app}\n${agent}`;
@@ -49,9 +70,11 @@ test("owner production controls remain present", () => {
     assert.ok(ownerSurface.includes(control), `missing owner control: ${control}`);
   }
   assert.match(app, /const navSections/);
-  assert.match(app, /label: "Customers"/);
-  assert.match(app, /label: "AI front desk"/);
-  assert.match(app, /label: "Business"/);
+  for (const operatingStage of ["Launch", "Operate", "Convert", "Improve"]) {
+    assert.match(app, new RegExp(`label: "${operatingStage}"`));
+  }
+  assert.match(app, /label: "Handoff & alerts"/);
+  assert.match(app, /label: "Booking & CTAs"/);
   assert.match(app, /Your AI front desk is ready/);
   assert.match(app, /sidebar-account/);
   assert.match(app, /agent-tabs/);
@@ -328,6 +351,7 @@ test("application navigation is route-driven and refresh-safe", () => {
     'segments[0] === "demo"',
     'segments[0] === "onboarding"',
     'segments[0] === "platform"',
+    'segments[0] === "partner"',
     'segments[0] === "app"',
     '"organization-detail"',
     '"business-detail"',
@@ -341,6 +365,11 @@ test("application navigation is route-driven and refresh-safe", () => {
   assert.match(app, /window\.history\[replace \? "replaceState" : "pushState"\]/);
   assert.match(app, /window\.addEventListener\("popstate", handleRouteChange\)/);
   assert.match(app, /Keep control-plane and onboarding deep links stable/);
+  const partnerRoute = parseRoute({ pathname: "/partner/clients", search: "" });
+  assert.deepEqual(partnerRoute, { kind: "partner", section: "clients" });
+  assert.equal(routeView(partnerRoute), "partner");
+  assert.equal(routePath(partnerRoute), "/partner/clients");
+  assert.match(app, /PartnerPortal/);
 });
 
 test("Stripe checkout keeps the webhook-authoritative success journey visible", () => {
@@ -418,6 +447,10 @@ test("public SEO routes are unique, indexable, and statically packaged", () => {
   }
   assert.match(marketingComponent, /marketing-page-faq-list/);
   assert.match(marketingComponent, /Calculate readiness score/);
+  assert.ok(marketing.some((page) => page.path === "/partners"), "partner channel page is part of the public content cluster");
+  assert.match(apiServer, /\/api\/v1\/partners\/demos/);
+  assert.match(apiServer, /\/api\/v1\/partners\/clients/);
+  assert.match(apiServer, /partner_client_links/);
   assert.match(metadataScript, /sitemap\.xml/);
   assert.match(metadataScript, /Disallow: \/app\//);
 });

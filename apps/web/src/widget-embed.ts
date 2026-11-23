@@ -11,6 +11,12 @@ import {
   type WidgetRendererController,
   type WidgetState,
 } from "./widget-ui/renderer";
+import {
+  initializeWidgetMixpanel,
+  MIXPANEL_EVENTS,
+  trackWidgetMixpanel,
+  trackWidgetMixpanelOnce,
+} from "./analytics/mixpanel-widget";
 
 type PerformanceEventDetails = {
   durationMs?: number;
@@ -308,6 +314,37 @@ type FrontDeskWiseWindow = Window & {
     }).catch(() => { /* Telemetry must never interrupt the visitor flow. */ });
   }
 
+  function productAnalytics(event: typeof MIXPANEL_EVENTS[keyof typeof MIXPANEL_EVENTS], properties: Record<string, unknown> = {}): void {
+    trackWidgetMixpanel(event, {
+      source: "widget",
+      surface: "visitor_widget",
+      site_key: siteKey,
+      ...properties,
+    });
+  }
+
+  function productAnalyticsOnce(key: string, event: typeof MIXPANEL_EVENTS[keyof typeof MIXPANEL_EVENTS], properties: Record<string, unknown> = {}): void {
+    trackWidgetMixpanelOnce(key, event, {
+      source: "widget",
+      surface: "visitor_widget",
+      site_key: siteKey,
+      ...properties,
+    });
+  }
+
+  function trackConversationStatus(status: string | undefined): void {
+    if (!conversationId) return;
+    if (status === "CONTACT_REQUIRED" || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") {
+      productAnalyticsOnce(`handoff-requested:${conversationId}`, MIXPANEL_EVENTS.HUMAN_REQUESTED, { conversation_status: status });
+    }
+    if (status === "HUMAN_ACTIVE" || status === "AI_ASSISTED") {
+      productAnalyticsOnce(`staff-takeover:${conversationId}`, MIXPANEL_EVENTS.STAFF_TAKEOVER, { conversation_status: status });
+    }
+    if (status === "RESOLVED") {
+      productAnalyticsOnce(`conversation-resolved:${conversationId}`, MIXPANEL_EVENTS.CONVERSATION_RESOLVED, { conversation_status: status });
+    }
+  }
+
   function handoffDismissalKey(): string {
     return `frontdeskwise:handoff-dismissed:${siteKey}:${conversationId ? `conversation:${conversationId}` : `session:${visitorId}`}`;
   }
@@ -351,7 +388,8 @@ type FrontDeskWiseWindow = Window & {
   }
 
   function renderConversationStatus(status: string | undefined, options: { returning?: boolean; handoffRequestedAt?: string | null; notificationStatus?: string } = {}): void {
-    const waitingForStaff = status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
+    const contactRequired = status === "CONTACT_REQUIRED";
+    const waitingForStaff = contactRequired || status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED";
     const normalizedStatus = (status || "AI_ACTIVE") as WidgetHandoffStatus;
     const followUpPending = normalizedStatus === "FOLLOW_UP_PENDING";
     if (normalizedStatus === "HUMAN_ACTIVE" || waitingForStaff || followUpPending) {
@@ -359,7 +397,7 @@ type FrontDeskWiseWindow = Window & {
       proactiveShown = true;
     }
     if (waitingForStaff || followUpPending) {
-      updateState({ handoffStatus: normalizedStatus, handoffRequestedAt: options.handoffRequestedAt ?? state.handoffRequestedAt ?? null });
+      updateState({ handoffStatus: normalizedStatus, handoffRequestedAt: options.handoffRequestedAt ?? state.handoffRequestedAt ?? null, ...(contactRequired && !state.leadCaptured ? { leadVisible: true } : {}) });
       if (followUpPending) {
         if (!handoffFollowUpShown) {
           handoffFollowUpShown = true;
@@ -371,9 +409,13 @@ type FrontDeskWiseWindow = Window & {
       if (!handoffWaiting) {
         handoffWaiting = true;
         showHandoffNotice(
-          options.notificationStatus === "failed"
-            ? "Your message has been saved for the team."
-            : options.returning ? "You still have a conversation waiting for the team. I’m still here if you have questions." : "A team member has been notified. I’m still here if you have questions.",
+          contactRequired
+            ? options.notificationStatus === "failed"
+              ? "Your request is saved for the team. Share an email or phone so we can reach you if you step away. You can keep chatting here."
+              : "A team member has been notified. Share an email or phone so we can reach you if you step away. You can keep chatting here."
+            : options.notificationStatus === "failed"
+              ? "Your message has been saved for the team."
+              : options.returning ? "You still have a conversation waiting for the team. I’m still here if you have questions." : "A team member has been notified. I’m still here if you have questions.",
           options.returning,
         );
       }
@@ -533,6 +575,7 @@ type FrontDeskWiseWindow = Window & {
     if (!conversationId) return;
     try {
       const payload = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}`);
+      trackConversationStatus(payload.conversation?.status);
       if (payload.conversation?.status === "RESOLVED" || payload.conversation?.status === "EXPIRED") {
         conversationId = null;
         resetConversationUi();
@@ -562,6 +605,7 @@ type FrontDeskWiseWindow = Window & {
     try {
       const payload = await api<ConversationPayload>(`/api/v1/widget/${encodeURIComponent(siteKey)}/conversations/${encodeURIComponent(conversationId)}/status`);
       const remoteStatus = payload.conversation?.status || "AI_ACTIVE";
+      trackConversationStatus(remoteStatus);
       if (remoteStatus === "RESOLVED" || remoteStatus === "EXPIRED") {
         conversationId = null;
         resetConversationUi();
@@ -698,7 +742,7 @@ type FrontDeskWiseWindow = Window & {
 
   function hasActiveHandoff(): boolean {
     if (!conversationId) return false;
-    return state.handoffStatus === "HUMAN_ACTIVE" || state.handoffStatus === "WAITING_FOR_STAFF" || state.handoffStatus === "HANDOFF_REQUESTED" || state.handoffStatus === "FOLLOW_UP_PENDING";
+    return state.handoffStatus === "HUMAN_ACTIVE" || state.handoffStatus === "CONTACT_REQUIRED" || state.handoffStatus === "WAITING_FOR_STAFF" || state.handoffStatus === "HANDOFF_REQUESTED" || state.handoffStatus === "FOLLOW_UP_PENDING";
   }
 
   function aiSuppressedByHandoff(status: string | undefined): boolean {
@@ -722,6 +766,10 @@ type FrontDeskWiseWindow = Window & {
     clearProactiveEngagement();
     suppressProactive(config.proactiveFrequency || "session", "shown");
     markPerformance("proactive_triggered");
+    productAnalytics(MIXPANEL_EVENTS.PRIMARY_CTA_SHOWN, {
+      cta_source: "proactive",
+      status: "shown",
+    });
     telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "shown", behavior: config.proactiveBehavior || "teaser" } });
     if ((config.proactiveBehavior || "teaser") === "open") {
       renderer.open("proactive", false);
@@ -831,6 +879,10 @@ type FrontDeskWiseWindow = Window & {
         body: JSON.stringify({ sessionId: visitorId, newConversation: true }),
       });
       conversationId = started.conversationId;
+      productAnalyticsOnce(`conversation-started:${conversationId}`, MIXPANEL_EVENTS.CONVERSATION_STARTED, {
+        conversation_status: "AI_ACTIVE",
+        resumed: Boolean(started.resumed),
+      });
       resetConversationUi();
       setHealth("READY", "", { statusAction: undefined });
     } catch (error) {
@@ -868,6 +920,10 @@ type FrontDeskWiseWindow = Window & {
       });
       const conversationChanged = conversationId !== started.conversationId;
       conversationId = started.conversationId;
+      productAnalyticsOnce(`conversation-started:${conversationId}`, MIXPANEL_EVENTS.CONVERSATION_STARTED, {
+        conversation_status: "AI_ACTIVE",
+        resumed: Boolean(started.resumed),
+      });
       if (conversationChanged) {
         const pendingMessage = state.messages.find((message) => message.id === messageId);
         resetConversationUi(pendingMessage);
@@ -910,6 +966,13 @@ type FrontDeskWiseWindow = Window & {
         ...(handoffActive ? { leadVisible: false } : {}),
       });
       if (answer.primaryCta && !handoffActive) {
+        productAnalytics(MIXPANEL_EVENTS.PRIMARY_CTA_SHOWN, {
+          action_id: answer.primaryCta.actionId,
+          action_key: answer.primaryCta.key,
+          execution_mode: answer.primaryCta.executionMode,
+          tracking_key: answer.primaryCta.trackingKey,
+          cta_source: "primary_conversion",
+        });
         telemetry("CTA_SHOWN", {
           flowId: answer.primaryCta.actionId,
           metadata: {
@@ -984,10 +1047,18 @@ type FrontDeskWiseWindow = Window & {
       addMessage(answer.answer, "assistant", answer.citations || []);
       updateState({ actionError: "", healthState: "READY" });
       reconcileRemoteConversation(answer.conversation);
+      trackConversationStatus(answer.conversation?.status);
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       renderConversationStatus(answer.conversation?.status, { handoffRequestedAt: answer.conversation?.handoffRequestedAt });
       if (conversationId && state.isOpen) startPolling();
       renderActionForm(answer.action);
+      if (answer.action?.status === "completed") {
+        productAnalytics(MIXPANEL_EVENTS.CTA_CONVERSION_COMPLETED, {
+          action_id: action.id,
+          cta_source: "workflow",
+          success: true,
+        });
+      }
     } catch (error) {
       updateMessage(submissionMessageId, { status: "failed", retryable: false });
       updateState({ actionError: "We couldn’t send your details. Your entries are still here — please try again.", healthState: "ACTION_FAILED" });
@@ -997,7 +1068,13 @@ type FrontDeskWiseWindow = Window & {
   }
 
   async function submitLead(values: { name: string; email: string; phone: string; consent: boolean }): Promise<void> {
-    if (!values.name || !values.email || !conversationId || state.leadSubmitting) return;
+    if (!conversationId || state.leadSubmitting) return;
+    const handoffContact = state.handoffStatus === "CONTACT_REQUIRED";
+    if (handoffContact && !values.email && !values.phone) {
+      addMessage("Please share the best email or phone number for the team to reach you if you step away.", "assistant");
+      return;
+    }
+    if (!handoffContact && (!values.name || !values.email)) return;
     const consent = state.consentGiven === true || values.consent;
     if (config?.requireLeadConsent && !consent) {
       addMessage("Please confirm that you agree to share your details.", "assistant");
@@ -1006,9 +1083,24 @@ type FrontDeskWiseWindow = Window & {
     if (consent) rememberConsent();
     updateState({ leadSubmitting: true });
     try {
-      await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name, email: values.email, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString() }) });
+      const result = await api(`/api/v1/widget/${encodeURIComponent(siteKey)}/leads`, { method: "POST", body: JSON.stringify({ conversationId, name: values.name || null, email: values.email || null, phone: values.phone || null, intent: lastQuestion, consent: true, consentAt: new Date().toISOString(), pageUrl: window.location.href }) }) as { conversation?: ConversationPayload["conversation"] };
       updateState({ leadCaptured: true, leadVisible: false });
-      addMessage("Thanks — your details were sent to the team.", "assistant");
+      if (result.conversation) {
+        reconcileRemoteConversation(result.conversation);
+        trackConversationStatus(result.conversation.status);
+        lastConversationUpdatedAt = result.conversation.updatedAt || lastConversationUpdatedAt;
+        renderConversationStatus(result.conversation.status, { handoffRequestedAt: result.conversation.handoffRequestedAt, notificationStatus: result.conversation.handoffNotificationStatus });
+      }
+      addMessage(
+        handoffContact
+          ? "Got it — I’ve saved your details. You can stay here and keep chatting with me while we wait for a team member to join."
+          : "Thanks — your details were sent to the team.",
+        "assistant",
+      );
+      productAnalytics(MIXPANEL_EVENTS.CTA_CONVERSION_COMPLETED, {
+        cta_source: handoffContact ? "handoff_contact" : "lead_form",
+        success: true,
+      });
     } catch (error) {
       addMessage("We couldn’t send your details. Your entries are still here — please try again.", "assistant");
       setHealth("ACTION_FAILED", "", { statusContacts: fallbackContacts() });
@@ -1024,6 +1116,7 @@ type FrontDeskWiseWindow = Window & {
   }
 
   visitorId = getVisitorId();
+  initializeWidgetMixpanel({ site_key: siteKey, surface: "visitor_widget", source: "widget" });
   state = { ...state, consentGiven: hasRememberedConsent() };
   restoreInteractionState();
   window.addEventListener("offline", () => {
@@ -1073,6 +1166,13 @@ type FrontDeskWiseWindow = Window & {
     },
     onAsk: (question) => { void ask(question); },
     onPrimaryCtaClick: (cta) => {
+      productAnalytics(MIXPANEL_EVENTS.PRIMARY_CTA_CLICKED, {
+        action_id: cta.actionId,
+        action_key: cta.key,
+        execution_mode: cta.executionMode,
+        tracking_key: cta.trackingKey,
+        cta_source: "primary_conversion",
+      });
       telemetry(cta.executionMode === "DIRECT_LINK" ? "DEMO_LINK_OPENED" : "CTA_CLICKED", { flowId: cta.actionId, metadata: { source: "primary-conversion", actionId: cta.actionId, actionKey: cta.key, trackingKey: cta.trackingKey, executionMode: cta.executionMode } });
     },
     onRetryConfig: () => { void loadConfig(); },

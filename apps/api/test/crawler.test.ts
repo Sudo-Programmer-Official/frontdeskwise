@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
-import { CrawlError, detectSpaIndicators, extractBrandColors, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
+import { assertPublicUrl, CrawlError, detectSpaIndicators, extractBrandColors, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey } from "../src/crawler.ts";
 import { PAGE_TYPES } from "../src/page-classification.ts";
 
 test("normalisePublicUrl adds https to a bare domain", () => {
@@ -19,6 +19,12 @@ test("normalisePublicUrl still rejects unsupported protocols", () => {
     () => normalisePublicUrl("ftp://example.com"),
     (error: unknown) => error instanceof CrawlError && error.message === "websiteUrl must use http or https",
   );
+});
+
+test("crawler rejects literal private and metadata destinations before fetch", async () => {
+  await assert.rejects(() => assertPublicUrl("http://127.0.0.1:8080/health"), (error: unknown) => error instanceof CrawlError);
+  await assert.rejects(() => assertPublicUrl("http://169.254.169.254/latest/meta-data"), (error: unknown) => error instanceof CrawlError);
+  await assert.rejects(() => assertPublicUrl("https://service.internal/health"), (error: unknown) => error instanceof CrawlError);
 });
 
 test("websiteIdentityKey treats protocol, www, and trailing slash variants as one site", () => {

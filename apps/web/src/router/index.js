@@ -4,6 +4,7 @@ const workspaceViews = new Set([
 ]);
 const settingsTabs = new Set(["general", "team", "integrations", "verification", "notifications", "billing"]);
 const agentTabs = new Set(["capabilities", "behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
+const partnerSections = new Set(["overview", "clients", "referrals", "settings"]);
 function cleanPath(pathname) {
     const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
     return path || "/";
@@ -77,6 +78,10 @@ export function parseRoute(location = window.location) {
         const step = segments[1] && ["business", "knowledge", "agent", "install"].includes(segments[1]) ? segments[1] : "index";
         return { kind: "onboarding", step };
     }
+    if (segments[0] === "partner") {
+        const section = segments[1] && partnerSections.has(segments[1]) ? segments[1] : "overview";
+        return { kind: "partner", section };
+    }
     if (segments[0] === "app" && segments[1] === "settings" && segments[2] === "billing" && segments[3] === "success") {
         const sessionId = query.get("session_id")?.trim();
         return { kind: "billing-success", ...(sessionId ? { sessionId } : {}) };
@@ -90,12 +95,18 @@ export function parseRoute(location = window.location) {
             return { kind: "platform", section: "business-detail", businessId: segments[2] };
         if (segments[1] === "action-registry")
             return { kind: "platform", section: "action-registry" };
+        if (segments[1] === "experience-signals")
+            return { kind: "platform", section: "experience-signals" };
+        if (segments[1] === "feature-flags")
+            return { kind: "platform", section: "feature-flags" };
         if (segments[1] === "users")
             return { kind: "platform", section: "users" };
         if (segments[1] === "demos")
             return { kind: "platform", section: "demos" };
         if (segments[1] === "messaging")
             return { kind: "platform", section: "messaging" };
+        if (segments[1] === "recovery")
+            return { kind: "platform", section: "recovery" };
         if (segments[1] === "support")
             return { kind: "platform", section: "support" };
         if (segments[1] === "installation-support")
@@ -140,6 +151,8 @@ export function routeView(route) {
         return "billing";
     if (route.kind === "platform")
         return "admin";
+    if (route.kind === "partner")
+        return "partner";
     if (route.kind === "onboarding")
         return route.step === "knowledge" ? "knowledge" : route.step === "agent" || route.step === "install" ? "agent" : "businesses";
     return "home";
@@ -175,6 +188,8 @@ export function routePath(route) {
     }
     if (route.kind === "demo-access")
         return `/demo/access?token=${encodeURIComponent(route.token)}`;
+    if (route.kind === "partner")
+        return route.section === "overview" ? "/partner" : `/partner/${route.section}`;
     if (route.kind === "onboarding")
         return route.step === "index" ? "/onboarding" : `/onboarding/${route.step}`;
     if (route.kind === "billing-success") {

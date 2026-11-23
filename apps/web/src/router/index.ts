@@ -16,10 +16,11 @@ export type WorkspaceView =
   | "businesses"
   | "settings"
   | "billing";
+export type PartnerRouteSection = "overview" | "clients" | "referrals" | "settings";
 
 export type SettingsRouteTab = "general" | "team" | "integrations" | "verification" | "notifications" | "billing";
 export type AgentRouteTab = "capabilities" | "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
-export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "action-registry" | "certification" | "users" | "demos" | "messaging" | "support" | "installation-support" | "operations";
+export type PlatformRouteSection = "overview" | "organizations" | "organization-detail" | "business-detail" | "action-registry" | "certification" | "experience-signals" | "feature-flags" | "users" | "demos" | "messaging" | "recovery" | "support" | "installation-support" | "operations";
 export type OnboardingRouteStep = "index" | "business" | "knowledge" | "agent" | "install";
 
 export type AppRoute =
@@ -32,6 +33,7 @@ export type AppRoute =
   | { kind: "agent-shortcut"; agentTab: AgentRouteTab; testQuestion?: string }
   | { kind: "demo"; demoId: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
   | { kind: "demo-access"; token: string }
+  | { kind: "partner"; section: PartnerRouteSection }
   | { kind: "onboarding"; step: OnboardingRouteStep }
   | { kind: "billing-success"; sessionId?: string }
   | { kind: "workspace"; businessSlug: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
@@ -44,6 +46,7 @@ const workspaceViews = new Set<WorkspaceView>([
 ]);
 const settingsTabs = new Set<SettingsRouteTab>(["general", "team", "integrations", "verification", "notifications", "billing"]);
 const agentTabs = new Set<AgentRouteTab>(["capabilities", "behavior", "knowledge", "appearance", "quick-actions", "actions", "test", "install"]);
+const partnerSections = new Set<PartnerRouteSection>(["overview", "clients", "referrals", "settings"]);
 
 function cleanPath(pathname: string): string {
   const path = pathname.replace(/\/+/g, "/").replace(/\/$/, "");
@@ -114,6 +117,10 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     const step = segments[1] && ["business", "knowledge", "agent", "install"].includes(segments[1]) ? segments[1] as OnboardingRouteStep : "index";
     return { kind: "onboarding", step };
   }
+  if (segments[0] === "partner") {
+    const section = segments[1] && partnerSections.has(segments[1] as PartnerRouteSection) ? segments[1] as PartnerRouteSection : "overview";
+    return { kind: "partner", section };
+  }
   if (segments[0] === "app" && segments[1] === "settings" && segments[2] === "billing" && segments[3] === "success") {
     const sessionId = query.get("session_id")?.trim();
     return { kind: "billing-success", ...(sessionId ? { sessionId } : {}) };
@@ -123,9 +130,12 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     if (segments[1] === "organizations") return { kind: "platform", section: "organizations" };
     if (segments[1] === "businesses" && segments[2]) return { kind: "platform", section: "business-detail", businessId: segments[2] };
     if (segments[1] === "action-registry") return { kind: "platform", section: "action-registry" };
+    if (segments[1] === "experience-signals") return { kind: "platform", section: "experience-signals" };
+    if (segments[1] === "feature-flags") return { kind: "platform", section: "feature-flags" };
     if (segments[1] === "users") return { kind: "platform", section: "users" };
     if (segments[1] === "demos") return { kind: "platform", section: "demos" };
     if (segments[1] === "messaging") return { kind: "platform", section: "messaging" };
+    if (segments[1] === "recovery") return { kind: "platform", section: "recovery" };
     if (segments[1] === "support") return { kind: "platform", section: "support" };
     if (segments[1] === "installation-support") return { kind: "platform", section: "installation-support" };
     if (segments[1] === "operations") return { kind: "platform", section: "operations" };
@@ -150,7 +160,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
   return { kind: "not-found", path };
 }
 
-export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "support" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "workflows" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" {
+export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "terms" | "overview" | "support" | "inbox" | "team" | "conversations" | "leads" | "knowledge" | "actions" | "workflows" | "connections" | "agent" | "analytics" | "businesses" | "settings" | "billing" | "admin" | "partner" {
   if (route.kind === "marketing") return "marketing";
   if (route.kind === "legal") return route.page;
   if (route.kind === "agent-shortcut") return "agent";
@@ -159,6 +169,7 @@ export function routeView(route: AppRoute): "home" | "marketing" | "privacy" | "
   if (route.kind === "workspace-settings") return route.view;
   if (route.kind === "billing-success") return "billing";
   if (route.kind === "platform") return "admin";
+  if (route.kind === "partner") return "partner";
   if (route.kind === "onboarding") return route.step === "knowledge" ? "knowledge" : route.step === "agent" || route.step === "install" ? "agent" : "businesses";
   return "home";
 }
@@ -187,6 +198,7 @@ export function routePath(route: AppRoute): string {
     return route.view === "overview" ? base : `${base}/${route.view}`;
   }
   if (route.kind === "demo-access") return `/demo/access?token=${encodeURIComponent(route.token)}`;
+  if (route.kind === "partner") return route.section === "overview" ? "/partner" : `/partner/${route.section}`;
   if (route.kind === "onboarding") return route.step === "index" ? "/onboarding" : `/onboarding/${route.step}`;
   if (route.kind === "billing-success") {
     const query = route.sessionId ? `?session_id=${encodeURIComponent(route.sessionId)}` : "";

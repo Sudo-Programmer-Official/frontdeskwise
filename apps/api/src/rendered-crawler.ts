@@ -1,5 +1,5 @@
 import { chromium, type Browser, type Page } from "playwright";
-import type { RenderedPage } from "./crawler.js";
+import { assertPublicUrl, type RenderedPage } from "./crawler.js";
 import { classifyPage } from "./page-classification.js";
 
 const RENDER_NAVIGATION_TIMEOUT_MS = 12_000;
@@ -96,6 +96,7 @@ async function renderPage(url: string): Promise<RenderedPage> {
     routeType,
   });
   try {
+    await assertPublicUrl(url);
     const browser = await browserInstance();
     stage = "context_create";
     context = await browser.newContext({
@@ -110,6 +111,11 @@ async function renderPage(url: string): Promise<RenderedPage> {
     await page.route("**/*", async (route) => {
       const requestUrl = route.request().url();
       if (/^(data:|blob:|about:)/i.test(requestUrl)) return route.abort();
+      try {
+        await assertPublicUrl(requestUrl);
+      } catch {
+        return route.abort();
+      }
       // Keep discovery and top-level navigation same-origin, but allow the
       // page's own public scripts/XHR/styles/images to load from a CDN or API
       // origin. Many legitimate SPAs cannot render without those resources.

@@ -151,3 +151,15 @@ test("follow-up pending keeps AI available after the configured timeout", () => 
   assert.equal(handoffShouldEnterFollowUp("WAITING_FOR_STAFF", requestedAt, 1_800, now), false);
   assert.equal(handoffShouldEnterFollowUp("FOLLOW_UP_PENDING", requestedAt, 900, now), false);
 });
+
+test("contact-required handoff keeps AI available until a contact channel is captured", () => {
+  assert.equal(runtimeHandoffState("CONTACT_REQUIRED"), "CONTACT_REQUIRED");
+  assert.equal(handoffSuppressesAi("CONTACT_REQUIRED"), false);
+  const runtime = buildConversationRuntimeState({
+    businessId: "business-runtime",
+    handoffState: "CONTACT_REQUIRED",
+    allowedCtas: [],
+  });
+  assert.equal(runtime.nextBestAction, "HANDOFF");
+  assertConversationRuntimeState(runtime);
+});

@@ -10,6 +10,7 @@ test("explicit human requests enter the handoff policy", () => {
 
 test("handoff actions use explicit conversation-state rules", () => {
   assert.equal(canTakeOver("WAITING_FOR_STAFF"), true);
+  assert.equal(canTakeOver("CONTACT_REQUIRED"), true);
   assert.equal(canTakeOver("FOLLOW_UP_PENDING"), true);
   assert.equal(canTakeOver("HUMAN_ACTIVE"), false);
   assert.equal(canReturnToAi("HUMAN_ACTIVE"), true);

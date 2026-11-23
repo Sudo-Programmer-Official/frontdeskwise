@@ -9,6 +9,7 @@ const templateMigration = await readFile(resolve(process.cwd(), "../../infra/db/
 const gapTemplateMigration = await readFile(resolve(process.cwd(), "../../infra/db/032_knowledge_gap_template.sql"), "utf8");
 const gapRepairMigration = await readFile(resolve(process.cwd(), "../../infra/db/033_knowledge_gap_diagnostics_repair.sql"), "utf8");
 const followUpMigration = await readFile(resolve(process.cwd(), "../../infra/db/068_handoff_follow_up_pending.sql"), "utf8");
+const contactRequiredMigration = await readFile(resolve(process.cwd(), "../../infra/db/069_handoff_contact_required.sql"), "utf8");
 
 test("handoff storage and delivery are business-scoped and actionable", () => {
   assert.match(settingsMigration, /create table if not exists business_notification_settings/);
@@ -20,6 +21,7 @@ test("handoff storage and delivery are business-scoped and actionable", () => {
   assert.match(gapRepairMigration, /add column if not exists reason/);
   assert.match(followUpMigration, /FOLLOW_UP_PENDING/);
   assert.match(followUpMigration, /handoff_timeout_seconds/);
+  assert.match(contactRequiredMigration, /CONTACT_REQUIRED/);
   assert.match(server, /\/notification-settings/);
   assert.match(server, /inbox_url: lifecycleAppUrl\(`\/app\/\$\{business\.slug\}\/inbox\?conversation=/);
   assert.match(server, /using legacy schema/);

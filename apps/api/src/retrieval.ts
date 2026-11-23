@@ -46,6 +46,8 @@ export function classifyQuestionIntent(question: string): RetrievalIntent {
   if (/\b(voice|speak|speaking|spoken|talk|audio|transcri|dictat|hands[- ]?free)\b/.test(value)) return "voice";
   if (/\b(remind|reminder|reminders|nudge|nudges|recap|recaps|notification|notifications|alert|alerts|follow[- ]?up)\b/.test(value)) return "reminders";
   if (/\b(price|pricing|cost|rate|rates|how much|fee|fees|budget|quote|quotation|plan|plans|subscription)\b/.test(value)) return "pricing";
+  if (/\b(compare|comparison|difference|versus|vs\.?|cheapest|lowest|most affordable)\b/.test(value)
+    && /\b(plan|plans|tier|tiers|package|packages|core|growth|complete)\b/.test(value)) return "pricing";
   if (/\b(automate|automation|features?|capabilities|solutions?|products?)\b/.test(value)) return "services";
   if (/\b(help|can)\b.*\bplan(?:\s|$)|\b(help|can)\b.*\b(organize|priorit)\w*/.test(value)) return "services";
   if (/\b(team|teams|workspace|workspaces|collaborat|shared|multiple users|seats?)\b/.test(value)) return "teams";

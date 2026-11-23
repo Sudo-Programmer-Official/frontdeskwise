@@ -4,6 +4,7 @@ import { build } from "vite";
 // IIFE so it is only downloaded after an explicit open/proactive interaction.
 await build({
   configFile: false,
+  publicDir: false,
   build: {
     emptyOutDir: false,
     lib: {
@@ -22,6 +23,7 @@ await build({
 
 await build({
   configFile: false,
+  publicDir: false,
   build: {
     emptyOutDir: false,
     lib: {

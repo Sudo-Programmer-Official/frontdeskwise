@@ -17,6 +17,7 @@
   "dependencies": {
     "@lucide/vue": "^1.77.0",
     "firebase": "^10.14.1",
+    "mixpanel-browser": "^2.86.0",
     "simple-icons": "^13.21.0",
     "vue": "^3.5.25"
   },

@@ -17,6 +17,13 @@ const page = computed<MarketingPage>(() => getMarketingPageByPath(props.pagePath
   secondaryCta: "Explore FrontDeskWise",
 });
 
+const pricingPlans = [
+  { key: "starter", name: "Starter", price: "$99", businesses: "1 business", usage: "300 AI conversations / month", description: "Grounded answers, lead capture, and a clear starting point.", featured: false, custom: false, bullets: ["Website knowledge", "Lead capture + email alerts", "Basic analytics", "Website widget"] },
+  { key: "growth", name: "Growth", price: "$199", businesses: "1 business", usage: "1,000 AI conversations / month", description: "Booking workflows, integrations, and visibility for teams focused on outcomes.", featured: true, custom: false, bullets: ["Everything in Starter", "Booking workflows", "CRM integrations", "Human handoff + reporting"] },
+  { key: "multi_business", name: "Business Plus", price: "$349", businesses: "Up to 2 businesses", usage: "2,000 shared AI conversations / month", description: "Shared operations for higher-volume businesses under one organization.", featured: false, custom: false, bullets: ["Everything in Growth", "Shared team workspace", "Advanced workflows", "Cross-business analytics"] },
+  { key: "portfolio", name: "Portfolio / Agency", price: "Custom", businesses: "Pooled locations", usage: "Pooled usage limits", description: "Per-location pricing with centralized administration and partner terms.", featured: false, custom: true, bullets: ["Centralized administration", "Partner discounts", "Custom integrations", "Priority support"] },
+];
+
 const readinessUrl = ref("");
 const readinessAnswers = ref([false, false, false, false]);
 const readinessScore = ref<number | null>(null);
@@ -51,6 +58,7 @@ function childHref(path: string) {
 
 function secondaryHref() {
   const destinations: Record<string, string> = {
+    partners: "/partner",
     industries: "/use-cases",
     "use-cases": "/industries",
     integrations: "/features",
@@ -99,6 +107,22 @@ function secondaryHref() {
           <div class="marketing-page-loop"><span>Grounded reply</span><span>Useful detail</span><span>Lead or booking</span><span>Human when needed</span></div>
           <small>Built around your business knowledge and the actions your team already uses.</small>
         </aside>
+      </section>
+
+      <section v-if="page.key === 'pricing'" class="marketing-page-section marketing-page-pricing-section">
+        <div class="marketing-page-section-heading"><p class="eyebrow">Choose the operating level</p><h2>Plans that scale with conversations and outcomes.</h2><p>Every paid plan starts with a 7-day trial. Pick the level that matches your business today; move to pooled agency capacity when one workspace is no longer enough.</p></div>
+        <div class="pricing-grid marketing-page-pricing-grid">
+          <article v-for="plan in pricingPlans" :key="plan.key" :class="['pricing-card', { featured: plan.featured }]">
+            <span v-if="plan.featured" class="pricing-badge">Most likely to fit</span>
+            <h3>{{ plan.name }}</h3><p>{{ plan.description }}</p>
+            <strong class="pricing-price">{{ plan.price }}<small v-if="!plan.custom">/month</small></strong>
+            <span class="pricing-businesses">{{ plan.businesses }}</span><span class="pricing-usage">{{ plan.usage }}</span>
+            <ul class="landing-plan-bullets"><li v-for="bullet in plan.bullets" :key="bullet">✓ {{ bullet }}</li></ul>
+            <button v-if="!plan.custom" class="primary-button small" type="button" @click="emit('start-demo')">Start 7-day trial</button>
+            <a v-else class="outline-button small pricing-plan-cta" href="mailto:hello@frontdeskwise.com?subject=FrontDeskWise%20Portfolio%20pricing">Talk to sales</a>
+          </article>
+        </div>
+        <p class="pricing-guardrail-note">AI conversation allowances are measured per visitor session with abuse filtering. Portfolio / Agency uses custom pooled capacity instead of a five-location bundle.</p>
       </section>
 
       <section v-if="page.children?.length" class="marketing-page-section marketing-page-directory">

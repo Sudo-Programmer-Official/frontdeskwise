@@ -7,7 +7,7 @@ import { currentWorkflowStep, workflowField, workflowNextBestAction, workflowSum
  * resolved or expired conversation has no live routing authority; the active
  * states below are the only states that can suppress AI or CTAs.
  */
-export type RuntimeHandoffState = "AI_ACTIVE" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | null;
+export type RuntimeHandoffState = "AI_ACTIVE" | "CONTACT_REQUIRED" | "WAITING_FOR_STAFF" | "FOLLOW_UP_PENDING" | "HUMAN_ACTIVE" | "AI_ASSISTED" | null;
 
 export type RuntimeRoute =
   | "GENERAL_QUESTION"
@@ -76,6 +76,7 @@ export function handoffShouldEnterFollowUp(
 }
 
 export function runtimeHandoffState(status: string | null | undefined): RuntimeHandoffState {
+  if (status === "CONTACT_REQUIRED") return "CONTACT_REQUIRED";
   if (status === "WAITING_FOR_STAFF" || status === "HANDOFF_REQUESTED") return "WAITING_FOR_STAFF";
   if (status === "FOLLOW_UP_PENDING") return "FOLLOW_UP_PENDING";
   if (status === "HUMAN_ACTIVE") return "HUMAN_ACTIVE";

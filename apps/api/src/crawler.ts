@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { classifyPage, crawlPriority, type PageType } from "./page-classification.js";
 import { extractWebsiteActions, type WebsiteActionCandidate } from "./website-actions.js";
+import { type OnboardingFailureCode } from "./onboarding-validation.js";
 
 const MAX_HTML_BYTES = 1_000_000;
 const CRAWL_TIMEOUT_MS = 8_000;
@@ -11,10 +14,20 @@ const CHUNK_OVERLAP_TOKENS = 80;
 const MIN_VISIBLE_TEXT_FOR_SPA_CHECK = 120;
 const MAX_SITEMAPS = 4;
 const MAX_SITEMAP_URLS = 100;
+const MAX_REDIRECTS = 5;
 
 export class CrawlError extends Error {
   statusCode = 422;
   audit?: CrawlAudit;
+  code: OnboardingFailureCode;
+  retryable: boolean;
+
+  constructor(message: string, code: OnboardingFailureCode = "CRAWL_ERROR", retryable = true) {
+    super(message);
+    this.name = "CrawlError";
+    this.code = code;
+    this.retryable = retryable;
+  }
 }
 
 export type CrawlChunk = {
@@ -137,6 +150,7 @@ export type CrawlAudit = {
     chunkCount: number;
     crawlMode: "static" | "rendered";
   }>;
+  failureCode?: OnboardingFailureCode | null;
 };
 
 export type RenderDiagnostics = {
@@ -206,7 +220,7 @@ export function extractBrandColors(html: string): string[] {
 }
 
 export function normalisePublicUrl(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) throw new CrawlError("websiteUrl is required");
+  if (typeof value !== "string" || !value.trim()) throw new CrawlError("websiteUrl is required", "INVALID_URL", false);
   const trimmed = value.trim();
   const candidate = trimmed.startsWith("//")
     ? `https:${trimmed}`
@@ -217,28 +231,81 @@ export function normalisePublicUrl(value: unknown): string {
   try {
     url = new URL(candidate);
   } catch {
-    throw new CrawlError("websiteUrl must be a valid URL");
+    throw new CrawlError("websiteUrl must be a valid URL", "INVALID_URL", false);
   }
-  if (!["http:", "https:"].includes(url.protocol)) throw new CrawlError("websiteUrl must use http or https");
-  if (url.username || url.password) throw new CrawlError("websiteUrl cannot contain credentials");
+  if (!["http:", "https:"].includes(url.protocol)) throw new CrawlError("websiteUrl must use http or https", "INVALID_URL", false);
+  if (url.username || url.password) throw new CrawlError("websiteUrl cannot contain credentials", "INVALID_URL", false);
 
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const octets = hostname.split(".").map((part) => Number(part));
   const isIpv4 = octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
-  const blockedHost = hostname === "localhost"
-    || hostname === "::1"
-    || hostname.startsWith("fc")
-    || hostname.startsWith("fd")
-    || hostname.startsWith("fe80:")
+  const blockedHost = isPrivateIpAddress(hostname)
+    || hostname === "localhost"
     || hostname.endsWith(".internal")
-    || (isIpv4 && (octets[0] === 0 || octets[0] === 10 || octets[0] === 127 || octets[0] === 169 && octets[1] === 254 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 || octets[0] === 192 && octets[1] === 168));
-  if (blockedHost) throw new CrawlError("websiteUrl must point to a public website");
+    || (isIpv4 && octets[0] === 0);
+  if (blockedHost) throw new CrawlError("websiteUrl must point to a public website", "INVALID_URL", false);
 
   url.hash = "";
   for (const key of [...url.searchParams.keys()]) {
     if (/^(utm_|fbclid$|gclid$|mc_cid$|mc_eid$)/i.test(key)) url.searchParams.delete(key);
   }
   return url.toString();
+}
+
+function isPrivateIpAddress(value: string): boolean {
+  const hostname = value.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isIP(hostname) === 4) {
+    const octets = hostname.split(".").map(Number);
+    const [first, second] = octets;
+    return first === 0 || first === 10 || first === 127 || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254) || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 0) || (first === 192 && second === 168)
+      || (first === 198 && (second === 18 || second === 19)) || first >= 224;
+  }
+  if (isIP(hostname) !== 6) return false;
+  const normalized = hostname.replace(/^::ffff:/i, "");
+  if (isIP(normalized) === 4) return isPrivateIpAddress(normalized);
+  return hostname === "::1"
+    || hostname === "::"
+    || /^f[cd]/i.test(hostname)
+    || /^fe[89ab]/i.test(hostname)
+    || /^2001:db8/i.test(hostname)
+    || /^ff/i.test(hostname);
+}
+
+/**
+ * Resolve the destination immediately before every server-side fetch. This
+ * closes the redirect/DNS-rebinding gap left by checking only the user-supplied
+ * hostname: a public hostname must not resolve to localhost, RFC1918 space, or
+ * a cloud metadata address at request time.
+ */
+export async function assertPublicUrl(value: string): Promise<URL> {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new CrawlError("websiteUrl must be a valid URL");
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!['http:', 'https:'].includes(url.protocol)
+    || url.username
+    || url.password
+    || hostname === "localhost"
+    || hostname.endsWith(".internal")
+    || isPrivateIpAddress(hostname)) {
+    throw new CrawlError("websiteUrl must point to a public website");
+  }
+  try {
+    const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+    if (!addresses.length || addresses.some((address) => isPrivateIpAddress(address.address))) {
+      throw new CrawlError("websiteUrl must point to a public website");
+    }
+  } catch (error) {
+    if (error instanceof CrawlError) throw error;
+    const code = networkFailureCode(error);
+    throw new CrawlError("The website hostname could not be resolved safely", code);
+  }
+  return url;
 }
 
 export function websiteIdentityKey(value: unknown): string {
@@ -447,7 +514,7 @@ async function readResponseText(response: Response): Promise<{ text: string; byt
     total += result.value.byteLength;
     if (total > MAX_HTML_BYTES) {
       await reader.cancel();
-      throw new CrawlError("The website is too large to crawl for a demo");
+      throw new CrawlError("The website is too large to crawl for a demo", "HTTP_ERROR", false);
     }
     parts.push(decoder.decode(result.value, { stream: true }));
   }
@@ -456,23 +523,59 @@ async function readResponseText(response: Response): Promise<{ text: string; byt
   return { text, bytes: total };
 }
 
-async function fetchText(url: string, accept: string): Promise<{ response: Response; text: string; bytes: number }> {
+async function fetchText(url: string, accept: string): Promise<{ response: Response; text: string; bytes: number; finalUrl: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CRAWL_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { "user-agent": "FrontDeskWise-DemoCrawler/0.2", accept },
-      redirect: "follow",
-    });
-    const body = await readResponseText(response);
-    return { response, ...body };
+    let currentUrl = url;
+    let response: Response;
+    for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+      await assertPublicUrl(currentUrl);
+      response = await fetch(currentUrl, {
+        signal: controller.signal,
+        headers: { "user-agent": "FrontDeskWise-DemoCrawler/0.2", accept },
+        redirect: "manual",
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) {
+        const body = await readResponseText(response);
+        return { response, ...body, finalUrl: currentUrl };
+      }
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => undefined);
+      if (!location) throw new CrawlError("The website returned an invalid redirect");
+      if (redirects === MAX_REDIRECTS) throw new CrawlError("The website redirected too many times");
+      currentUrl = new URL(location, currentUrl).toString();
+    }
+    throw new CrawlError("The website redirected too many times");
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw new CrawlError("The website took too long to respond");
+    if (error instanceof DOMException && error.name === "AbortError") throw new CrawlError("The website took too long to respond", "TIMEOUT");
     throw error;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function networkFailureCode(error: unknown): OnboardingFailureCode {
+  if (error instanceof CrawlError) return error.code;
+  const candidate = error as { code?: unknown; cause?: { code?: unknown } };
+  const code = String(candidate?.code ?? candidate?.cause?.code ?? "").toUpperCase();
+  if (["ENOTFOUND", "EAI_NONAME", "NXDOMAIN"].includes(code)) return "DOMAIN_NOT_FOUND";
+  if (["EAI_AGAIN", "EAI_FAIL", "ESERVFAIL", "ECONNREFUSED", "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH"].includes(code)) return "DNS_FAILURE";
+  if (["CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"].includes(code)) return "SSL_FAILURE";
+  if (error instanceof DOMException && error.name === "AbortError") return "TIMEOUT";
+  return "CRAWL_ERROR";
+}
+
+function failureCodeForAudit(audit: CrawlAudit, rootFailureCode: OnboardingFailureCode | null): OnboardingFailureCode {
+  if (rootFailureCode && rootFailureCode !== "CRAWL_ERROR") return rootFailureCode;
+  const rootRoute = audit.routes.find((route) => route.requestedUrl === audit.initialUrl) ?? audit.routes[0];
+  const rootRejected = audit.rejectedInternalLinks.some((rejection) => rejection.url === audit.initialUrl);
+  if (audit.rejectionReasons.robots_disallow && !audit.pages.length && rootRejected) return "ROBOTS_BLOCKED";
+  if (rootRoute?.status === 401 || rootRoute?.status === 403) return "AUTH_REQUIRED";
+  if (rootRoute?.status === 404) return "DOMAIN_NOT_FOUND";
+  if (rootRoute && rootRoute.status >= 400) return rootRoute.status === 408 || rootRoute.status === 504 ? "TIMEOUT" : "HTTP_ERROR";
+  if (audit.renderedCrawl.failed || audit.rejectionReasons.render_failed || audit.rejectionReasons.rendered_content_empty || audit.rejectionReasons.client_rendered_shell) return "SPA_RENDER_FAILURE";
+  return "NO_USEFUL_CONTENT";
 }
 
 function robotsDisallows(robotsText: string, target: URL): boolean {
@@ -535,6 +638,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
   const pages: CrawledPage[] = [];
   let brandColors: string[] = [];
   let robotsText = "";
+  let rootFailureCode: OnboardingFailureCode | null = null;
   const audit: CrawlAudit = {
     initialUrl,
     finalCanonicalUrl: null,
@@ -560,6 +664,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     },
     routes: [],
     pages: [],
+    failureCode: null,
   };
 
   const reject = (url: string, reason: string, details: Omit<CrawlRejection, "url" | "reason"> = {}): void => {
@@ -648,10 +753,11 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
       continue;
     }
 
-    let fetched: { response: Response; text: string; bytes: number };
+    let fetched: { response: Response; text: string; bytes: number; finalUrl: string };
     try {
       fetched = await fetchText(next.url, "text/html,application/xhtml+xml");
-    } catch {
+    } catch (error) {
+      if (next.depth === 0) rootFailureCode = networkFailureCode(error);
       reject(next.url, "fetch_error", { depth: next.depth });
       continue;
     }
@@ -673,7 +779,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
 
     let responseUrl: string;
     try {
-      responseUrl = normalizeCrawlUrl(fetched.response.url || next.url);
+      responseUrl = normalizeCrawlUrl(fetched.finalUrl || fetched.response.url || next.url);
     } catch {
       reject(next.url, "invalid_final_url", { depth: next.depth, status, contentType });
       continue;
@@ -845,13 +951,21 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
 
   if (!pages.length) {
     const renderFailure = audit.renderedCrawl.reason;
+    const code = failureCodeForAudit(audit, rootFailureCode);
+    audit.failureCode = code;
     const error = new CrawlError(isClientRenderedShell(audit.spaIndicators)
       ? options.renderPage && renderFailure
         ? `The website requires client-side rendering, but the rendered crawl failed (${renderFailure})`
         : "The website requires client-side rendering, but no rendered crawl adapter is configured"
-      : "The website did not contain readable pages for a demo");
+      : code === "NO_USEFUL_CONTENT"
+        ? "The website did not contain enough useful business information"
+        : "The website could not be read",
+      code,
+      code === "INVALID_URL" || code === "AUTH_REQUIRED" || code === "ROBOTS_BLOCKED",
+    );
     error.audit = audit;
     throw error;
   }
+  if (audit.rejectedInternalLinks.length > 0) audit.failureCode = "CRAWL_PARTIAL";
   return { pages, audit };
 }

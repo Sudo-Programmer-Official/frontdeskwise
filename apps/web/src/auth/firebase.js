@@ -1,5 +1,5 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { browserLocalPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, confirmPasswordReset, onIdTokenChanged, sendPasswordResetEmail, signInWithPopup, setPersistence, signInWithEmailAndPassword, signOut, verifyPasswordResetCode, } from "firebase/auth";
+import { browserLocalPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, confirmPasswordReset, onIdTokenChanged, reload, sendEmailVerification, sendPasswordResetEmail, signInWithPopup, setPersistence, signInWithEmailAndPassword, signOut, verifyPasswordResetCode, } from "firebase/auth";
 export class AuthSessionExpiredError extends Error {
     constructor() {
         super("Your FrontDeskWise session is no longer valid.");
@@ -76,7 +76,18 @@ export async function signInAndBootstrap(email, password, demoToken, organizatio
 export async function signUpAndBootstrap(email, password, demoToken, organizationName) {
     const auth = await firebaseAuth();
     const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+    await sendEmailVerification(credential.user);
     return bootstrap(credential.user, demoToken, organizationName);
+}
+export async function resendFrontDeskWiseVerificationEmail() {
+    const auth = await firebaseAuth();
+    const user = auth.currentUser;
+    if (!user)
+        throw new Error("Sign in again before requesting a verification email.");
+    await reload(user);
+    if (user.emailVerified)
+        return;
+    await sendEmailVerification(user);
 }
 export async function signInWithGoogleAndBootstrap(demoToken, organizationName) {
     const auth = await firebaseAuth();

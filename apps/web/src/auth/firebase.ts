@@ -6,6 +6,8 @@ import {
   GoogleAuthProvider,
   confirmPasswordReset,
   onIdTokenChanged,
+  reload,
+  sendEmailVerification,
   sendPasswordResetEmail,
   signInWithPopup,
   setPersistence,
@@ -53,7 +55,7 @@ export type AuthOrganization = {
 };
 
 export type AuthSnapshot = {
-  user: { id: string; email: string; name: string; isSuperAdmin: boolean };
+  user: { id: string; email: string; name: string; emailVerified: boolean; accessState?: "verified" | "email_verification_required"; isSuperAdmin: boolean };
   organizations: AuthOrganization[];
   activeOrganizationId: string | null;
 };
@@ -145,7 +147,17 @@ export async function signInAndBootstrap(email: string, password: string, demoTo
 export async function signUpAndBootstrap(email: string, password: string, demoToken?: string, organizationName?: string): Promise<AuthSnapshot> {
   const auth = await firebaseAuth();
   const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  await sendEmailVerification(credential.user);
   return bootstrap(credential.user, demoToken, organizationName);
+}
+
+export async function resendFrontDeskWiseVerificationEmail(): Promise<void> {
+  const auth = await firebaseAuth();
+  const user = auth.currentUser;
+  if (!user) throw new Error("Sign in again before requesting a verification email.");
+  await reload(user);
+  if (user.emailVerified) return;
+  await sendEmailVerification(user);
 }
 
 export async function signInWithGoogleAndBootstrap(demoToken?: string, organizationName?: string): Promise<AuthSnapshot> {

@@ -53,10 +53,13 @@ Migration `012_organization_billing_and_control_plane.sql` adds:
 - organization linkage on durable billing events.
 
 Migration `014_billing_entitlement_catalog.sql` completes the provider-neutral
-entitlement catalog for Demo, Starter, Growth, Multi-Business, and Portfolio.
-It records crawl limits, lead capture, booking actions, and business capacity
-as JSON entitlements. The API exposes these on the Billing response so plan
-behavior can be reviewed without coupling application access checks to Stripe.
+entitlement catalog for Demo, Starter, Growth, Business Plus, and Portfolio /
+Agency. It records crawl limits, lead capture, booking actions, and business
+capacity as JSON entitlements. Migration `078_pricing_usage_entitlements.sql`
+adds the public AI conversation allowances and setup-support modes. The API
+exposes these on the Billing response and enforces the monthly session
+allowance before opening a new visitor conversation, without coupling
+application access checks to Stripe.
 
 `billing_events` is idempotent on `(provider, event_id)`. A webhook is recorded before processing and marked with `processed_at` after the organization update succeeds. Stripe retries can therefore be safely acknowledged after a previously processed event.
 
@@ -113,6 +116,12 @@ cancellation or scheduled downgrade.
 
 The initial super-admin bootstrap uses a verified Firebase identity plus the server-only `FRONTDESKWISE_SUPER_ADMIN_EMAILS` allowlist. The first successful admin request inserts that user into `super_admin_users`; subsequent authorization comes from the database record.
 
+## Onboarding recovery
+
+Migration `073_onboarding_recovery_engine.sql` adds the durable onboarding recovery state used by the 15-minute scanner. It derives progress from website knowledge, testing, widget installation, and publication; records the last successful step and current blocker; and queues contextual recovery emails at 2 hours, 12 hours, 24 hours, 3 days, and 7 days of inactivity. Only active users with verified email addresses are eligible.
+
+The sequence stops after progress, publication, unsubscribe, or the final nurture message. A nearly complete blocked setup also emits an internal rescue alert. Super Admins can review `GET /api/v1/admin/onboarding-recovery` or open Platform → Onboarding recovery to see the incomplete-signup, reminded, returned, finished-setup, and published funnel.
+
 ## Stripe setup before charging a customer
 
 FrontDeskWise may use the existing Sudo Programmer Stripe account alongside SalonFlow, PlanCraftAI, and other products. It must have its own catalog, Price IDs, webhook configuration, and Render environment values. Never reuse another product's Price ID: Stripe account reuse is safe, product/price reuse is not unless the billing terms are intentionally identical.
@@ -123,8 +132,8 @@ Create these FrontDeskWise products in Stripe. Keep the product stable and put m
 | --- | ---: | --- |
 | `FrontDeskWise — Starter` | `$99/month` | 1 business |
 | `FrontDeskWise — Growth` | `$199/month` | 1 business with higher usage/features |
-| `FrontDeskWise — Multi-Business` | `$349/month` | Up to 2 businesses |
-| `FrontDeskWise — Portfolio` | `$499+/month` | More businesses / higher usage |
+| `FrontDeskWise — Business Plus` | `$349/month` | Up to 2 businesses; 2,000 shared AI conversations/month |
+| `FrontDeskWise — Portfolio / Agency` | `Custom` | Per-location pricing with pooled usage and centralized administration |
 
 Add this metadata to every FrontDeskWise product and price:
 
@@ -238,7 +247,7 @@ The webhook verifies Stripe's signature against the raw request body. The secret
 - Configure one Stripe test price and confirm Checkout redirects correctly.
 - Complete a Stripe test subscription and confirm the webhook changes the organization to `active`.
 - Replay the same webhook and confirm there is still one subscription state and one activation email delivery.
-- Change Starter → Growth and Growth → Multi-Business, then confirm the same Stripe subscription, plan, entitlements, UI, and admin timeline converge.
+- Change Starter → Growth and Growth → Business Plus, then confirm the same Stripe subscription, plan, entitlements, UI, and admin timeline converge.
 - Schedule cancellation at period end and confirm access remains active until the period end.
 - Send a test payment failure, confirm `grace` state plus dashboard warning and payment email, then send `invoice.paid` and confirm recovery.
 - Open Customer Portal and verify the return URL.
@@ -260,7 +269,7 @@ The current repository contains the following working pieces:
 - All Businesses organization aggregate view with lead, booking, conversation,
   and business counts;
 - add-business onboarding with organization membership and plan-capacity checks;
-- public landing-page pricing for Starter, Growth, Multi-Business, and Portfolio;
+- public landing-page pricing for Starter, Growth, Business Plus, and Portfolio / Agency;
 - organization-level trial and plan state;
 - organization business-capacity enforcement;
 - Stripe Checkout, Portal, and webhook boundaries;
@@ -314,10 +323,10 @@ The migration seeds these plan capacities and display prices:
 | `demo` | $0 | 1 | Internal/demo sandbox |
 | `starter` | $99/mo | 1 | Single-business launch |
 | `growth` | $199/mo | 1 | Higher usage and reporting |
-| `multi_business` | $349/mo | 2 | Two-business organization |
-| `portfolio` | $499/mo | 5 | Portfolio operators |
+| `multi_business` | $349/mo | 2 | Two-business organization with 2,000 shared AI conversations/month |
+| `portfolio` | Custom | 5+ by agreement | Agency and portfolio operators with pooled capacity |
 
-These are catalog defaults, not payment authorization. A plan becomes checkout-ready only after its Stripe recurring price ID is configured. A customer-specific plan override can change amount, capacity, interval, price ID, and reason without changing the public catalog.
+Starter includes 300 AI conversations/month and Growth includes 1,000 AI conversations/month. Conversation allowances are counted per visitor session with abuse filtering; the API prevents new sessions after a paid plan reaches its included monthly allowance. Portfolio / Agency uses a negotiated pooled allowance instead of a self-serve Stripe price. These are catalog defaults, not payment authorization. A plan becomes checkout-ready only after its Stripe recurring price ID is configured. A customer-specific plan override can change amount, capacity, interval, price ID, and reason without changing the public catalog.
 
 ## Deployment sequence
 
@@ -377,7 +386,7 @@ Admin links are still ordinary scoped demo sessions. They do not bypass business
 
 ## Dave founding-plan procedure
 
-After Dave has completed the pilot and a recurring Stripe Price exists for the founding offer. If the charged amount is exactly `$350/month`, create a separate recurring Stripe Price in the same account and attach it only to Dave's override; do not replace the public `$349` Multi-Business Price. A coupon is possible, but a dedicated founding Price is easier to audit:
+After Dave has completed the pilot and a recurring Stripe Price exists for the founding offer. If the charged amount is exactly `$350/month`, create a separate recurring Stripe Price in the same account and attach it only to Dave's override; do not replace the public `$349` Business Plus Price. A coupon is possible, but a dedicated founding Price is easier to audit:
 
 1. Ensure Dave's Firebase account has been bootstrapped and identify his organization ID from the owner dashboard/API.
 2. As a super-admin, call `POST /api/v1/admin/organizations/:organizationId/plan-override` with:

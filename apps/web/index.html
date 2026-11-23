@@ -26,6 +26,20 @@
     <meta name="twitter:description" content="Turn your website into your best front desk." />
     <meta name="twitter:image" content="https://frontdeskwise.invalid/frontdeskwise-logo-mark.png" />
     <meta name="twitter:image:alt" content="FrontDeskWise AI receptionist logo" />
+    <!-- Google Tag Manager -->
+    <script>
+      (function (w, d, s, l, i) {
+        w[l] = w[l] || [];
+        w[l].push({ "gtm.start": new Date().getTime(), event: "gtm.js" });
+        var firstScript = d.getElementsByTagName(s)[0];
+        var tagManagerScript = d.createElement(s);
+        var dataLayerQuery = l !== "dataLayer" ? "&l=" + l : "";
+        tagManagerScript.async = true;
+        tagManagerScript.src = "https://www.googletagmanager.com/gtm.js?id=" + i + dataLayerQuery;
+        firstScript.parentNode.insertBefore(tagManagerScript, firstScript);
+      })(window, document, "script", "dataLayer", "GTM-5447VNJL");
+    </script>
+    <!-- End Google Tag Manager -->
     <title>FrontDeskWise — AI front desk for local businesses</title>
     <script type="application/ld+json">
       {
@@ -49,6 +63,9 @@
     </script>
   </head>
   <body>
+    <!-- Google Tag Manager (noscript) -->
+    <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-5447VNJL" height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+    <!-- End Google Tag Manager (noscript) -->
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

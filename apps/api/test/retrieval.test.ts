@@ -21,6 +21,7 @@ const sources: RetrievalSource[] = [
 test("classifies business service questions as services intent", () => {
   assert.equal(classifyQuestionIntent("What services does Sudo Programmer offer?"), "services");
   assert.equal(classifyQuestionIntent("What are your cancellation policy terms?"), "policy");
+  assert.equal(classifyQuestionIntent("Compare Core, Growth, and Complete."), "pricing");
   assert.equal(classifyQuestionIntent("What permissions does PlanCraftAI use?"), "permissions");
   assert.equal(classifyQuestionIntent("Does PlanCraftAI work with calendars?"), "calendar");
   assert.equal(classifyQuestionIntent("Does PlanCraftAI support reminders?"), "reminders");

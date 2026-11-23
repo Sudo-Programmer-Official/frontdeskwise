@@ -1,21 +1,44 @@
 [
   {
+    "key": "partners",
+    "path": "/partners",
+    "type": "commercial",
+    "eyebrow": "Agency & partner program",
+    "title": "Turn every website you manage into recurring AI revenue",
+    "description": "Add an AI front desk to your clients’ websites without building the intelligence, workflows, or infrastructure yourself.",
+    "intro": "FrontDeskWise gives agencies a repeatable way to create client demos, provision businesses, install a conversion layer, and report the results back to the client. You keep the relationship. We power the front desk underneath.",
+    "primaryCta": "Become a partner",
+    "secondaryCta": "Open partner workspace",
+    "workflow": ["Paste a client website", "Generate a personalized demo", "Provision the client workspace", "Grow recurring partner revenue"],
+    "sections": [
+      { "heading": "A better partner pitch than a referral link", "body": "Add AI front desk services to the websites you already manage. Package the value inside your website, SEO, ads, or consulting retainer while FrontDeskWise handles the platform underneath.", "bullets": ["Create a Business Brain from a public website", "Share a prospect-specific AI front desk demo", "Provision client organizations in minutes", "Keep client performance and lead outcomes visible"] },
+      { "heading": "Start co-branded. Expand when the motion is proven.", "body": "Begin with an agency operating layer and explicit client access. Volume pricing, white-label packaging, WordPress installation, and deeper reseller controls can follow the first five agencies that prove the channel.", "bullets": ["Referral, agency, consultant, and reseller paths", "20% standard recurring commission projection", "Portfolio view across client businesses", "Client-ready reports and installation follow-up"] }
+    ],
+    "faqs": [
+      { "question": "Do I need to build or support the AI platform?", "answer": "No. FrontDeskWise provides the intelligence, workflow runtime, Business Brain, and infrastructure. You manage the client relationship and decide how to package the service." },
+      { "question": "Can I provision a client before they sign up?", "answer": "Yes. The partner workspace can create a personalized demo first, then provision a dedicated client organization when the prospect is ready to move forward." },
+      { "question": "Is this fully white-label?", "answer": "The first partner experience is co-branded so setup and support stay simple. Deeper white-label and reseller controls are designed as the channel proves demand." }
+    ],
+    "related": ["features", "pricing", "integrations"]
+  },
+  {
     "key": "pricing",
     "path": "/pricing",
     "type": "commercial",
     "eyebrow": "Pricing",
-    "title": "Simple AI front desk pricing for local businesses",
-    "description": "Start with one business, capture more website leads, and grow into a shared AI front desk for your team.",
-    "intro": "Every plan is built around the same useful loop: answer the question, capture the opportunity, and make the next step easy for the customer. Install it yourself in minutes, or we’ll help you get it live.",
+    "title": "AI front desk pricing built around leads and conversations",
+    "description": "Start at $99/month, make Growth your operating tier, and scale into pooled agency capacity when your usage and locations grow.",
+    "intro": "Every plan is built around the same useful loop: answer the question, capture the opportunity, and make the next step easy for the customer. Included AI conversation allowances make usage visible before costs surprise you.",
     "primaryCta": "Start your free trial",
     "secondaryCta": "See how it works",
     "sections": [
       { "heading": "Start with the work that matters", "body": "FrontDeskWise includes grounded answers from your website, lead capture, conversion actions, analytics, and a website widget. You can review the assistant before it goes live.", "bullets": ["One business workspace", "Website and document knowledge", "Lead capture and booking actions", "Human handoff when your team should step in"] },
-      { "heading": "Grow without another login", "body": "Add businesses and teammates as your operation expands. Keep each business's knowledge, actions, conversations, and analytics organized while sharing one operating layer.", "bullets": ["Business-level workspaces", "Role-based team access", "Shared connections and notifications", "Portfolio-ready reporting"] }
+      { "heading": "Grow with the right operating layer", "body": "Add businesses and teammates as your operation expands. Keep each business's knowledge, actions, conversations, and analytics organized while sharing one operating layer.", "bullets": ["Business-level workspaces", "Role-based team access", "Shared connections and notifications", "Custom pooled capacity for agencies"] }
     ],
     "faqs": [
       { "question": "Do I need a credit card to start?", "answer": "No. You can generate a starting workspace from a website and review the experience before publishing." },
       { "question": "Can I use my existing CRM or booking system?", "answer": "Yes. FrontDeskWise can save the lead first and connect completion actions to supported integrations, webhooks, email, or MCP-powered workflows." },
+      { "question": "How are AI conversations counted?", "answer": "A conversation is a visitor session that can resume while it is active, with abuse filtering applied. Starter includes 300 per month, Growth includes 1,000, and Business Plus includes 2,000 shared across its businesses." },
       { "question": "Can a human take over?", "answer": "Yes. Human handoff keeps the conversation context and notifies the team when a customer needs a person." }
     ],
     "related": ["features", "ai-front-desk", "tools-ai-front-desk-readiness"]

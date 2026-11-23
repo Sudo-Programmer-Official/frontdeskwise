@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { createCrmAdapter, type CrmAdapter } from "./crm.js";
 import { sendTransactionalEmail, sesConfigured } from "./email.js";
+import { assertPublicUrl } from "./crawler.js";
 
 export type ActionConnectorProvider =
   | "generic_webhook"
@@ -53,11 +54,19 @@ type WebhookConfig = { webhookUrl: string; signingSecret?: string };
 
 function requiredUrl(value: string): URL {
   const url = new URL(value);
-  const localDevelopment = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  const localDevelopment = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
   if (url.protocol !== "https:" && !(localDevelopment && url.protocol === "http:")) {
     throw new Error("Action webhook must use HTTPS");
   }
   return url;
+}
+
+async function safeEndpoint(value: string): Promise<URL> {
+  const url = requiredUrl(value);
+  const localDevelopment = process.env.NODE_ENV !== "production"
+    && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1");
+  if (localDevelopment) return url;
+  return assertPublicUrl(value);
 }
 
 function timeoutSignal(): { signal: AbortSignal; cleanup: () => void } {
@@ -70,7 +79,7 @@ export class GenericWebhookConnector implements ActionConnector {
   constructor(private readonly config: WebhookConfig) {}
 
   async validateConfig(): Promise<boolean> {
-    requiredUrl(this.config.webhookUrl);
+    await safeEndpoint(this.config.webhookUrl);
     return true;
   }
 
@@ -101,6 +110,7 @@ export class GenericWebhookConnector implements ActionConnector {
           "x-frontdeskwise-idempotency-key": input.idempotencyKey,
           ...(signature ? { "x-frontdeskwise-signature": `sha256=${signature}` } : {}),
         },
+        redirect: "error",
         body,
       });
       if (!response.ok) throw new Error(`Action webhook request failed (${response.status})`);
@@ -192,7 +202,7 @@ class VendorApiConnector implements ActionConnector {
 
   async validateConfig(): Promise<boolean> {
     if (!this.config.endpoint) throw new Error(`${this.provider} endpoint is required`);
-    requiredUrl(this.config.endpoint);
+    await safeEndpoint(this.config.endpoint);
     if (!this.config.accessToken && !this.config.apiKey) throw new Error(`${this.provider} credentials are required`);
     return true;
   }
@@ -211,6 +221,7 @@ class VendorApiConnector implements ActionConnector {
           ...(this.config.accessToken ? { authorization: `Bearer ${this.config.accessToken}` } : {}),
           ...(this.config.apiKey ? { "x-api-key": this.config.apiKey } : {}),
         },
+        redirect: "error",
         body: JSON.stringify({ provider: this.provider, ...input }),
       });
       if (!response.ok) throw new Error(`${this.provider} action request failed (${response.status})`);
