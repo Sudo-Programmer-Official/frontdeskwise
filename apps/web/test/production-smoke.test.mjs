@@ -158,6 +158,10 @@ test("workflow creation never reuses a zero-step relationship projection", () =>
   assert.match(apiServer, /Workflow list read trace/);
   assert.match(apiServer, /Workflow by-id read trace/);
   assert.match(apiServer, /Generated workflow read-after-write failed validation/);
+  assert.match(apiServer, /const previousActionIsActive = previousAction\.enabled !== false && previousAction\.lifecycleStatus !== "disabled"/);
+  assert.match(apiServer, /action\.enabled = true;/);
+  assert.match(apiServer, /action\.lifecycleStatus = "active";/);
+  assert.match(apiServer, /action\.reviewReason = "owner_override";/);
 });
 
 test("owner UI uses the shared product design language", () => {

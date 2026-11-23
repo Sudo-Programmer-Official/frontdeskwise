@@ -19232,13 +19232,14 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   const previousHasSteps = (previousAction.steps?.length ?? 0) > 0;
   const previousVerification = previousHasSteps ? verifyWorkflowDefinition(previousAction) : null;
   const previousOwnerSchemaDiagnostics = workflowOwnerSchemaDiagnostics(previousAction);
+  const previousActionIsActive = previousAction.enabled !== false && previousAction.lifecycleStatus !== "disabled";
   app.log.info({
     phase: "previous-record",
     businessId: business.id,
     publicationVersion: business.publishedConfigVersion,
     trace: workflowTrace(previousAction),
   }, "Generated workflow previous-record trace");
-  if (previousHasSteps && previousVerification?.ok && previousOwnerSchemaDiagnostics.length === 0) {
+  if (previousHasSteps && previousVerification?.ok && previousOwnerSchemaDiagnostics.length === 0 && previousActionIsActive) {
     // A stale Actions page can still submit Generate workflow after the
     // workflow was already persisted. Return the current workflow so the
     // owner is taken to the existing completed draft instead of seeing a
@@ -19287,6 +19288,14 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   }, "Generated workflow request trace");
   const action = normalizedAction(actionInput, previousAction);
   action.businessId = previousAction.businessId ?? business.id;
+  // Creating a workflow is an explicit owner override of a discovered or
+  // disabled Action. Keep the same Action/workflow id, but make the complete
+  // definition visible in the owner workflow catalog immediately. Without
+  // this transition, a valid 14-step workflow can be persisted successfully
+  // and still be hidden by the UI's disabled-action filter.
+  action.enabled = true;
+  action.lifecycleStatus = "active";
+  action.reviewReason = "owner_override";
   const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
   if (organizationId) action.organizationId = organizationId;
   if (!action.steps?.length) throw httpError(400, "Generated workflow must include at least one step");
