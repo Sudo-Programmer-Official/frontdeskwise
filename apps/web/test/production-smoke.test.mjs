@@ -688,6 +688,8 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(apiServer, /allowStaleContextVersion: true/);
   assert.match(workflowIsolation, /allowStaleContextVersion/);
   assert.match(workflowWorkspace, /businessContext: props\.businessContext \?\? workflowContextPayload/);
+  assert.match(workflowWorkspace, /isJustCreatedWorkflow/);
+  assert.match(workflowWorkspace, /create endpoint returns a complete, validated workflow/);
   assert.match(workflowVerifier, /provider_fallback_missing/);
   assert.match(apiServer, /workflowActionId/);
   for (const marker of [

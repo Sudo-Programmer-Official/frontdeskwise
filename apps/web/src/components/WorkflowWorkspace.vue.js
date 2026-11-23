@@ -161,7 +161,11 @@ const allActions = computed(() => {
 const workflowActions = computed(() => allActions.value.filter((action) => {
     if (action.enabled === false || action.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(action.id))
         return false;
-    return action.workflowSafety?.status === "blocked" || actionHasWorkflow(action);
+    // The create endpoint returns a complete, validated workflow before the
+    // parent Actions projection is refreshed. Keep that authoritative response
+    // visible even if its relationship count/IDs are still stale for one read.
+    const isJustCreatedWorkflow = locallyCreatedAction.value?.id === action.id && (action.steps?.length ?? 0) > 0;
+    return isJustCreatedWorkflow || action.workflowSafety?.status === "blocked" || actionHasWorkflow(action);
 }));
 const duplicateCreateWorkflow = computed(() => {
     const candidate = normalizeWorkflowName(createWorkflowName.value.slice(0, 160));
