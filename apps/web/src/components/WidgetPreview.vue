@@ -17,8 +17,6 @@ const props = withDefaults(defineProps<{
   welcomeMessage: string;
   businessName: string;
   websiteUrl: string;
-  websitePreviewEndpoint?: string;
-  websitePreviewToken?: string;
   widgetColor: string;
   widgetTheme?: "light" | "dark" | "auto";
   widgetPosition?: "bottom-right" | "bottom-left";
@@ -100,18 +98,6 @@ const previewWebsiteUrl = computed(() => {
     return "";
   }
 });
-const websitePreviewState = ref<"empty" | "loading" | "ready" | "error">("empty");
-const websitePreviewErrorReason = ref<"security_policy" | "unavailable" | null>(null);
-let previewTimeout: number | null = null;
-let previewProbeVersion = 0;
-
-function clearPreviewTimeout(): void {
-  if (previewTimeout !== null) {
-    window.clearTimeout(previewTimeout);
-    previewTimeout = null;
-  }
-}
-
 function clearHandoffNoticeTimer(): void {
   if (handoffNoticeTimer !== null) {
     window.clearTimeout(handoffNoticeTimer);
@@ -127,70 +113,6 @@ function armHandoffNoticeTimer(): void {
     handoffNoticeDismissed.value = true;
     syncRenderer();
   }, 6000);
-}
-
-function resetWebsitePreview(url: string): void {
-  clearPreviewTimeout();
-  websitePreviewErrorReason.value = null;
-  websitePreviewState.value = url ? "loading" : "empty";
-  if (url) {
-    previewTimeout = window.setTimeout(() => {
-      if (websitePreviewState.value === "loading") websitePreviewState.value = "error";
-    }, 8000);
-  }
-}
-
-async function checkWebsitePreview(url: string): Promise<void> {
-  const version = ++previewProbeVersion;
-  clearPreviewTimeout();
-  websitePreviewErrorReason.value = null;
-  websitePreviewState.value = url ? "loading" : "empty";
-  if (!url) return;
-
-  const endpoint = props.websitePreviewEndpoint?.trim();
-  if (!endpoint) {
-    resetWebsitePreview(url);
-    return;
-  }
-
-  try {
-    const response = await fetch(endpoint, {
-      headers: props.websitePreviewToken?.trim() ? { authorization: `Bearer ${props.websitePreviewToken.trim()}` } : {},
-      credentials: "same-origin",
-    });
-    if (version !== previewProbeVersion) return;
-    if (response.ok) {
-      const payload = await response.json() as { embeddable?: boolean; reason?: "security_policy" | "unavailable" | null };
-      if (payload.embeddable === false) {
-        websitePreviewErrorReason.value = payload.reason === "security_policy" ? "security_policy" : "unavailable";
-        websitePreviewState.value = "error";
-        return;
-      }
-    }
-  } catch {
-    // If the probe is unavailable, retain the direct iframe attempt. The
-    // timeout/error state below still gives the owner a useful fallback.
-  }
-  if (version !== previewProbeVersion) return;
-  websitePreviewState.value = "loading";
-  previewTimeout = window.setTimeout(() => {
-    if (websitePreviewState.value === "loading") {
-      websitePreviewErrorReason.value = "unavailable";
-      websitePreviewState.value = "error";
-    }
-  }, 8000);
-}
-
-function markWebsitePreviewReady(): void {
-  clearPreviewTimeout();
-  websitePreviewErrorReason.value = null;
-  websitePreviewState.value = "ready";
-}
-
-function markWebsitePreviewError(): void {
-  clearPreviewTimeout();
-  websitePreviewErrorReason.value = "unavailable";
-  websitePreviewState.value = "error";
 }
 
 function sampleMessages(nextScenario: WidgetScenario): WidgetMessage[] {
@@ -275,7 +197,6 @@ function handleAsk(question: string): void {
   emit("ask", question);
 }
 
-watch([previewWebsiteUrl, () => props.websitePreviewEndpoint, () => props.websitePreviewToken], ([url]) => { void checkWebsitePreview(url); }, { immediate: true });
 watch(() => props.mode, (nextMode) => { previewMode.value = nextMode; });
 watch(() => props.scenario, (nextScenario) => { if (nextScenario) { scenario.value = nextScenario; handoffNoticeDismissed.value = false; proactiveDismissed.value = false; armHandoffNoticeTimer(); } });
 watch([widgetConfig, widgetState], syncRenderer, { deep: true });
@@ -310,7 +231,6 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  clearPreviewTimeout();
   clearHandoffNoticeTimer();
   renderer?.destroy();
   renderer = null;
@@ -328,20 +248,21 @@ onBeforeUnmount(() => {
     </div>
     <div aria-label="Widget preview" :class="['customer-preview', `preview-${previewMode}`, `theme-${widgetTheme}`, `position-${widgetPosition}`]">
       <div class="preview-site-bar"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>{{ previewWebsiteUrl || websiteUrl || 'yourbusiness.com' }}</span></div>
-      <div class="preview-site-body" :class="{ 'preview-site-body-fallback': websitePreviewState === 'error' || websitePreviewState === 'empty' }">
-        <iframe v-if="previewWebsiteUrl && websitePreviewState !== 'error'" :key="previewWebsiteUrl" class="preview-website-frame" :src="previewWebsiteUrl" :title="`Website preview for ${businessName || 'your business'}`" loading="eager" referrerpolicy="strict-origin-when-cross-origin" @load="markWebsitePreviewReady" @error="markWebsitePreviewError"></iframe>
-        <div v-if="websitePreviewState === 'loading'" class="preview-site-state" aria-live="polite"><span class="preview-site-state-dot"></span>Loading your website…</div>
-        <div v-else-if="websitePreviewState === 'error'" class="preview-site-error"><p class="ds-section-kicker">Website preview unavailable</p><strong>{{ previewWebsiteUrl || websiteUrl }}</strong><p>{{ websitePreviewErrorReason === 'security_policy' ? 'This website is connected to knowledge, but its security policy does not allow a live embedded preview here.' : 'This website could not be loaded in the live preview right now.' }} Open it in a new tab to view the live page.</p><a :href="previewWebsiteUrl || websiteUrl" target="_blank" rel="noreferrer">Open website in a new tab</a></div>
-        <div v-else-if="websitePreviewState === 'empty'" class="preview-site-error"><p class="ds-section-kicker">Add a website to preview</p><strong>{{ businessName || 'Your business' }}</strong><p>Once a public website is connected, the live page will appear behind the assistant.</p></div>
+      <div class="preview-site-body">
+        <div class="preview-site-simulation" aria-label="Simulated website frame">
+          <div class="preview-site-nav"><strong>{{ businessName || 'Your business' }}</strong><span>Services</span><span>About</span><span>Contact</span></div>
+          <div class="preview-site-copy"><span class="preview-badge">WELCOME TO {{ (businessName || 'YOUR BUSINESS').toUpperCase() }}</span><h4>Helpful answers, right away.</h4><p>Your visitors can explore services, get grounded answers, and take the next step with your AI front desk.</p><div class="preview-site-pills"><span></span><span></span><span></span></div></div>
+        </div>
+        <div class="preview-site-state"><span class="preview-site-state-dot"></span>Simulated website frame</div>
         <div ref="previewMount" class="widget-preview-stage"></div>
       </div>
     </div>
-    <p class="preview-note">The chatbot above uses the production widget renderer. The website frame and sample data are preview-only.</p>
+    <p class="preview-note">The chatbot above uses the production widget renderer. This website frame is simulated, so external sites and their framing policies never affect the preview.</p>
   </div>
 </template>
 
 <style scoped>
-.agent-preview-shell { min-width: 0; }
+.agent-preview-shell { width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
 .agent-preview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
 .agent-preview-toolbar h3 { margin: 0; color: #14233d; font-size: 17px; letter-spacing: -.025em; }
 .preview-toolbar-controls { display: flex; align-items: center; gap: 8px; }
@@ -350,20 +271,24 @@ onBeforeUnmount(() => {
 .preview-mode-toggle { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid #d7e0eb; border-radius: 7px; background: #eef2f7; }
 .preview-mode-toggle button { padding: 6px 9px; border: 0; border-radius: 5px; color: #687892; background: transparent; font-size: 11px; font-weight: 700; }
 .preview-mode-toggle button.active { color: #14233d; background: #fff; box-shadow: 0 1px 2px rgba(20,42,74,.12); }
-.customer-preview { position: relative; min-height: 570px; overflow: hidden; border: 1px solid #dfe6ef; border-radius: 14px; background: #eaf7fc; box-shadow: 0 18px 45px rgba(20,42,74,.08); }
+.customer-preview { position: relative; width: 100%; max-width: 100%; min-height: 620px; overflow: hidden; border: 1px solid #dfe6ef; border-radius: 14px; background: #eaf7fc; box-shadow: 0 18px 45px rgba(20,42,74,.08); }
 .customer-preview.preview-mobile { width: min(100%, 390px); min-height: 680px; margin: 0 auto; }
 .preview-site-bar { position: relative; z-index: 5; display: flex; align-items: center; gap: 6px; padding: 12px 15px; color: #8795a8; background: #f8fafc; font-size: 10px; }
 .preview-site-bar > span:last-child { flex: 1; margin-left: 5px; padding: 6px 9px; overflow: hidden; border-radius: 6px; background: #fff; text-overflow: ellipsis; white-space: nowrap; }
-.preview-site-body { position: relative; min-height: 526px; overflow: hidden; background: linear-gradient(135deg, #dff5fb, #effafe 50%, #d6edf8); }
+.preview-site-body { position: relative; min-height: 574px; overflow: hidden; background: linear-gradient(135deg, #dff5fb, #effafe 50%, #d6edf8); }
 .preview-mobile .preview-site-body { min-height: 640px; }
-.preview-site-body-fallback { display: grid; place-items: center; }
-.preview-website-frame { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+.preview-site-simulation { position: absolute; z-index: 0; inset: 0; overflow: hidden; background: linear-gradient(135deg, #dff5fb, #effafe 50%, #d6edf8); }
+.preview-site-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 22px; color: #2b6489; background: rgba(255,255,255,.85); font-size: 10px; }
+.preview-site-nav strong { color: #164c86; font-size: 12px; }
+.preview-site-copy { padding: 60px 28px; color: #155277; }
+.preview-badge { color: #2f80ed; font-size: 9px; font-weight: 800; letter-spacing: .12em; }
+.preview-site-copy h4 { max-width: 320px; margin: 12px 0 8px; color: #125687; font-size: 34px; line-height: 1; letter-spacing: -.06em; }
+.preview-site-copy p { max-width: 250px; color: #4a7e9c; font-size: 12px; line-height: 1.5; }
+.preview-site-pills { display: flex; gap: 7px; margin-top: 22px; }
+.preview-site-pills span { width: 44px; height: 7px; border-radius: 99px; background: rgba(47,128,237,.28); }
+.preview-site-pills span:first-child { width: 78px; background: rgba(47,128,237,.68); }
 .preview-site-state { position: absolute; z-index: 1; top: 20px; left: 20px; display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 7px; color: #58728f; background: rgba(255,255,255,.84); font-size: 10px; transform: none; }
 .preview-site-state-dot { width: 7px; height: 7px; border-radius: 50%; background: #2f80ed; animation: preview-pulse 1s infinite ease-in-out; }
-.preview-site-error { position: relative; z-index: 1; width: min(270px, calc(100% - 44px)); padding: 18px; border: 1px solid rgba(205,225,239,.95); border-radius: 12px; color: #4d7897; background: rgba(255,255,255,.82); box-shadow: 0 12px 30px rgba(20,42,74,.08); font-size: 11px; line-height: 1.45; }
-.preview-site-error strong { display: block; overflow: hidden; color: #164c86; text-overflow: ellipsis; white-space: nowrap; }
-.preview-site-error p:not(.ds-section-kicker) { margin: 8px 0 0; }
-.preview-site-error a { display: inline-block; margin-top: 10px; color: #1769e8; font-weight: 750; }
 .widget-preview-stage { position: absolute; z-index: 4; inset: 0; container-name: fdw-preview; container-type: inline-size; }
 .preview-note { margin: 10px 0 0; color: #687892; font-size: 11px; line-height: 1.5; }
 @keyframes preview-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }

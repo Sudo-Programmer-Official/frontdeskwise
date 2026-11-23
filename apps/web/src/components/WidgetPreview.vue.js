@@ -53,16 +53,6 @@ const previewWebsiteUrl = computed(() => {
         return "";
     }
 });
-const websitePreviewState = ref("empty");
-const websitePreviewErrorReason = ref(null);
-let previewTimeout = null;
-let previewProbeVersion = 0;
-function clearPreviewTimeout() {
-    if (previewTimeout !== null) {
-        window.clearTimeout(previewTimeout);
-        previewTimeout = null;
-    }
-}
 function clearHandoffNoticeTimer() {
     if (handoffNoticeTimer !== null) {
         window.clearTimeout(handoffNoticeTimer);
@@ -78,69 +68,6 @@ function armHandoffNoticeTimer() {
         handoffNoticeDismissed.value = true;
         syncRenderer();
     }, 6000);
-}
-function resetWebsitePreview(url) {
-    clearPreviewTimeout();
-    websitePreviewErrorReason.value = null;
-    websitePreviewState.value = url ? "loading" : "empty";
-    if (url) {
-        previewTimeout = window.setTimeout(() => {
-            if (websitePreviewState.value === "loading")
-                websitePreviewState.value = "error";
-        }, 8000);
-    }
-}
-async function checkWebsitePreview(url) {
-    const version = ++previewProbeVersion;
-    clearPreviewTimeout();
-    websitePreviewErrorReason.value = null;
-    websitePreviewState.value = url ? "loading" : "empty";
-    if (!url)
-        return;
-    const endpoint = props.websitePreviewEndpoint?.trim();
-    if (!endpoint) {
-        resetWebsitePreview(url);
-        return;
-    }
-    try {
-        const response = await fetch(endpoint, {
-            headers: props.websitePreviewToken?.trim() ? { authorization: `Bearer ${props.websitePreviewToken.trim()}` } : {},
-            credentials: "same-origin",
-        });
-        if (version !== previewProbeVersion)
-            return;
-        if (response.ok) {
-            const payload = await response.json();
-            if (payload.embeddable === false) {
-                websitePreviewErrorReason.value = payload.reason === "security_policy" ? "security_policy" : "unavailable";
-                websitePreviewState.value = "error";
-                return;
-            }
-        }
-    }
-    catch {
-        // If the probe is unavailable, retain the direct iframe attempt. The
-        // timeout/error state below still gives the owner a useful fallback.
-    }
-    if (version !== previewProbeVersion)
-        return;
-    websitePreviewState.value = "loading";
-    previewTimeout = window.setTimeout(() => {
-        if (websitePreviewState.value === "loading") {
-            websitePreviewErrorReason.value = "unavailable";
-            websitePreviewState.value = "error";
-        }
-    }, 8000);
-}
-function markWebsitePreviewReady() {
-    clearPreviewTimeout();
-    websitePreviewErrorReason.value = null;
-    websitePreviewState.value = "ready";
-}
-function markWebsitePreviewError() {
-    clearPreviewTimeout();
-    websitePreviewErrorReason.value = "unavailable";
-    websitePreviewState.value = "error";
 }
 function sampleMessages(nextScenario) {
     const assistantName = (props.assistantName || "AI front desk")
@@ -223,7 +150,6 @@ function selectScenario(nextScenario) {
 function handleAsk(question) {
     emit("ask", question);
 }
-watch([previewWebsiteUrl, () => props.websitePreviewEndpoint, () => props.websitePreviewToken], ([url]) => { void checkWebsitePreview(url); }, { immediate: true });
 watch(() => props.mode, (nextMode) => { previewMode.value = nextMode; });
 watch(() => props.scenario, (nextScenario) => { if (nextScenario) {
     scenario.value = nextScenario;
@@ -262,7 +188,6 @@ onMounted(() => {
     });
 });
 onBeforeUnmount(() => {
-    clearPreviewTimeout();
     clearHandoffNoticeTimer();
     renderer?.destroy();
     renderer = null;
@@ -302,8 +227,6 @@ void __VLS_ctx, __VLS_components, __VLS_intrinsics, __VLS_directives;
 const __VLS_template = () => {
     __VLS_withDotValue(previewMode, {});
     __VLS_withDotValue(previewWebsiteUrl, {});
-    __VLS_withDotValue(websitePreviewState, {});
-    __VLS_withDotValue(websitePreviewErrorReason, {});
     void {};
     /** @type {__VLS_StyleScopedClasses['agent-preview-toolbar']} */ ;
     /** @type {__VLS_StyleScopedClasses['preview-scenario']} */ ;
@@ -313,9 +236,11 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['preview-site-bar']} */ ;
     /** @type {__VLS_StyleScopedClasses['preview-mobile']} */ ;
     /** @type {__VLS_StyleScopedClasses['preview-site-body']} */ ;
-    /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
-    /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
-    /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-nav']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-copy']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-copy']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-pills']} */ ;
+    /** @type {__VLS_StyleScopedClasses['preview-site-pills']} */ ;
     /** @type {__VLS_StyleScopedClasses['agent-preview-toolbar']} */ ;
     /** @type {__VLS_StyleScopedClasses['preview-toolbar-controls']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
@@ -418,66 +343,48 @@ const __VLS_template = () => {
     (previewWebsiteUrl.value || __VLS_ctx.websiteUrl || 'yourbusiness.com');
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ...{ class: "preview-site-body" },
-        ...{ class: ({ 'preview-site-body-fallback': websitePreviewState.value === 'error' || websitePreviewState.value === 'empty' }) },
     });
     /** @type {__VLS_StyleScopedClasses['preview-site-body']} */ ;
-    /** @type {__VLS_StyleScopedClasses['preview-site-body-fallback']} */ ;
-    if (previewWebsiteUrl.value && websitePreviewState.value !== 'error') {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.iframe, __VLS_intrinsics.iframe)({
-            ...{ onLoad: (markWebsitePreviewReady) },
-            ...{ onError: (markWebsitePreviewError) },
-            key: (previewWebsiteUrl.value),
-            ...{ class: "preview-website-frame" },
-            src: (previewWebsiteUrl.value),
-            title: (`Website preview for ${__VLS_ctx.businessName || 'your business'}`),
-            loading: "eager",
-            referrerpolicy: "strict-origin-when-cross-origin",
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-website-frame']} */ ;
-    }
-    if (websitePreviewState.value === 'loading') {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "preview-site-state" },
-            'aria-live': "polite",
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-site-state']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: "preview-site-state-dot" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-site-state-dot']} */ ;
-    }
-    else if (websitePreviewState.value === 'error') {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "preview-site-error" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "ds-section-kicker" },
-        });
-        /** @type {__VLS_StyleScopedClasses['ds-section-kicker']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
-        (previewWebsiteUrl.value || __VLS_ctx.websiteUrl);
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
-        (websitePreviewErrorReason.value === 'security_policy' ? 'This website is connected to knowledge, but its security policy does not allow a live embedded preview here.' : 'This website could not be loaded in the live preview right now.');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.a, __VLS_intrinsics.a)({
-            href: (previewWebsiteUrl.value || __VLS_ctx.websiteUrl),
-            target: "_blank",
-            rel: "noreferrer",
-        });
-    }
-    else if (websitePreviewState.value === 'empty') {
-        __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
-            ...{ class: "preview-site-error" },
-        });
-        /** @type {__VLS_StyleScopedClasses['preview-site-error']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({
-            ...{ class: "ds-section-kicker" },
-        });
-        /** @type {__VLS_StyleScopedClasses['ds-section-kicker']} */ ;
-        __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
-        (__VLS_ctx.businessName || 'Your business');
-        __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
-    }
+    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        ...{ class: "preview-site-simulation" },
+        'aria-label': "Simulated website frame",
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-site-simulation']} */ ;
+    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        ...{ class: "preview-site-nav" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-site-nav']} */ ;
+    __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+    (__VLS_ctx.businessName || 'Your business');
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        ...{ class: "preview-site-copy" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-site-copy']} */ ;
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+        ...{ class: "preview-badge" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-badge']} */ ;
+    ((__VLS_ctx.businessName || 'YOUR BUSINESS').toUpperCase());
+    __VLS_asFunctionalElement1(__VLS_intrinsics.h4, __VLS_intrinsics.h4)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.p, __VLS_intrinsics.p)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        ...{ class: "preview-site-pills" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-site-pills']} */ ;
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+    __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+        ...{ class: "preview-site-state" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-site-state']} */ ;
+    __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
+        ...{ class: "preview-site-state-dot" },
+    });
+    /** @type {__VLS_StyleScopedClasses['preview-site-state-dot']} */ ;
     __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
         ref: "previewMount",
         ...{ class: "widget-preview-stage" },
@@ -488,7 +395,7 @@ const __VLS_template = () => {
     });
     /** @type {__VLS_StyleScopedClasses['preview-note']} */ ;
     // @ts-ignore
-    [previewMode, previewMode, widgetTheme, widgetPosition, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, previewWebsiteUrl, websiteUrl, websiteUrl, websiteUrl, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, websitePreviewState, businessName, businessName, websitePreviewErrorReason,];
+    [previewMode, previewMode, widgetTheme, widgetPosition, previewWebsiteUrl, websiteUrl, businessName, businessName,];
     return {};
 };
 void [__VLS_template];

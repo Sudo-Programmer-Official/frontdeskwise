@@ -21,6 +21,7 @@ import {
   Database,
   DollarSign,
   FileText,
+  Gauge,
   Headset,
   House,
   Inbox,
@@ -1151,6 +1152,35 @@ interface AdminHealthSnapshot {
   checkedAt: string;
 }
 
+interface AdminRequestMetricRow {
+  route?: string;
+  method?: string;
+  trafficClass?: string;
+  requests: number;
+  errors: number;
+  errorRate: number;
+  averageDurationMs: number;
+  p50ApproxMs?: number | null;
+  p95ApproxMs?: number | null;
+  lastSeenAt?: string | null;
+}
+
+interface AdminRequestMetrics {
+  generatedAt: string;
+  windowHours: number;
+  totals: {
+    requests: number;
+    errors: number;
+    errorRate: number;
+    averageDurationMs: number;
+    averageRequestsPerMinute: number;
+  };
+  routes: AdminRequestMetricRow[];
+  trafficClasses: AdminRequestMetricRow[];
+  live: AdminRequestMetricRow[];
+  unavailable?: boolean;
+}
+
 const route = ref<AppRoute>(parseRoute());
 const view = computed<View>({
   get: () => routeView(route.value) as View,
@@ -1543,6 +1573,18 @@ const adminEmailTestLoading = ref(false);
 const adminEmailTestMessage = ref("");
 const adminSection = ref<AdminSection>("overview");
 const adminHealth = ref<AdminHealthSnapshot | null>(null);
+const adminRequestMetrics = ref<AdminRequestMetrics | null>(null);
+const adminRequestMetricsLoading = ref(false);
+const adminRequestMetricsError = ref("");
+
+function requestMetricPercent(value: number): string {
+  return `${(value * 100).toFixed(value > 0 && value < 0.01 ? 2 : 1)}%`;
+}
+
+function requestMetricDuration(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return value >= 5_001 ? ">5s" : `${value}ms`;
+}
 const installationSupportRequests = ref<InstallationSupportRequest[]>([]);
 const installationSupportAssignees = ref<InstallationSupportAssignee[]>([]);
 const installationSupportSummary = ref({ new: 0, inProgress: 0, resolved: 0 });
@@ -1691,7 +1733,7 @@ const inboxComposer = ref<HTMLTextAreaElement | null>(null);
 const inboxNearBottom = ref(true);
 const inboxNewMessageCount = ref(0);
 const inboxLocalMessages = ref<Record<string, InboxMessage[]>>({});
-let inboxRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let inboxRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 const teamMembers = ref<TeamMember[]>([]);
 const teamBusinesses = ref<Array<{ id: string; name: string; slug: string }>>([]);
 const teamLoading = ref(false);
@@ -2413,6 +2455,7 @@ async function applyRouteState(nextRoute: AppRoute) {
       void loadAdminMessaging();
       void loadAdminRecovery();
       void loadAdminHealth();
+      void loadAdminRequestMetrics();
     }
     return;
   }
@@ -4604,18 +4647,40 @@ async function refreshSelectedInboxConversation() {
   }
 }
 
+function inboxPollingDelayMs(): number {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return 60_000;
+  return selectedInboxConversation.value ? 10_000 : 30_000;
+}
+
+function scheduleInboxPolling(delayMs = inboxPollingDelayMs()) {
+  if (view.value !== "inbox") {
+    stopInboxPolling();
+    return;
+  }
+  if (inboxRefreshTimer !== null) window.clearTimeout(inboxRefreshTimer);
+  inboxRefreshTimer = window.setTimeout(async () => {
+    inboxRefreshTimer = null;
+    if (view.value === "inbox" && !inboxLoading.value) {
+      await loadInbox(inboxPage.value, { globalLoading: false, refreshSelected: true });
+    }
+    if (view.value === "inbox") scheduleInboxPolling();
+  }, Math.max(0, delayMs));
+}
+
 function startInboxPolling() {
-  if (inboxRefreshTimer !== null) return;
-  inboxRefreshTimer = window.setInterval(() => {
-    if (view.value !== "inbox" || inboxLoading.value) return;
-    void loadInbox(inboxPage.value, { globalLoading: false, refreshSelected: true });
-  }, 10_000);
+  if (inboxRefreshTimer !== null || view.value !== "inbox") return;
+  scheduleInboxPolling();
 }
 
 function stopInboxPolling() {
   if (inboxRefreshTimer === null) return;
-  window.clearInterval(inboxRefreshTimer);
+  window.clearTimeout(inboxRefreshTimer);
   inboxRefreshTimer = null;
+}
+
+function handleInboxVisibilityChange() {
+  if (view.value !== "inbox") return;
+  scheduleInboxPolling(document.visibilityState === "hidden" ? 60_000 : 0);
 }
 
 async function loadInbox(page = inboxPage.value, options: { globalLoading?: boolean; refreshSelected?: boolean } = {}) {
@@ -6725,6 +6790,22 @@ async function loadAdminHealth() {
   }
 }
 
+async function loadAdminRequestMetrics() {
+  if (!authSnapshot.value || adminRequestMetricsLoading.value) return;
+  adminRequestMetricsLoading.value = true;
+  adminRequestMetricsError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl("/api/v1/admin/request-metrics?hours=24"), { headers: ownerHeaders() }, { globalLoading: false });
+    const payload = await response.json() as AdminRequestMetrics & { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load request metrics.");
+    adminRequestMetrics.value = payload;
+  } catch (error) {
+    adminRequestMetricsError.value = error instanceof Error ? error.message : "Could not load request metrics.";
+  } finally {
+    adminRequestMetricsLoading.value = false;
+  }
+}
+
 async function loadAdminUsers() {
   if (!authSnapshot.value) return;
   try {
@@ -7825,6 +7906,7 @@ watch(adminSection, (nextSection, previousSection) => {
   if (nextSection === "feature-flags") void loadAdminFeatureFlags();
   if (nextSection === "recovery") void loadAdminRecovery();
   if (nextSection === "support") void loadAdminSupportCases();
+  if (nextSection === "operations") void loadAdminRequestMetrics();
   commitRoute(platformRoute(nextSection));
 });
 
@@ -7868,6 +7950,7 @@ watch(view, (nextView, previousView) => {
     void loadAdminMessaging();
     void loadAdminRecovery();
     void loadAdminHealth();
+    void loadAdminRequestMetrics();
   }
 });
 
@@ -7937,6 +8020,7 @@ onMounted(() => {
     window.addEventListener("keydown", handleMobileNavKeydown);
     window.addEventListener("resize", handleViewportChange);
     window.addEventListener("orientationchange", handleViewportChange);
+    document.addEventListener("visibilitychange", handleInboxVisibilityChange);
     if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       landingHeroTimer = window.setInterval(() => {
         if (view.value === "home") heroDemoStep.value = (heroDemoStep.value + 1) % landingDemoSteps.length;
@@ -7966,6 +8050,7 @@ onBeforeUnmount(() => {
     window.removeEventListener("keydown", handleMobileNavKeydown);
     window.removeEventListener("resize", handleViewportChange);
     window.removeEventListener("orientationchange", handleViewportChange);
+    document.removeEventListener("visibilitychange", handleInboxVisibilityChange);
   }
 });
 
@@ -9006,7 +9091,19 @@ function startMarketingDemo() {
             <template v-else-if="messagingTab === 'delivery'"><div class="section-toolbar compact"><div><p class="eyebrow">Provider delivery log</p><h3>Recent messages</h3></div><select v-model="messagingDeliveryFilter" @change="loadAdminMessaging(true)"><option value="all">All statuses</option><option value="queued">Queued</option><option value="sent">Sent</option><option value="deferred">Deferred</option><option value="failed">Failed</option></select></div><div class="table-heading messaging-delivery-row"><span>Message</span><span>Recipient</span><span>Status</span><span>Time</span><span></span></div><div v-if="!messagingDeliveries.length" class="diagnostics-empty">No lifecycle deliveries found.</div><div v-for="delivery in messagingDeliveries" :key="delivery.id" class="table-row messaging-delivery-row"><div><strong>{{ delivery.templateName }}</strong><small>{{ delivery.businessName || 'Account' }} · {{ formatLabel(delivery.eventType) }}</small></div><span>{{ delivery.recipientEmail }}</span><span :class="['status-pill', delivery.status === 'sent' || delivery.status === 'delivered' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span><span>{{ delivery.sentAt ? new Date(delivery.sentAt).toLocaleString() : delivery.scheduledAt ? new Date(delivery.scheduledAt).toLocaleString() : '—' }}</span><button v-if="delivery.status === 'failed' || delivery.status === 'deferred'" class="outline-button small" type="button" :disabled="messagingLoading" @click="retryMessagingDelivery(delivery)">Retry</button><span v-else></span></div></template>
             <template v-else><div class="messaging-settings-grid"><article class="ds-card"><p class="eyebrow">Provider</p><h3>{{ messagingSummary?.provider.name.toUpperCase() ?? 'SES' }}</h3><p>{{ messagingSummary?.provider.configured ? 'Configured for transactional delivery.' : 'Set AWS_REGION and FRONTDESKWISE_SES_FROM_EMAIL to enable delivery.' }}</p><small>Provider delivery IDs are stored on each message. Provider dashboards are not the canonical template source.</small></article><article class="ds-card"><p class="eyebrow">Guardrails</p><h3>Operational control stays explicit</h3><p>Super Admins manage lifecycle templates and automations. Business owners manage noisy operational notifications.</p><small>Billing, payment, and security notices remain mandatory.</small></article></div></template>
           </article>
-          <div v-if="adminSection === 'operations'" class="admin-overview-grid"><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">System health</p><h2>Infrastructure readiness</h2><p>Refresh this page after changing Render, storage, email, or model configuration.</p></div><button class="outline-button small" type="button" @click="loadAdminHealth">Refresh checks</button></div><div class="health-list health-list-large"><div><span>API</span><strong :class="`health-${adminHealth?.api ?? 'degraded'}`">{{ adminHealth?.api ?? 'Checking…' }}</strong></div><div><span>Database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Object storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Transactional email</span><strong>{{ adminHealth?.emailConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Stripe billing</span><strong>{{ adminHealth?.stripeConfigured ? 'Ready' : 'Not configured' }}</strong></div></div></article><article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Delivery test</p><h2>Email operations</h2><p>Send a controlled SES test to the authenticated super-admin address.</p></div></div><button class="primary-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Send test email →' }}</button><p v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</p></article></div>
+          <div v-if="adminSection === 'operations'" class="admin-operations-stack">
+            <div class="admin-overview-grid">
+              <article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">System health</p><h2>Infrastructure readiness</h2><p>Refresh this page after changing Render, storage, email, or model configuration.</p></div><button class="outline-button small" type="button" @click="loadAdminHealth">Refresh checks</button></div><div class="health-list health-list-large"><div><span>API</span><strong :class="`health-${adminHealth?.api ?? 'degraded'}`">{{ adminHealth?.api ?? 'Checking…' }}</strong></div><div><span>Database</span><strong>{{ adminHealth?.database ?? 'Checking…' }}</strong></div><div><span>Object storage</span><strong>{{ adminHealth?.objectStorageConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Transactional email</span><strong>{{ adminHealth?.emailConfigured ? 'Ready' : 'Not configured' }}</strong></div><div><span>Stripe billing</span><strong>{{ adminHealth?.stripeConfigured ? 'Ready' : 'Not configured' }}</strong></div></div></article>
+              <article class="ds-card"><div class="ds-card-heading"><div><p class="eyebrow">Delivery test</p><h2>Email operations</h2><p>Send a controlled SES test to the authenticated super-admin address.</p></div></div><button class="primary-button small" type="button" :disabled="adminEmailTestLoading" @click="testAdminEmail">{{ adminEmailTestLoading ? 'Sending…' : 'Send test email →' }}</button><p v-if="adminEmailTestMessage" class="saved-message">✓ {{ adminEmailTestMessage }}</p></article>
+            </div>
+            <section class="panel request-metrics-panel">
+              <div class="section-toolbar"><div><p class="eyebrow">Capacity planning · last {{ adminRequestMetrics?.windowHours ?? 24 }}h</p><h2>Where API traffic is coming from</h2><p>Aggregated route counts separate customer work, polling, background telemetry, health checks, and internal traffic.</p></div><button class="outline-button small" type="button" :disabled="adminRequestMetricsLoading" @click="loadAdminRequestMetrics">{{ adminRequestMetricsLoading ? 'Refreshing…' : 'Refresh metrics' }}</button></div>
+              <p v-if="adminRequestMetricsError" class="form-error">{{ adminRequestMetricsError }}</p>
+              <div v-if="adminRequestMetrics" class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Activity :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRequestMetrics.totals.requests.toLocaleString() }}</strong><small>Requests</small><em>{{ adminRequestMetrics.totals.averageRequestsPerMinute.toFixed(2) }} / minute average</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><Gauge :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ requestMetricDuration(adminRequestMetrics.totals.averageDurationMs) }}</strong><small>Average latency</small><em>p50/p95 are shown by route below</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ requestMetricPercent(adminRequestMetrics.totals.errorRate) }}</strong><small>Error rate</small><em>{{ adminRequestMetrics.totals.errors.toLocaleString() }} 5xx responses</em></article></div>
+              <div v-if="adminRequestMetrics" class="request-metrics-grid"><article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">Traffic mix</p><h3>Requests by purpose</h3></div></div><div v-if="!adminRequestMetrics.trafficClasses.length" class="diagnostics-empty">No persisted samples yet. Metrics appear after the next flush.</div><div v-for="item in adminRequestMetrics.trafficClasses" :key="item.trafficClass" class="detail-list-row"><span><strong>{{ formatLabel(item.trafficClass || 'other') }}</strong><small>{{ item.requests.toLocaleString() }} requests · {{ requestMetricDuration(item.averageDurationMs) }} average</small></span><span><strong>{{ requestMetricPercent(item.requests / Math.max(1, adminRequestMetrics.totals.requests)) }}</strong><small>{{ requestMetricPercent(item.errorRate) }} errors</small></span></div></article><article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">Top routes</p><h3>Highest request volume</h3></div></div><div v-if="!adminRequestMetrics.routes.length" class="diagnostics-empty">No route samples yet.</div><div v-for="item in adminRequestMetrics.routes.slice(0, 12)" :key="`${item.method}-${item.route}-${item.trafficClass}`" class="detail-list-row"><span><strong>{{ item.method }} {{ item.route }}</strong><small>{{ formatLabel(item.trafficClass || 'other') }} · {{ item.requests.toLocaleString() }} requests</small></span><span><strong>{{ requestMetricDuration(item.p95ApproxMs) }}</strong><small>{{ requestMetricPercent(item.errorRate) }} errors · {{ requestMetricDuration(item.averageDurationMs) }} avg</small></span></div></article></div>
+              <p v-else class="diagnostics-empty">Request metrics are loading…</p>
+            </section>
+          </div>
         </div>
 
         <div v-else class="view-content empty-view"><div class="empty-icon"><CircleHelp :size="30" :stroke-width="1.8" aria-hidden="true" /></div><p class="eyebrow">{{ pageTitle }}</p><h2>This page is unavailable</h2><p>Return to the overview and choose a workspace section.</p><button class="primary-button small" type="button" @click="view = 'overview'">Back to overview <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>

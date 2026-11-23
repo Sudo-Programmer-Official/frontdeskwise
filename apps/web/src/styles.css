@@ -141,15 +141,8 @@
 .preview-site-bar { display: flex; align-items: center; gap: 6px; padding: 12px 15px; color: #8795a8; background: #f8fafc; font-size: 10px; }
 .preview-site-bar > span:last-child { flex: 1; margin-left: 5px; padding: 6px 9px; overflow: hidden; border-radius: 6px; background: #fff; text-overflow: ellipsis; white-space: nowrap; }
 .preview-site-body { position: relative; min-height: 0; flex: 1; overflow: hidden; background: linear-gradient(135deg, #dff5fb, #effafe 50%, #d6edf8); }
-.preview-site-body-fallback { background: #f7faff; }
-.preview-website-frame { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
 .preview-site-state { position: absolute; z-index: 1; top: 14px; left: 50%; display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid rgba(207,220,235,.92); border-radius: 999px; color: #58708f; background: rgba(255,255,255,.92); box-shadow: 0 6px 18px rgba(20,42,74,.1); font-size: 10px; font-weight: 700; transform: translateX(-50%); }
 .preview-site-state-dot { width: 7px; height: 7px; border-radius: 50%; background: #2f80ed; box-shadow: 0 0 0 4px rgba(47,128,237,.12); }
-.preview-site-error { position: absolute; z-index: 1; inset: 0; display: grid; place-content: center; gap: 8px; padding: 34px; color: var(--ds-color-ink-500); text-align: center; }
-.preview-site-error .ds-section-kicker { margin: 0; }
-.preview-site-error strong { color: var(--ds-color-ink-900); font-size: 18px; overflow-wrap: anywhere; }
-.preview-site-error p:not(.ds-section-kicker) { max-width: 360px; margin: 0 auto; font-size: 12px; line-height: 1.5; }
-.preview-site-error a { justify-self: center; margin-top: 4px; color: var(--ds-color-brand-700); font-size: 12px; font-weight: 750; }
 .preview-site-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 22px; color: #2b6489; background: rgba(255,255,255,.85); font-size: 10px; }
 .preview-site-nav strong { color: #164c86; font-size: 12px; }
 .preview-site-copy { padding: 60px 28px; color: #155277; }
@@ -162,7 +155,7 @@
 .theme-dark .preview-site-copy p { color: #bfd0e5; }
 .accessible-color-note { display: flex; align-items: center; gap: 8px; margin: 13px 0 0; color: var(--ds-color-ink-400); font-size: 11px; }
 .accessible-color-note span { display: inline-grid; width: 25px; height: 25px; place-items: center; border-radius: 7px; font-size: 11px; font-weight: 800; }
-@media (max-width: 980px) { .agent-preview-shell { position: static; }.customer-preview { min-height: 560px; } }
+@media (max-width: 900px) { .agent-preview-shell { position: static; }.customer-preview { min-height: 560px; } }
 @media (max-width: 640px) { .agent-preview-toolbar { align-items: flex-start; flex-direction: column; }.ds-file-upload { align-items: flex-start; }.ds-form-section { padding: 20px; }.customer-preview { min-height: 600px; }.preview-site-nav span { display: none; }.ds-drawer { padding: 22px 18px; } }
 
 * { box-sizing: border-box; }
@@ -314,6 +307,16 @@ button:disabled { cursor: wait; opacity: .7; }
 @media (max-width: 1060px) { .model-routing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .model-routing-grid { grid-template-columns: 1fr; } }
 @media (max-width: 1060px) { .ds-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.admin-overview-grid { grid-template-columns: 1fr; } }
+
+.admin-operations-stack { display: grid; gap: 18px; }
+.request-metrics-panel { overflow: hidden; }
+.request-metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.request-metrics-grid .ds-card { box-shadow: none; }
+.request-metrics-grid .detail-list-row span:last-child { flex: 0 0 auto; text-align: right; }
+
+@media (max-width: 780px) {
+  .request-metrics-grid { grid-template-columns: 1fr; }
+}
 @media (max-width: 760px) { .ds-stat-grid { grid-template-columns: 1fr; }.admin-section-tabs { overflow-x: auto; flex-wrap: nowrap; }.admin-section-tabs button { flex: 0 0 auto; }.admin-only-mode .content-header { align-items: center; }.admin-only-mode .content-header .text-button { display: inline-flex; }.admin-only-mode .view-content { padding-left: 18px; padding-right: 18px; } }
 @media (max-width: 760px) { .knowledge-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 

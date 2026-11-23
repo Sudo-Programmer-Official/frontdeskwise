@@ -29,6 +29,7 @@ const pwa = await readFile(resolve(here, "../src/pwa.ts"), "utf8");
 const serviceWorker = await readFile(resolve(here, "../public/sw.js"), "utf8");
 const apiServer = await readFile(resolve(here, "../../api/src/server.ts"), "utf8");
 const pushMigration = await readFile(resolve(here, "../../../infra/db/074_web_push_subscriptions.sql"), "utf8");
+const requestMetricsMigration = await readFile(resolve(here, "../../../infra/db/079_api_request_metrics.sql"), "utf8");
 
 test("Google Tag Manager is installed in the HTML shell", () => {
   assert.match(index, /googletagmanager\.com\/gtm\.js\?id=\" \+ i/);
@@ -105,11 +106,11 @@ test("owner UI uses the shared product design language", () => {
   assert.match(styles, /select option\s*\{/);
   assert.match(styles, /mobile-preview/);
   assert.match(agent, /aria-label="Widget preview"|Customer view/);
-  assert.match(widgetPreview, /class="preview-website-frame"/);
+  assert.match(widgetPreview, /class="preview-site-simulation"/);
   assert.match(widgetPreview, /\.preview-site-state[^}]*left: 20px[^}]*transform: none/);
-  assert.match(widgetPreview, /@load="markWebsitePreviewReady"/);
-  assert.match(widgetPreview, /websitePreviewEndpoint/);
-  assert.match(widgetPreview, /connected to knowledge/);
+  assert.match(widgetPreview, /Simulated website frame/);
+  assert.doesNotMatch(widgetPreview, /<iframe\b/);
+  assert.doesNotMatch(widgetPreview, /websitePreviewEndpoint|websitePreviewToken/);
   assert.match(apiServer, /\/website-preview/);
   assert.match(apiServer, /inspectWebsiteEmbedPolicy/);
   assert.match(widgetRenderer, /Powered by/);
@@ -128,6 +129,22 @@ test("owner UI uses the shared product design language", () => {
   assert.match(app, /class="provider-logo"/);
   assert.match(app, /<component :is="item\.icon"/);
   assert.doesNotMatch(app, /icon: "[⌂✉♧◒▤ϟ✦▦⚙⌁]"/);
+});
+
+test("Agent Behavior keeps settings and preview visible across responsive breakpoints", () => {
+  assert.match(agent, /agent-behavior-layout agent-config-layout/);
+  assert.match(agent, /agent-settings-panel/);
+  assert.match(agent, /agent-preview-column/);
+  assert.match(agent, /grid-template-columns: minmax\(300px, 340px\) minmax\(0, 1fr\);/);
+  assert.match(agent, /gap: 20px/);
+  assert.match(agent, /\.agent-settings-panel, \.agent-form-panel, \.agent-preview-column \{ min-width: 0; width: 100%; \}/);
+  assert.match(agent, /@media \(max-width: 900px\)/);
+  assert.match(agent, /\.agent-preview-column \{ order: 0; \}/);
+  assert.doesNotMatch(agent, /@media \(max-width: 980px\) \{ \.agent-config-layout/);
+  assert.match(agent, /\.agent-header-actions \{ flex-wrap: wrap; \}/);
+  assert.match(agent, /\.agent-header-row \{ display: flex; align-items: stretch; flex-direction: column; \}/);
+  assert.match(agent, /v-if="hasUnpublishedChanges"[^>]*>Publish updates/);
+  assert.match(agent, /Publish updates from the header/);
 });
 
 test("landing page presents an honest, conversion-ready product story", () => {
@@ -240,6 +257,19 @@ test("active production widget state cannot be closed by stale updates or form r
   }
   assert.doesNotMatch(`${rendererSource}\n${embedSource}`, /document\.addEventListener\(["'](?:click|pointerdown|touchstart)/);
   assert.doesNotMatch(`${rendererSource}\n${embedSource}`, /window\.addEventListener\(["'](?:blur|visibilitychange|resize)/);
+});
+
+test("capacity observability separates request traffic and adapts polling", () => {
+  assert.match(apiServer, /\/api\/v1\/admin\/request-metrics/);
+  assert.match(apiServer, /classifyRequestTraffic/);
+  assert.match(apiServer, /persistRequestTelemetry/);
+  assert.match(requestMetricsMigration, /api_request_metrics_hourly/);
+  assert.match(widgetEmbed, /BACKGROUND_POLL_INTERVAL_MS = 60_000/);
+  assert.match(widgetEmbed, /INACTIVE_POLL_INTERVAL_MS = 30_000/);
+  assert.match(widgetEmbed, /document\.visibilityState/);
+  assert.match(app, /loadAdminRequestMetrics/);
+  assert.match(app, /Where API traffic is coming from/);
+  assert.match(app, /scheduleInboxPolling/);
 });
 
 test("widget preserves visitor messages through send and history reconciliation", () => {

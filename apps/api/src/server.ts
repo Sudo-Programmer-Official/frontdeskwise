@@ -236,6 +236,11 @@ import {
   type FeatureFlagOverrideState,
   type FeatureFlagStage,
 } from "./feature-flags.js";
+import {
+  classifyRequestTraffic,
+  persistRequestTelemetry,
+  RequestTelemetryBuffer,
+} from "./request-telemetry.js";
 
 const trustProxy = process.env.FRONTDESKWISE_TRUST_PROXY?.trim().toLowerCase() === "true";
 const app = Fastify({
@@ -253,6 +258,10 @@ await app.register(rawBody, { global: false, encoding: "utf8", runFirst: true })
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const pool = createPoolFromEnv();
+const requestTelemetry = new RequestTelemetryBuffer();
+const requestStartedAt = new WeakMap<FastifyRequest, number>();
+let requestTelemetryFlushInFlight = false;
+let requestTelemetryFlushTimer: NodeJS.Timeout | null = null;
 const webPushPublicKey = process.env.FRONTDESKWISE_WEB_PUSH_PUBLIC_KEY?.trim() ?? "";
 const webPushPrivateKey = process.env.FRONTDESKWISE_WEB_PUSH_PRIVATE_KEY?.trim() ?? "";
 const webPushSubject = process.env.FRONTDESKWISE_WEB_PUSH_SUBJECT?.trim() || "mailto:support@frontdeskwise.com";
@@ -11250,6 +11259,11 @@ async function purgeExpiredCustomerData(): Promise<void> {
       app.log.warn({ businessId: business.id }, "Retention cleanup skipped until the latest schema is available");
     }
   }
+  if (pool) {
+    await pool.query("delete from api_request_metrics_hourly where bucket_start < now() - interval '400 days'").catch((error) => {
+      if (!isMissingDatabaseTable(error)) throw error;
+    });
+  }
 }
 
 function recentExperienceBehavior(business: Business, conversationId: string): {
@@ -12403,6 +12417,123 @@ app.get("/api/v1/admin/security-events", async (request) => {
   }
 });
 
+app.get("/api/v1/admin/request-metrics", async (request) => {
+  await requireSuperAdmin(request);
+  if (!pool) throw httpError(503, "Request metrics require PostgreSQL storage");
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const requestedHours = Number(query.hours ?? 24);
+  const hours = Math.max(1, Math.min(168, Number.isFinite(requestedHours) ? Math.floor(requestedHours) : 24));
+  const trafficClass = optionalString(query.trafficClass, 40);
+  const filter = trafficClass ? "and traffic_class = $2" : "";
+  const values = trafficClass ? [hours, trafficClass] : [hours];
+  const routeMetricSql = `
+    select route, method, traffic_class,
+           sum(request_count)::integer as request_count,
+           sum(error_count)::integer as error_count,
+           sum(total_duration_ms)::bigint as total_duration_ms,
+           case
+             when sum(duration_le_50) >= ceil(sum(request_count) * 0.50) then 50
+             when sum(duration_le_50 + duration_le_100) >= ceil(sum(request_count) * 0.50) then 100
+             when sum(duration_le_50 + duration_le_100 + duration_le_250) >= ceil(sum(request_count) * 0.50) then 250
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500) >= ceil(sum(request_count) * 0.50) then 500
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000) >= ceil(sum(request_count) * 0.50) then 1000
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000) >= ceil(sum(request_count) * 0.50) then 2000
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000 + duration_le_5000) >= ceil(sum(request_count) * 0.50) then 5000
+             else 5001
+           end::integer as p50_approx_ms,
+           case
+             when sum(duration_le_50) >= ceil(sum(request_count) * 0.95) then 50
+             when sum(duration_le_50 + duration_le_100) >= ceil(sum(request_count) * 0.95) then 100
+             when sum(duration_le_50 + duration_le_100 + duration_le_250) >= ceil(sum(request_count) * 0.95) then 250
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500) >= ceil(sum(request_count) * 0.95) then 500
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000) >= ceil(sum(request_count) * 0.95) then 1000
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000) >= ceil(sum(request_count) * 0.95) then 2000
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000 + duration_le_5000) >= ceil(sum(request_count) * 0.95) then 5000
+             else 5001
+           end::integer as p95_approx_ms,
+           max(last_seen_at) as last_seen_at
+      from api_request_metrics_hourly
+     where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
+     group by route, method, traffic_class
+     order by request_count desc, route asc`;
+  const classMetricSql = `
+    select traffic_class,
+           sum(request_count)::integer as request_count,
+           sum(error_count)::integer as error_count,
+           sum(total_duration_ms)::bigint as total_duration_ms
+      from api_request_metrics_hourly
+     where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
+     group by traffic_class
+     order by request_count desc`;
+  const totalMetricSql = `
+    select coalesce(sum(request_count), 0)::integer as request_count,
+           coalesce(sum(error_count), 0)::integer as error_count,
+           coalesce(sum(total_duration_ms), 0)::bigint as total_duration_ms
+      from api_request_metrics_hourly
+     where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}`;
+  try {
+    const [routes, classes, totals] = await Promise.all([
+      pool.query<Record<string, unknown>>(routeMetricSql, values),
+      pool.query<Record<string, unknown>>(classMetricSql, values),
+      pool.query<Record<string, unknown>>(totalMetricSql, values),
+    ]);
+    const mapMetric = (row: Record<string, unknown>) => {
+      const requests = Number(row.request_count ?? 0);
+      const errors = Number(row.error_count ?? 0);
+      return {
+        ...(row.route ? { route: String(row.route) } : {}),
+        ...(row.method ? { method: String(row.method) } : {}),
+        ...(row.traffic_class ? { trafficClass: String(row.traffic_class) } : {}),
+        requests,
+        errors,
+        errorRate: requests ? errors / requests : 0,
+        averageDurationMs: requests ? Math.round(Number(row.total_duration_ms ?? 0) / requests) : 0,
+        ...(row.p50_approx_ms !== undefined ? { p50ApproxMs: row.p50_approx_ms === null ? null : Number(row.p50_approx_ms) } : {}),
+        ...(row.p95_approx_ms !== undefined ? { p95ApproxMs: row.p95_approx_ms === null ? null : Number(row.p95_approx_ms) } : {}),
+        ...(row.last_seen_at !== undefined ? { lastSeenAt: nullableIso(row.last_seen_at) } : {}),
+      };
+    };
+    const total = totals.rows[0] ?? {};
+    const live = requestTelemetry.snapshot().map((row) => ({
+      route: row.route,
+      method: row.method,
+      trafficClass: row.trafficClass,
+      requests: row.requestCount,
+      errors: row.errorCount,
+      errorRate: row.requestCount ? row.errorCount / row.requestCount : 0,
+      averageDurationMs: row.requestCount ? Math.round(row.totalDurationMs / row.requestCount) : 0,
+      lastSeenAt: row.lastSeenAt.toISOString(),
+    }));
+    return {
+      generatedAt: new Date().toISOString(),
+      windowHours: hours,
+      totals: {
+        requests: Number(total.request_count ?? 0),
+        errors: Number(total.error_count ?? 0),
+        errorRate: Number(total.request_count ?? 0) ? Number(total.error_count ?? 0) / Number(total.request_count ?? 0) : 0,
+        averageDurationMs: Number(total.request_count ?? 0) ? Math.round(Number(total.total_duration_ms ?? 0) / Number(total.request_count ?? 0)) : 0,
+        averageRequestsPerMinute: Number(total.request_count ?? 0) / (hours * 60),
+      },
+      routes: routes.rows.map(mapMetric),
+      trafficClasses: classes.rows.map(mapMetric),
+      live,
+    };
+  } catch (error) {
+    if (isMissingDatabaseTable(error)) {
+      return {
+        generatedAt: new Date().toISOString(),
+        windowHours: hours,
+        totals: { requests: 0, errors: 0, errorRate: 0, averageDurationMs: 0, averageRequestsPerMinute: 0 },
+        routes: [],
+        trafficClasses: [],
+        live: requestTelemetry.snapshot(),
+        unavailable: true,
+      };
+    }
+    throw error;
+  }
+});
+
 async function findOrganizationIdForStripeEvent(object: Record<string, unknown>): Promise<string | null> {
   if (!pool) return null;
   const metadata = asRecord(object.metadata);
@@ -12813,7 +12944,27 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
   }
 }
 
+async function flushRequestTelemetry(): Promise<void> {
+  if (!pool || requestTelemetryFlushInFlight || requestTelemetry.size === 0) return;
+  requestTelemetryFlushInFlight = true;
+  const rows = requestTelemetry.drain();
+  try {
+    await persistRequestTelemetry(pool, rows);
+  } catch (error) {
+    requestTelemetry.restore(rows);
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown request telemetry error" }, "Request telemetry flush failed");
+  } finally {
+    requestTelemetryFlushInFlight = false;
+  }
+}
+
+requestTelemetryFlushTimer = setInterval(() => {
+  void flushRequestTelemetry();
+}, 10_000);
+requestTelemetryFlushTimer.unref();
+
 app.addHook("onRequest", async (request, reply) => {
+  requestStartedAt.set(request, performance.now());
   const requestOrigin = typeof request.headers.origin === "string" ? request.headers.origin : null;
   const path = request.url.split("?", 1)[0];
   const isPublicWidgetRoute = path.startsWith("/api/v1/widget/");
@@ -12845,6 +12996,16 @@ app.addHook("onRequest", async (request, reply) => {
 
 app.addHook("onResponse", async (request, reply) => {
   const path = request.url.split("?", 1)[0];
+  const startedAt = requestStartedAt.get(request);
+  requestStartedAt.delete(request);
+  requestTelemetry.record({
+    route: typeof request.routeOptions?.url === "string" ? request.routeOptions.url : path,
+    method: request.method,
+    trafficClass: classifyRequestTraffic(path, request.method),
+    statusCode: reply.statusCode,
+    durationMs: startedAt === undefined ? 0 : performance.now() - startedAt,
+  });
+  if (pool && requestTelemetry.size >= 50) void flushRequestTelemetry();
   const privilegedMutation = !["GET", "HEAD", "OPTIONS"].includes(request.method)
     && (path.startsWith("/api/v1/demo/") || path.startsWith("/api/v1/admin/") || path.startsWith("/api/v1/auth/"))
     && !path.startsWith("/api/v1/demo-catalog")
@@ -18462,6 +18623,8 @@ app.setErrorHandler((error, request: FastifyRequest, reply: FastifyReply) => {
 app.addHook("onClose", async () => {
   clearInterval(retentionCleanupTimer);
   clearInterval(lifecycleBillingTimer);
+  if (requestTelemetryFlushTimer) clearInterval(requestTelemetryFlushTimer);
+  await flushRequestTelemetry();
   await renderedPageAdapter.close();
   await pool?.end();
 });

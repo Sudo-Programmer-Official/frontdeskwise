@@ -113,6 +113,9 @@ type FrontDeskWiseWindow = Window & {
   const MESSAGE_SOFT_TIMEOUT_MS = 8_000;
   const MESSAGE_TIMEOUT_MS = 15_000;
   const STATUS_NOTICE_TIMEOUT_MS = 5_000;
+  const ACTIVE_POLL_INTERVAL_MS = 5_000;
+  const INACTIVE_POLL_INTERVAL_MS = 30_000;
+  const BACKGROUND_POLL_INTERVAL_MS = 60_000;
   let online = typeof navigator === "undefined" ? true : navigator.onLine !== false;
   let restoredStatusTimer: number | null = null;
   let statusNoticeTimer: number | null = null;
@@ -622,18 +625,42 @@ type FrontDeskWiseWindow = Window & {
       // Status polling is best-effort; the visitor can continue using the assistant.
     } finally {
       statusSyncInFlight = false;
+      if (state.isOpen && conversationId) schedulePolling();
     }
+  }
+
+  function pollingIntervalMs(): number {
+    if (document.visibilityState === "hidden") return BACKGROUND_POLL_INTERVAL_MS;
+    if (handoffWaiting || ["CONTACT_REQUIRED", "HANDOFF_REQUESTED", "WAITING_FOR_STAFF", "HUMAN_ACTIVE"].includes(state.handoffStatus || "")) return ACTIVE_POLL_INTERVAL_MS;
+    return INACTIVE_POLL_INTERVAL_MS;
+  }
+
+  function schedulePolling(delayMs = pollingIntervalMs()): void {
+    if (!state.isOpen || !conversationId) {
+      stopPolling();
+      return;
+    }
+    if (pollTimer !== null) window.clearTimeout(pollTimer);
+    pollTimer = window.setTimeout(() => {
+      pollTimer = null;
+      void syncConversationStatus();
+    }, Math.max(0, delayMs));
+  }
+
+  function nudgePolling(): void {
+    if (!state.isOpen || !conversationId) return;
+    schedulePolling(document.visibilityState === "hidden" ? BACKGROUND_POLL_INTERVAL_MS : ACTIVE_POLL_INTERVAL_MS);
   }
 
   function startPolling(): void {
     if (pollTimer !== null || !state.isOpen || !conversationId) return;
     void syncConversationStatus();
-    pollTimer = window.setInterval(() => void syncConversationStatus(), 5000);
+    schedulePolling();
   }
 
   function stopPolling(): void {
     if (pollTimer === null) return;
-    window.clearInterval(pollTimer);
+    window.clearTimeout(pollTimer);
     pollTimer = null;
   }
 
@@ -954,7 +981,10 @@ type FrontDeskWiseWindow = Window & {
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       const responseStatus = answer.conversation?.status || answer.handoff?.status;
       renderConversationStatus(responseStatus, { handoffRequestedAt: answer.conversation?.handoffRequestedAt, notificationStatus: answer.conversation?.handoffNotificationStatus || answer.handoff?.notificationStatus });
-      if (conversationId && state.isOpen) startPolling();
+      if (conversationId && state.isOpen) {
+        startPolling();
+        nudgePolling();
+      }
       const workflowActive = answer.conversation?.action?.status === "active";
       const handoffActive = aiSuppressedByHandoff(responseStatus);
       // The API only returns a CTA after workflow policy allows it. Keep that
@@ -1050,7 +1080,10 @@ type FrontDeskWiseWindow = Window & {
       trackConversationStatus(answer.conversation?.status);
       lastConversationUpdatedAt = answer.conversation?.updatedAt || lastConversationUpdatedAt;
       renderConversationStatus(answer.conversation?.status, { handoffRequestedAt: answer.conversation?.handoffRequestedAt });
-      if (conversationId && state.isOpen) startPolling();
+      if (conversationId && state.isOpen) {
+        startPolling();
+        nudgePolling();
+      }
       renderActionForm(answer.action);
       if (answer.action?.status === "completed") {
         productAnalytics(MIXPANEL_EVENTS.CTA_CONVERSION_COMPLETED, {
@@ -1123,6 +1156,10 @@ type FrontDeskWiseWindow = Window & {
     online = false;
     markPerformance("network_offline");
     setHealth("OFFLINE", "", { connectionState: "offline", statusContacts: fallbackContacts() });
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!state.isOpen || !conversationId) return;
+    schedulePolling(document.visibilityState === "hidden" ? BACKGROUND_POLL_INTERVAL_MS : 0);
   });
   window.addEventListener("online", () => {
     online = true;
