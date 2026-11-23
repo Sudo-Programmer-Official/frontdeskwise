@@ -1,6 +1,6 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowRight, Check, ChevronDown, GitBranch, Plus, Sparkles, Trash2, X } from "@lucide/vue";
-import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey } from "../workflow-generator.js";
+import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, validateWorkflowGeneration, workflowGenerationCacheKey } from "../workflow-generator.js";
 import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 const { defineProps, defineEmits, } = {};
 const props = defineProps();
@@ -377,6 +377,28 @@ const workflowOutcomeAction = computed(() => {
     const actionId = workflowMetadata.value?.actionId || workflowDraft.value?.id;
     return allActions.value.find((action) => action.id === actionId) ?? workflowDraft.value;
 });
+const workflowOutcomeProvider = computed(() => actionProvider(workflowOutcomeAction.value));
+const workflowOutcomeProviderConnected = computed(() => actionProviderConnected(workflowOutcomeAction.value));
+const workflowOutcomeFallbackAvailable = computed(() => {
+    const steps = workflowOutcomeAction.value?.steps ?? [];
+    return steps.some((step) => {
+        const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
+            ? step.config
+            : {};
+        return ["form", "handoff", "notify"].includes(String(step.type))
+            || typeof config.failureBehavior === "string"
+            || config.providerUnavailableBehavior === "capture_request_and_notify";
+    }) || workflowCompletion(workflowOutcomeAction.value ?? {}).notifyStaff === true;
+});
+const workflowOutcomeReadinessLabel = computed(() => {
+    if (workflowOutcomeProvider.value && !workflowOutcomeProviderConnected.value)
+        return workflowOutcomeFallbackAvailable.value ? "Needs setup · Fallback available" : "Needs setup";
+    if (workflowOutcomeAction.value?.setupStatus === "READY")
+        return "Ready";
+    if (workflowOutcomeAction.value?.setupStatus === "DRAFT")
+        return "Draft";
+    return "Needs setup";
+});
 const workflowStatusSummary = computed(() => {
     const status = draftIsDirty.value
         ? "Unpublished changes"
@@ -455,6 +477,10 @@ function verifyWorkflowDraft() {
             issues.push({ code: "duplicate_step_id", message: `Step id “${step.id}” is used more than once.`, stepIndex: index });
         else
             byId.set(step.id, { step, index });
+        const stepCopy = `${step.label ?? ""} ${step.question ?? ""} ${step.conditionText ?? ""}`;
+        if (/select step actions to configure this step|untitled step|configure this step|enter prompt here|select actions?/i.test(stepCopy)) {
+            issues.push({ code: "placeholder_step", message: `“${step.label || step.id}” still contains editor placeholder text.`, stepIndex: index });
+        }
     }
     const entry = activeSteps[0];
     if (activeSteps.length) {
@@ -496,6 +522,19 @@ function verifyWorkflowDraft() {
             }
             if (["lookup", "book", "api_action"].includes(step.type) && !workflowProvider.value && !stepConfigValue(step, "provider")) {
                 issues.push({ code: "provider_missing", message: `“${step.label || "This step"}” needs a connected provider.`, stepIndex: steps.indexOf(step) });
+            }
+            const config = step.config && typeof step.config === "object" && !Array.isArray(step.config) ? step.config : {};
+            if (config.requiresProviderResult === true) {
+                const sourceId = typeof config.providerResultStepId === "string" ? config.providerResultStepId : typeof config.sourceStepId === "string" ? config.sourceStepId : "";
+                const source = sourceId ? byId.get(sourceId)?.step : undefined;
+                if (!source || source.type !== "lookup")
+                    issues.push({ code: "provider_result_dependency_missing", message: `“${step.label || step.id}” needs a valid provider lookup result first.`, stepIndex: steps.indexOf(step) });
+            }
+            if (config.requiresSelection === true && !activeSteps.slice(0, activeSteps.indexOf(step)).some((candidate) => candidate.type === "select")) {
+                issues.push({ code: "selection_dependency_missing", message: `“${step.label || step.id}” needs a selected provider option first.`, stepIndex: steps.indexOf(step) });
+            }
+            if (config.requiresContactBeforeHandoff === true && !activeSteps.slice(0, activeSteps.indexOf(step)).some((candidate) => candidate.type === "create_lead" || (candidate.type === "form" && candidate.config?.ensureContact === true))) {
+                issues.push({ code: "contact_boundary_missing", message: `“${step.label || step.id}” needs contact capture before handoff.`, stepIndex: steps.indexOf(step) });
             }
         }
     }
@@ -731,13 +770,16 @@ function generatedWorkflowFor(action) {
     if (createWorkflowMode.value === "template") {
         const template = workflowTemplates.find((candidate) => candidate.key === createWorkflowTemplateKey.value) ?? workflowTemplates[0];
         const generated = generateWorkflow(template.description, [], workflowGenerationContext(action));
+        const steps = templateSteps(template.key);
+        const fields = generated.fields;
         return {
             name: template.label,
             description: template.description,
-            steps: templateSteps(template.key),
-            fields: generated.fields,
+            steps,
+            fields,
             executionMode: generated.executionMode,
             provider: generated.provider,
+            validation: validateWorkflowGeneration({ steps, fields }),
         };
     }
     const description = preserveWorkflowGoal(createWorkflowDescription.value) ?? defaultBusinessWorkflowDescription();
@@ -749,6 +791,7 @@ function generatedWorkflowFor(action) {
         fields: generated.fields,
         executionMode: generated.executionMode,
         provider: generated.provider,
+        validation: generated.validation,
     };
 }
 async function createInlineAction() {
@@ -845,6 +888,10 @@ async function createWorkflow() {
     createWorkflowError.value = "";
     try {
         const generated = generatedWorkflowFor(action);
+        if (!generated.validation.ok) {
+            createWorkflowError.value = `The generated workflow needs review before it can be saved: ${generated.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
+            return;
+        }
         const nextAction = clone(action);
         // Generating from an archived/disabled action is an explicit owner action:
         // promote the new workflow to the current draft so it appears in both
@@ -1010,6 +1057,13 @@ function readinessLabel(label) {
 }
 function stepTypeLabel(type) {
     return stepTypes.find((item) => item.value === type)?.label ?? formatLabel(type || "Step");
+}
+function workflowStepDisplayLabel(step) {
+    const field = workflowFieldForStep(step);
+    const raw = field?.label || step.label || step.question || step.id;
+    if (/select step actions to configure this step|untitled step|configure this step|enter prompt here|select actions?/i.test(raw))
+        return stepTypeLabel(step.type);
+    return raw.includes("_") || raw === step.id ? formatLabel(raw) : raw;
 }
 function ensureStepConfig(step) {
     if (!step.config || Array.isArray(step.config))
@@ -1528,6 +1582,11 @@ function generateStarter() {
         ? ENROLLMENT_WORKFLOW_GOAL
         : preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
     const result = generateWorkflow(ownerGoal, [], generationContext);
+    if (!result.validation.ok) {
+        workflowSaveError.value = `The generated workflow needs review before it can be saved: ${result.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
+        workflowVerificationOpen.value = true;
+        return;
+    }
     workflowDraft.value.description = result.description;
     workflowDraft.value.steps = result.steps;
     workflowDraft.value.fields = result.fields;
@@ -1645,6 +1704,7 @@ const __VLS_template = () => {
     __VLS_withDotValue(workflowDescription, {});
     __VLS_withDotValue(showTemplatePicker, {});
     __VLS_withDotValue(workflowOutcomeAction, {});
+    __VLS_withDotValue(workflowOutcomeReadinessLabel, {});
     __VLS_withDotValue(workflowMetadata, {});
     __VLS_withDotValue(selectedWorkflowPerformance, {});
     __VLS_withDotValue(workflowRecommendation, {});
@@ -2740,10 +2800,10 @@ const __VLS_template = () => {
         });
         /** @type {__VLS_StyleScopedClasses['workflow-outcome-meta']} */ ;
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
-            ...{ class: (['status-pill', workflowOutcomeAction.value?.setupStatus === 'READY' ? 'booked' : 'new']) },
+            ...{ class: (['status-pill', workflowOutcomeReadinessLabel.value === 'Ready' ? 'booked' : 'new']) },
         });
         /** @type {__VLS_StyleScopedClasses['status-pill']} */ ;
-        (workflowOutcomeAction.value?.setupStatus === 'READY' ? 'Ready' : workflowOutcomeAction.value?.setupStatus === 'DRAFT' ? 'Draft' : 'Needs setup');
+        (workflowOutcomeReadinessLabel.value);
         __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
         (workflowOutcomeAction.value?.capability?.completionType === 'link' ? 'Send visitors to a page' : workflowOutcomeAction.value?.capability?.completionType === 'provider' ? 'Use a connected provider' : 'Action completion');
         __VLS_asFunctionalElement1(__VLS_intrinsics.small, __VLS_intrinsics.small)({});
@@ -2754,7 +2814,7 @@ const __VLS_template = () => {
                         throw 0;
                     return (__VLS_unwrap(emit, {})('open-action', workflowMetadata.value?.actionId || workflowDraft.value?.id || ''));
                     // @ts-ignore
-                    [emit, workflowDraft, workflowDraft, workflowOutcomeAction, workflowOutcomeAction, workflowOutcomeAction, workflowOutcomeAction, workflowOutcomeAction, workflowOutcomeAction, workflowMetadata,];
+                    [emit, workflowDraft, workflowDraft, workflowOutcomeAction, workflowOutcomeAction, workflowOutcomeAction, workflowOutcomeReadinessLabel, workflowOutcomeReadinessLabel, workflowMetadata,];
                 } },
             ...{ class: "outline-button small" },
             type: "button",
@@ -3189,7 +3249,7 @@ const __VLS_template = () => {
                 });
                 /** @type {__VLS_StyleScopedClasses['workflow-step-summary']} */ ;
                 __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
-                (step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select step actions to configure this step'));
+                (step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : workflowStepDisplayLabel(step)));
                 if (stepConditionText(step)) {
                     __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({
                         ...{ class: "workflow-summary-tag" },

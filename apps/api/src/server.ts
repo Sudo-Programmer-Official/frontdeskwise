@@ -179,7 +179,7 @@ import {
   type ExperienceSignalAssessment,
 } from "./experience-signals.js";
 import { syncOnboardingRecovery } from "./onboarding-recovery.js";
-import { verifyWorkflowSet } from "./workflow-verifier.js";
+import { verifyWorkflowDefinition, verifyWorkflowSet } from "./workflow-verifier.js";
 import {
   createActionConnector,
   type ActionConnectorProvider,
@@ -10211,7 +10211,7 @@ async function advanceWorkflowAutomation(
         const resultStatus = (result as Record<string, unknown>).status;
         const fallbackReason = resultStatus === "unavailable"
           ? "unavailable"
-          : resultStatus === "not_found" && Array.isArray((result as Record<string, unknown>).matches) && !(result as { matches: unknown[] }).matches.length
+          : ["not_found", "matched"].includes(String(resultStatus)) && Array.isArray((result as Record<string, unknown>).matches) && !(result as { matches: unknown[] }).matches.length
             ? "not_found"
             : null;
         const provider = actionConfigString(step.config ?? {}, "provider") ?? configuredActionProvider(action);
@@ -11009,7 +11009,6 @@ async function submitActionForm(
     state.formShown = false;
     const formStep = currentWorkflowStep(action, state);
     if (formStep?.type === "form") transitionWorkflow(action, state, formStep.id);
-    if (state.providerFallback) return completeActionConversation(business, conversation, action, state);
     const next = await advanceWorkflowAutomation(business, action, state, { allowStaffSensitiveActions: !waitingForStaff(conversation) }, conversation);
     if (!next || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
     if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, next)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
@@ -19042,6 +19041,13 @@ app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
   if (organizationId) action.organizationId = organizationId;
   const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
+  if (action.steps?.length) {
+    const verification = verifyWorkflowDefinition(action);
+    if (!verification.ok) {
+      const message = verification.issues.filter((issue) => issue.severity === "error").slice(0, 4).map((issue) => issue.message).join("; ");
+      throw httpError(400, `Workflow validation failed before persistence: ${message}`);
+    }
+  }
   const reusableAction = findCompatibleAction(
     business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled"),
     action,
@@ -19081,6 +19087,13 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   if (organizationId) action.organizationId = organizationId;
   const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
+  if (action.steps?.length) {
+    const verification = verifyWorkflowDefinition(action);
+    if (!verification.ok) {
+      const message = verification.issues.filter((issue) => issue.severity === "error").slice(0, 4).map((issue) => issue.message).join("; ");
+      throw httpError(400, `Workflow validation failed before persistence: ${message}`);
+    }
+  }
   const workflowName = workflowNameForAction(action);
   const activeWorkflows = business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled");
   if (workflowName && findDuplicateWorkflowName(activeWorkflows, workflowName, action.id)) {

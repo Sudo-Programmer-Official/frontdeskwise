@@ -8,9 +8,32 @@ export type WorkflowFieldDraft = {
   options?: string[];
 };
 
+export const WORKFLOW_STEP_PRIMITIVES = [
+  "ask",
+  "capture",
+  "form",
+  "knowledge",
+  "condition",
+  "decision",
+  "lookup",
+  "recommend",
+  "select",
+  "confirm",
+  "api_action",
+  "create_lead",
+  "book",
+  "generate_link",
+  "redirect",
+  "notify",
+  "handoff",
+  "complete",
+] as const;
+
+export type WorkflowStepPrimitive = typeof WORKFLOW_STEP_PRIMITIVES[number];
+
 export type WorkflowStepDraft = {
   id: string;
-  type: string;
+  type: WorkflowStepPrimitive;
   enabled?: boolean;
   label?: string;
   fieldKey?: string;
@@ -95,7 +118,152 @@ export type WorkflowGenerationResult = {
   missingInformation?: string[];
   executionMode?: string;
   provider?: string;
+  validation: WorkflowGenerationValidation;
 };
+
+export type WorkflowGenerationIssue = {
+  code:
+    | "missing_step_id"
+    | "duplicate_step_id"
+    | "unsupported_step_type"
+    | "missing_step_label"
+    | "placeholder_step"
+    | "missing_terminal_step"
+    | "provider_fallback_missing"
+    | "provider_result_dependency_missing"
+    | "selection_dependency_missing"
+    | "contact_boundary_missing";
+  message: string;
+  stepId?: string;
+  stepIndex?: number;
+};
+
+export type WorkflowGenerationValidation = {
+  ok: boolean;
+  issues: WorkflowGenerationIssue[];
+};
+
+const workflowPlaceholderCopy = [
+  /select step actions to configure this step/i,
+  /untitled step/i,
+  /configure this step/i,
+  /enter prompt here/i,
+  /select actions?/i,
+];
+
+function stepConfig(step: WorkflowStepDraft): Record<string, unknown> {
+  return step.config && typeof step.config === "object" ? step.config : {};
+}
+
+function stepTargetIds(steps: WorkflowStepDraft[], step: WorkflowStepDraft, index: number): string[] {
+  const targets = new Set<string>();
+  const nextStepId = (step as WorkflowStepDraft & { nextStepId?: unknown }).nextStepId;
+  if (typeof nextStepId === "string" && nextStepId) targets.add(nextStepId);
+  const branches = (step as WorkflowStepDraft & { branches?: unknown }).branches;
+  if (Array.isArray(branches)) {
+    for (const branch of branches) {
+      if (branch && typeof branch === "object" && typeof (branch as Record<string, unknown>).nextStepId === "string") {
+        targets.add((branch as Record<string, unknown>).nextStepId as string);
+      }
+    }
+  }
+  if (!targets.size && steps[index + 1]) targets.add(steps[index + 1].id);
+  return [...targets];
+}
+
+/**
+ * Validate generated steps before they are copied into an editable workflow.
+ * This is deliberately deterministic: model/editor placeholder copy and
+ * unsafe provider-success paths must never become persisted workflow data.
+ */
+export function validateWorkflowGeneration(input: {
+  steps: WorkflowStepDraft[];
+  fields?: WorkflowFieldDraft[];
+}): WorkflowGenerationValidation {
+  const { steps, fields = [] } = input;
+  const issues: WorkflowGenerationIssue[] = [];
+  const byId = new Map<string, WorkflowStepDraft>();
+  const indexById = new Map<string, number>();
+
+  for (const [index, step] of steps.entries()) {
+    if (!step.id?.trim()) issues.push({ code: "missing_step_id", message: `Step ${index + 1} is missing an id.`, stepIndex: index });
+    else if (byId.has(step.id)) issues.push({ code: "duplicate_step_id", message: `Step id “${step.id}” is duplicated.`, stepId: step.id, stepIndex: index });
+    else {
+      byId.set(step.id, step);
+      indexById.set(step.id, index);
+    }
+
+    if (!WORKFLOW_STEP_PRIMITIVES.includes(step.type as WorkflowStepPrimitive)) {
+      issues.push({ code: "unsupported_step_type", message: `Step “${step.id || index + 1}” uses unsupported type “${String(step.type)}”.`, stepId: step.id, stepIndex: index });
+    }
+    if (!step.label?.trim()) issues.push({ code: "missing_step_label", message: `Step “${step.id || index + 1}” needs a human-readable label.`, stepId: step.id, stepIndex: index });
+    const copy = `${step.label ?? ""} ${step.question ?? ""} ${step.conditionText ?? ""}`;
+    if (workflowPlaceholderCopy.some((pattern) => pattern.test(copy))) {
+      issues.push({ code: "placeholder_step", message: `Step “${step.id || index + 1}” contains editor placeholder copy.`, stepId: step.id, stepIndex: index });
+    }
+  }
+
+  if (steps.length && !steps.some((step) => ["complete", "redirect", "handoff", "book"].includes(step.type))) {
+    issues.push({ code: "missing_terminal_step", message: "The generated workflow has no reachable completion, redirect, or handoff step." });
+  }
+
+  const reachable = new Set<string>();
+  const visit = (id: string, stack: string[] = []): void => {
+    if (stack.includes(id) || reachable.has(id)) return;
+    const step = byId.get(id);
+    if (!step) return;
+    reachable.add(id);
+    const index = indexById.get(id) ?? -1;
+    for (const target of stepTargetIds(steps, step, index)) visit(target, [...stack, id]);
+  };
+  if (steps[0]?.id) visit(steps[0].id);
+  for (const [index, step] of steps.entries()) {
+    if (step.enabled === false || !reachable.has(step.id)) continue;
+    const config = stepConfig(step);
+    if (step.type === "lookup" && typeof config.provider === "string") {
+      const fallbackStepId = typeof config.fallbackStepId === "string" ? config.fallbackStepId : "";
+      const hasFallbackBehavior = typeof config.failureBehavior === "string" && Boolean(config.failureBehavior.trim());
+      if (!hasFallbackBehavior && !fallbackStepId) {
+        issues.push({ code: "provider_fallback_missing", message: `Provider step “${step.label || step.id}” has no explicit fallback behavior.`, stepId: step.id, stepIndex: index });
+      }
+      if (fallbackStepId && !byId.has(fallbackStepId)) {
+        issues.push({ code: "provider_fallback_missing", message: `Provider step “${step.label || step.id}” points to missing fallback step “${fallbackStepId}”.`, stepId: step.id, stepIndex: index });
+      }
+    }
+    const requiresProviderResult = config.requiresProviderResult === true;
+    if (requiresProviderResult) {
+      const sourceId = typeof config.providerResultStepId === "string" ? config.providerResultStepId : typeof config.sourceStepId === "string" ? config.sourceStepId : "";
+      const sourceIndex = sourceId ? indexById.get(sourceId) : undefined;
+      if (!sourceId || sourceIndex === undefined || sourceIndex >= index || byId.get(sourceId)?.type !== "lookup") {
+        issues.push({ code: "provider_result_dependency_missing", message: `“${step.label || step.id}” can run only after a provider lookup with verified results.`, stepId: step.id, stepIndex: index });
+      }
+    }
+    if (config.requiresSelection === true) {
+      const priorSelection = steps.slice(0, index).some((candidate) => candidate.type === "select");
+      if (!priorSelection) issues.push({ code: "selection_dependency_missing", message: `“${step.label || step.id}” requires a selected provider option first.`, stepId: step.id, stepIndex: index });
+      if (config.requiresVerifiedProviderSelection === true && !steps.slice(0, index).some((candidate) => candidate.type === "lookup")) {
+        issues.push({ code: "selection_dependency_missing", message: `“${step.label || step.id}” requires a provider-verified selection.`, stepId: step.id, stepIndex: index });
+      }
+    }
+    if (config.requiresContactBeforeHandoff === true) {
+      const hasContactBoundary = steps.slice(0, index).some((candidate) => candidate.type === "create_lead" || (candidate.type === "form" && stepConfig(candidate).ensureContact === true));
+      if (!hasContactBoundary) issues.push({ code: "contact_boundary_missing", message: `“${step.label || step.id}” needs contact capture before external handoff.`, stepId: step.id, stepIndex: index });
+    }
+  }
+
+  const requiredFields = fields.filter((field) => field.required && field.visibility !== "hidden");
+  const captured = new Set(steps.flatMap((step) => {
+    if (step.fieldKey) return [step.fieldKey];
+    if (step.type === "form" && Array.isArray(stepConfig(step).fieldKeys)) return (stepConfig(step).fieldKeys as unknown[]).filter((key): key is string => typeof key === "string");
+    return [];
+  }));
+  for (const field of requiredFields) {
+    if (!captured.has(field.key)) issues.push({ code: "contact_boundary_missing", message: `Required generated field “${field.label || field.key}” is never captured.`, stepId: field.key });
+  }
+
+  const uniqueIssues = [...new Map(issues.map((item) => [`${item.code}|${item.stepId ?? ""}|${item.message}`, item])).values()];
+  return { ok: uniqueIssues.length === 0, issues: uniqueIssues };
+}
 
 /**
  * Workflow goals are owner-authored instructions. Use trim only to determine
@@ -415,7 +583,9 @@ function enrollmentSteps(): WorkflowStepDraft[] {
         dayField: "schedule_preference",
         searchFields: "child_age, ability, goal, location, schedule_preference",
         includeWaitlist: true,
-        failureBehavior: "handoff",
+        failureBehavior: "capture_lead",
+        fallbackStepId: "parent-contact",
+        providerUnavailableBehavior: "capture_request_and_notify",
       },
     },
     {
@@ -423,14 +593,14 @@ function enrollmentSteps(): WorkflowStepDraft[] {
       type: "recommend",
       label: "Present matching classes",
       question: "I found these matching classes. Which one would you like to consider?",
-      config: { ...interruptionConfig, sourceStepId: "find-classes", maxResults: 5 },
+      config: { ...interruptionConfig, sourceStepId: "find-classes", providerResultStepId: "find-classes", requiresProviderResult: true, maxResults: 5 },
     },
     {
       id: "class-selection",
       type: "select",
       label: "Let visitor select a class",
       question: "Reply with the number of the class you want.",
-      config: { ...interruptionConfig, sourceStepId: "find-classes", maxResults: 5 },
+      config: { ...interruptionConfig, sourceStepId: "find-classes", providerResultStepId: "find-classes", requiresProviderResult: true, maxResults: 5 },
     },
     {
       id: "parent-contact",
@@ -456,14 +626,14 @@ function enrollmentSteps(): WorkflowStepDraft[] {
       id: "registration-link",
       type: "generate_link",
       label: "Generate registration link",
-      config: { ...interruptionConfig, provider: "jackrabbit", failureBehavior: "handoff" },
+      config: { ...interruptionConfig, provider: "jackrabbit", requiresSelection: true, requiresVerifiedProviderSelection: true, requiresContactBeforeHandoff: true, failureBehavior: "handoff" },
     },
     {
       id: "enrollment-complete",
       type: "complete",
       label: "Continue registration",
       question: "Your registration link is ready.",
-      config: { ...interruptionConfig, buttonLabel: "Continue registration" },
+      config: { ...interruptionConfig, buttonLabel: "Continue registration", requiresCompletionUrl: true },
     },
   ];
 }
@@ -657,7 +827,7 @@ export function inferWorkflowIntent(description: string, context: WorkflowGenera
 
 export function generateWorkflow(description: string, baseFields: WorkflowFieldDraft[] = [], context: WorkflowGenerationContext = {}): WorkflowGenerationResult {
   const intent = inferWorkflowIntent(description, context);
-  const steps = intent === "plan_selection"
+  const steps: WorkflowStepDraft[] = intent === "plan_selection"
     ? planSelectionSteps(context)
     : intent === "enrollment"
       ? enrollmentSteps()
@@ -758,9 +928,10 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
         ? businessName ? `Help visitors find the right ${businessName} fit` : "Help visitors find the right fit"
       : context.actionName ?? "Workflow";
   const missingInformation = [...new Set(steps.flatMap((step) => {
-    const config = step.config ?? {};
+    const config: Record<string, unknown> = step.config ?? {};
     return config.generationStatus === "missing" && typeof config.generationReason === "string" ? [config.generationReason] : [];
   }))];
+  const generatedWorkflowFields = mergeFields(intent === "business_fit" ? [] : baseFields, generated);
   return {
     intent,
     name: defaultName,
@@ -769,9 +940,10 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
     // Business-fit journeys are rebuilt from the active Business Brain. Do not
     // merge fields from the previous draft because that is the exact path by
     // which a previous tenant's qualification questions can survive a switch.
-    fields: mergeFields(intent === "business_fit" ? [] : baseFields, generated),
+    fields: generatedWorkflowFields,
     ...(missingInformation.length ? { missingInformation } : {}),
     ...(intent === "enrollment" ? { executionMode: "PROVIDER_FLOW", provider: "jackrabbit" } : {}),
+    validation: validateWorkflowGeneration({ steps, fields: generatedWorkflowFields }),
   };
 }
 

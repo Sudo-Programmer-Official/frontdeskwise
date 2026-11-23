@@ -309,14 +309,14 @@ function canonicalEnrollmentSteps(): ActionStep[] {
     { id: "student-goal", type: "capture", fieldKey: "goal" },
     { id: "student-location", type: "capture", fieldKey: "location" },
     { id: "student-schedule", type: "capture", fieldKey: "schedule_preference" },
-    { id: "registration-options", type: "lookup", label: "Find matching classes", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", searchFields: "child_age, ability, goal, location, schedule_preference", includeWaitlist: true } },
-    { id: "class-recommendations", type: "recommend", label: "Present matching classes", question: "I found these matching classes. Which one would you like to consider?", config: { sourceStepId: "registration-options", maxResults: 5 } },
-    { id: "class-selection", type: "select", label: "Let visitor select a class", question: "Reply with the number of the class you want.", config: { sourceStepId: "registration-options", maxResults: 5 } },
-    { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"], ensureContact: true, contactFields: ["email", "phone"] } },
+    { id: "registration-options", type: "lookup", label: "Find matching classes", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", searchFields: "child_age, ability, goal, location, schedule_preference", includeWaitlist: true, failureBehavior: "capture_lead", fallbackStepId: "parent-contact", providerUnavailableBehavior: "capture_request_and_notify" } },
+    { id: "class-recommendations", type: "recommend", label: "Present matching classes", question: "I found these matching classes. Which one would you like to consider?", config: { sourceStepId: "registration-options", providerResultStepId: "registration-options", requiresProviderResult: true, maxResults: 5 } },
+    { id: "class-selection", type: "select", label: "Let visitor select a class", question: "Reply with the number of the class you want.", config: { sourceStepId: "registration-options", providerResultStepId: "registration-options", requiresProviderResult: true, maxResults: 5 } },
+    { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"], ensureContact: true, contactFields: ["email", "phone"], providerFallback: true } },
     { id: "save-lead", type: "create_lead", label: "Save parent request", config: { ensureContact: true, failureBehavior: "handoff" } },
-    { id: "enrollment-confirm", type: "confirm", question: "I have the class details. Shall I prepare the registration link?" },
-    { id: "registration-link", type: "generate_link", label: "Generate registration link", config: { provider: "jackrabbit", completion: "external_provider" } },
-    { id: "enrollment-complete", type: "complete", label: "Complete workflow" },
+    { id: "enrollment-confirm", type: "confirm", question: "I have the class details. Shall I prepare the registration link?", config: { requiresSelection: true, requiresVerifiedProviderSelection: true } },
+    { id: "registration-link", type: "generate_link", label: "Generate registration link", config: { provider: "jackrabbit", completion: "external_provider", requiresSelection: true, requiresVerifiedProviderSelection: true, requiresContactBeforeHandoff: true } },
+    { id: "enrollment-complete", type: "complete", label: "Complete workflow", config: { requiresCompletionUrl: true } },
   ];
 }
 

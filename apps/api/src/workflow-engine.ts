@@ -97,6 +97,27 @@ function workflowStepIsAvailable(step: ActionStep, state: ConversationActionStat
   // business has verified them. The step remains visible in the owner editor,
   // but the runtime skips it and continues to the safe next step.
   if (config.requiresVerifiedData === true && config.reviewStatus === "needs_owner_confirmation") return false;
+  if (config.requiresProviderResult === true) {
+    const sourceStepId = typeof config.providerResultStepId === "string"
+      ? config.providerResultStepId
+      : typeof config.sourceStepId === "string" ? config.sourceStepId : null;
+    const result = sourceStepId ? state.lookupResults?.[sourceStepId] : undefined;
+    const matches = result && typeof result === "object" && Array.isArray((result as Record<string, unknown>).matches)
+      ? (result as Record<string, unknown>).matches as unknown[]
+      : [];
+    const status = result && typeof result === "object" ? (result as Record<string, unknown>).status : undefined;
+    if (status !== "matched" || !matches.length) return false;
+  }
+  if (config.requiresSelection === true && !state.selectedActionResourceId) return false;
+  if (config.requiresVerifiedProviderSelection === true) {
+    const selectedId = state.selectedActionResourceId;
+    const verifiedSelection = Object.values(state.lookupResults ?? {}).some((value) => {
+      if (!value || typeof value !== "object" || !Array.isArray((value as Record<string, unknown>).matches)) return false;
+      return ((value as Record<string, unknown>).matches as unknown[]).some((match) => match && typeof match === "object" && String((match as Record<string, unknown>).id ?? "") === selectedId);
+    });
+    if (!verifiedSelection) return false;
+  }
+  if (config.requiresCompletionUrl === true && !state.completionUrl) return false;
   return true;
 }
 
@@ -112,6 +133,17 @@ export function workflowStep(action: ActionFlow, stepId: string | undefined): Ac
  * second, provider-specific workflow shape.
  */
 export function providerFallbackStep(action: ActionFlow): ActionStep | null {
+  const configuredFallback = (action.steps ?? []).find((step) => {
+    const fallbackStepId = step.config?.fallbackStepId;
+    return step.type === "lookup"
+      && typeof fallbackStepId === "string"
+      && action.steps?.some((candidate) => candidate.id === fallbackStepId && ["form", "handoff", "notify", "complete"].includes(candidate.type));
+  });
+  const configuredFallbackId = configuredFallback?.config?.fallbackStepId;
+  if (typeof configuredFallbackId === "string") {
+    const explicit = action.steps?.find((step) => step.id === configuredFallbackId && ["form", "handoff", "notify", "complete"].includes(step.type));
+    if (explicit) return explicit;
+  }
   const forms = (action.steps ?? []).filter((step) => step.type === "form");
   return forms.find((step) => step.config?.providerFallback === true)
     ?? forms.find((step) => {

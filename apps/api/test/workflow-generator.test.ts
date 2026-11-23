@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { generateWorkflow, workflowGenerationCacheKey } from "../../web/src/workflow-generator.ts";
+import { generateWorkflow, validateWorkflowGeneration, workflowGenerationCacheKey } from "../../web/src/workflow-generator.ts";
 
 const planPrompt = "Help visitors choose the right PlanCraftAI plan. Ask whether they are using it solo or with a team, what they mainly want help with, and roughly how they plan to use it. Based on their answers, recommend the most suitable plan, explain the reason briefly, then show the Get started button. If they ask a side question like pricing, features, cancellation, or privacy, answer it and continue the workflow without losing progress.";
 const davePrompt = "Help parents find the right swim lesson for their child. Ask the child’s age, swimming ability, goal, location or ZIP code, and preferred days. Then use Jackrabbit to find matching classes, show available options and pricing, and generate the registration link. If no class is available, offer the waitlist or team handoff. If the parent asks a side question, answer it and continue from where the workflow left off.";
@@ -44,6 +44,7 @@ test("Dave swim prompt creates a provider-backed enrollment journey", () => {
   });
 
   assert.equal(result.intent, "enrollment");
+  assert.equal(result.steps.length, 14);
   assert.deepEqual(result.steps.slice(0, 6).map((step) => step.fieldKey), ["customer_type", "child_age", "ability", "goal", "location", "schedule_preference"]);
   assert.equal(result.steps.find((step) => step.id === "find-classes")?.config?.provider, "jackrabbit");
   assert.equal(result.steps.find((step) => step.id === "find-classes")?.config?.reviewStatus, "provider_backed");
@@ -55,11 +56,26 @@ test("Dave swim prompt creates a provider-backed enrollment journey", () => {
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.config?.reviewStatus, "provider_backed");
   assert.match(result.steps.find((step) => step.id === "class-recommendations")?.label ?? "", /matching classes/i);
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.type, "generate_link");
+  assert.equal(result.validation.ok, true, JSON.stringify(result.validation.issues));
+  assert.equal(result.steps.find((step) => step.id === "find-classes")?.config?.fallbackStepId, "parent-contact");
+  assert.equal(result.steps.find((step) => step.id === "class-recommendations")?.config?.requiresProviderResult, true);
+  assert.equal(result.steps.find((step) => step.id === "registration-link")?.config?.requiresVerifiedProviderSelection, true);
   assert.ok(result.fields.some((field) => field.key === "child_age"));
   assert.equal(result.fields.find((field) => field.key === "parent_name")?.required, true);
   assert.equal(result.fields.find((field) => field.key === "email")?.required, false);
   assert.equal(result.fields.find((field) => field.key === "phone")?.required, false);
   assert.equal(result.steps.some((step) => step.fieldKey === "name" || step.fieldKey === "email"), false);
+});
+
+test("workflow generation rejects editor placeholders before persistence", () => {
+  const result = validateWorkflowGeneration({
+    steps: [
+      { id: "start", type: "capture", label: "Select step actions to configure this step", fieldKey: "name" },
+      { id: "complete", type: "complete", label: "Complete workflow" },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "placeholder_step"));
 });
 
 test("SalonFlow prompt is generated from the active business context", () => {

@@ -114,6 +114,15 @@ test("Actions and Workflows share current relationships and provider readiness",
   assert.match(workflowWorkspace, /Needs setup ·/);
   assert.match(workflowWorkspace, /isn’t connected yet/);
   assert.match(workflowWorkspace, /capture the visitor’s request and notify the team/);
+  assert.match(workflowWorkspace, /Needs setup · Fallback available/);
+  assert.match(app, /Needs setup · Fallback available/);
+  assert.match(app, /actionHasProviderFallback/);
+  assert.match(workflowWorkspace, /workflowOutcomeReadinessLabel/);
+  assert.match(workflowWorkspace, /placeholder_step/);
+  assert.match(workflowWorkspace, /requiresProviderResult/);
+  assert.match(workflowGenerator, /validateWorkflowGeneration/);
+  assert.match(workflowGenerator, /fallbackStepId: "parent-contact"/);
+  assert.match(workflowGenerator, /requiresVerifiedProviderSelection/);
   assert.doesNotMatch(workflowWorkspace, /\.filter\(\(action\) => action\.enabled !== false/);
   assert.match(workflowWorkspace, /promote the new workflow to the current draft/);
   assert.match(workflowWorkspace, /workflowGeneration: true/);

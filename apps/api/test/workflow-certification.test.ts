@@ -82,6 +82,24 @@ test("provider fallback reuses the enrollment contact form and never fabricates 
   assert.equal(state.lookupResults, undefined);
 });
 
+test("provider result and selection steps stay unavailable until their prerequisites exist", () => {
+  const state = stateAt("registration-options", {
+    customer_type: "New student",
+    child_age: "7",
+    ability: "Beginner",
+    goal: "Learn to swim",
+    location: "Largo",
+    schedule_preference: "Saturdays",
+  }, stepIdsThrough("student-schedule"));
+  state.lookupResults = { "registration-options": { status: "unavailable", matches: [] } };
+  assert.equal(currentWorkflowStep(enrollment, { ...state, currentStepId: "class-recommendations" })?.id, "parent-contact");
+  state.lookupResults = { "registration-options": { status: "matched", matches: [{ id: "class-1" }] } };
+  assert.equal(currentWorkflowStep(enrollment, { ...state, currentStepId: "class-recommendations" })?.id, "class-recommendations");
+  assert.equal(currentWorkflowStep(enrollment, { ...state, currentStepId: "enrollment-confirm" }), null);
+  state.selectedActionResourceId = "class-1";
+  assert.equal(currentWorkflowStep(enrollment, { ...state, currentStepId: "enrollment-confirm" })?.id, "enrollment-confirm");
+});
+
 const goldenTurns: Array<{
   name: string;
   input: string;
@@ -311,8 +329,13 @@ test("workflow summary exposes provider lookup as the next best action", () => {
 
 test("confirm, link, and completion states expose deterministic next actions", () => {
   const confirm = stateAt("enrollment-confirm");
+  confirm.selectedActionResourceId = "class-verified";
+  confirm.lookupResults = { "registration-options": { status: "matched", matches: [{ id: "class-verified" }] } };
   assert.equal(workflowNextBestAction(enrollment, currentWorkflowStep(enrollment, confirm)), "CONFIRM_SELECTION");
   const link = stateAt("registration-link");
+  link.selectedActionResourceId = "class-verified";
+  link.lookupResults = { "registration-options": { status: "matched", matches: [{ id: "class-verified" }] } };
+  link.completionUrl = "https://register.example/class-verified";
   assert.equal(workflowNextBestAction(enrollment, currentWorkflowStep(enrollment, link)), "GENERATE_REGISTRATION_LINK");
   const done = stateAt("enrollment-complete");
   done.status = "completed";

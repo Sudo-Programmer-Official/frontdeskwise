@@ -12,7 +12,10 @@ export type WorkflowVerificationIssue = {
   | "required_field_not_captured"
   | "provider_missing"
   | "provider_dependency_missing"
-  | "unverified_link_source";
+  | "unverified_link_source"
+  | "placeholder_step"
+  | "selection_dependency_missing"
+  | "contact_boundary_missing";
   severity: WorkflowVerificationSeverity;
   message: string;
   stepId?: string;
@@ -77,6 +80,19 @@ function issue(code: WorkflowVerificationIssue["code"], message: string, stepId?
   return { code, message, ...(stepId ? { stepId } : {}), ...(fieldKey ? { fieldKey } : {}), severity: "error" };
 }
 
+const workflowPlaceholderCopy = [
+  /select step actions to configure this step/i,
+  /untitled step/i,
+  /configure this step/i,
+  /enter prompt here/i,
+  /select actions?/i,
+];
+
+function containsWorkflowPlaceholder(step: ActionStep): boolean {
+  const copy = `${step.label ?? ""} ${step.question ?? ""} ${step.conditionText ?? ""}`;
+  return workflowPlaceholderCopy.some((pattern) => pattern.test(copy));
+}
+
 /** Deterministic graph and provider-safety checks used before publication. */
 export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificationResult {
   const steps = action.steps ?? [];
@@ -86,6 +102,7 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
   for (const step of steps) {
     if (byId.has(step.id)) issues.push(issue("duplicate_step_id", `Workflow step id is duplicated: ${step.id}`, step.id));
     else byId.set(step.id, step);
+    if (containsWorkflowPlaceholder(step)) issues.push(issue("placeholder_step", `Workflow step ${step.id} contains editor placeholder text`, step.id));
   }
 
   const reachable = new Set<string>();
@@ -128,6 +145,27 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
   const provider = actionProviderForFlow(action);
   for (const step of steps.filter((candidate) => reachable.has(candidate.id))) {
     if (providerStepTypes.has(step.type) && !provider && typeof step.config?.provider !== "string") issues.push(issue("provider_missing", `Provider step ${step.id} has no configured provider`, step.id));
+    const config = step.config ?? {};
+    if (config.requiresProviderResult === true) {
+      const sourceId = typeof config.providerResultStepId === "string"
+        ? config.providerResultStepId
+        : typeof config.sourceStepId === "string" ? config.sourceStepId : "";
+      const source = byId.get(sourceId);
+      if (!source || source.type !== "lookup") issues.push(issue("provider_dependency_missing", `Workflow step ${step.id} requires a provider lookup result from a valid lookup step`, step.id));
+    }
+    if (config.requiresSelection === true) {
+      const currentIndex = steps.findIndex((candidate) => candidate.id === step.id);
+      const hasSelection = steps.slice(0, currentIndex).some((candidate) => candidate.type === "select");
+      if (!hasSelection) issues.push(issue("selection_dependency_missing", `Workflow step ${step.id} requires a visitor-selected option`, step.id));
+      if (config.requiresVerifiedProviderSelection === true && !steps.slice(0, currentIndex).some((candidate) => candidate.type === "lookup")) {
+        issues.push(issue("selection_dependency_missing", `Workflow step ${step.id} requires a provider-verified option`, step.id));
+      }
+    }
+    if (config.requiresContactBeforeHandoff === true) {
+      const currentIndex = steps.findIndex((candidate) => candidate.id === step.id);
+      const hasContact = steps.slice(0, currentIndex).some((candidate) => candidate.type === "create_lead" || (candidate.type === "form" && candidate.config?.ensureContact === true));
+      if (!hasContact) issues.push(issue("contact_boundary_missing", `Workflow step ${step.id} requires contact capture before external handoff`, step.id));
+    }
   }
 
   const pathSeen = new Set<string>();

@@ -31,6 +31,20 @@ test("workflow verifier catches missing fields, cycles, and unverified links", (
   assert.ok(result.issues.some((issue) => issue.code === "unverified_link_source"));
 });
 
+test("workflow verifier blocks editor placeholder copy", () => {
+  const broken: ActionFlow = {
+    ...swim,
+    id: "placeholder-workflow",
+    steps: [
+      { id: "start", type: "capture", label: "Select step actions to configure this step", fieldKey: "child_age", nextStepId: "done" },
+      { id: "done", type: "complete", label: "Complete workflow" },
+    ],
+  };
+  const result = verifyWorkflowDefinition(broken);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "placeholder_step" && issue.stepId === "start"));
+});
+
 test("disabled steps do not satisfy required-field verification", () => {
   const draft: ActionFlow = {
     ...swim,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ArrowDown, ArrowRight, ArrowUp, Check, ChevronDown, Copy, Eye, EyeOff, GitBranch, GripVertical, MoreHorizontal, Plus, Sparkles, Trash2, X } from "@lucide/vue";
-import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
+import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, validateWorkflowGeneration, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
 import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 
 type WorkflowStep = WorkflowStepDraft & { enabled?: boolean; nextStepId?: string; branches?: Array<{ nextStepId?: string; when?: Record<string, string> }> };
@@ -449,6 +449,25 @@ const workflowOutcomeAction = computed(() => {
   const actionId = workflowMetadata.value?.actionId || workflowDraft.value?.id;
   return allActions.value.find((action) => action.id === actionId) ?? workflowDraft.value;
 });
+const workflowOutcomeProvider = computed(() => actionProvider(workflowOutcomeAction.value));
+const workflowOutcomeProviderConnected = computed(() => actionProviderConnected(workflowOutcomeAction.value));
+const workflowOutcomeFallbackAvailable = computed(() => {
+  const steps = workflowOutcomeAction.value?.steps ?? [];
+  return steps.some((step) => {
+    const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
+      ? step.config as Record<string, unknown>
+      : {};
+    return ["form", "handoff", "notify"].includes(String(step.type))
+      || typeof config.failureBehavior === "string"
+      || config.providerUnavailableBehavior === "capture_request_and_notify";
+  }) || workflowCompletion(workflowOutcomeAction.value ?? ({} as WorkflowAction)).notifyStaff === true;
+});
+const workflowOutcomeReadinessLabel = computed(() => {
+  if (workflowOutcomeProvider.value && !workflowOutcomeProviderConnected.value) return workflowOutcomeFallbackAvailable.value ? "Needs setup · Fallback available" : "Needs setup";
+  if (workflowOutcomeAction.value?.setupStatus === "READY") return "Ready";
+  if (workflowOutcomeAction.value?.setupStatus === "DRAFT") return "Draft";
+  return "Needs setup";
+});
 const workflowStatusSummary = computed(() => {
   const status = draftIsDirty.value
     ? "Unpublished changes"
@@ -527,6 +546,10 @@ function verifyWorkflowDraft(): { ok: boolean; issues: WorkflowDraftIssue[] } {
     }
     if (byId.has(step.id)) issues.push({ code: "duplicate_step_id", message: `Step id “${step.id}” is used more than once.`, stepIndex: index });
     else byId.set(step.id, { step, index });
+    const stepCopy = `${step.label ?? ""} ${step.question ?? ""} ${step.conditionText ?? ""}`;
+    if (/select step actions to configure this step|untitled step|configure this step|enter prompt here|select actions?/i.test(stepCopy)) {
+      issues.push({ code: "placeholder_step", message: `“${step.label || step.id}” still contains editor placeholder text.`, stepIndex: index });
+    }
   }
   const entry = activeSteps[0];
   if (activeSteps.length) {
@@ -565,6 +588,18 @@ function verifyWorkflowDraft(): { ok: boolean; issues: WorkflowDraftIssue[] } {
       }
       if (["lookup", "book", "api_action"].includes(step.type) && !workflowProvider.value && !stepConfigValue(step, "provider")) {
         issues.push({ code: "provider_missing", message: `“${step.label || "This step"}” needs a connected provider.`, stepIndex: steps.indexOf(step) });
+      }
+      const config = step.config && typeof step.config === "object" && !Array.isArray(step.config) ? step.config as Record<string, unknown> : {};
+      if (config.requiresProviderResult === true) {
+        const sourceId = typeof config.providerResultStepId === "string" ? config.providerResultStepId : typeof config.sourceStepId === "string" ? config.sourceStepId : "";
+        const source = sourceId ? byId.get(sourceId)?.step : undefined;
+        if (!source || source.type !== "lookup") issues.push({ code: "provider_result_dependency_missing", message: `“${step.label || step.id}” needs a valid provider lookup result first.`, stepIndex: steps.indexOf(step) });
+      }
+      if (config.requiresSelection === true && !activeSteps.slice(0, activeSteps.indexOf(step)).some((candidate) => candidate.type === "select")) {
+        issues.push({ code: "selection_dependency_missing", message: `“${step.label || step.id}” needs a selected provider option first.`, stepIndex: steps.indexOf(step) });
+      }
+      if (config.requiresContactBeforeHandoff === true && !activeSteps.slice(0, activeSteps.indexOf(step)).some((candidate) => candidate.type === "create_lead" || (candidate.type === "form" && candidate.config?.ensureContact === true))) {
+        issues.push({ code: "contact_boundary_missing", message: `“${step.label || step.id}” needs contact capture before handoff.`, stepIndex: steps.indexOf(step) });
       }
     }
   }
@@ -806,17 +841,20 @@ function refreshWorkflowContext(): void {
   emit("refresh-workspace");
 }
 
-function generatedWorkflowFor(action: WorkflowAction): { name: string; description: string; steps: WorkflowStep[]; fields: Array<WorkflowFieldDraft & { id?: string; visibility?: string }>; executionMode?: string; provider?: string } {
+function generatedWorkflowFor(action: WorkflowAction): { name: string; description: string; steps: WorkflowStep[]; fields: Array<WorkflowFieldDraft & { id?: string; visibility?: string }>; executionMode?: string; provider?: string; validation: ReturnType<typeof validateWorkflowGeneration> } {
   if (createWorkflowMode.value === "template") {
     const template = workflowTemplates.find((candidate) => candidate.key === createWorkflowTemplateKey.value) ?? workflowTemplates[0];
     const generated = generateWorkflow(template.description, [], workflowGenerationContext(action));
+    const steps = templateSteps(template.key) as unknown as WorkflowStep[];
+    const fields = generated.fields as Array<WorkflowFieldDraft & { id?: string; visibility?: string }>;
     return {
       name: template.label,
       description: template.description,
-      steps: templateSteps(template.key) as unknown as WorkflowStep[],
-      fields: generated.fields as Array<WorkflowFieldDraft & { id?: string; visibility?: string }>,
+      steps,
+      fields,
       executionMode: generated.executionMode,
       provider: generated.provider,
+      validation: validateWorkflowGeneration({ steps, fields }),
     };
   }
   const description = preserveWorkflowGoal(createWorkflowDescription.value) ?? defaultBusinessWorkflowDescription();
@@ -828,6 +866,7 @@ function generatedWorkflowFor(action: WorkflowAction): { name: string; descripti
     fields: generated.fields as Array<WorkflowFieldDraft & { id?: string; visibility?: string }>,
     executionMode: generated.executionMode,
     provider: generated.provider,
+    validation: generated.validation,
   };
 }
 
@@ -921,6 +960,10 @@ async function createWorkflow(): Promise<void> {
   createWorkflowError.value = "";
   try {
     const generated = generatedWorkflowFor(action);
+    if (!generated.validation.ok) {
+      createWorkflowError.value = `The generated workflow needs review before it can be saved: ${generated.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
+      return;
+    }
     const nextAction = clone(action);
     // Generating from an archived/disabled action is an explicit owner action:
     // promote the new workflow to the current draft so it appears in both
@@ -1077,6 +1120,13 @@ function readinessLabel(label: string): string {
 
 function stepTypeLabel(type?: string): string {
   return stepTypes.find((item) => item.value === type)?.label ?? formatLabel(type || "Step");
+}
+
+function workflowStepDisplayLabel(step: WorkflowStep): string {
+  const field = workflowFieldForStep(step);
+  const raw = field?.label || step.label || step.question || step.id;
+  if (/select step actions to configure this step|untitled step|configure this step|enter prompt here|select actions?/i.test(raw)) return stepTypeLabel(step.type);
+  return raw.includes("_") || raw === step.id ? formatLabel(raw) : raw;
 }
 
 function ensureStepConfig(step: WorkflowStep): Record<string, unknown> {
@@ -1600,6 +1650,11 @@ function generateStarter() {
     ? ENROLLMENT_WORKFLOW_GOAL
     : preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
   const result = generateWorkflow(ownerGoal, [], generationContext);
+  if (!result.validation.ok) {
+    workflowSaveError.value = `The generated workflow needs review before it can be saved: ${result.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
+    workflowVerificationOpen.value = true;
+    return;
+  }
   workflowDraft.value.description = result.description;
   workflowDraft.value.steps = result.steps as unknown as Array<Record<string, unknown>>;
   workflowDraft.value.fields = result.fields as unknown as WorkflowAction["fields"];
@@ -1725,7 +1780,7 @@ onMounted(() => {
         </section>
 
         <section class="workflow-outcome-card" aria-labelledby="workflow-outcome-heading">
-          <div class="workflow-outcome-copy"><p class="eyebrow">Outcome</p><h3 id="workflow-outcome-heading">{{ workflowOutcomeAction?.name || 'Configured Action' }}</h3><div class="workflow-outcome-meta"><span :class="['status-pill', workflowOutcomeAction?.setupStatus === 'READY' ? 'booked' : 'new']">{{ workflowOutcomeAction?.setupStatus === 'READY' ? 'Ready' : workflowOutcomeAction?.setupStatus === 'DRAFT' ? 'Draft' : 'Needs setup' }}</span><span>{{ workflowOutcomeAction?.capability?.completionType === 'link' ? 'Send visitors to a page' : workflowOutcomeAction?.capability?.completionType === 'provider' ? 'Use a connected provider' : 'Action completion' }}</span></div><small>Actions define what happens. This Workflow owns the journey that gets visitors there.</small></div>
+          <div class="workflow-outcome-copy"><p class="eyebrow">Outcome</p><h3 id="workflow-outcome-heading">{{ workflowOutcomeAction?.name || 'Configured Action' }}</h3><div class="workflow-outcome-meta"><span :class="['status-pill', workflowOutcomeReadinessLabel === 'Ready' ? 'booked' : 'new']">{{ workflowOutcomeReadinessLabel }}</span><span>{{ workflowOutcomeAction?.capability?.completionType === 'link' ? 'Send visitors to a page' : workflowOutcomeAction?.capability?.completionType === 'provider' ? 'Use a connected provider' : 'Action completion' }}</span></div><small>Actions define what happens. This Workflow owns the journey that gets visitors there.</small></div>
           <button class="outline-button small" type="button" @click="emit('open-action', workflowMetadata?.actionId || workflowDraft?.id || '')">View action</button>
         </section>
 
@@ -1755,7 +1810,7 @@ onMounted(() => {
             <div class="workflow-step-rail"><span>{{ workflowStepIndex(step) + 1 }}</span><i v-if="index < workflowDisplaySteps.length - 1"></i></div>
             <div class="workflow-step-body">
               <div v-if="stepGenerationReason(step)" :class="['workflow-step-reason', { missing: stepGenerationStatus(step) === 'missing', verified: stepGenerationStatus(step) === 'verified' }]" role="note"><strong>Why this was added</strong><span>{{ stepGenerationReason(step) }}</span><small v-if="stepGenerationStatus(step) === 'missing'">{{ stepGenerationStatusLabel(step) }} · review before publishing</small></div>
-              <div v-if="selectedStepIndex !== workflowStepIndex(step)" class="workflow-step-summary"><span>{{ step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select step actions to configure this step') }}</span><span v-if="stepConditionText(step)" class="workflow-summary-tag">Condition</span><span v-if="isConditionalStep(step)" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
+              <div v-if="selectedStepIndex !== workflowStepIndex(step)" class="workflow-step-summary"><span>{{ step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : workflowStepDisplayLabel(step)) }}</span><span v-if="stepConditionText(step)" class="workflow-summary-tag">Condition</span><span v-if="isConditionalStep(step)" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
               <div v-else>
                 <div v-if="step.type === 'capture'" class="workflow-capture-config">
                   <div class="workflow-step-grid">

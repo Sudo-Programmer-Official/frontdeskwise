@@ -5693,6 +5693,17 @@ function actionNeedsProviderConnection(action: ActionFlow): boolean {
     && !providerIsConnected(actionProvider(action));
 }
 
+function actionHasProviderFallback(action: ActionFlow): boolean {
+  return (action.steps ?? []).some((step) => {
+    const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
+      ? step.config as Record<string, unknown>
+      : {};
+    return ["form", "handoff", "notify"].includes(String(step.type))
+      || typeof config.failureBehavior === "string"
+      || config.providerUnavailableBehavior === "capture_request_and_notify";
+  }) || action.completion.notifyStaff === true || action.completion.requiresStaff === true;
+}
+
 function actionPrimarySetupHint(action: ActionFlow): string {
   if (actionNeedsProviderConnection(action)) {
     return "Connect and verify Jackrabbit before making this primary";
@@ -5851,18 +5862,18 @@ function actionSetupStatus(action: ActionFlow): "Ready" | "Draft" | "Needs setup
   return "Needs setup";
 }
 
-function actionStatusLabel(action: ActionFlow): "Ready" | "Draft" | "Disabled" | "Needs setup" | "Integration error" {
+function actionStatusLabel(action: ActionFlow): "Ready" | "Draft" | "Disabled" | "Needs setup" | "Needs setup · Fallback available" | "Integration error" {
   const delivery = actionDeliveries.value.find((item) => item.actionId === action.id && item.status === "failed");
   if (delivery) return "Integration error";
   if (!action.enabled) return "Disabled";
-  if (actionNeedsProviderConnection(action)) return "Needs setup";
+  if (actionNeedsProviderConnection(action)) return actionHasProviderFallback(action) ? "Needs setup · Fallback available" : "Needs setup";
   return actionSetupStatus(action);
 }
 
 function actionStatusTone(status: ReturnType<typeof actionStatusLabel>): "active" | "draft" | "paused" | "attention" {
   if (status === "Ready") return "active";
   if (status === "Disabled") return "paused";
-  if (status === "Integration error" || status === "Needs setup") return "attention";
+  if (status === "Integration error" || status.startsWith("Needs setup")) return "attention";
   return "draft";
 }
 
