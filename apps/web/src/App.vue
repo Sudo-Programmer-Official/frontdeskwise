@@ -5776,8 +5776,38 @@ function openWorkflowAction(actionId: string) {
   navigateToWorkspaceView("actions");
 }
 
+function actionHasCurrentWorkflow(action: ActionFlow): boolean {
+  const isCurrent = action.enabled !== false && action.lifecycleStatus !== "disabled";
+  if (!isCurrent) return false;
+  const hasCurrentDefinition = (action.steps?.length ?? 0) > 0;
+  return Boolean((action.workflowCount ?? 0) > 0 || (action.workflowCount === 0 && hasCurrentDefinition));
+}
+
+function actionWorkflowCount(action: ActionFlow): number {
+  return actionHasCurrentWorkflow(action) ? Math.max(1, action.workflowCount ?? 0) : action.workflowCount ?? 0;
+}
+
+function actionWorkflowNames(action: ActionFlow): string[] {
+  if (action.workflowNames?.length) return action.workflowNames;
+  return actionHasCurrentWorkflow(action)
+    ? [action.completion.workflow?.name?.trim() || action.name]
+    : [];
+}
+
+function normalizeActionWorkflowProjection(actions: ActionFlow[]): ActionFlow[] {
+  return actions.map((action) => {
+    if (!actionHasCurrentWorkflow(action) || action.workflowNames?.length) return action;
+    return {
+      ...action,
+      workflowCount: actionWorkflowCount(action),
+      workflowIds: action.workflowIds?.length ? action.workflowIds : [action.id],
+      workflowNames: actionWorkflowNames(action),
+    };
+  });
+}
+
 function openWorkflowForAction(action: ActionFlow, workflowIndex = 0) {
-  const workflowId = action.workflowIds?.[workflowIndex] ?? (action.workflowCount ? action.id : undefined);
+  const workflowId = action.workflowIds?.[workflowIndex] ?? (actionHasCurrentWorkflow(action) ? action.id : undefined);
   const options = workflowId ? { workflowId } : { workflowActionId: action.id };
   const nextRoute = route.value.kind === "demo"
     ? demoRoute(workspaceSlugForRoute(), "workflows", options)
@@ -6085,7 +6115,7 @@ async function loadActions() {
     const payload = await response.json() as { actions?: ActionFlow[]; templates?: ActionTemplate[]; deliveries?: ActionDelivery[]; error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not load conversation flows.");
     if (loadGeneration !== actionsLoadGeneration || demoSlug.value !== slug) return;
-    actionFlows.value = payload.actions ?? [];
+    actionFlows.value = normalizeActionWorkflowProjection(payload.actions ?? []);
     actionTemplates.value = payload.templates ?? [];
     actionDeliveries.value = payload.deliveries ?? [];
     const selected = actionFlows.value.find((action) => action.id === selectedActionId.value) ?? null;

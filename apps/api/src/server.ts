@@ -19097,15 +19097,23 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   if (actionIndex < 0) throw httpError(404, "Action not found");
   const previousAction = business.actions[actionIndex];
   const previousWorkflow = previousAction.completion.workflow;
-  if (previousWorkflow?.creationRequestId === clientRequestId && (previousAction.steps?.length ?? 0) > 0) {
-    return reply.code(200).send({ action: previousAction, workflow: previousAction, reused: true, idempotent: true });
+  const previousHasSteps = (previousAction.steps?.length ?? 0) > 0;
+  const previousVerification = previousHasSteps ? verifyWorkflowDefinition(previousAction) : null;
+  if (previousHasSteps && previousVerification?.ok) {
+    // A stale Actions page can still submit Generate workflow after the
+    // workflow was already persisted. Return the current workflow so the
+    // owner is taken to the existing completed draft instead of seeing a
+    // duplicate-creation error.
+    return reply.code(200).send({
+      action: previousAction,
+      workflow: previousAction,
+      reused: true,
+      idempotent: previousWorkflow?.creationRequestId === clientRequestId,
+    });
   }
-  // A metadata-only or zero-step record is an incomplete shell from an older
-  // creation attempt. It is safe to replace it with the complete generated
-  // draft; only a real persisted workflow should block a second creation.
-  if ((previousAction.steps?.length ?? 0) > 0) {
-    throw httpError(409, "This Action already has a workflow. Open the existing workflow instead of creating another one.");
-  }
+  // A metadata-only, zero-step, or invalid legacy record is an incomplete
+  // shell from an older creation attempt. It is safe to replace it with the
+  // complete generated draft.
 
   const workflowSourceCompletion = asRecord(body.completion);
   const workflowSource = asRecord(workflowSourceCompletion.workflow);

@@ -87,6 +87,23 @@ test("Action relationships count workflow references without changing persisted 
   });
 });
 
+test("Action relationships count self-contained workflow records", () => {
+  const workflow = {
+    ...actions().find((item) => item.key === "request_demo")!,
+    id: "self-contained-workflow",
+    steps: [{ id: "demo", type: "redirect" as const }],
+    completion: { ...actions().find((item) => item.key === "request_demo")!.completion },
+    enabled: true,
+    lifecycleStatus: "active" as const,
+  };
+
+  assert.deepEqual(actionRelationships([workflow], workflow), {
+    workflowCount: 1,
+    workflowIds: ["self-contained-workflow"],
+    workflowNames: [workflow.name],
+  });
+});
+
 test("Action relationships do not expose disabled or orphaned workflow references", () => {
   const action = actions().find((item) => item.key === "request_demo")!;
   const disabledWorkflow: ActionFlow = {

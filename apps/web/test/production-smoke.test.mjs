@@ -106,6 +106,8 @@ test("Actions and Workflows share current relationships and provider readiness",
   assert.match(app, /connectionStatus === "active"/);
   assert.match(app, /providerIsConnected\(provider\) \? "Connected" : "Needs setup"/);
   assert.match(app, /!providerIsConnected\(actionProvider\(action\)\)/);
+  assert.match(app, /normalizeActionWorkflowProjection/);
+  assert.match(app, /actionHasCurrentWorkflow/);
   assert.match(workflowWorkspace, /typeof action\.workflowCount === "number"/);
   assert.match(workflowWorkspace, /actionHasWorkflow\(action\)/);
   assert.match(workflowWorkspace, /actionCanStartWorkflow/);
@@ -678,7 +680,8 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(workflowWorkspace, /clientRequestId/);
   assert.match(workflowWorkspace, /Creating your customer journey/);
   assert.match(apiServer, /clientRequestId is required for generated workflow creation/);
-  assert.match(apiServer, /idempotent: true/);
+  assert.match(apiServer, /reused: true/);
+  assert.match(apiServer, /previousWorkflow\?\.creationRequestId === clientRequestId/);
   assert.match(apiServer, /workflowActionId/);
   for (const marker of [
     "WorkflowBusinessContext",

@@ -133,8 +133,11 @@ export function actionRelationships(actions: ActionFlow[], action: ActionFlow): 
     // the Workflows library correctly hides them.
     if (!candidate.steps?.length || candidate.enabled === false || candidate.lifecycleStatus === "disabled") return false;
     const workflowActionId = candidate.completion.workflow?.actionId;
-    const referencedActionId = workflowActionId ?? candidate.id;
-    return referencedActionId === action.id;
+    // Most workflows explicitly point at their outcome Action. Workflows
+    // created before that metadata existed are stored directly on the Action,
+    // so the current record is also a valid relationship target. Keeping both
+    // cases here makes Actions and Workflows project the same record set.
+    return workflowActionId ? workflowActionId === action.id : candidate.id === action.id;
   });
   const uniqueReferences = [...new Map(references.map((reference) => [reference.id, reference])).values()];
   const names = [...new Set(uniqueReferences.map(workflowName).filter(Boolean))];

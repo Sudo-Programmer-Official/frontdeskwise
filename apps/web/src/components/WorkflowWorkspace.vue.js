@@ -667,8 +667,12 @@ function actionHasWorkflow(action) {
     // workflow ids against the current business snapshot so a stale or
     // inaccessible reference cannot send the owner to an empty builder.
     if (typeof action.workflowCount === "number") {
-        if (action.workflowCount <= 0)
-            return false;
+        if (action.workflowCount <= 0) {
+            // Be tolerant of an older API projection while the business snapshot is
+            // refreshing. A current Action carrying its own steps is itself a
+            // workflow record and must not be hidden behind a stale zero count.
+            return (action.steps?.length ?? 0) > 0 && action.enabled !== false && action.lifecycleStatus !== "disabled";
+        }
         if (action.workflowIds?.length) {
             return action.workflowIds.some((workflowId) => allActions.value.some((candidate) => candidate.id === workflowId && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"));
         }
@@ -985,7 +989,9 @@ async function createWorkflow() {
         draftIsDirty.value = false;
         selectedStepIndex.value = savedWorkflow.steps?.length ? 0 : -1;
         selectedWorkflowId.value = savedWorkflow.id;
-        workflowSaveMessage.value = `Workflow created and linked to ${action.name}.`;
+        workflowSaveMessage.value = payload.reused
+            ? `Opened the existing workflow linked to ${action.name}.`
+            : `Workflow created and linked to ${action.name}.`;
         createWorkflowOpen.value = false;
         createWorkflowRequestId.value = "";
         emit("refresh");
