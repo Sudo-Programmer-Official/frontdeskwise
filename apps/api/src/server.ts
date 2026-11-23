@@ -258,6 +258,10 @@ import {
 
 const trustProxy = process.env.FRONTDESKWISE_TRUST_PROXY?.trim().toLowerCase() === "true";
 const app = Fastify({
+  // Uploaded logos are persisted as small data URLs in the agent config. Keep
+  // the request limit explicit so a valid logo is not rejected by Fastify's
+  // default JSON body limit when the rest of the configuration is included.
+  bodyLimit: 2 * 1024 * 1024,
   logger: {
     base: {
       service: "frontdeskwise-api",
@@ -318,6 +322,8 @@ const promptInjectionRateLimiter = new FixedWindowRateLimiter(
 const stripe = process.env.STRIPE_SECRET_KEY?.trim() ? new Stripe(process.env.STRIPE_SECRET_KEY.trim()) : null;
 const stripeAppMetadata = "frontdeskwise";
 const defaultTrialDays = Math.max(1, Number(process.env.FRONTDESKWISE_DEFAULT_TRIAL_DAYS ?? 7));
+const maxWidgetLogoDataUrlLength = 700_000;
+const widgetLogoDataUrlPattern = /^data:image\/(?:png|jpe?g|svg\+xml);base64,[a-z\d+/]+={0,2}$/i;
 const renderedPageAdapter = createRenderedPageAdapter();
 
 function crawlConfiguredWebsite(websiteUrl: string) {
@@ -1356,6 +1362,10 @@ function requiredString(value: unknown, field: string, maxLength = 500): string 
     throw httpError(400, `${field} is required`);
   }
   return value.trim().slice(0, maxLength);
+}
+
+function isPersistedWidgetLogo(value: string): boolean {
+  return value.length <= maxWidgetLogoDataUrlLength && widgetLogoDataUrlPattern.test(value);
 }
 
 function contentHash(content: string): string {
@@ -19089,7 +19099,11 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   if (body.widgetLogoUrl === null) business.agentConfig.widgetLogoUrl = null;
   if (typeof body.widgetLogoUrl === "string") {
     const logoUrl = body.widgetLogoUrl.trim();
-    if (!logoUrl || /^https:\/\//i.test(logoUrl)) business.agentConfig.widgetLogoUrl = logoUrl || null;
+    if (!logoUrl || /^https:\/\//i.test(logoUrl) || isPersistedWidgetLogo(logoUrl)) {
+      business.agentConfig.widgetLogoUrl = logoUrl || null;
+    } else {
+      throw httpError(400, "Logo must be an HTTPS URL or a PNG, JPG, or SVG upload no larger than 512 KB");
+    }
   }
   if (["light", "dark", "auto"].includes(String(body.widgetTheme))) business.agentConfig.widgetTheme = body.widgetTheme as AgentConfig["widgetTheme"];
   if (["bottom-right", "bottom-left"].includes(String(body.widgetPosition))) business.agentConfig.widgetPosition = body.widgetPosition as AgentConfig["widgetPosition"];

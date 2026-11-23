@@ -271,8 +271,12 @@ const recommendedQuickActions = computed<QuickAction[]>(() => buildQuickActionRe
 const quickActionPublishIssues = computed(() => draft.value.widgetQuickActions
   .map((action) => ({ action, readiness: quickActionReadiness(action) }))
   .filter(({ action, readiness }) => quickActionNeedsApproval(action) || readiness.readiness === "blocked"));
+const maxPersistedLogoBytes = 512 * 1024;
+const allowedLogoTypes = new Set(["image/png", "image/jpeg", "image/svg+xml"]);
 const logoPreview = ref(props.model.widgetLogoUrl);
 const logoFileName = ref("");
+const logoProcessing = ref(false);
+const logoError = ref("");
 const testPrompt = ref("");
 const sessionHasGroundedAnswer = computed(() => props.test.messages.some((message) => message.role === "assistant" && message.grounded));
 const sessionSourceCount = computed(() => new Set(props.test.messages.flatMap((message) => message.citations.map((citation) => citation.url || citation.title || ""))).size);
@@ -369,6 +373,8 @@ function syncModel(model: AgentModel): void {
   recommendationsApplied.value = false;
   logoPreview.value = model.widgetLogoUrl;
   logoFileName.value = "";
+  logoProcessing.value = false;
+  logoError.value = "";
 }
 
 function updateBehaviorPreviewFocus(): void {
@@ -429,6 +435,7 @@ function saveChanges(): void {
     emit("require-auth");
     return;
   }
+  if (logoProcessing.value || logoError.value) return;
   if (!isHexColor(draft.value.widgetColor)) return;
   localSaved.value = true;
   window.setTimeout(() => (localSaved.value = false), 2600);
@@ -675,9 +682,39 @@ function moveAction(index: number, direction: -1 | 1): void {
 }
 
 function previewLogo(file: File): void {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  const fallbackType = extension === "svg" ? "image/svg+xml" : extension === "jpg" || extension === "jpeg" ? "image/jpeg" : extension === "png" ? "image/png" : "";
+  const contentType = allowedLogoTypes.has(file.type.toLowerCase()) ? file.type.toLowerCase() : fallbackType;
+  if (!contentType) {
+    logoError.value = "Choose a PNG, JPG, or SVG image.";
+    return;
+  }
+  if (file.size > maxPersistedLogoBytes) {
+    logoError.value = "Logo files must be 512 KB or smaller.";
+    return;
+  }
   logoFileName.value = file.name;
-  logoPreview.value = URL.createObjectURL(file);
-  emit("logo-preview", logoPreview.value);
+  logoError.value = "";
+  logoProcessing.value = true;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = typeof reader.result === "string" ? reader.result : "";
+    if (!result) {
+      logoError.value = "The logo could not be read. Try another image.";
+      logoProcessing.value = false;
+      return;
+    }
+    const dataUrl = result.replace(/^data:[^;]+;/i, `data:${contentType};`);
+    draft.value.widgetLogoUrl = dataUrl;
+    logoPreview.value = dataUrl;
+    logoProcessing.value = false;
+    emit("logo-preview", dataUrl);
+  };
+  reader.onerror = () => {
+    logoError.value = "The logo could not be read. Try another image.";
+    logoProcessing.value = false;
+  };
+  reader.readAsDataURL(file);
 }
 
 function ask(question = testPrompt.value): void {
@@ -887,7 +924,9 @@ function openLiveWebsite(): void {
       <Card class="agent-form-panel agent-settings-panel">
         <FormSection eyebrow="Brand" title="Appearance" description="Make the front desk feel like part of your website.">
           <FileUpload :filename="logoFileName || (draft.widgetLogoUrl ? 'Current logo' : '')" :preview-url="logoPreview" accept="image/png,image/jpeg,image/svg+xml" @change="previewLogo" />
-          <details class="advanced-setting"><summary>Advanced · logo URL</summary><FormField label="Logo URL" hint="Use an HTTPS URL when the logo should persist to the published widget."><TextInput v-model="draft.widgetLogoUrl" type="url" placeholder="https://yourbusiness.com/logo.png" /></FormField></details>
+          <p v-if="logoProcessing" class="form-help">Preparing logo… save after the preview finishes.</p>
+          <p v-if="logoError" class="logo-error" role="alert">{{ logoError }}</p>
+          <details class="advanced-setting"><summary>Advanced · logo URL</summary><FormField label="Logo URL" hint="Uploaded logos are saved with this configuration. Use an HTTPS URL when the logo is hosted on your website."><TextInput v-model="draft.widgetLogoUrl" type="url" placeholder="https://yourbusiness.com/logo.png" /></FormField></details>
           <FormField label="Brand color" hint="Used for CTAs, accents, focus rings, and quick actions. Text contrast adjusts automatically."><ColorPicker v-model="draft.widgetColor" :website-colors="websiteBrandColors" :website-label="businessName || websiteUrl || 'your website'" /></FormField>
           <p class="accessible-color-note"><span :style="{ background: safeWidgetColor, color: accessibleWidgetText }">Aa</span> Accessible text preview</p>
         </FormSection>
@@ -1047,6 +1086,7 @@ function openLiveWebsite(): void {
 .logo-upload-row strong, .logo-upload-row small { display: block; }
 .logo-upload-row strong { color: var(--agent-ink); font-size: 12px; }
 .logo-upload-row small { margin: 3px 0 8px; color: var(--agent-muted); font-size: 11px; }
+.logo-error { margin: 8px 0 0; color: #b42318; font-size: 11px; line-height: 1.45; }
 .upload-button { display: inline-flex !important; width: max-content; margin: 0 !important; cursor: pointer; }
 .upload-button input { display: none; }
 .advanced-setting { margin-top: 18px; color: var(--agent-muted); font-size: 11px; }
