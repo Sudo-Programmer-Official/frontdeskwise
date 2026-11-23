@@ -202,6 +202,7 @@ const emit = defineEmits<{
   (event: "select-tab", tab: AgentTab): void;
   (event: "save", payload: AgentModel): void;
   (event: "publish", payload: AgentModel): void;
+  (event: "logo-preview", previewUrl: string): void;
   (event: "open-knowledge"): void;
   (event: "view-dashboard"): void;
   (event: "require-auth"): void;
@@ -419,6 +420,7 @@ function moveAction(index: number, direction: -1 | 1): void {
 function previewLogo(file: File): void {
   logoFileName.value = file.name;
   logoPreview.value = URL.createObjectURL(file);
+  emit("logo-preview", logoPreview.value);
 }
 
 function ask(question = testPrompt.value): void {

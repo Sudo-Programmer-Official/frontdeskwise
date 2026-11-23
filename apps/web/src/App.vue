@@ -1375,6 +1375,8 @@ const showBookingAction = ref(true);
 const widgetDefaultMode = ref<"compact" | "expanded" | "fullscreen">("compact");
 const widgetAllowExpand = ref(true);
 const widgetLogoUrl = ref("");
+const workspaceLogoPreviewUrl = ref("");
+const workspaceLogoLoadFailed = ref(false);
 const widgetTheme = ref<"light" | "dark" | "auto">("auto");
 const widgetPosition = ref<"bottom-right" | "bottom-left">("bottom-right");
 const widgetQuickActions = ref<WidgetQuickAction[]>([
@@ -1964,7 +1966,21 @@ const selectedConversationOwnerLabel = computed(() => {
   if (conversation.assignedUserId === authSnapshot.value?.user.id) return "You";
   return conversation.assignedUserName || "Another team member";
 });
-const businessInitial = computed(() => (businessName.value.trim().charAt(0) || "?").toUpperCase());
+const selectedBusiness = computed(() => availableBusinesses.value.find((business) => business.slug === demoSlug.value) ?? null);
+const businessInitial = computed(() => ((selectedBusiness.value?.name ?? businessName.value).trim().charAt(0) || "?").toUpperCase());
+const workspaceLogoSrc = computed(() => {
+  if (workspaceLogoLoadFailed.value) return "";
+  return workspaceLogoPreviewUrl.value.trim() || widgetLogoUrl.value.trim();
+});
+
+function handleWorkspaceLogoError() {
+  workspaceLogoLoadFailed.value = true;
+}
+
+function handleWorkspaceLogoPreview(previewUrl: string) {
+  workspaceLogoPreviewUrl.value = previewUrl.trim();
+  workspaceLogoLoadFailed.value = false;
+}
 const conversationCount = computed(() => workspaceStats.value?.conversations ?? 0);
 const inboxUnreadCount = computed(() => inboxSummary.value.unread);
 const inboxNeedsResponseCount = computed(() => inboxSummary.value.needsResponse);
@@ -3170,6 +3186,8 @@ function clearWorkspaceState() {
   widgetDefaultMode.value = "compact";
   widgetAllowExpand.value = true;
   widgetLogoUrl.value = "";
+  workspaceLogoPreviewUrl.value = "";
+  workspaceLogoLoadFailed.value = false;
   widgetTheme.value = "auto";
   widgetPosition.value = "bottom-right";
   widgetQuickActions.value = [
@@ -3318,6 +3336,8 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   showBookingAction.value = payload.agent?.showBookingAction ?? true;
   widgetDefaultMode.value = payload.agent?.widgetDefaultMode ?? "compact";
   widgetAllowExpand.value = payload.agent?.widgetAllowExpand ?? true;
+  workspaceLogoPreviewUrl.value = "";
+  workspaceLogoLoadFailed.value = false;
   widgetLogoUrl.value = payload.agent?.widgetLogoUrl ?? "";
   widgetTheme.value = payload.agent?.widgetTheme ?? "auto";
   widgetPosition.value = payload.agent?.widgetPosition ?? "bottom-right";
@@ -8443,7 +8463,7 @@ function startMarketingDemo() {
           </div>
         </header>
         <div v-if="notificationMenuOpen && authSnapshot" class="notification-menu mobile-notification-menu"><div class="panel-heading notification-panel-heading"><strong>Notifications</strong><div class="notification-panel-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div></div><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></div>
-        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${businessName || 'Workspace'} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><div v-if="!adminSurfaceMode" class="header-workspace-switcher"><span class="workspace-avatar">{{ businessInitial }}</span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading notification-panel-heading"><strong>Notifications</strong><div class="notification-panel-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div></div><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button v-if="canAccessBilling" type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
+        <header class="content-header mobile-page-heading"><div><p class="breadcrumb">{{ view === 'admin' ? 'Operations / FrontDeskWise' : `${businessName || 'Workspace'} / FrontDeskWise` }}</p><h1>{{ view === 'admin' ? adminSectionTitle : pageTitle }}</h1></div><div class="header-actions"><div v-if="!adminSurfaceMode" class="header-workspace-switcher"><span class="workspace-avatar"><img v-if="workspaceLogoSrc" :src="workspaceLogoSrc" alt="" aria-hidden="true" @error="handleWorkspaceLogoError" /><span v-else aria-hidden="true">{{ businessInitial }}</span></span><span v-if="availableBusinesses.length" class="workspace-select-wrap"><select v-model="workspaceSelection" aria-label="Switch business"><option v-for="business in availableBusinesses" :key="business.id" :value="business.slug">{{ business.name }}</option></select><small>{{ activeOrganization?.name ?? 'Organization' }}</small></span><span v-else><strong>{{ businessName || (authSnapshot ? 'No business yet' : 'Demo workspace') }}</strong><small>{{ businessLocation || (authSnapshot ? 'Add your first business' : 'Preview data from the API') }}</small></span><span class="workspace-actions"><span class="chevron" aria-hidden="true"><ChevronDown :size="16" :stroke-width="1.8" /></span></span></div><button v-if="authSnapshot" class="notification-trigger" type="button" aria-label="Open notifications" :aria-expanded="notificationMenuOpen" @click="toggleNotifications"><Bell class="notification-bell" :size="20" :stroke-width="1.8" aria-hidden="true" /><span v-if="notificationUnreadCount" class="notification-badge">{{ notificationUnreadCount > 9 ? '9+' : notificationUnreadCount }}</span></button><button v-if="authSnapshot" class="profile-avatar profile-menu-trigger" type="button" aria-label="Open account menu" :aria-expanded="profileMenuOpen" @click="profileMenuOpen = !profileMenuOpen; notificationMenuOpen = false">{{ authSnapshot.user.name.charAt(0).toUpperCase() }}</button><span v-else class="profile-avatar">SP</span></div><div v-if="notificationMenuOpen && authSnapshot" class="notification-menu"><div class="panel-heading notification-panel-heading"><strong>Notifications</strong><div class="notification-panel-actions"><button v-if="notificationUnreadCount" class="text-button" type="button" :disabled="notificationActionLoading" @click="markAllNotificationsRead">{{ notificationActionLoading ? 'Clearing…' : 'Mark all read' }}</button><button class="text-button" type="button" @click="loadNotifications">Refresh</button></div></div><p v-if="notificationActionError" class="notification-action-error">{{ notificationActionError }}</p><div v-if="!staffNotifications.length" class="diagnostics-empty">No new team notifications.</div><button v-for="notification in staffNotifications" :key="notification.id" :class="['notification-row', { 'notification-row-unread': !notification.readAt }]" type="button" @click="markNotificationRead(notification); view = 'inbox'; notificationMenuOpen = false"><span class="notification-row-indicator" aria-hidden="true"></span><span><strong>{{ notification.title }}</strong><small>{{ notification.body }}</small><em>{{ new Date(notification.createdAt).toLocaleString() }}</em></span></button></div><div v-if="profileMenuOpen && authSnapshot" class="profile-menu"><strong>{{ authSnapshot.user.name }}</strong><small>{{ authSnapshot.user.email }}</small><button type="button" @click="openSettingsTab('general')">Account settings</button><button v-if="canAccessBilling" type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="toggleNotifications">Notifications</button><button type="button" class="danger-text" @click="profileMenuOpen = false; signOut()">Sign out</button></div></header>
         <div v-if="!adminSurfaceMode && supportViewMode" class="trial-banner warning support-view-banner"><span><strong>You are viewing {{ businessName || 'this business' }} as support.</strong><small>Read-only support view · case {{ supportViewCaseId || 'linked case' }} · access expires automatically and this session is audited.</small></span><button class="primary-button small" type="button" @click="exitSupportView">Exit support view</button></div>
         <div v-else-if="!adminSurfaceMode && publicDemoMode" class="trial-banner info"><span><strong>Public sample workspace</strong><small>This view is live demo data in read-only mode. Generate your own demo or create an account to customize, install, and capture leads.</small></span><button class="primary-button small" type="button" @click="openAuth('signup')">Create your workspace →</button></div>
         <div v-else-if="!adminSurfaceMode && billingSnapshot?.billing.status === 'trial' && billingSnapshot.billing.mode !== 'sandbox'" class="trial-banner compact"><span><strong>{{ trialDaysRemaining }} {{ trialDaysRemaining === 1 ? 'day' : 'days' }} left in your trial</strong><small>· Upgrade to keep your workspace active</small></span><button class="primary-button small" type="button" @click="openSettingsTab('billing')">Upgrade →</button></div>
@@ -8502,6 +8522,7 @@ function startMarketingDemo() {
             :capabilities="agentCapabilities"
             @select-tab="selectAgentTab"
             @save="saveAgent"
+            @logo-preview="handleWorkspaceLogoPreview"
             @publish="publishAgent"
             @open-knowledge="navigateToWorkspaceView('knowledge')"
             @view-dashboard="navigateToWorkspaceView('overview')"
