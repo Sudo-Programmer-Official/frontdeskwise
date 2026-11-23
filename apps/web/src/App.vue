@@ -1492,6 +1492,7 @@ const verificationMessage = ref("");
 const verificationError = ref("");
 const verificationLoading = ref(false);
 const isAsking = ref(false);
+let testRequestGeneration = 0;
 const leadName = ref("");
 const leadEmail = ref("");
 const leadPhone = ref("");
@@ -2610,7 +2611,10 @@ async function applyRouteState(nextRoute: AppRoute) {
     if (nextRoute.agentTab) agentTab.value = nextRoute.agentTab;
     if (needsReload) await loadBusinessWorkspace(nextSlug, isPublic);
     if (nextRoute.view === "support") await loadSupport();
-    if (nextRoute.agentTab) void loadWidgetInstall();
+    // Install metadata is ancillary to the conversation. Keep it out of the
+    // route transition so entering Agent Test cannot blur the whole preview
+    // while the test request is running.
+    if (nextRoute.agentTab) void loadWidgetInstall(false);
     if (nextRoute.agentTab === "test" && nextRoute.testQuestion) void runRoutedTestQuestion(nextRoute.testQuestion);
     else if (nextRoute.agentTab !== "test") routedTestQuestion.value = "";
   }
@@ -2694,11 +2698,12 @@ function selectAgentTab(tab: AgentTab) {
   agentTab.value = tab;
   mobileNavOpen.value = false;
   commitRoute(routeForView("agent"));
-  if (tab === "install") void loadWidgetInstall();
+  if (tab === "install") void loadWidgetInstall(false);
 }
 
 function openAgentTest(question?: string) {
   const normalizedQuestion = question?.trim() || undefined;
+  invalidateTestRequest();
   knowledgeTestContext.value = null;
   resolvedKnowledgeQuestion.value = "";
   routedTestQuestion.value = "";
@@ -3389,6 +3394,7 @@ function requireAccountForPublish() {
 }
 
 function clearWorkspaceState() {
+  invalidateTestRequest();
   businessName.value = "";
   businessLocation.value = "";
   websiteUrl.value = "";
@@ -3527,6 +3533,7 @@ function clearWorkspaceState() {
   verificationError.value = "";
   conversationId.value = "";
   testQuestion.value = "";
+  routedTestQuestion.value = "";
   testMessages.value = [];
   testAnswer.value = "";
   answerGrounded.value = false;
@@ -3606,7 +3613,27 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   testMessages.value = [];
 }
 
-async function loadBusinessWorkspace(slug: string, publicOnly = false) {
+let workspaceLoadPromise: Promise<void> | null = null;
+let workspaceLoadPromiseKey = "";
+
+function loadBusinessWorkspace(slug: string, publicOnly = false): Promise<void> {
+  const loadKey = `${publicOnly ? "public" : "owner"}:${slug}`;
+  const existingPromise = workspaceLoadPromise;
+  if (existingPromise && workspaceLoadPromiseKey === loadKey) return existingPromise;
+
+  const loadPromise = loadBusinessWorkspaceInternal(slug, publicOnly);
+  workspaceLoadPromiseKey = loadKey;
+  const trackedPromise = loadPromise.finally(() => {
+    if (workspaceLoadPromise === trackedPromise) {
+      workspaceLoadPromise = null;
+      workspaceLoadPromiseKey = "";
+    }
+  });
+  workspaceLoadPromise = trackedPromise;
+  return trackedPromise;
+}
+
+async function loadBusinessWorkspaceInternal(slug: string, publicOnly = false) {
   const loadGeneration = ++workspaceLoadGeneration;
   workspaceLoading.value = true;
   publicDemoMode.value = publicOnly;
@@ -3693,10 +3720,13 @@ async function selectBusiness(slug: string, nextViewOverride?: View) {
       : nextView === "admin" || nextView === "home" || nextView === "privacy" || nextView === "terms"
         ? "overview"
         : nextView as WorkspaceView;
+    const routeAgentTab = (route.value.kind === "workspace" || route.value.kind === "demo") && route.value.agentTab
+      ? route.value.agentTab
+      : agentTab.value;
     const options = nextWorkspaceView === "agent"
       ? {
-        agentTab: agentTab.value,
-        ...(agentTab.value === "test" && route.value.kind === "workspace" && route.value.testQuestion
+        agentTab: routeAgentTab,
+        ...((route.value.kind === "workspace" || route.value.kind === "demo") && routeAgentTab === "test" && route.value.testQuestion
           ? { testQuestion: route.value.testQuestion }
           : {}),
       }
@@ -4520,15 +4550,24 @@ async function waitForKnowledgeIndex(gap?: KnowledgeGap): Promise<void> {
   }
 }
 
-async function loadWidgetInstall() {
+let widgetInstallLoadPromise: Promise<void> | null = null;
+
+async function loadWidgetInstall(globalLoading = true) {
   if (!firebaseToken.value || !authSnapshot.value) return;
   if (ownershipVerification.value?.status !== "verified") {
     widgetInstall.value = null;
     return;
   }
-  const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/widget/install`), { headers: ownerHeaders() });
-  if (!response.ok) return;
-  widgetInstall.value = await response.json() as WidgetInstall;
+  if (widgetInstallLoadPromise) return widgetInstallLoadPromise;
+  const slug = demoSlug.value;
+  widgetInstallLoadPromise = (async () => {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${slug}/widget/install`), { headers: ownerHeaders() }, { globalLoading });
+    if (!response.ok || demoSlug.value !== slug) return;
+    widgetInstall.value = await response.json() as WidgetInstall;
+  })().finally(() => {
+    widgetInstallLoadPromise = null;
+  });
+  return widgetInstallLoadPromise;
 }
 
 function setLocalSupportContext() {
@@ -8062,6 +8101,11 @@ function testMessageId(role: TestConversationMessage["role"]): string {
   return `test-${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function invalidateTestRequest() {
+  testRequestGeneration += 1;
+  isAsking.value = false;
+}
+
 function actionFormValues(action: TestConversationAction | null | undefined): Record<string, string> {
   return Object.fromEntries((action?.form?.fields ?? []).map((field) => [field.key, field.value ?? ""]));
 }
@@ -8085,6 +8129,7 @@ function appendTestAssistantMessage(payload: TestAnswerPayload): TestConversatio
 async function askQuestion() {
   const question = testQuestion.value.trim();
   if (!question || isAsking.value) return;
+  const requestGeneration = ++testRequestGeneration;
   isAsking.value = true;
   testQuestion.value = "";
   testAnswer.value = "";
@@ -8113,6 +8158,7 @@ async function askQuestion() {
         body: JSON.stringify({ sessionId: `dashboard-${Date.now()}` }),
       });
       const conversationPayload = await conversationResponse.json() as { conversationId?: string };
+      if (requestGeneration !== testRequestGeneration) return;
       if (!conversationResponse.ok || !conversationPayload.conversationId) throw new Error("Could not start a test conversation.");
       conversationId.value = conversationPayload.conversationId;
       trackProductEventOnce(`conversation-started:${conversationId.value}`, MIXPANEL_EVENTS.CONVERSATION_STARTED, {
@@ -8136,6 +8182,7 @@ async function askQuestion() {
       body: JSON.stringify({ question }),
     });
     const payload = await response.json() as TestAnswerPayload;
+    if (requestGeneration !== testRequestGeneration) return;
     if (!response.ok) throw new Error(payload.error ?? "Could not answer that question.");
     testAnswer.value = payload.answer ?? "";
     answerGrounded.value = Boolean(payload.grounded);
@@ -8156,19 +8203,25 @@ async function askQuestion() {
         cta_source: "agent_test",
       });
     }
-    if (!publicDemoMode.value) await Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot()]);
+    // The answer is already complete at this point. Stop the chat-local
+    // loading state before refreshing owner-only summaries so the preview
+    // cannot show a finished answer together with a stale "Thinking…" state.
+    isAsking.value = false;
+    if (!publicDemoMode.value) void Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot()]);
   } catch (error) {
+    if (requestGeneration !== testRequestGeneration) return;
     const message = error instanceof Error ? error.message : "Could not answer that question.";
     testAnswer.value = message;
     answerGrounded.value = false;
     appendTestAssistantMessage({ answer: message, grounded: false, citations: [] });
   } finally {
-    isAsking.value = false;
+    if (requestGeneration === testRequestGeneration) isAsking.value = false;
   }
 }
 
 async function submitActionForm(messageId: string, actionId: string, values: Record<string, string>) {
   if (!conversationId.value || isAsking.value) return;
+  const requestGeneration = ++testRequestGeneration;
   isAsking.value = true;
   try {
     const response = await conversationFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/conversations/${conversationId.value}/actions/${actionId}/submit`), {
@@ -8177,6 +8230,7 @@ async function submitActionForm(messageId: string, actionId: string, values: Rec
       body: JSON.stringify({ values }),
     });
     const payload = await response.json() as TestAnswerPayload;
+    if (requestGeneration !== testRequestGeneration) return;
     if (!response.ok) throw new Error(payload.error ?? "Could not submit this request.");
     const sourceMessage = testMessages.value.find((message) => message.id === messageId);
     if (sourceMessage) {
@@ -8202,11 +8256,13 @@ async function submitActionForm(messageId: string, actionId: string, values: Rec
         success: true,
       });
     }
-    await Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot(), loadLeads(false)]);
+    isAsking.value = false;
+    void Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot(), loadLeads(false)]);
   } catch (error) {
+    if (requestGeneration !== testRequestGeneration) return;
     leadsError.value = error instanceof Error ? error.message : "Could not submit this request.";
   } finally {
-    isAsking.value = false;
+    if (requestGeneration === testRequestGeneration) isAsking.value = false;
   }
 }
 
@@ -8351,6 +8407,7 @@ function submitAgentAction(payload: { messageId: string; actionId: string; value
 }
 
 function resetAgentConversation() {
+  invalidateTestRequest();
   conversationId.value = "";
   testQuestion.value = "";
   routedTestQuestion.value = "";
@@ -8385,6 +8442,7 @@ watch(adminSection, (nextSection, previousSection) => {
 });
 
 watch(view, (nextView, previousView) => {
+  if (previousView === "agent" && nextView !== "agent") invalidateTestRequest();
   if (nextView === "overview") consumeBillingSuccessToast();
   if (nextView === "support") void loadSupport();
   if (previousView === "inbox" && nextView !== "inbox") stopInboxPolling();
@@ -8394,7 +8452,7 @@ watch(view, (nextView, previousView) => {
     void loadKnowledge();
     void loadDocuments();
   }
-  if (nextView === "agent") { void loadWidgetInstall(); }
+  if (nextView === "agent") { void loadWidgetInstall(false); }
   if (nextView === "leads") void loadLeads();
   if (nextView === "actions") {
     if (previousView !== "actions") selectAction(null);
