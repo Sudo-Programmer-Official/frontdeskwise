@@ -18848,6 +18848,7 @@ async function workflowIsolationForAction(
   business: Business,
   action: ActionFlow,
   rawBody?: Record<string, unknown>,
+  options: { allowStaleContextVersion?: boolean } = {},
 ): Promise<WorkflowIsolationResult> {
   const context = asRecord(rawBody?.workflowContext ?? rawBody?.businessContext);
   const requestedContextBusinessId = optionalString(rawBody?.workflowContextBusinessId, 120)
@@ -18918,6 +18919,7 @@ async function workflowIsolationForAction(
     currentOrganizationId: organizationId,
     requestedContextVersion: Number.isFinite(requestedContextVersion) ? requestedContextVersion : null,
     currentContextVersion: business.businessContextSnapshot?.version ?? null,
+    allowStaleContextVersion: options.allowStaleContextVersion === true,
   });
 }
 
@@ -19138,7 +19140,10 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   if (organizationId) action.organizationId = organizationId;
   if (!action.steps?.length) throw httpError(400, "Generated workflow must include at least one step");
 
-  const workflowIsolation = await workflowIsolationForAction(business, action, body);
+  // The request can come from a tab holding an older same-business Business
+  // Brain snapshot. That revision is safe to rebase for a generated draft;
+  // tenant and organization identifiers remain strict in the isolation check.
+  const workflowIsolation = await workflowIsolationForAction(business, action, body, { allowStaleContextVersion: true });
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
   const verification = verifyWorkflowDefinition(action);
   const hasOwnerFacingLabels = Boolean(action.steps?.every((step) => Boolean(step.label?.trim())));

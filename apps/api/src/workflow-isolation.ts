@@ -16,6 +16,12 @@ export type WorkflowIsolationInput = {
   currentOrganizationId?: string | null;
   requestedContextVersion?: number | null;
   currentContextVersion?: number | null;
+  /**
+   * A context version is an optimistic freshness marker, not a tenant ID.
+   * Generated drafts may be rebuilt from a stale same-business snapshot, but
+   * business and organization identifiers must still match exactly.
+   */
+  allowStaleContextVersion?: boolean;
 };
 
 export type WorkflowIsolationResult =
@@ -116,7 +122,8 @@ export function validateWorkflowTenantIsolation(action: ActionFlow, input: Workf
   if (input.requestedOrganizationId && input.currentOrganizationId && input.requestedOrganizationId !== input.currentOrganizationId) {
     return { ok: false, code: "organization_mismatch", identifier: input.requestedOrganizationId };
   }
-  if (input.requestedContextVersion !== null && input.requestedContextVersion !== undefined
+  if (!input.allowStaleContextVersion
+    && input.requestedContextVersion !== null && input.requestedContextVersion !== undefined
     && input.currentContextVersion !== null && input.currentContextVersion !== undefined
     && input.requestedContextVersion !== input.currentContextVersion) {
     return { ok: false, code: "context_mismatch", identifier: String(input.requestedContextVersion) };

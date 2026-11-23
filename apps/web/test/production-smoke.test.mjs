@@ -29,6 +29,7 @@ const pwa = await readFile(resolve(here, "../src/pwa.ts"), "utf8");
 const firebaseAuth = await readFile(resolve(here, "../src/auth/firebase.ts"), "utf8");
 const serviceWorker = await readFile(resolve(here, "../public/sw.js"), "utf8");
 const apiServer = await readFile(resolve(here, "../../api/src/server.ts"), "utf8");
+const workflowIsolation = await readFile(resolve(here, "../../api/src/workflow-isolation.ts"), "utf8");
 const workflowVerifier = await readFile(resolve(here, "../../api/src/workflow-verifier.ts"), "utf8");
 const pushMigration = await readFile(resolve(here, "../../../infra/db/074_web_push_subscriptions.sql"), "utf8");
 const requestMetricsMigration = await readFile(resolve(here, "../../../infra/db/079_api_request_metrics.sql"), "utf8");
@@ -684,6 +685,9 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(apiServer, /reused: true/);
   assert.match(apiServer, /previousWorkflow\?\.creationRequestId === clientRequestId/);
   assert.match(apiServer, /previousHasOwnerFacingLabels/);
+  assert.match(apiServer, /allowStaleContextVersion: true/);
+  assert.match(workflowIsolation, /allowStaleContextVersion/);
+  assert.match(workflowWorkspace, /businessContext: props\.businessContext \?\? workflowContextPayload/);
   assert.match(workflowVerifier, /provider_fallback_missing/);
   assert.match(apiServer, /workflowActionId/);
   for (const marker of [

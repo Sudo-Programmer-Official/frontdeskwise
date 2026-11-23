@@ -191,6 +191,34 @@ test("stale context versions remain a safe retryable mismatch", () => {
   assert.deepEqual(result, { ok: false, code: "context_mismatch", identifier: "4" });
 });
 
+test("generated drafts may rebase a stale same-business context version", () => {
+  const result = validateWorkflowTenantIsolation(action({ businessId: "plancraft-business" }), {
+    businessId: "plancraft-business",
+    businessName: "PlanCraftAI",
+    requestedBusinessId: "plancraft-business",
+    requestedContextBusinessId: "plancraft-business",
+    requestedOrganizationId: "org-1",
+    currentOrganizationId: "org-1",
+    requestedContextVersion: 53,
+    currentContextVersion: 54,
+    allowStaleContextVersion: true,
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
+test("stale-version rebasing does not allow a different business context", () => {
+  const result = validateWorkflowTenantIsolation(action({ businessId: "plancraft-business" }), {
+    businessId: "plancraft-business",
+    businessName: "PlanCraftAI",
+    requestedBusinessId: "plancraft-business",
+    requestedContextBusinessId: "other-business",
+    requestedContextVersion: 53,
+    currentContextVersion: 54,
+    allowStaleContextVersion: true,
+  });
+  assert.deepEqual(result, { ok: false, code: "context_mismatch", identifier: "other-business" });
+});
+
 test("organization drift is distinct from sibling-business contamination", () => {
   const result = validateWorkflowTenantIsolation(action({ businessId: "plancraft-business" }), {
     businessId: "plancraft-business",

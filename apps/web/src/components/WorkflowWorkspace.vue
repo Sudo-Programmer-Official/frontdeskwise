@@ -1025,7 +1025,7 @@ async function createWorkflow(): Promise<void> {
       businessId: createWorkflowBusinessId,
       organizationId: createWorkflowOrganizationId,
       workflowContext: workflowContextPayload,
-      businessContext: workflowContextPayload,
+      businessContext: props.businessContext ?? workflowContextPayload,
       workflowContextBusinessId: createWorkflowBusinessId,
       workflowContextOrganizationId: createWorkflowOrganizationId,
       ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
