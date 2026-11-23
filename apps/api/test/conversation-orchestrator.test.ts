@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createActionState, type ActionFlow } from "../src/action-flows.js";
-import { decideConversationRoute, isWorkflowCorrection } from "../src/conversation-orchestrator.js";
+import {
+  decideConversationRoute,
+  isExitRescueDecline,
+  isExitRescueIntent,
+  isWorkflowCorrection,
+  workflowHasMeaningfulEngagement,
+} from "../src/conversation-orchestrator.js";
 import { applyWorkflowValues, currentWorkflowStep, extractWorkflowValues } from "../src/workflow-engine.js";
 
 const action = {
@@ -62,6 +68,22 @@ test("side questions interrupt without losing the active workflow cursor", () =>
   assert.equal(decision.activeWorkflowId, action.id);
   assert.equal(decision.currentStepId, "preferred-days");
   assert.equal(decision.nextBestAction, "ASK_FIELD");
+});
+
+test("exit rescue detects natural pause language but ignores low-intent gratitude", () => {
+  assert.equal(isExitRescueIntent("I'll check later"), true);
+  assert.equal(isExitRescueIntent("Maybe next time"), true);
+  assert.equal(isExitRescueIntent("Thanks"), false);
+  assert.equal(isExitRescueDecline("No thanks"), true);
+  assert.equal(isExitRescueDecline("Maybe later"), false);
+});
+
+test("meaningful engagement requires qualification progress, not a greeting or contact alone", () => {
+  const state = createActionState(planAction);
+  state.values = { email: "parent@example.com" };
+  assert.equal(workflowHasMeaningfulEngagement(planAction, state), false);
+  state.values = { usage_type: "Solo", main_goal: "Planning" };
+  assert.equal(workflowHasMeaningfulEngagement(planAction, state), true);
 });
 
 test("audience words in a pricing interruption do not turn it into a workflow answer", () => {

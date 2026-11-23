@@ -49,10 +49,16 @@ test("Dave swim prompt creates a provider-backed enrollment journey", () => {
   assert.equal(result.steps.find((step) => step.id === "find-classes")?.config?.reviewStatus, "provider_backed");
   assert.equal(result.steps.find((step) => step.id === "class-recommendations")?.config?.reviewStatus, "provider_backed");
   assert.equal(result.steps.find((step) => step.id === "class-selection")?.type, "select");
+  assert.equal(result.steps.find((step) => step.id === "parent-contact")?.config?.ensureContact, true);
+  assert.deepEqual(result.steps.slice(-5).map((step) => step.id), ["parent-contact", "save-lead", "registration-confirm", "registration-link", "enrollment-complete"]);
+  assert.equal(result.steps.find((step) => step.id === "save-lead")?.type, "create_lead");
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.config?.reviewStatus, "provider_backed");
   assert.match(result.steps.find((step) => step.id === "class-recommendations")?.label ?? "", /matching classes/i);
   assert.equal(result.steps.find((step) => step.id === "registration-link")?.type, "generate_link");
   assert.ok(result.fields.some((field) => field.key === "child_age"));
+  assert.equal(result.fields.find((field) => field.key === "parent_name")?.required, true);
+  assert.equal(result.fields.find((field) => field.key === "email")?.required, false);
+  assert.equal(result.fields.find((field) => field.key === "phone")?.required, false);
   assert.equal(result.steps.some((step) => step.fieldKey === "name" || step.fieldKey === "email"), false);
 });
 

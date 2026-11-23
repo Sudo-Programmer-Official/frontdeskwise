@@ -71,6 +71,10 @@ export interface WidgetAction {
   status?: "active" | "completed";
   linkUrl?: string;
   linkLabel?: string;
+  workflow?: {
+    collected?: Record<string, string>;
+    progressPercent?: number | null;
+  };
   form?: {
     submitLabel: string;
     fields: WidgetFormField[];

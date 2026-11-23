@@ -798,12 +798,18 @@ type FrontDeskWiseWindow = Window & {
       status: "shown",
     });
     telemetry("CTA_CLICKED", { metadata: { source: "proactive", action: "shown", behavior: config.proactiveBehavior || "teaser" } });
+    const collected = state.action?.workflow?.collected ?? {};
+    const meaningfulJourney = state.action?.status === "active"
+      && Object.entries(collected).filter(([key, value]) => !/^(email|phone|name|parent_name)$/i.test(key) && Boolean(value?.trim())).length >= 2;
+    const proactiveMessage = meaningfulJourney
+      ? "Want to save your progress? Leave your email or phone and continue later."
+      : config.proactiveMessage || "Looking for the right service? I can help.";
     if ((config.proactiveBehavior || "teaser") === "open") {
       renderer.open("proactive", false);
-      addMessage(config.proactiveMessage || "Looking for the right service? I can help.", "assistant");
+      addMessage(proactiveMessage, "assistant");
       return;
     }
-    updateState({ proactive: { visible: true, message: config.proactiveMessage || "Looking for the right service? I can help." } });
+    updateState({ proactive: { visible: true, message: proactiveMessage } });
     markPerformance("teaser_rendered");
   }
 

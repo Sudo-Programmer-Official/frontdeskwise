@@ -282,7 +282,7 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
       field("location", "Location or ZIP code", "text", "What location or ZIP code should I use to find classes?"),
       field("schedule_preference", "Schedule preference", "text", "Which days or schedule usually work best?"),
       field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?"),
-      field("email", "Email", "email", "What email address should we use?"),
+      field("email", "Email", "email", "What email address should we use?", false),
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
     ];
   }
@@ -436,7 +436,13 @@ function enrollmentSteps(): WorkflowStepDraft[] {
       id: "parent-contact",
       type: "form",
       label: "Parent contact details",
-      config: { ...interruptionConfig, fieldKeys: ["parent_name", "email", "phone"] },
+      config: { ...interruptionConfig, fieldKeys: ["parent_name", "email", "phone"], ensureContact: true, contactFields: ["email", "phone"] },
+    },
+    {
+      id: "save-lead",
+      type: "create_lead",
+      label: "Save parent request",
+      config: { ...interruptionConfig, ensureContact: true, failureBehavior: "handoff" },
     },
     {
       id: "registration-confirm",

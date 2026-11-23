@@ -46,6 +46,7 @@ import {
   type ActionOrigin,
   type ActionReviewReason,
   type ActionSourceType,
+  type ActionField,
   type ActionStep,
   type BusinessActionType,
   type ConversationActionState,
@@ -139,7 +140,12 @@ import {
   renderLifecycleEmail,
   type LifecycleEventType,
 } from "./lifecycle-messaging.js";
-import { decideConversationRoute } from "./conversation-orchestrator.js";
+import {
+  decideConversationRoute,
+  isExitRescueDecline,
+  isExitRescueIntent,
+  workflowHasMeaningfulEngagement,
+} from "./conversation-orchestrator.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { extractHandoffContact, hasHandoffContactChannel, mergeHandoffContacts, type HandoffContact } from "./handoff-contact.js";
 import {
@@ -810,6 +816,9 @@ type ConversionEventType =
   | "DEMO_LINK_OPENED"
   | "HANDOFF_REQUESTED"
   | "LEAD_CAPTURED"
+  | "EXIT_RESCUE_OFFERED"
+  | "EXIT_RESCUE_SAVED"
+  | "EXIT_RESCUE_DECLINED"
   | "BOOKING_LINK_OPENED"
   | "CONVERSATION_ABANDONED"
   | "IMPROVEMENT_SIGNAL";
@@ -846,7 +855,8 @@ const conversionEventTypes = new Set<ConversionEventType>([
   "FLOW_STARTED", "FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED",
   "FORM_DISPLAYED", "FORM_SUBMITTED", "ACTION_STARTED", "ACTION_SUCCEEDED",
   "ACTION_FAILED", "FLOW_COMPLETED", "CTA_SHOWN", "CTA_CLICKED", "DEMO_LINK_OPENED", "HANDOFF_REQUESTED",
-  "LEAD_CAPTURED", "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED", "IMPROVEMENT_SIGNAL",
+  "LEAD_CAPTURED", "EXIT_RESCUE_OFFERED", "EXIT_RESCUE_SAVED", "EXIT_RESCUE_DECLINED",
+  "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED", "IMPROVEMENT_SIGNAL",
 ]);
 
 const widgetPerformanceEventTypes = new Set([
@@ -3366,12 +3376,13 @@ async function processOrganizationDocument(documentId: string): Promise<void> {
     return;
   }
 
-  await pool.query(
+  const processingClaim = await pool.query(
     `update organization_documents
      set status = 'processing', metadata = metadata || $2::jsonb, updated_at = now()
      where id = $1 and status = 'uploaded'`,
     [documentId, JSON.stringify({ error: null })],
   );
+  if (!processingClaim.rowCount) return;
 
   try {
     const buffer = await readDocumentObject(String(document.object_key));
@@ -3435,6 +3446,34 @@ async function processOrganizationDocument(documentId: string): Promise<void> {
       [documentId, JSON.stringify({ error: message })],
     );
     app.log.warn({ documentId, error: message }, "Organization document processing failed");
+  }
+}
+
+async function recoverOrganizationDocumentProcessing(): Promise<void> {
+  if (!pool) return;
+  try {
+    await pool.query(
+      `update organization_documents
+       set status = 'uploaded', metadata = metadata || $1::jsonb, updated_at = now()
+       where status = 'processing' and updated_at < now() - interval '15 minutes'`,
+      [JSON.stringify({ error: null })],
+    );
+    const result = await pool.query<{ id: string }>(
+      `select id
+       from organization_documents
+       where status = 'uploaded'
+       order by created_at asc
+       limit 25`,
+    );
+    for (const row of result.rows) {
+      try {
+        await processOrganizationDocument(row.id);
+      } catch (error) {
+        app.log.warn({ documentId: row.id, error: error instanceof Error ? error.message : "unknown error" }, "Organization document recovery failed");
+      }
+    }
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : "unknown error" }, "Organization document recovery could not start");
   }
 }
 
@@ -7457,6 +7496,9 @@ function conversionFunnelPayload(business: Business) {
     started: number;
     formDisplayed: number;
     submitted: number;
+    exitRescueOffered: number;
+    exitRescueSaved: number;
+    exitRescueDeclined: number;
     actionSucceeded: number;
     completed: number;
     abandoned: number;
@@ -7472,6 +7514,9 @@ function conversionFunnelPayload(business: Business) {
       started: 0,
       formDisplayed: 0,
       submitted: 0,
+      exitRescueOffered: 0,
+      exitRescueSaved: 0,
+      exitRescueDeclined: 0,
       actionSucceeded: 0,
       completed: 0,
       abandoned: 0,
@@ -7480,6 +7525,9 @@ function conversionFunnelPayload(business: Business) {
     if (event.event === "FLOW_STARTED") flow.started += 1;
     if (event.event === "FORM_DISPLAYED") flow.formDisplayed += 1;
     if (event.event === "FORM_SUBMITTED") flow.submitted += 1;
+    if (event.event === "EXIT_RESCUE_OFFERED") flow.exitRescueOffered += 1;
+    if (event.event === "EXIT_RESCUE_SAVED") flow.exitRescueSaved += 1;
+    if (event.event === "EXIT_RESCUE_DECLINED") flow.exitRescueDeclined += 1;
     if (event.event === "ACTION_SUCCEEDED") flow.actionSucceeded += 1;
     if (event.event === "FLOW_COMPLETED") flow.completed += 1;
     if (event.event === "CONVERSATION_ABANDONED") flow.abandoned += 1;
@@ -7499,6 +7547,9 @@ function conversionFunnelPayload(business: Business) {
     started: flow.started,
     formDisplayed: flow.formDisplayed,
     submitted: flow.submitted,
+    exitRescueOffered: flow.exitRescueOffered,
+    exitRescueSaved: flow.exitRescueSaved,
+    exitRescueDeclined: flow.exitRescueDeclined,
     actionSucceeded: flow.actionSucceeded,
     completed: flow.completed,
     abandoned: flow.abandoned,
@@ -9456,10 +9507,58 @@ function finalizeCustomerResponse(
   };
 }
 
+function exitRescueContactFields(action: ActionFlow, state: ConversationActionState): ActionField[] {
+  const configured = action.fields.filter((field) => /^(parent_name|name|email|phone)$/i.test(field.key));
+  const fields = new Map<string, ActionField>();
+  for (const field of configured) {
+    const contactKey = field.key.toLowerCase();
+    fields.set(contactKey, {
+      ...field,
+      required: contactKey === "name" || contactKey === "parent_name" ? !Boolean(state.values[field.key]?.trim()) : false,
+    });
+  }
+  if (!fields.has("parent_name") && !fields.has("name") && !state.values.parent_name && !state.values.name) {
+    fields.set("parent_name", {
+      id: "parent_name",
+      key: "parent_name",
+      label: "Parent or guardian name",
+      type: "text",
+      required: true,
+      visibility: "visible",
+      question: "What’s the parent or guardian name?",
+    });
+  }
+  if (!fields.has("email") && !state.values.email) {
+    fields.set("email", {
+      id: "email",
+      key: "email",
+      label: "Email",
+      type: "email",
+      required: false,
+      visibility: "visible",
+      question: "What’s the best email?",
+    });
+  }
+  if (!fields.has("phone") && !state.values.phone) {
+    fields.set("phone", {
+      id: "phone",
+      key: "phone",
+      label: "Phone",
+      type: "phone",
+      required: false,
+      visibility: "visible",
+      question: "What’s the best phone number?",
+    });
+  }
+  return [...fields.values()];
+}
+
 function actionFormSchema(action: ActionFlow, state: ConversationActionState): ActionFormSchema {
+  const rescue = state.exitRescue?.status === "offered";
   return {
-    submitLabel: action.completion.submitLabel ?? action.completion.linkLabel ?? "Submit request",
-    fields: (action.steps?.length ? workflowFormFields(action, state) : formFields(action, state)).map((field) => ({ ...field, value: state.values[field.key] ?? "" })),
+    submitLabel: rescue ? "Save my progress" : action.completion.submitLabel ?? action.completion.linkLabel ?? "Submit request",
+    fields: (rescue ? exitRescueContactFields(action, state) : action.steps?.length ? workflowFormFields(action, state) : formFields(action, state))
+      .map((field) => ({ ...field, value: state.values[field.key] ?? "" })),
   };
 }
 
@@ -9469,7 +9568,10 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
   const next = workflow?.fieldKey
     ? action.fields.find((field) => field.key === workflow.fieldKey || field.id === workflow.fieldKey) ?? null
     : nextConversationalField(action, state);
-  const showForm = state.status === "active" && (Boolean(state.formShown) || state.captureMode === "form" || workflow?.type === "form");
+  const showForm = state.status === "active"
+    && state.exitRescue?.status !== "saved"
+    && state.exitRescue?.status !== "declined"
+    && (Boolean(state.formShown) || state.captureMode === "form" || workflow?.type === "form");
   const completionUrl = state.completionUrl ?? action.completion.linkUrl;
   const lookup = Object.fromEntries(Object.entries(state.lookupResults ?? {}).flatMap(([key, value]) => {
     if (!value || typeof value !== "object" || !Array.isArray((value as Record<string, unknown>).matches)) return [];
@@ -9669,9 +9771,10 @@ async function workflowResumePlanForConversation(
   action: ActionFlow,
   state: ConversationActionState,
   options: { allowStaffSensitiveActions?: boolean } = {},
+  conversation?: Conversation,
 ): Promise<WorkflowResumePlan> {
   const plan = recomputeWorkflowResume(action, state);
-  const automatedStep = await advanceWorkflowAutomation(business, action, state, options);
+  const automatedStep = await advanceWorkflowAutomation(business, action, state, options, conversation);
   return { ...plan, step: automatedStep ?? currentWorkflowStep(action, state) };
 }
 
@@ -9949,11 +10052,135 @@ function waitingActionHoldAnswer(action: ActionFlow, state: ConversationActionSt
   return "I’ve saved those details. A team member will review the next step, and I can still answer questions while you wait.";
 }
 
+function workflowLeadMetadata(action: ActionFlow, state: ConversationActionState): Record<string, unknown> {
+  const summary = action.steps?.length ? workflowSummary(action, state) : null;
+  const resolutions = workflowLookupResolutions(state);
+  const candidates = resolutions.flatMap((resolution) => resolution.matches);
+  const selectedResource = state.selectedActionResourceId
+    ? candidates.find((match) => match.id === state.selectedActionResourceId)
+    : candidates.length === 1 ? candidates[0] : undefined;
+  const qualification = Object.fromEntries(Object.entries(state.values).filter(([key]) => !/^(email|phone|name|parent_name)$/i.test(key)));
+  return {
+    workflow: action.key,
+    workflowState: summary?.currentState ?? (state.status === "completed" ? "completed" : "collecting"),
+    nextBestAction: summary?.nextBestAction ?? "CAPTURE_DETAILS",
+    workflowProgressPercent: summary?.progressPercent ?? null,
+    workflowMissing: summary?.missing ?? [],
+    qualification,
+    selectedService: selectedResource?.name ?? state.values.program ?? null,
+    selectedLocation: selectedResource?.location ?? state.values.location ?? null,
+    schedulePreference: state.values.schedule_preference ?? null,
+    providerObjectId: selectedResource?.providerObjectId ?? state.selectedActionResourceId ?? null,
+    conversionStage: state.providerFallback ? "provider_follow_up" : state.completionUrl ? "registration_link_sent" : "awaiting_registration",
+    providerFallback: state.providerFallback ?? null,
+  };
+}
+
+async function persistWorkflowLead(
+  business: Business,
+  conversation: Conversation,
+  action: ActionFlow,
+  state: ConversationActionState,
+  metadata: Record<string, unknown>,
+  options: { status?: Lead["status"]; metadata?: Record<string, unknown> } = {},
+): Promise<Lead | null> {
+  if (!action.completion.createLead) return null;
+  const existing = state.leadId ? business.leads.find((lead) => lead.id === state.leadId) : business.leads.find((lead) => lead.idempotencyKey === `action:${conversation.id}:${action.id}`);
+  if (existing) {
+    state.leadId = existing.id;
+    conversation.leadCaptured = true;
+    return existing;
+  }
+  const email = state.values.email ?? null;
+  const phone = state.values.phone ?? null;
+  if (!email && !phone) return null;
+  const leadInput: Lead = {
+    id: randomUUID(),
+    conversationId: conversation.id,
+    name: state.values.name ?? state.values.parent_name ?? null,
+    email,
+    phone,
+    intent: action.name,
+    status: options.status ?? action.completion.leadStatus,
+    source: "action_flow",
+    pageUrl: state.sourcePage ?? null,
+    referrer: null,
+    consentAt: null,
+    idempotencyKey: `action:${conversation.id}:${action.id}`,
+    metadata: {
+      actionKey: action.key,
+      actionId: action.id,
+      fields: state.values,
+      participants: state.participants ?? [],
+      ...metadata,
+      ...(options.metadata ?? {}),
+    },
+    createdAt: new Date().toISOString(),
+  };
+  const persisted = await persistLead(business, leadInput);
+  const existingIndex = business.leads.findIndex((item) => item.id === persisted.id || item.idempotencyKey === persisted.idempotencyKey);
+  const created = existingIndex < 0;
+  if (existingIndex >= 0) business.leads.splice(existingIndex, 1);
+  business.leads.unshift(persisted);
+  state.leadId = persisted.id;
+  conversation.leadCaptured = true;
+  if (created) {
+    await recordConversionEvent(business, {
+      event: "LEAD_CAPTURED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { leadId: persisted.id, actionKey: action.key, captureBoundary: "before_external_handoff" },
+    });
+  }
+  return persisted;
+}
+
+function hasRecoverableContact(state: ConversationActionState): boolean {
+  return Boolean(state.leadId || state.values.email?.trim() || state.values.phone?.trim());
+}
+
+async function offerExitRescue(
+  business: Business,
+  conversation: Conversation,
+  action: ActionFlow,
+  state: ConversationActionState,
+): Promise<ConversationAnswerResult> {
+  const step = currentWorkflowStep(action, state);
+  state.exitRescue = {
+    status: "offered",
+    reason: "language",
+    returnStepId: step?.id ?? state.currentStepId ?? null,
+    offeredAt: new Date().toISOString(),
+  };
+  state.formShown = true;
+  await recordConversionEvent(business, {
+    event: "EXIT_RESCUE_OFFERED",
+    conversationId: conversation.id,
+    flowId: action.id,
+    metadata: { returnStepId: state.exitRescue.returnStepId, trigger: "language" },
+  });
+  return actionAnswer(
+    action,
+    state,
+    "No problem. If you’d like, I can save what we discussed so you don’t have to start over. What’s the best email or phone number?",
+  );
+}
+
+async function refreshWorkflowLeadMetadata(business: Business, lead: Lead, metadata: Record<string, unknown>): Promise<void> {
+  lead.metadata = { ...lead.metadata, ...metadata };
+  if (!pool) return;
+  await pool.query(
+    `update leads set metadata = $3, updated_at = now() where business_id = $1 and id = $2`,
+    [business.id, lead.id, JSON.stringify(lead.metadata)],
+  );
+}
+
 async function advanceWorkflowAutomation(
   business: Business,
   action: ActionFlow,
   state: ConversationActionState,
   options: { allowStaffSensitiveActions?: boolean } = {},
+  conversation?: Conversation,
 ): Promise<NonNullable<ReturnType<typeof currentWorkflowStep>> | null> {
   let step = currentWorkflowStep(action, state);
   const visited = new Set<string>();
@@ -10000,6 +10227,9 @@ async function advanceWorkflowAutomation(
         ? candidates.find((match) => match.id === state.selectedActionResourceId)
         : resolutions.every((resolution) => resolution.matches.length === 1) ? candidates[0] : undefined;
       if (selected?.destination?.url) state.completionUrl = selected.destination.url;
+    }
+    if (step.type === "create_lead") {
+      if (conversation) await persistWorkflowLead(business, conversation, action, state, workflowLeadMetadata(action, state));
     }
     const transition = transitionWorkflow(action, state, step.id);
     step = transition.step;
@@ -10126,13 +10356,40 @@ async function continueWorkflowActionConversation(
   const orchestration = preserveWorkflowState
     ? initialOrchestration
     : decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
+  if (state.exitRescue?.status === "offered" && isExitRescueDecline(question)) {
+    state.exitRescue = {
+      ...state.exitRescue,
+      status: "declined",
+      declinedAt: new Date().toISOString(),
+    };
+    state.formShown = false;
+    await recordConversionEvent(business, {
+      event: "EXIT_RESCUE_DECLINED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { returnStepId: state.exitRescue.returnStepId },
+    });
+    return actionAnswer(action, state, "No problem — I’ll leave your progress here. You can continue whenever you’re ready.");
+  }
+  if (isExitRescueIntent(question) && initialOrchestration.route !== "HUMAN_HANDOFF") {
+    if (hasRecoverableContact(state)) {
+      return actionAnswer(action, state, "No problem — I have your details and what you’re looking for. You can continue anytime.");
+    }
+    if (
+      action.completion.createLead
+      && !state.exitRescue
+      && workflowHasMeaningfulEngagement(action, state)
+    ) {
+      return offerExitRescue(business, conversation, action, state);
+    }
+  }
   const isSideQuestion = orchestration.route === "INTERRUPTION";
   const knowledgeStep = configuredKnowledgeStepForQuestion(action, question);
   if (orchestration.route === "EXPLICIT_ACTION") {
     return actionAnswer(action, state, `You’re currently working on ${action.name.toLowerCase()}. We can continue that journey, or I can switch to ${orchestration.actionIntent.replace(/_/g, " ")} if you prefer. ${currentAfterExtraction ? workflowPrompt(action, state, currentAfterExtraction, business) : "What would you like to do?"}`);
   }
   if (isSideQuestion) {
-    const resumePlan = await workflowResumePlanForConversation(business, action, state, automationOptions);
+    const resumePlan = await workflowResumePlanForConversation(business, action, state, automationOptions, conversation);
     pushWorkflowInterruption(state, {
       intent: orchestration.interruptionIntent ?? classifyQuestionIntent(question),
       question,
@@ -10161,7 +10418,7 @@ async function continueWorkflowActionConversation(
   }
 
   if (!extracted.updated.length && actionKnowledgeIntents.has(classifyQuestionIntent(question))) {
-    const resumePlan = await workflowResumePlanForConversation(business, action, state, automationOptions);
+    const resumePlan = await workflowResumePlanForConversation(business, action, state, automationOptions, conversation);
     pushWorkflowInterruption(state, {
       intent: classifyQuestionIntent(question),
       question,
@@ -10178,7 +10435,7 @@ async function continueWorkflowActionConversation(
   }
   if (state.interruptionStack?.length) resumeWorkflowInterruption(state);
 
-  let step = await advanceWorkflowAutomation(business, action, state, automationOptions);
+  let step = await advanceWorkflowAutomation(business, action, state, automationOptions, conversation);
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
   if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const initialResumePlan = recomputeWorkflowResume(action, state);
@@ -10253,7 +10510,7 @@ async function continueWorkflowActionConversation(
     transitionWorkflow(action, state, step.id);
     const selectionStep = currentWorkflowStep(action, state);
     if (step.type === "recommend" && selectionStep?.type === "select") transitionWorkflow(action, state, selectionStep.id);
-    const next = await advanceWorkflowAutomation(business, action, state, automationOptions);
+    const next = await advanceWorkflowAutomation(business, action, state, automationOptions, conversation);
     if (!next || state.status === "completed") return completeActionConversation(business, conversation, action, state);
     if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, next)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
     state.currentStepId = next.id;
@@ -10309,7 +10566,7 @@ async function continueWorkflowActionConversation(
     }
   }
 
-  step = await advanceWorkflowAutomation(business, action, state, automationOptions);
+  step = await advanceWorkflowAutomation(business, action, state, automationOptions, conversation);
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
   if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const finalResumePlan = recomputeWorkflowResume(action, state);
@@ -10500,28 +10757,8 @@ async function completeActionConversation(
     });
     return actionAnswer(action, state, "This action is not available right now. I can help you contact the team instead.");
   }
-  const summary = action.steps?.length ? workflowSummary(action, state) : null;
-  const resolutions = workflowLookupResolutions(state);
-  const candidates = resolutions.flatMap((resolution) => resolution.matches);
-  const selectedResource = state.selectedActionResourceId
-    ? candidates.find((match) => match.id === state.selectedActionResourceId)
-    : candidates.length === 1 ? candidates[0] : undefined;
-  const qualification = Object.fromEntries(Object.entries(state.values).filter(([key]) => !/^(email|phone|name|parent_name)$/i.test(key)));
   const providerFallback = state.providerFallback ?? null;
-  const structuredWorkflowMetadata = {
-    workflow: action.key,
-    workflowState: summary?.currentState ?? (state.status === "completed" ? "completed" : "collecting"),
-    nextBestAction: summary?.nextBestAction ?? "CAPTURE_DETAILS",
-    workflowProgressPercent: summary?.progressPercent ?? null,
-    workflowMissing: summary?.missing ?? [],
-    qualification,
-    selectedService: selectedResource?.name ?? state.values.program ?? null,
-    selectedLocation: selectedResource?.location ?? state.values.location ?? null,
-    schedulePreference: state.values.schedule_preference ?? null,
-    providerObjectId: selectedResource?.providerObjectId ?? state.selectedActionResourceId ?? null,
-    conversionStage: providerFallback ? "provider_follow_up" : state.completionUrl ? "registration_link_sent" : state.status === "completed" ? "qualified" : "in_progress",
-    providerFallback,
-  };
+  const structuredWorkflowMetadata = workflowLeadMetadata(action, state);
   const submission = await persistActionSubmission(business, action, conversation, state.values, state.sourcePage ?? null);
   if (submission.status === "completed") {
     state.status = "completed";
@@ -10549,48 +10786,8 @@ async function completeActionConversation(
   }
   let persistedLead: Lead | null = null;
   let actionDelivery: ConversationAnswerResult["actionDelivery"];
-  if (action.completion.createLead) {
-    const values = state.values;
-    const email = values.email ?? null;
-    const phone = values.phone ?? null;
-    if (email || phone) {
-      const lead: Lead = {
-        id: randomUUID(),
-        conversationId: conversation.id,
-        name: values.name ?? values.parent_name ?? null,
-        email,
-        phone,
-        intent: action.name,
-        status: action.completion.leadStatus,
-        source: "action_flow",
-        pageUrl: state.sourcePage ?? null,
-        referrer: null,
-        consentAt: null,
-        idempotencyKey: "action:" + conversation.id + ":" + action.id,
-        metadata: {
-          actionKey: action.key,
-          actionId: action.id,
-          fields: values,
-          participants: state.participants ?? [],
-          ...structuredWorkflowMetadata,
-          conversionStage: state.completionUrl ? "registration_link_sent" : structuredWorkflowMetadata.conversionStage,
-        },
-        createdAt: new Date().toISOString(),
-      };
-      const persisted = await persistLead(business, lead);
-      persistedLead = persisted;
-      const existingIndex = business.leads.findIndex((item) => item.id === persisted.id || item.idempotencyKey === persisted.idempotencyKey);
-      if (existingIndex >= 0) business.leads.splice(existingIndex, 1);
-      business.leads.unshift(persisted);
-      conversation.leadCaptured = true;
-      await recordConversionEvent(business, {
-        event: "LEAD_CAPTURED",
-        conversationId: conversation.id,
-        flowId: action.id,
-        metadata: { leadId: persisted.id, actionKey: action.key },
-      });
-    }
-  }
+  if (action.completion.createLead) persistedLead = await persistWorkflowLead(business, conversation, action, state, structuredWorkflowMetadata);
+  if (persistedLead) await refreshWorkflowLeadMetadata(business, persistedLead, workflowLeadMetadata(action, state));
   const completionUrl = state.completionUrl ?? action.completion.linkUrl;
   if (completionUrl) {
     answer += "\n\n" + (action.completion.linkLabel ?? "Continue") + ": " + completionUrl;
@@ -10704,7 +10901,11 @@ async function submitActionForm(
     conversationId: conversation.id,
     flowId: action.id,
   });
-  const visibleFormFields = action.steps?.length ? workflowFormFields(action, state) : formFields(action, state);
+  const submittedFormStep = action.steps?.length ? currentWorkflowStep(action, state) : null;
+  const exitRescueSubmission = state.exitRescue?.status === "offered";
+  const visibleFormFields = exitRescueSubmission
+    ? exitRescueContactFields(action, state)
+    : action.steps?.length ? workflowFormFields(action, state) : formFields(action, state);
   const repeatable = repeatableWorkflowConfig(action);
   for (const field of visibleFormFields) {
     const raw = rawValues[field.key];
@@ -10725,12 +10926,72 @@ async function submitActionForm(
       fieldId: field.key,
     });
   }
+  if (submittedFormStep?.config?.ensureContact === true) {
+    const configuredContactFields = Array.isArray(submittedFormStep.config.contactFields)
+      ? submittedFormStep.config.contactFields.filter((value): value is string => typeof value === "string")
+      : ["email", "phone"];
+    if (!configuredContactFields.some((key) => Boolean(state.values[key]?.trim()))) {
+      state.formShown = true;
+      return actionAnswer(action, state, "Please add an email or phone number so the team can reconnect with you. You can keep asking questions here without submitting contact details yet.");
+    }
+  }
+  if (exitRescueSubmission) {
+    if (!state.values.email?.trim() && !state.values.phone?.trim()) {
+      state.formShown = true;
+      return actionAnswer(action, state, "Please add an email or phone number so the team can save your progress. You can keep asking questions here without submitting contact details yet.");
+    }
+    const returnStepId = state.exitRescue?.returnStepId ?? state.currentStepId ?? null;
+    const pausedMetadata = {
+      ...workflowLeadMetadata(action, state),
+      journeyStatus: "paused",
+      followUpStatus: "pending",
+      conversionStage: returnStepId ? `paused_before_${returnStepId}` : "paused_before_external_handoff",
+      exitRescue: {
+        reason: state.exitRescue?.reason ?? "language",
+        returnStepId,
+        savedAt: new Date().toISOString(),
+      },
+    };
+    const lead = await persistWorkflowLead(business, conversation, action, state, pausedMetadata, {
+      status: "qualified",
+      metadata: pausedMetadata,
+    });
+    if (lead) await refreshWorkflowLeadMetadata(business, lead, pausedMetadata);
+    if (action.completion.notifyStaff || action.completion.requiresStaff) {
+      try {
+        conversation.handoffNotificationStatus = await notifyStaff(business, conversation, {
+          type: "lead_paused",
+          title: `Paused ${action.name} request`,
+          body: `${business.name} has a qualified visitor who asked to save their progress before completing ${action.name.toLowerCase()}.`,
+          leadId: lead?.id ?? null,
+          channels: action.completion.notifyChannels,
+          targets: action.completion.notifyTargets,
+        });
+      } catch (error) {
+        conversation.handoffNotificationStatus = "failed";
+        app.log.warn({ error: error instanceof Error ? error.message : "unknown paused-lead notification failure", businessId: business.id, conversationId: conversation.id }, "Paused lead saved but staff notification failed");
+      }
+    }
+    state.exitRescue = {
+      ...(state.exitRescue ?? { reason: "language", returnStepId }),
+      status: "saved",
+      savedAt: new Date().toISOString(),
+    };
+    state.formShown = false;
+    await recordConversionEvent(business, {
+      event: "EXIT_RESCUE_SAVED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { leadId: lead?.id ?? null, returnStepId },
+    });
+    return actionAnswer(action, state, "Got it — I saved your request and what we discussed. The team can follow up, and you won’t have to repeat everything.");
+  }
   if (action.steps?.length) {
     state.formShown = false;
     const formStep = currentWorkflowStep(action, state);
     if (formStep?.type === "form") transitionWorkflow(action, state, formStep.id);
     if (state.providerFallback) return completeActionConversation(business, conversation, action, state);
-    const next = await advanceWorkflowAutomation(business, action, state, { allowStaffSensitiveActions: !waitingForStaff(conversation) });
+    const next = await advanceWorkflowAutomation(business, action, state, { allowStaffSensitiveActions: !waitingForStaff(conversation) }, conversation);
     if (!next || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
     if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, next)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
     state.currentStepId = next.id;
@@ -19304,3 +19565,4 @@ app.addHook("onClose", async () => {
 });
 
 await app.listen({ host, port });
+void recoverOrganizationDocumentProcessing();

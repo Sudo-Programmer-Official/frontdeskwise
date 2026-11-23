@@ -33,11 +33,14 @@ test("swim school enrollment uses progressive capture", () => {
     "class-recommendations",
     "class-selection",
     "parent-contact",
+    "save-lead",
     "enrollment-confirm",
     "registration-link",
     "enrollment-complete",
   ]);
   assert.equal(action?.steps?.find((step) => step.id === "class-selection")?.type, "select");
+  assert.equal(action?.steps?.find((step) => step.id === "parent-contact")?.config?.ensureContact, true);
+  assert.equal(action?.fields.find((field) => field.key === "email")?.required, false);
   assert.equal(action?.executionMode, "PROVIDER_FLOW");
   assert.equal(action?.provider, "jackrabbit");
   assert.equal(action?.attachmentPolicy, "high_intent_only");

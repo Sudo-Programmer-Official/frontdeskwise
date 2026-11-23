@@ -358,6 +358,15 @@ function advanceSyntheticSteps(business: ReferenceBusiness, state: ConversationA
     }
   }
 
+  // Lead persistence is a non-interactive workflow capability. Once the
+  // contact form has supplied a recoverable identity, the certification
+  // runtime should advance through it before handling the next confirmation
+  // or registration step, just like the production runtime does.
+  while (step?.type === "create_lead") {
+    transitionWorkflow(business.workflow, state, step.id);
+    step = currentWorkflowStep(business.workflow, state);
+  }
+
   if (step?.type === "confirm") {
     if (/^(yes|y|sure|ok|okay|please|continue|do it|go ahead|option\s*1)\b/i.test(message.trim()) || /option\s*1/i.test(message)) {
       state.selectedActionResourceId = "reference-class-1";

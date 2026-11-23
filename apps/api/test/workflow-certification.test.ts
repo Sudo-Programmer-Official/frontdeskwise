@@ -56,12 +56,17 @@ test("British Swim School certification uses the canonical reference workflow", 
     "class-recommendations",
     "class-selection",
     "parent-contact",
+    "save-lead",
     "enrollment-confirm",
     "registration-link",
     "enrollment-complete",
   ]);
   assert.equal(enrollment.provider, "jackrabbit");
   assert.equal(enrollment.version, 2);
+  assert.equal(enrollment.steps?.find((step) => step.id === "parent-contact")?.config?.ensureContact, true);
+  assert.deepEqual(enrollment.steps?.find((step) => step.id === "parent-contact")?.config?.contactFields, ["email", "phone"]);
+  assert.equal(enrollment.steps?.find((step) => step.id === "save-lead")?.type, "create_lead");
+  assert.equal(enrollment.fields.find((field) => field.key === "email")?.required, false);
 });
 
 test("provider fallback reuses the enrollment contact form and never fabricates a class", () => {

@@ -37,6 +37,8 @@ interface WorkflowAction {
   workflowCount?: number;
   workflowIds?: string[];
   workflowNames?: string[];
+  archived?: boolean;
+  deleted?: boolean;
   capability?: {
     intent: string;
     completionType: "link" | "provider" | "phone" | "email" | "handoff" | "webhook" | "collect_details";
@@ -260,8 +262,62 @@ const duplicateCreateWorkflow = computed(() => {
   if (!candidate) return null;
   return workflowActions.value.find((action) => normalizeWorkflowName(workflowDisplayName(action)) === candidate) ?? null;
 });
+const currentBusinessScopeId = computed(() => props.selectedBusinessId ?? props.workspaceBusinessId ?? props.businessContext?.businessId ?? null);
+const workflowCompatibleExecutionModes = new Set(["DIRECT_LINK", "FORM_FLOW", "PROVIDER_FLOW", "PHONE", "EMAIL", "HANDOFF", "API_ACTION"]);
+function actionCanStartWorkflow(action: WorkflowAction): boolean {
+  const businessId = currentBusinessScopeId.value;
+  if (!action.id.trim() || !action.name.trim() || (businessId && action.businessId && action.businessId !== businessId)) return false;
+  if (action.archived === true || action.deleted === true || ["archived", "deleted"].includes(String(action.lifecycleStatus)) || action.reviewReason === "source_removed") return false;
+  if (action.workflowSafety?.status === "blocked" || hiddenWorkflowIds.value.has(action.id) || actionHasWorkflow(action)) return false;
+  if (action.executionMode && !workflowCompatibleExecutionModes.has(action.executionMode)) return false;
+  return Boolean(action.completion && typeof action.completion === "object" && !Array.isArray(action.completion));
+}
+function actionProvider(action: WorkflowAction | null): string | null {
+  const provider = action?.provider?.trim() || action?.capability?.provider?.trim();
+  return provider ? provider.toLowerCase() : null;
+}
+function actionProviderConnected(action: WorkflowAction | null): boolean {
+  const provider = actionProvider(action);
+  if (!provider) return true;
+  return props.integrations.some((value) => {
+    const integration = value as IntegrationLike;
+    return integration.provider?.toLowerCase() === provider && integration.connectionStatus === "active";
+  });
+}
+function actionPickerStatus(action: WorkflowAction): string {
+  const provider = actionProvider(action);
+  if (provider && !actionProviderConnected(action)) return `Needs setup · ${formatLabel(provider)} not connected`;
+  if (action.enabled === false || action.lifecycleStatus === "disabled") return "Disabled";
+  if (action.setupStatus === "DRAFT") return "Draft";
+  if (action.setupStatus === "NEEDS_SETUP" || action.readiness?.ready === false) return "Needs setup";
+  return "Ready";
+}
+const selectedActionSetupWarning = computed(() => {
+  const action = selectedCreateWorkflowAction.value;
+  if (!action) return null;
+  const provider = actionProvider(action);
+  if (provider && !actionProviderConnected(action)) {
+    return {
+      title: `${formatLabel(provider)} isn’t connected yet.`,
+      message: `You can still create and test this workflow. Until ${formatLabel(provider)} is connected, FrontDeskWise will capture the visitor’s request and notify the team instead of showing live availability.`,
+    };
+  }
+  if (action.enabled === false || action.lifecycleStatus === "disabled") {
+    return {
+      title: "This Action is disabled.",
+      message: "You can still create and test this workflow. Creating it will restore the Action for this draft; publish remains gated by the workflow readiness checks.",
+    };
+  }
+  if (action.setupStatus !== "READY" || action.readiness?.ready === false) {
+    return {
+      title: "This Action still needs setup.",
+      message: "You can still create and test this workflow. Complete the remaining setup checks before publishing it for production visitors.",
+    };
+  }
+  return null;
+});
 const eligibleActions = computed(() => allActions.value
-  .filter((action) => action.enabled !== false && action.workflowSafety?.status !== "blocked" && !actionHasWorkflow(action))
+  .filter(actionCanStartWorkflow)
   .sort((left, right) => {
     const leftDemo = /try|demo|start|book|request/i.test(left.name) ? 0 : 1;
     const rightDemo = /try|demo|start|book|request/i.test(right.name) ? 0 : 1;
@@ -665,7 +721,7 @@ function openCreateWorkflow(actionId?: string | MouseEvent): void {
   createWorkflowError.value = "";
   createNewActionOpen.value = false;
   const requestedActionId = typeof actionId === "string" ? actionId : undefined;
-  createWorkflowActionId.value = (requestedActionId && allActions.value.some((action) => action.id === requestedActionId && !actionHasWorkflow(action)) ? requestedActionId : undefined)
+  createWorkflowActionId.value = (requestedActionId && allActions.value.some((action) => action.id === requestedActionId && actionCanStartWorkflow(action)) ? requestedActionId : undefined)
     ?? eligibleActions.value.find((action) => /try|demo/i.test(action.name))?.id
     ?? eligibleActions.value[0]?.id
     ?? "";
@@ -1775,7 +1831,8 @@ onMounted(() => {
         <div class="workflow-create-fields">
           <label>Workflow name <span class="optional">must be unique in this business</span><input v-model="createWorkflowName" type="text" maxlength="160" placeholder="Lead qualification" /></label>
           <p v-if="duplicateCreateWorkflow" class="workflow-name-warning" role="alert">A workflow with this name already exists. Choose a different name or open the existing workflow.</p>
-          <label v-if="createWorkflowMode === 'action' || createWorkflowMode === 'template'">Action <span class="optional">what the assistant can do</span><select v-model="createWorkflowActionId" @change="updateCreateWorkflowNameSuggestion()"><option value="" disabled>Choose an action…</option><option v-for="action in eligibleActions" :key="action.id" :value="action.id">{{ action.name }}</option></select></label>
+          <label v-if="createWorkflowMode === 'action' || createWorkflowMode === 'template'">Action <span class="optional">what the assistant can do</span><select v-model="createWorkflowActionId" @change="updateCreateWorkflowNameSuggestion()"><option value="" disabled>Choose an action…</option><option v-for="action in eligibleActions" :key="action.id" :value="action.id">{{ action.name }} · {{ actionPickerStatus(action) }}</option></select></label>
+          <div v-if="selectedActionSetupWarning" class="workflow-action-setup-warning" role="alert"><strong>{{ selectedActionSetupWarning.title }}</strong><span>{{ selectedActionSetupWarning.message }}</span></div>
           <div v-if="createWorkflowMode === 'describe'" class="workflow-inference-preview"><p class="eyebrow">Suggested from your description</p><div class="workflow-inference-list"><span v-if="plainEnglishInference.contactFields">✓ Capture name and email</span><span v-if="plainEnglishInference.leadCapture">✓ Save the visitor as a lead</span><span v-if="plainEnglishInference.demoAction">✓ Offer the demo action</span><span v-if="plainEnglishInference.demoAction">✓ Guide interested visitors to the demo page</span></div><strong>Primary conversion: {{ selectedCreateWorkflowAction?.name || 'Choose a conversion action' }}</strong><small>FrontDeskWise will add lead capture as part of the journey; it does not replace the demo action.</small></div>
           <div v-if="!eligibleActions.length" class="workflow-create-empty"><strong>No eligible actions yet.</strong><span>Create one inline, then continue without leaving Workflows.</span></div>
           <button class="workflow-inline-action-button" type="button" @click="openNewActionFlow"><Plus :size="15" :stroke-width="1.9" aria-hidden="true" /> Create new action</button>
@@ -2395,6 +2452,8 @@ onMounted(() => {
 .workflow-delete-action { display: inline-flex; align-items: center; gap: 5px; padding: 7px 0; color: #b34135; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .workflow-delete-action:hover { color: #922c23; }
 .workflow-name-warning { padding: 9px 10px; margin: -4px 0 0; border: 1px solid #f0d2c9; border-radius: 8px; color: #9b4d3c; background: #fff8f6; font-size: 11px; line-height: 1.4; }
+.workflow-action-setup-warning { display: grid; gap: 3px; padding: 10px 11px; margin: -4px 0 0; border: 1px solid #f2d49d; border-radius: 9px; color: #805b19; background: #fff9ed; font-size: 11px; line-height: 1.45; }
+.workflow-action-setup-warning strong { color: #67470e; font-size: 12px; }
 .workflow-delete-warning { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; margin: 15px 0 13px; border: 1px solid #f0d2c9; border-radius: 10px; color: #a64e3e; background: #fff8f6; }
 .workflow-delete-warning > svg { flex: 0 0 auto; margin-top: 1px; }
 .workflow-delete-warning > div { display: grid; gap: 3px; }

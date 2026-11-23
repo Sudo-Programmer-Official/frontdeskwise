@@ -208,6 +208,17 @@ export type ConversationActionState = {
     provider: string;
     reason: "unavailable" | "not_found";
   };
+  /** Lead captured at the workflow conversion boundary, before external handoff. */
+  leadId?: string | null;
+  /** A meaningful journey can be paused and saved without completing the action. */
+  exitRescue?: {
+    status: "offered" | "saved" | "declined";
+    reason: "language" | "browser" | "inactivity";
+    returnStepId?: string | null;
+    offeredAt?: string;
+    savedAt?: string;
+    declinedAt?: string;
+  };
   selectedActionResourceId?: string;
   completionUrl?: string;
   participants?: ActionParticipant[];
@@ -299,7 +310,8 @@ function canonicalEnrollmentSteps(): ActionStep[] {
     { id: "registration-options", type: "lookup", label: "Find matching classes", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", searchFields: "child_age, ability, goal, location, schedule_preference", includeWaitlist: true } },
     { id: "class-recommendations", type: "recommend", label: "Present matching classes", question: "I found these matching classes. Which one would you like to consider?", config: { sourceStepId: "registration-options", maxResults: 5 } },
     { id: "class-selection", type: "select", label: "Let visitor select a class", question: "Reply with the number of the class you want.", config: { sourceStepId: "registration-options", maxResults: 5 } },
-    { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"] } },
+    { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"], ensureContact: true, contactFields: ["email", "phone"] } },
+    { id: "save-lead", type: "create_lead", label: "Save parent request", config: { ensureContact: true, failureBehavior: "handoff" } },
     { id: "enrollment-confirm", type: "confirm", question: "I have the class details. Shall I prepare the registration link?" },
     { id: "registration-link", type: "generate_link", label: "Generate registration link", config: { provider: "jackrabbit", completion: "external_provider" } },
     { id: "enrollment-complete", type: "complete", label: "Complete workflow" },
@@ -398,7 +410,7 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
       field("program", "Program", "text", "Which program are you interested in?", false),
       field("schedule_preference", "Schedule preference", "text", "Which days or schedule usually work best?", false),
       field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?"),
-      field("email", "Email", "email", "What email address should we use?"),
+      field("email", "Email", "email", "What email address should we use?", false),
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
     ],
     executionMode: "PROVIDER_FLOW",

@@ -107,11 +107,27 @@ test("Actions and Workflows share current relationships and provider readiness",
   assert.match(app, /providerIsConnected\(provider\) \? "Connected" : "Needs setup"/);
   assert.match(app, /!providerIsConnected\(actionProvider\(action\)\)/);
   assert.match(workflowWorkspace, /typeof action\.workflowCount === "number"/);
-  assert.match(workflowWorkspace, /!actionHasWorkflow\(action\)/);
+  assert.match(workflowWorkspace, /actionHasWorkflow\(action\)/);
+  assert.match(workflowWorkspace, /actionCanStartWorkflow/);
+  assert.match(workflowWorkspace, /action\.archived === true/);
+  assert.match(workflowWorkspace, /action\.reviewReason === "source_removed"/);
+  assert.match(workflowWorkspace, /Needs setup ·/);
+  assert.match(workflowWorkspace, /isn’t connected yet/);
+  assert.match(workflowWorkspace, /capture the visitor’s request and notify the team/);
+  assert.doesNotMatch(workflowWorkspace, /\.filter\(\(action\) => action\.enabled !== false/);
   assert.match(workflowWorkspace, /promote the new workflow to the current draft/);
   assert.match(workflowWorkspace, /workflowGeneration: true/);
   assert.match(apiServer, /actionSupportsProviderFallback/);
   assert.match(apiServer, /status: "unavailable"/);
+  assert.match(apiServer, /captureBoundary: "before_external_handoff"/);
+  assert.match(apiServer, /ensureContact/);
+  assert.match(apiServer, /awaiting_registration/);
+  assert.match(apiServer, /EXIT_RESCUE_OFFERED/);
+  assert.match(apiServer, /journeyStatus: "paused"/);
+  assert.match(apiServer, /followUpStatus: "pending"/);
+  assert.match(apiServer, /Save my progress/);
+  assert.match(workflowGenerator, /id: "save-lead"/);
+  assert.match(workflowGenerator, /contactFields: \["email", "phone"\]/);
   assert.match(apiServer, /provider_follow_up/);
 });
 
@@ -229,6 +245,8 @@ test("production proactive engagement carries bootstrap settings into the live w
     "body?.scrollTop || 0",
     "event.relatedTarget",
     "hasActiveHandoff()",
+    "meaningfulJourney",
+    "Want to save your progress? Leave your email or phone and continue later.",
     "if (!conversationId) return false;",
     "let userOpened = false;",
   ]) {

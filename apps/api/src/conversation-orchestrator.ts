@@ -63,6 +63,41 @@ function hasActiveWorkflow(action?: ActionFlow | null, state?: ConversationActio
   return Boolean(action?.steps?.length && state && state.status === "active");
 }
 
+/**
+ * Detects a conversational exit from an active journey. This intentionally
+ * stays narrower than generic gratitude or abandonment language so a visitor
+ * can still say "thanks" without being asked for contact details.
+ */
+export function isExitRescueIntent(message: string): boolean {
+  return /\b(?:i(?:'|’)ll|i will|maybe|let me|need to|gotta|have to|not right now|i(?:'|’)m|i am)\b.{0,32}\b(?:check|think|come back|do this|go|leave|pause|later|next time|leaving|going)\b|\b(?:maybe later|maybe next time|not right now|i have to go|i need to go|gotta go|let me think|i(?:'|’)ll think about it|i(?:'|’)ll check later|i(?:'|’)ll come back later|i(?:'|’)ll do this later|pause this|stop for now)\b/i.test(message.trim());
+}
+
+/** The visitor declined the save-progress offer; do not keep prompting. */
+export function isExitRescueDecline(message: string): boolean {
+  return /^(?:no|no thanks|no,? thanks|don(?:'|’)t save(?: it)?|do not save(?: it)?|skip(?: it)?|leave it|not now)\s*[.!?]*$/i.test(message.trim());
+}
+
+/**
+ * Exit rescue is reserved for a journey with enough signal to be useful to a
+ * teammate later. Contact fields themselves do not count as qualification.
+ */
+export function workflowHasMeaningfulEngagement(action: ActionFlow, state: ConversationActionState): boolean {
+  const configuredNonContactKeys = new Set(
+    (action.fields ?? [])
+      .filter((field) => !/^(email|phone|name|parent_name)$/i.test(field.key))
+      .map((field) => field.key),
+  );
+  const capturedQualification = Object.entries(state.values).filter(([key, value]) => configuredNonContactKeys.has(key) && Boolean(value?.trim())).length;
+  if (capturedQualification >= 2) return true;
+  if (state.selectedActionResourceId || state.providerFallback || Object.keys(state.lookupResults ?? {}).length) return true;
+  if ((state.interruptionStack ?? []).some((item) => item.intent === "pricing")) return true;
+  const completedQualificationSteps = (state.completedStepIds ?? []).filter((stepId) => {
+    const step = action.steps?.find((candidate) => candidate.id === stepId);
+    return Boolean(step?.fieldKey && !/^(email|phone|name|parent_name)$/i.test(step.fieldKey));
+  }).length;
+  return completedQualificationSteps >= 2;
+}
+
 function workflowMatchesActionIntent(action: ActionFlow, actionIntent: string, message: string): boolean {
   const haystack = `${action.key} ${action.actionType} ${action.name}`.toLowerCase();
   if (actionIntent === "plan_selection") return isPlanSelectionWorkflow(action);
