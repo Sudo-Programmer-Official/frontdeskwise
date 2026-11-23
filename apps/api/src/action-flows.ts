@@ -77,7 +77,11 @@ export type ActionStepBranch = {
 export type ActionStep = {
   id: string;
   type: ActionStepType;
+  /** Owner can keep a step in the draft while taking it out of the runtime path. */
+  enabled?: boolean;
   label?: string;
+  /** Owner-facing condition copy. Runtime transitions continue to use `condition`. */
+  conditionText?: string;
   fieldKey?: string;
   question?: string;
   required?: boolean;
@@ -441,7 +445,7 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
   {
     key: "request_demo",
     name: "Request a demo",
-    description: "Collect business context and contact details before sending the visitor to the demo request flow.",
+    description: "Send the visitor to the verified demo request destination.",
     triggerPhrases: ["request a demo", "book a demo", "I want a demo", "show me a demo"],
     triggerIntents: ["demo", "lead"],
     captureMode: "hybrid",

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, reactive, ref, toRef, watch } from "vue";
-import { Check, GripVertical, Plus, X } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRef, watch } from "vue";
+import { Check, GripVertical, MoreHorizontal, Plus, X } from "@lucide/vue";
 import Button from "./components/ui/Button.vue";
 import Card from "./components/ui/Card.vue";
 import ColorPicker from "./components/ui/ColorPicker.vue";
@@ -14,7 +14,7 @@ import TextInput from "./components/ui/TextInput.vue";
 import Textarea from "./components/ui/Textarea.vue";
 import WidgetPreview from "./components/WidgetPreview.vue";
 import { getAccessibleTextColor, isHexColor } from "./utils/color";
-import type { WidgetAction, WidgetState } from "./widget-ui/renderer";
+import type { WidgetAction, WidgetScenario, WidgetState } from "./widget-ui/renderer";
 
 type AgentTab = "capabilities" | "behavior" | "knowledge" | "appearance" | "quick-actions" | "actions" | "test" | "install";
 type Tone = "friendly" | "professional" | "concise" | "custom";
@@ -25,6 +25,8 @@ type ProactiveTrigger = "delay" | "scroll" | "exit" | "returning";
 type ProactiveBehavior = "teaser" | "open";
 type ProactiveFrequency = "session" | "24h" | "visit";
 type CitationVisibility = "always" | "contextual" | "hidden";
+type QuickActionKind = "KNOWLEDGE" | "WORKFLOW" | "ACTION" | "HANDOFF";
+type QuickActionReadiness = "ready" | "blocked";
 type VerificationMethod = "email" | "meta_tag" | "file" | "dns_txt" | "manual";
 type InstallPlatform = "wordpress" | "wix" | "shopify" | "squarespace" | "custom" | "not_sure";
 type SupportContactMethod = "email" | "phone";
@@ -51,6 +53,25 @@ interface InstallationSupportPayload {
 interface QuickAction {
   label: string;
   question: string;
+  kind?: QuickActionKind;
+  targetId?: string;
+  approved?: boolean;
+  generated?: boolean;
+}
+
+interface AgentWorkflow {
+  id: string;
+  name: string;
+  description?: string;
+  steps?: Array<Record<string, unknown>>;
+  completion?: { createLead?: boolean; notifyStaff?: boolean; requiresStaff?: boolean; workflow?: { name?: string } };
+  workflowStatus?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  readiness?: { ready?: boolean; reason?: string };
+  enabled?: boolean;
+  actionType?: string;
+  provider?: string | null;
+  executionMode?: string;
+  isPrimary?: boolean;
 }
 
 interface AgentModel {
@@ -189,6 +210,7 @@ const props = defineProps<{
   knowledge: KnowledgeModel | null;
   knowledgeGaps: KnowledgeGap[];
   knowledgeReady: boolean;
+  suggestedQuestions: string[];
   agentTested: boolean;
   installationSupportLoading: boolean;
   installationSupportMessage: string;
@@ -196,6 +218,7 @@ const props = defineProps<{
   openSupportRequest: number;
   test: TestModel;
   capabilities: AgentCapability[];
+  workflows: AgentWorkflow[];
 }>();
 
 const emit = defineEmits<{
@@ -218,6 +241,7 @@ const emit = defineEmits<{
   (event: "request-install-help", payload: InstallationSupportPayload): void;
   (event: "clear-install-help-message"): void;
   (event: "open-capability-action", target: CapabilityAction): void;
+  (event: "open-workflow", workflowId?: string): void;
 }>();
 
 function cloneModel(model: AgentModel): AgentModel {
@@ -227,11 +251,26 @@ function cloneModel(model: AgentModel): AgentModel {
 const draft = ref<AgentModel>(cloneModel(props.model));
 const agentDraft = computed(() => draft.value);
 const previewMode = ref<"desktop" | "mobile">("desktop");
+const behaviorPane = ref<"settings" | "preview">("settings");
+const behaviorSettingsPanel = ref<HTMLElement | null>(null);
+const behaviorPreviewScenario = ref<WidgetScenario>("conversation");
+const behaviorPreviewLabel = ref("Conversation");
+let behaviorScrollContainer: HTMLElement | null = null;
 const quickActionEditorOpen = ref(false);
 const editingActionIndex = ref<number | null>(null);
+const openQuickActionMenuIndex = ref<number | null>(null);
+const recommendationsApplied = ref(false);
 const actionDraft = reactive<QuickAction>({ label: "", question: "" });
 const actionLabel = toRef(actionDraft, "label");
 const actionQuestion = toRef(actionDraft, "question");
+const editingActionConnection = computed(() => {
+  const index = editingActionIndex.value;
+  return quickActionConnection(index === null ? actionDraft : draft.value.widgetQuickActions[index] ?? actionDraft);
+});
+const recommendedQuickActions = computed<QuickAction[]>(() => buildQuickActionRecommendations());
+const quickActionPublishIssues = computed(() => draft.value.widgetQuickActions
+  .map((action) => ({ action, readiness: quickActionReadiness(action) }))
+  .filter(({ action, readiness }) => quickActionNeedsApproval(action) || readiness.readiness === "blocked"));
 const logoPreview = ref(props.model.widgetLogoUrl);
 const logoFileName = ref("");
 const testPrompt = ref("");
@@ -288,6 +327,11 @@ const accessibleWidgetText = computed(() => getAccessibleTextColor(safeWidgetCol
 const publishStatus = computed<AgentPublishStatus>(() => props.publishingLoading ? "PUBLISHING" : props.publishing.status);
 const isLive = computed(() => publishStatus.value === "LIVE" || publishStatus.value === "LIVE_WITH_UNPUBLISHED_CHANGES");
 const hasUnpublishedChanges = computed(() => publishStatus.value === "LIVE_WITH_UNPUBLISHED_CHANGES");
+const hasDraftChanges = computed(() => JSON.stringify(draft.value) !== JSON.stringify(props.model));
+const behaviorSaveStatus = computed(() => hasDraftChanges.value ? "Unsaved changes" : hasUnpublishedChanges.value ? "Unpublished changes" : isLive.value ? "Live" : "All changes saved");
+const behaviorSaveStatusCopy = computed(() => hasDraftChanges.value ? "Save before publishing this configuration." : hasUnpublishedChanges.value ? "Publish when you are ready to update the live front desk." : isLive.value ? "Your live front desk matches this configuration." : "Your current configuration is saved.");
+const behaviorPublishLabel = computed(() => publishStatus.value === "PUBLISHING" ? "Publishing…" : isLive.value ? "Publish updates" : "Publish AI front desk");
+const behaviorPublishDisabled = computed(() => publishStatus.value === "PUBLISHING" || props.ownershipStatus !== "verified" || props.billingReadOnly);
 const toneOptions = ["friendly", "professional", "concise", "custom"].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }));
 const themeOptions = ["light", "dark", "auto"].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }));
 const positionOptions = [{ label: "Bottom right", value: "bottom-right" }, { label: "Bottom left", value: "bottom-left" }];
@@ -322,12 +366,48 @@ const supportScreenshotUrl = toRef(supportForm, "screenshotUrl");
 
 function syncModel(model: AgentModel): void {
   draft.value = cloneModel(model);
+  recommendationsApplied.value = false;
   logoPreview.value = model.widgetLogoUrl;
   logoFileName.value = "";
 }
 
+function updateBehaviorPreviewFocus(): void {
+  const panel = behaviorSettingsPanel.value;
+  if (!panel || props.tab !== "behavior") return;
+  const sections = [...panel.querySelectorAll<HTMLElement>("[data-preview-scenario]")];
+  if (!sections.length) return;
+
+  const pivot = Math.min(window.innerHeight * 0.34, 360);
+  let activeSection = sections[0];
+  for (const section of sections) {
+    if (section.getBoundingClientRect().top <= pivot) activeSection = section;
+  }
+  behaviorPreviewScenario.value = (activeSection.dataset.previewScenario as WidgetScenario | undefined) ?? "conversation";
+  behaviorPreviewLabel.value = activeSection.dataset.previewLabel ?? "Conversation";
+}
+
+function teardownBehaviorPreviewTracking(): void {
+  behaviorScrollContainer?.removeEventListener("scroll", updateBehaviorPreviewFocus);
+  behaviorScrollContainer = null;
+}
+
+function setupBehaviorPreviewTracking(): void {
+  teardownBehaviorPreviewTracking();
+  if (props.tab !== "behavior") return;
+  nextTick(() => {
+    if (props.tab !== "behavior" || !behaviorSettingsPanel.value) return;
+    behaviorScrollContainer = behaviorSettingsPanel.value.closest(".content-area") as HTMLElement | null;
+    behaviorScrollContainer?.addEventListener("scroll", updateBehaviorPreviewFocus, { passive: true });
+    updateBehaviorPreviewFocus();
+  });
+}
+
 watch(() => props.businessKey, () => syncModel(props.model));
 watch(() => props.model, (model) => syncModel(model), { deep: true });
+watch(() => props.tab, () => {
+  behaviorPane.value = "settings";
+  setupBehaviorPreviewTracking();
+});
 watch(() => props.verificationMethod, (method) => {
   verificationMethodDraft.value = method;
 });
@@ -340,6 +420,9 @@ watch(() => props.authUserName, (name) => {
 watch(() => props.authUserEmail, (email) => {
   if (supportForm.preferredContactMethod === "email") supportForm.contactValue = email;
 });
+
+onMounted(setupBehaviorPreviewTracking);
+onBeforeUnmount(teardownBehaviorPreviewTracking);
 
 function saveChanges(): void {
   if (!props.authReady) {
@@ -355,6 +438,10 @@ function saveChanges(): void {
 function publishDraft(): void {
   if (!testCompleted.value) {
     selectTab("test");
+    return;
+  }
+  if (quickActionPublishIssues.value.length) {
+    selectTab("quick-actions");
     return;
   }
   emit("publish", cloneModel(draft.value));
@@ -375,8 +462,156 @@ function selectTab(tab: AgentTab): void {
   emit("select-tab", tab);
 }
 
+function workflowStatusLabel(workflow: AgentWorkflow): string {
+  if (workflow.workflowStatus === "LIVE") return "Live";
+  if (workflow.workflowStatus === "LIVE_WITH_UNPUBLISHED_CHANGES") return "Live · changes";
+  return "Draft";
+}
+
+function workflowUsesCapability(workflow: AgentWorkflow, capabilityId: string): boolean {
+  const stepTypes = new Set((workflow.steps ?? []).map((step) => String(step.type ?? "").toLowerCase()));
+  const actionText = `${workflow.name} ${workflow.description ?? ""} ${workflow.actionType ?? ""}`.toLowerCase();
+  if (capabilityId === "answer") return stepTypes.has("knowledge");
+  if (capabilityId === "capture") return Boolean(workflow.completion?.createLead) || ["capture", "form", "create_lead"].some((type) => stepTypes.has(type));
+  if (capabilityId === "handoff") return Boolean(workflow.completion?.notifyStaff || workflow.completion?.requiresStaff) || ["handoff", "notify"].some((type) => stepTypes.has(type));
+  if (capabilityId === "booking") return /book|appointment|booking|reserve|schedule/.test(actionText) || ["book", "lookup", "generate_link"].some((type) => stepTypes.has(type));
+  if (capabilityId === "lead-delivery") return Boolean(workflow.completion?.notifyStaff);
+  return false;
+}
+
+function workflowsForCapability(capability: AgentCapability): AgentWorkflow[] {
+  return props.workflows.filter((workflow) => workflowUsesCapability(workflow, capability.id));
+}
+
+function quickActionText(action: QuickAction): string {
+  return `${action.label} ${action.question}`.toLowerCase();
+}
+
+function workflowForQuickAction(action: QuickAction): AgentWorkflow | null {
+  if (action.targetId) {
+    const targeted = props.workflows.find((workflow) => workflow.id === action.targetId);
+    if (targeted) return targeted;
+  }
+  const actionText = quickActionText(action);
+  if (/book|appointment|booking|reserve|schedule|availability|find a class/.test(actionText)) {
+    return props.workflows.find((workflow) => workflowUsesCapability(workflow, "booking") || /book|appointment|booking|reserve|schedule/i.test(`${workflow.name} ${workflow.description ?? ""}`)) ?? null;
+  }
+  if (/lead|contact|demo|trial|tour|get started|start|quote|estimate|service|emergency/.test(actionText)) {
+    return props.workflows.find((workflow) => /demo|trial|tour|quote|estimate/.test(actionText) && /demo|trial|tour|quote|estimate/.test(`${workflow.name} ${workflow.description ?? ""}`.toLowerCase()))
+      ?? props.workflows.find((workflow) => workflowUsesCapability(workflow, "capture"))
+      ?? null;
+  }
+  return null;
+}
+
+function inferQuickActionKind(action: QuickAction): QuickActionKind {
+  const actionText = quickActionText(action);
+  const inferredKind: QuickActionKind = /talk to|speak to|contact (the )?team|human|person/.test(actionText)
+    ? "HANDOFF"
+    : /book|appointment|booking|reserve|schedule|quote|estimate|demo|trial|tour|start free|free trial|check availability|availability|request service|service request|find a class|emergency help|contact sales|talk to sales/.test(actionText)
+      ? "WORKFLOW"
+      : "KNOWLEDGE";
+  if (inferredKind === "HANDOFF" && action.kind && action.kind !== "HANDOFF") return inferredKind;
+  if ((action.kind === "KNOWLEDGE" || action.kind === "HANDOFF") && action.kind !== inferredKind) return inferredKind;
+  if (action.kind) return action.kind;
+  const workflow = workflowForQuickAction(action);
+  if (workflow) return workflow.steps?.length ? "WORKFLOW" : "ACTION";
+  return inferredKind;
+}
+
+function quickActionReadiness(action: QuickAction): { kind: QuickActionKind; readiness: QuickActionReadiness; reason: string; target: AgentWorkflow | null } {
+  const kind = inferQuickActionKind(action);
+  if (action.approved === false && action.generated !== true) return { kind, readiness: "blocked", reason: "Owner approval required", target: workflowForQuickAction(action) };
+  if (kind === "HANDOFF") {
+    return draft.value.humanHandoffEnabled
+      ? { kind, readiness: "ready", reason: "Human handoff is enabled", target: null }
+      : { kind, readiness: "blocked", reason: "Human handoff is disabled in Agent Behavior", target: null };
+  }
+  if (kind === "KNOWLEDGE") {
+    return props.knowledgeReady
+      ? { kind, readiness: "ready", reason: "Verified knowledge available", target: null }
+      : { kind, readiness: "blocked", reason: "Verified knowledge is not ready", target: null };
+  }
+  const target = workflowForQuickAction(action);
+  if (!target) return { kind, readiness: "blocked", reason: "No workflow or published action is connected", target: null };
+  if (target.enabled === false) return { kind, readiness: "blocked", reason: "Connected workflow is disabled", target };
+  if (target.workflowStatus !== "LIVE") return { kind, readiness: "blocked", reason: "Connected workflow must be published", target };
+  if (target.readiness?.ready === false) return { kind, readiness: "blocked", reason: target.readiness.reason ? `Connected workflow needs setup · ${target.readiness.reason}` : "Connected workflow needs setup", target };
+  return { kind, readiness: "ready", reason: kind === "WORKFLOW" ? "Published workflow is ready" : "Published action is ready", target };
+}
+
+function quickActionNeedsApproval(action: QuickAction): boolean {
+  return action.approved === false || (action.generated === true && action.approved !== true);
+}
+
+function recommendationLabel(workflow: AgentWorkflow): { label: string; question: string } {
+  const text = `${workflow.name} ${workflow.description ?? ""} ${workflow.actionType ?? ""}`.toLowerCase();
+  if (/book|appointment|booking|reserve|schedule/.test(text)) return { label: "Book an appointment", question: "I'd like to book an appointment." };
+  if (/demo|trial|tour/.test(text)) return { label: "See the demo", question: "I'd like to see a demo." };
+  if (/quote|estimate/.test(text)) return { label: "Request a quote", question: "I'd like to request a quote." };
+  if (/service|feature|plan/.test(text)) return { label: "Explore services", question: "What services do you offer?" };
+  return { label: workflow.name, question: `I'd like help with ${workflow.name.toLowerCase()}.` };
+}
+
+function buildQuickActionRecommendations(): QuickAction[] {
+  const recommendations: QuickAction[] = [];
+  const addWorkflowRecommendation = (workflow: AgentWorkflow | undefined): void => {
+    if (!workflow || workflow.workflowStatus !== "LIVE" || workflow.enabled === false || workflow.readiness?.ready === false) return;
+    const copy = recommendationLabel(workflow);
+    const kind: QuickActionKind = workflow.steps?.length ? "WORKFLOW" : "ACTION";
+    if (recommendations.some((action) => action.targetId === workflow.id || action.label === copy.label)) return;
+    recommendations.push({ ...copy, kind, targetId: workflow.id, generated: true, approved: false });
+  };
+
+  addWorkflowRecommendation(props.workflows.find((workflow) => workflow.isPrimary));
+
+  if (props.knowledgeReady && recommendations.length < 4) {
+    const question = props.suggestedQuestions.find((candidate) => /pricing|price|cost|service|feature|location|hours/i.test(candidate))
+      ?? props.suggestedQuestions[0]
+      ?? "What services do you offer?";
+    const label = /pricing|price|cost/i.test(question) ? "Pricing" : /location|hours/i.test(question) ? "Locations" : "Explore services";
+    recommendations.push({ label, question, kind: "KNOWLEDGE", generated: true, approved: false });
+  }
+
+  addWorkflowRecommendation(props.workflows.find((workflow) => !workflow.isPrimary && (workflow.steps?.length ?? 0) > 0));
+
+  if (props.knowledgeReady && recommendations.length < 4) {
+    recommendations.push({ label: "Ask a question", question: "What would you like help with?", kind: "KNOWLEDGE", generated: true, approved: false });
+  }
+  return recommendations.slice(0, 4);
+}
+
+function quickActionConnection(action: QuickAction): { label: string; detail: string; workflow: AgentWorkflow | null; kind: QuickActionKind; readiness: QuickActionReadiness; reason: string } {
+  const state = quickActionReadiness(action);
+  if (state.kind === "HANDOFF") return { label: "HANDOFF", detail: "Request human support", workflow: null, ...state };
+  if (state.kind === "KNOWLEDGE") return { label: "KNOWLEDGE", detail: "Answer from Business Brain", workflow: null, ...state };
+  if (state.target) return { label: state.kind, detail: state.target.name, workflow: state.target, ...state };
+  return { label: state.kind, detail: state.reason, workflow: null, ...state };
+}
+
+function applyQuickActionRecommendations(): void {
+  draft.value.widgetQuickActions = recommendedQuickActions.value.map((action) => ({ ...action, approved: true }));
+  recommendationsApplied.value = true;
+  openQuickActionMenuIndex.value = null;
+}
+
+function quickActionWorkflowId(action: QuickAction): string | undefined {
+  return quickActionReadiness(action).target?.id;
+}
+
+function quickActionStatusLabel(action: QuickAction): string {
+  const state = quickActionReadiness(action);
+  if (state.readiness === "blocked") return state.reason;
+  if (quickActionNeedsApproval(action)) return "Needs owner approval";
+  return "Ready to publish";
+}
+
 function handleGoLive(): void {
   if (!testCompleted.value) return;
+  if (quickActionPublishIssues.value.length) {
+    selectTab("quick-actions");
+    return;
+  }
   if (isLive.value) {
     emit("view-dashboard");
     return;
@@ -386,6 +621,7 @@ function handleGoLive(): void {
 
 function startAddAction(): void {
   editingActionIndex.value = null;
+  openQuickActionMenuIndex.value = null;
   actionDraft.label = "";
   actionDraft.question = "";
   quickActionEditorOpen.value = true;
@@ -393,21 +629,42 @@ function startAddAction(): void {
 
 function editAction(index: number): void {
   editingActionIndex.value = index;
+  openQuickActionMenuIndex.value = null;
   actionDraft.label = draft.value.widgetQuickActions[index]?.label ?? "";
   actionDraft.question = draft.value.widgetQuickActions[index]?.question ?? "";
   quickActionEditorOpen.value = true;
 }
 
 function saveAction(): void {
-  const action = { label: actionDraft.label.trim(), question: actionDraft.question.trim() };
+  const existing = editingActionIndex.value === null ? undefined : draft.value.widgetQuickActions[editingActionIndex.value];
+  const action: QuickAction = {
+    ...(existing ?? {}),
+    label: actionDraft.label.trim(),
+    question: actionDraft.question.trim(),
+    approved: true,
+    generated: false,
+  };
   if (!action.label || !action.question) return;
+  const connection = quickActionConnection(action);
+  if (connection.workflow && connection.kind !== "KNOWLEDGE") {
+    action.kind = connection.kind;
+    action.targetId = connection.workflow.id;
+  }
   if (editingActionIndex.value === null) draft.value.widgetQuickActions.push(action);
   else draft.value.widgetQuickActions.splice(editingActionIndex.value, 1, action);
   quickActionEditorOpen.value = false;
 }
 
+function duplicateAction(index: number): void {
+  const action = draft.value.widgetQuickActions[index];
+  if (!action || draft.value.widgetQuickActions.length >= 4) return;
+  draft.value.widgetQuickActions.splice(index + 1, 0, { ...action, label: `${action.label} copy`, approved: true, generated: false });
+  openQuickActionMenuIndex.value = null;
+}
+
 function removeAction(index: number): void {
   draft.value.widgetQuickActions.splice(index, 1);
+  openQuickActionMenuIndex.value = null;
 }
 
 function moveAction(index: number, direction: -1 | 1): void {
@@ -491,7 +748,7 @@ function openLiveWebsite(): void {
       </div>
       <div class="agent-header-actions">
         <span v-if="savedMessage || localSaved" class="saved-message"><Check :size="14" :stroke-width="2" aria-hidden="true" /> {{ savedMessage || "Saved" }}</span>
-        <Button v-if="!['capabilities', 'test', 'install'].includes(tab)" variant="primary" size="small" @click="saveChanges">Save changes</Button>
+        <Button v-if="!['capabilities', 'behavior', 'knowledge', 'test', 'install'].includes(tab)" variant="primary" size="small" @click="saveChanges">Save changes</Button>
         <Button v-if="tab === 'test'" variant="secondary" size="small" @click="emit('reset-conversation')">Reset conversation</Button>
         <Button v-if="tab === 'install' && publishStatus === 'NOT_PUBLISHED'" variant="primary" size="small" :disabled="ownershipStatus !== 'verified' || billingReadOnly" @click="publishDraft">Publish AI front desk</Button>
         <Button v-if="tab === 'install' && publishStatus === 'PUBLISHING'" variant="primary" size="small" disabled>Publishing…</Button>
@@ -511,19 +768,24 @@ function openLiveWebsite(): void {
     <div v-if="tab === 'capabilities'" class="agent-capabilities-layout">
       <section class="agent-capabilities-intro panel">
         <div>
-          <p class="section-kicker">Guidance layer</p>
+          <p class="section-kicker">Your AI front desk</p>
           <h3>What your AI front desk can do</h3>
-          <p>Keep connections in Settings. This view shows which business outcomes are ready and what to set up next.</p>
+          <p>Capabilities are the outcomes your Agent can deliver. Workflows show how it guides a visitor there.</p>
         </div>
         <span class="capability-summary-count">{{ capabilities.filter((capability) => capability.ready).length }}/{{ capabilities.length }} ready</span>
       </section>
       <section class="agent-capability-list panel" aria-label="Agent capabilities">
         <article v-for="capability in capabilities" :key="capability.id" :class="['agent-capability-row', { ready: capability.ready }]">
           <span :class="['capability-status-icon', { ready: capability.ready }]">{{ capability.ready ? '✓' : '○' }}</span>
-          <div class="agent-capability-copy"><strong>{{ capability.title }}</strong><p>{{ capability.description }}</p></div>
+          <div class="agent-capability-copy"><strong>{{ capability.title }}</strong><p>{{ capability.description }}</p><div v-if="workflowsForCapability(capability).length" class="capability-relationship"><span>Used by</span><button v-for="workflow in workflowsForCapability(capability).slice(0, 2)" :key="workflow.id" type="button" @click="emit('open-workflow', workflow.id)">{{ workflow.name }}</button><small v-if="workflowsForCapability(capability).length > 2">+{{ workflowsForCapability(capability).length - 2 }} more</small></div><div v-else-if="capability.ready" class="capability-relationship capability-relationship-muted"><span>Available to workflows</span></div></div>
           <span :class="['capability-status-label', { ready: capability.ready }]">{{ capability.ready ? 'Ready' : 'Set up' }}</span>
           <button class="capability-action" type="button" @click="emit('open-capability-action', capability.target)">{{ capability.actionLabel }} →</button>
         </article>
+      </section>
+      <section class="agent-journeys panel" aria-labelledby="agent-journeys-heading">
+        <div class="agent-journeys-heading"><div><p class="section-kicker">Workflows</p><h3 id="agent-journeys-heading">Active customer journeys</h3><p>Each workflow combines Agent defaults with a specific customer goal.</p></div><button class="outline-button small" type="button" @click="emit('open-workflow')">Manage workflows →</button></div>
+        <div v-if="workflows.length" class="agent-journey-list"><button v-for="workflow in workflows.slice(0, 4)" :key="workflow.id" class="agent-journey-card" type="button" @click="emit('open-workflow', workflow.id)"><span class="journey-icon">↗</span><span><strong>{{ workflow.name }}</strong><small>{{ workflow.steps?.length ?? 0 }} step{{ (workflow.steps?.length ?? 0) === 1 ? '' : 's' }} · {{ workflowStatusLabel(workflow) }}</small></span><span class="journey-arrow">→</span></button></div>
+        <div v-else class="agent-journeys-empty">Create a workflow to turn a capability into a guided customer journey.</div>
       </section>
       <aside class="agent-capabilities-note panel">
         <div><p class="section-kicker">Where connections live</p><h3>Settings is the connection center</h3><p>Agent keeps the outcome visible without duplicating HubSpot, Zapier, webhook, or MCP configuration.</p></div>
@@ -531,12 +793,31 @@ function openLiveWebsite(): void {
       </aside>
     </div>
 
-    <div v-else-if="tab === 'behavior'" class="agent-behavior-layout agent-config-layout">
-      <Card class="agent-form-panel agent-settings-panel">
-        <FormSection eyebrow="Identity" title="Assistant identity">
+    <div v-else-if="tab === 'behavior'" class="agent-behavior-view">
+      <div class="agent-behavior-action-bar" role="region" aria-label="Behavior changes">
+        <div class="agent-behavior-save-state">
+          <span :class="['agent-behavior-save-dot', { pending: hasDraftChanges || hasUnpublishedChanges }]" aria-hidden="true"></span>
+          <div><strong>{{ behaviorSaveStatus }}</strong><small>{{ behaviorSaveStatusCopy }}</small></div>
+        </div>
+        <div class="agent-behavior-action-buttons">
+          <Button variant="secondary" size="small" @click="saveChanges">Save changes</Button>
+          <Button variant="primary" size="small" :disabled="behaviorPublishDisabled" @click="publishDraft">{{ behaviorPublishLabel }}</Button>
+        </div>
+      </div>
+      <div class="agent-defaults-context"><span class="agent-defaults-context-mark">◎</span><div><strong>Global Agent defaults</strong><small>Tone, language, trust, fallback, and handoff behavior are inherited by every workflow.</small></div><button class="text-button" type="button" @click="emit('open-workflow')">See in Workflows →</button></div>
+
+      <div class="behavior-view-switcher" role="tablist" aria-label="Behavior workspace view">
+        <button type="button" role="tab" :aria-selected="behaviorPane === 'settings'" :class="{ active: behaviorPane === 'settings' }" @click="behaviorPane = 'settings'">Configure</button>
+        <button type="button" role="tab" :aria-selected="behaviorPane === 'preview'" :class="{ active: behaviorPane === 'preview' }" @click="behaviorPane = 'preview'">Preview</button>
+      </div>
+
+      <div class="agent-behavior-layout agent-config-layout">
+        <div ref="behaviorSettingsPanel" :class="['agent-behavior-settings', { 'behavior-pane-active': behaviorPane === 'settings' }]">
+          <Card class="agent-form-panel agent-settings-panel">
+        <FormSection id="behavior-identity" data-preview-scenario="conversation" data-preview-label="Assistant identity" eyebrow="Identity" title="Assistant identity">
           <FormField label="Assistant name" required><TextInput v-model="draft.assistantName" :maxlength="120" /></FormField>
         </FormSection>
-        <FormSection eyebrow="Conversation" title="How your assistant speaks">
+        <FormSection id="behavior-conversation" data-preview-scenario="conversation" data-preview-label="Conversation" eyebrow="Conversation" title="How your assistant speaks">
           <FormField label="Welcome message" required><Textarea v-model="draft.welcomeMessage" :rows="4" :maxlength="1000" /></FormField>
           <div class="field-grid">
             <FormField label="Tone"><SegmentedControl v-model="draft.tone" :options="toneOptions" aria-label="Assistant tone" /></FormField>
@@ -544,11 +825,11 @@ function openLiveWebsite(): void {
           </div>
           <FormField v-if="draft.tone === 'custom'" label="Custom tone instructions" hint="These instructions guide answer style while keeping customer answers grounded and concise."><Textarea v-model="draft.customToneInstructions" :rows="4" :maxlength="600" placeholder="Warm, direct, and reassuring. Use short paragraphs and avoid jargon." /></FormField>
         </FormSection>
-        <FormSection eyebrow="Trust & transparency" title="Answer sources" description="Choose when visitors can open the page used to ground an answer. Sources remain stored for quality review either way.">
+        <FormSection id="behavior-sources" data-preview-scenario="source-citation" data-preview-label="Answer sources" eyebrow="Trust & transparency" title="Answer sources" description="Choose when visitors can open the page used to ground an answer. Sources remain stored for quality review either way.">
           <FormField label="Show answer sources"><SegmentedControl v-model="draft.citationVisibility" :options="citationVisibilityOptions" aria-label="Answer source visibility" /></FormField>
           <p class="form-help">When helpful shows sources for pricing, policy, privacy, service, and other detail-heavy answers.</p>
         </FormSection>
-        <FormSection eyebrow="Proactive engagement" title="Invite visitors before they ask" description="Start with a small prompt above the launcher. Visitors can open the full assistant when they are ready.">
+        <FormSection id="behavior-proactive" data-preview-scenario="default" data-preview-label="Proactive engagement" eyebrow="Proactive engagement" title="Invite visitors before they ask" description="Start with a small prompt above the launcher. Visitors can open the full assistant when they are ready.">
           <Switch v-model="draft.proactiveEnabled" label="Engage visitors automatically" description="Show a proactive message when a visitor reaches one of your selected triggers." />
           <template v-if="draft.proactiveEnabled">
             <div class="proactive-trigger-grid">
@@ -564,8 +845,10 @@ function openLiveWebsite(): void {
             <p class="form-help">After a visitor dismisses or opens the prompt, FrontDeskWise respects this frequency and will not keep interrupting them.</p>
           </template>
         </FormSection>
-        <FormSection eyebrow="When AI cannot answer" title="Make the next step clear">
+        <FormSection id="behavior-fallback" data-preview-scenario="safe-fallback" data-preview-label="Fallback behavior" eyebrow="When AI cannot answer" title="Make the next step clear">
           <FormField label="Fallback behavior"><Select v-model="draft.fallbackBehavior" :options="fallbackOptions" placeholder="" /></FormField>
+        </FormSection>
+        <FormSection id="behavior-handoff" data-preview-scenario="human-handoff" data-preview-label="Human handoff" eyebrow="Human support" title="Keep your team in the loop" description="Give visitors a clear path to a person when the assistant cannot resolve the request.">
           <Switch v-model="draft.humanHandoffEnabled" label="Human handoff" description="Let visitors ask for your team when they need help." />
           <div class="field-grid">
             <FormField label="Fallback phone" hint="Shown to visitors during an outage."><TextInput v-model="draft.fallbackPhone" type="tel" placeholder="(555) 555-0123" /></FormField>
@@ -577,17 +860,26 @@ function openLiveWebsite(): void {
           <div><strong>Conversation behavior is ready to review.</strong><p>Save changes to use this configuration in the live widget.</p></div>
           <Button variant="primary" size="small" @click="saveChanges">Save changes</Button>
         </section>
-      </Card>
-      <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :citation-visibility="agentDraft.citationVisibility" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
+          </Card>
+        </div>
+        <aside :class="['agent-preview-column', 'agent-behavior-preview', { 'behavior-pane-active': behaviorPane === 'preview' }]">
+          <div class="behavior-preview-context"><span class="behavior-preview-live-dot" aria-hidden="true"></span><div><span>Preview focus</span><strong>{{ behaviorPreviewLabel }}</strong></div><small>Updates as you move through the settings.</small></div>
+          <WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :citation-visibility="agentDraft.citationVisibility" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :scenario="behaviorPreviewScenario" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
+      </div>
     </div>
 
     <div v-else-if="tab === 'knowledge'" class="agent-knowledge-layout">
       <article class="agent-knowledge-summary panel">
-        <div class="agent-section-heading"><div><p class="section-kicker">Agent context</p><h3>Knowledge readiness</h3><p>Keep this view focused on what the agent can answer. Manage sources and documents in the full Knowledge workspace.</p></div><span :class="['knowledge-readiness-pill', knowledgeReady ? 'ready' : 'needs-review']">{{ knowledgeReady ? 'Ready' : 'Review' }}</span></div>
-        <div class="agent-knowledge-metrics"><div><strong>{{ knowledge?.sourceCount ?? 0 }}</strong><small>ready sources</small></div><div><strong>{{ knowledge?.openGaps ?? 0 }}</strong><small>open answer gaps</small></div><div><strong>{{ knowledge?.chunkCount ?? 0 }}</strong><small>indexed chunks</small></div><div><strong>{{ knowledgeLastUpdated }}</strong><small>last indexed</small></div></div>
+        <div class="agent-section-heading"><div><p class="section-kicker">Agent context</p><h3>How Agent uses Business Brain</h3><p>Configure how the Agent uses verified business knowledge here. Manage sources, facts, and crawling in the full Knowledge workspace.</p></div><span :class="['knowledge-readiness-pill', knowledgeReady ? 'ready' : 'needs-review']">{{ knowledgeReady ? 'Ready' : 'Review' }}</span></div>
+        <div class="agent-knowledge-metrics"><div><strong>{{ knowledge?.sourceCount ?? 0 }}</strong><small>sources available</small></div><div><strong>{{ knowledge?.chunkCount ?? 0 }}</strong><small>indexed facts</small></div><div><strong>{{ knowledge?.openGaps ?? 0 }}</strong><small>open answer gaps</small></div><div><strong>{{ knowledgeLastUpdated }}</strong><small>last indexed</small></div></div>
+        <div class="agent-knowledge-behavior" aria-label="Knowledge behavior">
+          <div><span class="knowledge-check">✓</span><span><strong>Answer only from verified sources</strong><small>Business Brain remains the source of truth for customer answers.</small></span></div>
+          <div><span class="knowledge-check">✓</span><span><strong>Use supported retrieval</strong><small>Retrieve grounded context before answering detail-heavy questions.</small></span></div>
+          <div><span :class="['knowledge-check', { muted: draft.citationVisibility === 'hidden' }]">{{ draft.citationVisibility === 'hidden' ? '—' : '✓' }}</span><span><strong>Show sources when helpful</strong><small>{{ draft.citationVisibility === 'hidden' ? 'Source links are hidden from visitors.' : 'Source links follow Agent Behavior settings.' }}</small></span></div>
+        </div>
         <p class="agent-knowledge-status">{{ knowledgeStatusLabel }}</p>
         <div v-if="openKnowledgeGaps.length" class="agent-knowledge-gaps"><strong>Open answer gaps</strong><button v-for="gap in openKnowledgeGaps.slice(0, 3)" :key="gap.question" type="button" @click="emit('open-knowledge')">{{ gap.question }} <span>{{ gap.occurrenceCount }}×</span></button><small v-if="openKnowledgeGaps.length > 3">{{ openKnowledgeGaps.length - 3 }} more gaps in Knowledge</small></div>
-        <div class="agent-knowledge-actions"><Button variant="primary" size="small" @click="emit('open-knowledge')">Add knowledge</Button><Button variant="secondary" size="small" @click="emit('open-knowledge')">Review knowledge</Button><Button v-if="openKnowledgeGaps.length" variant="secondary" size="small" @click="emit('open-knowledge')">Review gaps</Button></div>
+        <div class="agent-knowledge-actions"><Button variant="primary" size="small" @click="emit('open-knowledge')">Manage business knowledge →</Button><Button v-if="openKnowledgeGaps.length" variant="secondary" size="small" @click="emit('open-knowledge')">Review gaps</Button></div>
       </article>
     </div>
 
@@ -612,9 +904,15 @@ function openLiveWebsite(): void {
 
     <div v-else-if="tab === 'quick-actions' || tab === 'actions'" class="agent-config-layout">
       <article class="agent-form-panel agent-settings-panel panel">
-        <section class="agent-section quick-actions-section"><div class="agent-section-heading action-heading"><div><p class="section-kicker">Guide visitors</p><h3>Quick actions</h3><p>Keep this list short. The same buttons appear in the visitor preview.</p></div><Button variant="primary" size="small" :disabled="agentDraft.widgetQuickActions.length >= 5" @click="startAddAction"><Plus :size="14" :stroke-width="2" aria-hidden="true" /> Add quick action</Button></div><div v-if="!agentDraft.widgetQuickActions.length" class="empty-actions"><strong>Start with a helpful question.</strong><p>Add one action to give visitors an easy first step.</p><Button variant="secondary" size="small" @click="startAddAction"><Plus :size="14" :stroke-width="2" aria-hidden="true" /> Add quick action</Button></div><div v-else class="compact-action-list"><article v-for="(action, index) in agentDraft.widgetQuickActions" :key="`${action.label}-${index}`" class="compact-action-row"><button class="drag-handle" type="button" aria-label="Move action up" @click="moveAction(index, -1)"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /></button><div class="compact-action-copy"><strong>{{ action.label }}</strong><span>“{{ action.question }}”</span></div><div class="compact-action-controls"><button type="button" @click="editAction(index)">Edit</button><button type="button" @click="removeAction(index)">Delete</button></div></article></div></section>
-        <section v-if="quickActionEditorOpen" class="action-drawer"><div class="agent-section-heading"><div><p class="section-kicker">{{ editingActionIndex === null ? 'New action' : 'Edit action' }}</p><h3>Quick action details</h3></div><button class="icon-button" type="button" aria-label="Close" @click="quickActionEditorOpen = false"><X :size="18" :stroke-width="1.8" aria-hidden="true" /></button></div><FormField label="Label" required><TextInput v-model="actionLabel" :maxlength="48" placeholder="Explore services" /></FormField><FormField label="Customer message" required><TextInput v-model="actionQuestion" :maxlength="300" placeholder="What services do you offer?" /></FormField><FormField label="Action type"><Select :options="[{ label: 'Ask AI', value: 'ask' }, { label: 'Open lead form', value: 'lead' }, { label: 'Request human', value: 'human' }]" placeholder="" /></FormField><div class="drawer-actions"><Button variant="secondary" size="small" @click="quickActionEditorOpen = false">Cancel</Button><Button variant="primary" size="small" :disabled="!actionLabel.trim() || !actionQuestion.trim()" @click="saveAction">Save action</Button></div></section>
-        <section class="agent-section agent-section-footer"><div><strong>{{ agentDraft.widgetQuickActions.length }} of 5 recommended actions</strong><p>Use specific questions that help visitors choose what to do next.</p></div><Button variant="primary" size="small" @click="saveChanges">Save changes</Button></section>
+        <section class="agent-section quick-actions-section">
+          <div class="agent-section-heading action-heading"><div><p class="section-kicker">Capability-aware shortcuts</p><h3>Quick actions</h3><p>FrontDeskWise recommends 3–4 safe entry points from verified knowledge, published workflows, actions, and handoff.</p></div><Button variant="primary" size="small" :disabled="agentDraft.widgetQuickActions.length >= 4" @click="startAddAction"><Plus :size="14" :stroke-width="2" aria-hidden="true" /> Add approved action</Button></div>
+          <div v-if="recommendedQuickActions.length" class="quick-action-recommendations"><div class="quick-action-recommendations-heading"><div><p class="section-kicker">FrontDeskWise recommends</p><strong>Use only what the system can safely fulfill</strong><small>Recommendations are not published until you approve them.</small></div><Button variant="secondary" size="small" @click="applyQuickActionRecommendations">{{ recommendationsApplied ? 'Recommendations applied' : 'Use recommendations' }}</Button></div><div class="quick-action-recommendation-list"><div v-for="recommendation in recommendedQuickActions" :key="`${recommendation.kind}-${recommendation.targetId ?? recommendation.label}`"><span class="recommendation-check">✓</span><strong>{{ recommendation.label }}</strong><span class="quick-action-kind-pill">{{ recommendation.kind }}</span><small>{{ quickActionReadiness(recommendation).reason }}</small></div></div></div>
+          <div v-if="quickActionPublishIssues.length" class="quick-action-validation" role="alert"><strong>{{ quickActionPublishIssues.length }} quick action{{ quickActionPublishIssues.length === 1 ? '' : 's' }} need{{ quickActionPublishIssues.length === 1 ? 's' : '' }} review before publish.</strong><small>Approve recommendations or connect/publish the capability they promise.</small></div>
+          <div v-if="!agentDraft.widgetQuickActions.length" class="empty-actions"><strong>No approved shortcuts yet.</strong><p>Use the safe recommendations above, then edit them to match your visitor language.</p><Button variant="secondary" size="small" :disabled="!recommendedQuickActions.length" @click="applyQuickActionRecommendations">Use recommendations</Button></div>
+          <div v-else class="quick-action-card-list"><article v-for="(action, index) in agentDraft.widgetQuickActions" :key="`${action.label}-${index}`" class="quick-action-card"><button class="drag-handle" type="button" aria-label="Move action up" @click="moveAction(index, -1)"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /></button><div class="quick-action-card-copy"><div class="quick-action-card-title"><strong>{{ action.label }}</strong><span :class="['quick-action-approval', quickActionNeedsApproval(action) ? 'needs-approval' : 'approved']">{{ quickActionNeedsApproval(action) ? 'Needs approval' : 'Approved' }}</span></div><span>“{{ action.question }}”</span><div class="quick-action-meta"><span class="quick-action-kind-pill">{{ quickActionConnection(action).kind }}</span><strong>{{ quickActionConnection(action).detail }}</strong><span :class="['quick-action-readiness', quickActionConnection(action).readiness]">{{ quickActionStatusLabel(action) }}</span></div><button v-if="quickActionWorkflowId(action)" class="quick-action-workflow-link" type="button" @click.stop="emit('open-workflow', quickActionWorkflowId(action))">View workflow →</button></div><div class="quick-action-menu-wrap"><button class="quick-action-menu-button" type="button" aria-label="More quick action options" :aria-expanded="openQuickActionMenuIndex === index" @click="openQuickActionMenuIndex = openQuickActionMenuIndex === index ? null : index"><MoreHorizontal :size="17" :stroke-width="1.9" aria-hidden="true" /></button><div v-if="openQuickActionMenuIndex === index" class="quick-action-menu" role="menu"><button type="button" role="menuitem" @click="editAction(index)">Edit</button><button type="button" role="menuitem" :disabled="agentDraft.widgetQuickActions.length >= 4" @click="duplicateAction(index)">Duplicate</button><button type="button" role="menuitem" class="danger-menu-item" @click="removeAction(index)">Delete</button></div></div></article></div>
+        </section>
+        <section v-if="quickActionEditorOpen" class="action-drawer"><div class="agent-section-heading"><div><p class="section-kicker">{{ editingActionIndex === null ? 'New shortcut' : 'Edit shortcut' }}</p><h3>Quick action details</h3></div><button class="icon-button" type="button" aria-label="Close" @click="quickActionEditorOpen = false"><X :size="18" :stroke-width="1.8" aria-hidden="true" /></button></div><FormField label="Label" required><TextInput v-model="actionLabel" :maxlength="48" placeholder="Explore services" /></FormField><FormField label="Customer message" required><TextInput v-model="actionQuestion" :maxlength="300" placeholder="What services do you offer?" /></FormField><div class="quick-action-editor-note"><span>Connection</span><strong>{{ editingActionConnection.label }}</strong><small>{{ editingActionConnection.detail }}</small></div><div class="drawer-actions"><Button variant="secondary" size="small" @click="quickActionEditorOpen = false">Cancel</Button><Button variant="primary" size="small" :disabled="!actionLabel.trim() || !actionQuestion.trim()" @click="saveAction">Save action</Button></div></section>
+        <section class="agent-section agent-section-footer"><div><strong>{{ agentDraft.widgetQuickActions.length }} of 4 approved actions</strong><p>Every shortcut must be backed by verified knowledge, a published workflow/action, or enabled handoff.</p></div><Button variant="primary" size="small" @click="saveChanges">Save changes</Button></section>
       </article>
       <aside class="agent-preview-column"><WidgetPreview :assistant-name="agentDraft.assistantName" :welcome-message="agentDraft.welcomeMessage" :business-name="businessName" :website-url="websiteUrl" :widget-color="safeWidgetColor" :widget-theme="agentDraft.widgetTheme" :widget-position="agentDraft.widgetPosition" :widget-default-mode="agentDraft.widgetDefaultMode" :widget-allow-expand="agentDraft.widgetAllowExpand" :quick-actions="agentDraft.widgetQuickActions" :show-lead-capture="agentDraft.showLeadCapture" :require-lead-consent="agentDraft.requireLeadConsent" :privacy-notice-url="agentDraft.privacyNoticeUrl" :show-ai-disclosure="agentDraft.showAiDisclosure" :citation-visibility="agentDraft.citationVisibility" :tone="agentDraft.tone" :fallback-behavior="agentDraft.fallbackBehavior" :human-handoff-enabled="agentDraft.humanHandoffEnabled" :widget-logo-url="logoPreview || agentDraft.widgetLogoUrl" :proactive-enabled="agentDraft.proactiveEnabled" :proactive-message="agentDraft.proactiveMessage" :proactive-behavior="agentDraft.proactiveBehavior" :mode="previewMode" @change-mode="previewMode = $event" /></aside>
     </div>
@@ -685,6 +983,32 @@ function openLiveWebsite(): void {
 .agent-header-actions, .drawer-actions, .compact-action-controls, .install-platform-tabs, .preview-mode-toggle { display: flex; align-items: center; gap: 10px; }
 .agent-header-actions { flex-wrap: wrap; }
 .agent-config-layout { display: grid; grid-template-columns: minmax(300px, 340px) minmax(0, 1fr); gap: 20px; align-items: start; min-width: 0; }
+.agent-behavior-view { min-width: 0; }
+.agent-behavior-action-bar { position: sticky; bottom: 14px; z-index: 12; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 0 0 18px; padding: 11px 13px; border: 1px solid #cfe0f3; border-radius: 12px; background: rgba(248, 251, 255, .96); box-shadow: 0 12px 28px rgba(20,42,74,.12); backdrop-filter: blur(12px); }
+.agent-behavior-save-state { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-behavior-save-state > div { display: grid; gap: 2px; min-width: 0; }
+.agent-behavior-save-state strong { overflow: hidden; color: var(--agent-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-behavior-save-state small { overflow: hidden; color: var(--agent-muted); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.agent-behavior-save-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #19bb8a; box-shadow: 0 0 0 4px rgba(25,187,138,.12); }
+.agent-behavior-save-dot.pending { background: #e3a327; box-shadow: 0 0 0 4px rgba(227,163,39,.14); }
+.agent-behavior-action-buttons { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.agent-defaults-context { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; padding: 11px 13px; border: 1px solid #dce7f4; border-radius: 11px; color: #536a87; background: #f8fbff; }
+.agent-defaults-context-mark { display: grid; width: 23px; height: 23px; flex: 0 0 23px; place-items: center; border-radius: 50%; color: #315d93; background: #e9f2ff; font-size: 14px; font-weight: 800; }
+.agent-defaults-context > div { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.agent-defaults-context strong { color: var(--agent-ink); font-size: 12px; }
+.agent-defaults-context small { color: var(--agent-muted); font-size: 10px; line-height: 1.35; }
+.agent-defaults-context .text-button { flex: 0 0 auto; padding: 0; font-size: 10px; }
+.behavior-view-switcher { display: none; }
+.agent-behavior-layout { grid-template-columns: minmax(360px, 400px) minmax(520px, 1fr); }
+.agent-behavior-settings, .agent-behavior-preview { min-width: 0; }
+.agent-behavior-preview { position: sticky; top: calc(var(--workspace-header-height, 72px) + 44px); align-self: start; }
+.agent-behavior-preview :deep(.agent-preview-shell) { position: static; }
+.behavior-preview-context { display: flex; align-items: center; gap: 9px; margin: 0 0 11px; padding: 10px 12px; border: 1px solid #dce7f4; border-radius: 10px; color: var(--agent-muted); background: #f8fbff; }
+.behavior-preview-context > div { display: grid; gap: 2px; min-width: 0; }
+.behavior-preview-context > div > span { color: #7b8ba0; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.behavior-preview-context strong { overflow: hidden; color: var(--agent-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.behavior-preview-context small { margin-left: auto; color: #8795a8; font-size: 10px; white-space: nowrap; }
+.behavior-preview-live-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #2f80ed; box-shadow: 0 0 0 4px rgba(47,128,237,.12); }
 .agent-settings-panel, .agent-form-panel, .agent-preview-column { min-width: 0; width: 100%; }
 .agent-form-panel { padding: 0; overflow: hidden; }
 .agent-section { padding: 24px; border-bottom: 1px solid var(--agent-border); }
@@ -734,14 +1058,50 @@ function openLiveWebsite(): void {
 .color-swatch { width: 25px; height: 25px; border: 3px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px #d2dce9; }
 .color-swatch.selected { box-shadow: 0 0 0 2px #1769e8; }
 .quick-actions-section { min-height: 280px; }
-.compact-action-list { display: grid; gap: 8px; margin-top: 19px; }
-.compact-action-row { display: flex; align-items: center; gap: 11px; padding: 11px 10px; border: 1px solid var(--agent-border); border-radius: 10px; background: #fff; }
+.quick-action-card-list { display: grid; gap: 10px; margin-top: 19px; }
+.quick-action-card { position: relative; display: flex; align-items: flex-start; gap: 11px; padding: 14px 10px; border: 1px solid var(--agent-border); border-radius: 11px; background: #fff; transition: border-color .15s ease, box-shadow .15s ease; }
+.quick-action-card:hover { border-color: #bfd1e7; box-shadow: 0 5px 15px rgba(31, 68, 117, .06); }
 .drag-handle { width: 24px; padding: 4px; border: 0; color: #8a9ab1; background: transparent; font-size: 18px; }
-.compact-action-copy { display: grid; gap: 3px; min-width: 0; flex: 1; }
-.compact-action-copy strong { overflow: hidden; color: var(--agent-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.compact-action-copy span { overflow: hidden; color: var(--agent-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.compact-action-controls button { padding: 5px 6px; border: 0; color: #2168d8; background: transparent; font-size: 11px; font-weight: 700; }
-.compact-action-controls button:last-child { color: #b44343; }
+.quick-action-card-copy { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.quick-action-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.quick-action-card-copy > strong { overflow: hidden; color: var(--agent-ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.quick-action-card-copy > span { overflow: hidden; color: var(--agent-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.quick-action-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 6px; color: #7f8da1; font-size: 10px; }
+.quick-action-meta span { padding: 3px 6px; border-radius: 999px; color: #315d93; background: #eef5ff; font-weight: 750; }
+.quick-action-meta strong { color: #556b87; font-size: 10px; font-weight: 650; }
+.quick-action-approval { flex: 0 0 auto; padding: 3px 6px; border-radius: 999px; font-size: 9px; font-weight: 800; white-space: nowrap; }
+.quick-action-approval.approved { color: #08785d; background: #e7f8f1; }
+.quick-action-approval.needs-approval { color: #95630c; background: #fff5df; }
+.quick-action-kind-pill { display: inline-flex; align-items: center; padding: 3px 6px; border-radius: 999px; color: #315d93; background: #eef5ff; font-size: 9px !important; font-weight: 800 !important; letter-spacing: .04em; }
+.quick-action-readiness { color: #08785d; font-size: 10px; }
+.quick-action-readiness.blocked { color: #b44343; }
+.quick-action-workflow-link { justify-self: start; padding: 0; border: 0; color: #2168d8; background: transparent; font-size: 10px; font-weight: 750; }
+.quick-action-menu-wrap { position: relative; flex: 0 0 auto; }
+.quick-action-menu-button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 7px; color: #71829a; background: transparent; }
+.quick-action-menu-button:hover, .quick-action-menu-button[aria-expanded="true"] { border-color: #d5e0ee; color: #2168d8; background: #f6f9fd; }
+.quick-action-menu { position: absolute; z-index: 5; top: calc(100% + 5px); right: 0; display: grid; min-width: 130px; padding: 5px; border: 1px solid #d9e3ef; border-radius: 9px; background: #fff; box-shadow: 0 12px 28px rgba(33, 56, 91, .15); }
+.quick-action-menu button { padding: 8px 9px; border: 0; border-radius: 6px; color: #455b77; background: transparent; font-size: 11px; text-align: left; }
+.quick-action-menu button:hover:not(:disabled) { color: #2458b2; background: #f3f7fd; }
+.quick-action-menu button:disabled { color: #b8c2cf; cursor: not-allowed; }
+.quick-action-menu .danger-menu-item { color: #b34135; }
+.quick-action-editor-note { display: grid; gap: 4px; margin-top: 18px; padding: 11px 12px; border: 1px solid #dce7f4; border-radius: 9px; background: #f8fbff; }
+.quick-action-editor-note span { color: #7b8ba0; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.quick-action-editor-note strong { color: var(--agent-ink); font-size: 12px; }
+.quick-action-editor-note small { color: var(--agent-muted); font-size: 10px; }
+.quick-action-recommendations { margin-top: 18px; padding: 15px; border: 1px solid #cfe0f3; border-radius: 11px; background: linear-gradient(135deg, #f8fbff, #f2f7ff); }
+.quick-action-recommendations-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.quick-action-recommendations-heading > div { display: grid; gap: 3px; min-width: 0; }
+.quick-action-recommendations-heading .section-kicker { margin-bottom: 1px; }
+.quick-action-recommendations-heading strong { color: var(--agent-ink); font-size: 12px; }
+.quick-action-recommendations-heading small { color: var(--agent-muted); font-size: 10px; }
+.quick-action-recommendation-list { display: grid; gap: 8px; margin-top: 13px; }
+.quick-action-recommendation-list > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.quick-action-recommendation-list strong { color: var(--agent-ink); font-size: 11px; }
+.quick-action-recommendation-list small { overflow: hidden; margin-left: auto; color: var(--agent-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.recommendation-check { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border-radius: 50%; color: #08785d; background: #e7f8f1; font-size: 10px; font-weight: 800; }
+.quick-action-validation { display: grid; gap: 3px; margin-top: 12px; padding: 11px 12px; border: 1px solid #f0d5a6; border-radius: 9px; color: #7d5c20; background: #fffaf0; }
+.quick-action-validation strong { color: #6e4e14; font-size: 11px; }
+.quick-action-validation small { color: #8c6d36; font-size: 10px; }
 .action-drawer { margin: 0 24px 22px; padding: 18px; border: 1px solid #bcd2ef; border-radius: 11px; background: #f7faff; }
 .icon-button { border: 0; color: var(--agent-muted); background: transparent; font-size: 20px; }
 .drawer-actions { justify-content: flex-end; margin-top: 20px; }
@@ -764,10 +1124,30 @@ function openLiveWebsite(): void {
 .agent-capability-copy { min-width: 0; }
 .agent-capability-copy strong { color: var(--agent-ink); font-size: 13px; }
 .agent-capability-copy p { margin: 4px 0 0; color: var(--agent-muted); font-size: 11px; line-height: 1.45; }
+.capability-relationship { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; color: #7d8da2; font-size: 10px; }
+.capability-relationship span { color: #8a98aa; font-weight: 750; }
+.capability-relationship button { padding: 0; border: 0; color: #315d93; background: transparent; font-size: 10px; font-weight: 750; text-align: left; }
+.capability-relationship button:hover { color: #2168d8; text-decoration: underline; }
+.capability-relationship button:not(:last-of-type)::after { margin-left: 6px; color: #b2bfce; content: "·"; text-decoration: none; }
+.capability-relationship small { color: #8795a8; font-size: 10px; }
+.capability-relationship-muted { color: #8896a8; }
 .capability-status-label { padding: 5px 8px; border-radius: 999px; color: #95630c; background: #fff5df; font-size: 10px; font-weight: 800; white-space: nowrap; }
 .capability-status-label.ready { color: #08785d; background: #e7f8f1; }
 .capability-action { padding: 6px 0; border: 0; color: #2168d8; background: transparent; font-size: 11px; font-weight: 750; white-space: nowrap; }
 .agent-capabilities-note { align-items: center; border-color: #cfe0f3; background: linear-gradient(135deg, #f8fbff, #f1f8ff); }
+.agent-journeys { padding: 22px; }
+.agent-journeys-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.agent-journeys-heading h3 { margin: 0; color: var(--agent-ink); font-size: 17px; letter-spacing: -.025em; }
+.agent-journeys-heading p:not(.section-kicker) { margin: 7px 0 0; color: var(--agent-muted); font-size: 12px; line-height: 1.5; }
+.agent-journey-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 18px; }
+.agent-journey-card { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 11px; border: 1px solid var(--agent-border); border-radius: 10px; color: inherit; background: #fff; text-align: left; }
+.agent-journey-card:hover { border-color: #bcd2ef; background: #f8fbff; }
+.journey-icon { display: grid; width: 25px; height: 25px; flex: 0 0 25px; place-items: center; border-radius: 8px; color: #315d93; background: #edf4ff; font-size: 12px; }
+.agent-journey-card > span:nth-child(2) { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.agent-journey-card strong { overflow: hidden; color: var(--agent-ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-journey-card small { color: var(--agent-muted); font-size: 10px; }
+.journey-arrow { color: #7890ad; font-size: 13px; }
+.agent-journeys-empty { margin-top: 16px; padding: 13px; border: 1px dashed #cbd8e7; border-radius: 9px; color: var(--agent-muted); background: #fbfcfe; font-size: 11px; }
 .agent-knowledge-layout { display: grid; max-width: 900px; gap: 18px; }
 .agent-knowledge-summary { padding: 24px; }
 .knowledge-readiness-pill { padding: 5px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; }
@@ -779,6 +1159,13 @@ function openLiveWebsite(): void {
 .agent-knowledge-metrics strong { overflow: hidden; color: var(--agent-ink); font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-knowledge-metrics small { margin-top: 4px; color: var(--agent-muted); font-size: 10px; }
 .agent-knowledge-status { margin: 18px 0 0; color: #08785d; font-size: 13px; font-weight: 750; }
+.agent-knowledge-behavior { display: grid; gap: 10px; margin-top: 20px; padding: 15px; border: 1px solid #dce7f4; border-radius: 10px; background: #f8fbff; }
+.agent-knowledge-behavior > div { display: flex; align-items: flex-start; gap: 9px; }
+.agent-knowledge-behavior > div > span:last-child { display: grid; gap: 3px; }
+.knowledge-check { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border-radius: 50%; color: #08785d; background: #e7f8f1; font-size: 10px; font-weight: 800; }
+.knowledge-check.muted { color: #8a98a9; background: #eef1f5; }
+.agent-knowledge-behavior strong { color: var(--agent-ink); font-size: 11px; }
+.agent-knowledge-behavior small { color: var(--agent-muted); font-size: 10px; line-height: 1.35; }
 .agent-knowledge-gaps { display: grid; gap: 8px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--agent-border); }
 .agent-knowledge-gaps > strong { color: var(--agent-ink); font-size: 13px; }
 .agent-knowledge-gaps button { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border: 0; color: #2168d8; background: transparent; font-size: 12px; text-align: left; }
@@ -850,7 +1237,18 @@ function openLiveWebsite(): void {
 .support-success p { margin: 6px 0 13px; color: #386e60; font-size: 12px; line-height: 1.5; }
 .install-support-drawer > .auth-close { position: absolute; top: 17px; right: 20px; border: 0; color: var(--agent-muted); background: transparent; font-size: 25px; }
 .publish-step { background: #f8fbff; }
+@media (max-width: 1100px) {
+  .agent-behavior-layout { display: block; }
+  .behavior-view-switcher { display: flex; gap: 3px; margin: 0 0 14px; padding: 3px; border: 1px solid #d7e0eb; border-radius: 9px; background: #eef2f7; }
+  .behavior-view-switcher button { flex: 1; min-height: 34px; padding: 7px 12px; border: 0; border-radius: 6px; color: var(--agent-muted); background: transparent; font-size: 11px; font-weight: 750; }
+  .behavior-view-switcher button.active { color: var(--agent-ink); background: #fff; box-shadow: 0 1px 2px rgba(20,42,74,.12); }
+  .agent-behavior-settings, .agent-behavior-preview { display: none; }
+  .agent-behavior-settings.behavior-pane-active, .agent-behavior-preview.behavior-pane-active { display: block; }
+  .agent-behavior-preview { position: static; }
+  .agent-behavior-preview :deep(.agent-preview-shell) { position: static; }
+}
 @media (max-width: 900px) { .agent-config-layout, .agent-test-layout { grid-template-columns: 1fr; } .preview-sticky { position: static; } .agent-settings-panel, .agent-form-panel, .agent-preview-column { display: block; width: 100%; } .agent-preview-column { order: 0; } .install-step-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .agent-behavior-settings, .agent-behavior-preview { display: none; } .agent-behavior-settings.behavior-pane-active, .agent-behavior-preview.behavior-pane-active { display: block; } }
 @media (max-width: 640px) { .install-support { display: block; } .install-support-actions { justify-content: flex-start; margin-top: 16px; } .install-support-drawer { padding: 24px 18px; } }
-@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer, .agent-live-banner, .agent-capabilities-intro, .agent-capabilities-note { display: block; } .agent-header-row { display: flex; align-items: stretch; flex-direction: column; } .agent-header-actions, .agent-live-actions { margin-top: 16px; } .agent-header-actions { width: 100%; } .agent-header-actions > button { flex: 1 1 0; } .field-grid, .agent-knowledge-metrics { grid-template-columns: 1fr 1fr; } .agent-section { padding: 19px; } .compact-action-row { align-items: flex-start; } .compact-action-controls { flex-direction: column; gap: 0; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } .agent-capability-row { grid-template-columns: 28px minmax(0, 1fr) auto; } .agent-capability-row .capability-action { grid-column: 2 / -1; justify-self: start; padding-top: 0; } .agent-capabilities-note .outline-button { margin-top: 16px; } }
+@media (max-width: 640px) { .agent-header-row, .install-status-card, .agent-section-footer, .agent-live-banner, .agent-capabilities-intro, .agent-capabilities-note { display: block; } .agent-header-row { display: flex; align-items: stretch; flex-direction: column; } .agent-header-actions, .agent-live-actions { margin-top: 16px; } .agent-header-actions { width: 100%; } .agent-header-actions > button { flex: 1 1 0; } .agent-behavior-action-bar { align-items: stretch; flex-direction: column; gap: 11px; } .agent-behavior-save-state small { white-space: normal; } .agent-behavior-action-buttons { width: 100%; } .agent-behavior-action-buttons .ds-button { flex: 1; } .agent-defaults-context { align-items: flex-start; flex-wrap: wrap; } .agent-defaults-context .text-button { margin-left: 33px; } .behavior-preview-context { align-items: flex-start; } .behavior-preview-context small { display: none; } .field-grid, .agent-knowledge-metrics { grid-template-columns: 1fr 1fr; } .agent-section { padding: 19px; } .quick-action-card { align-items: flex-start; } .quick-action-card-copy > span { white-space: normal; } .agent-journeys-heading { display: block; } .agent-journeys-heading .outline-button { margin-top: 14px; } .agent-journey-list { grid-template-columns: 1fr; } .test-conversation, .test-owner-panel { padding: 17px; } .install-status-list { margin-top: 15px; } .agent-capability-row { grid-template-columns: 28px minmax(0, 1fr) auto; } .agent-capability-row .capability-action { grid-column: 2 / -1; justify-self: start; padding-top: 0; } .agent-capabilities-note .outline-button { margin-top: 16px; } }
 </style>

@@ -85,6 +85,7 @@ export function conditionMatches(condition: { field: string; equals?: string; no
 }
 
 function workflowStepIsAvailable(step: ActionStep, state: ConversationActionState): boolean {
+  if (step.enabled === false) return false;
   const config = step.config ?? {};
   const trigger = typeof config.trigger === "string" ? config.trigger : null;
   if (trigger && state.workflowTrigger !== trigger) return false;

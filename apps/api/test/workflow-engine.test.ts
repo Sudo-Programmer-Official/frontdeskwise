@@ -78,6 +78,21 @@ test("workflow skips unverified pricing and keeps guided demo as a conditional b
   assert.equal(currentWorkflowStep(salonWorkflow, state)?.id, "complete");
 });
 
+test("disabled draft steps stay configured but are skipped by runtime", () => {
+  const disabledWorkflow: ActionFlow = {
+    ...flow,
+    id: "disabled-step-workflow",
+    steps: [
+      { id: "name", type: "capture", fieldKey: "name", enabled: false },
+      { id: "email", type: "capture", fieldKey: "email" },
+      { id: "done", type: "complete" },
+    ],
+  };
+  const state = createActionState(disabledWorkflow);
+  assert.equal(currentWorkflowStep(disabledWorkflow, state)?.id, "email");
+  assert.deepEqual(disabledWorkflow.steps?.map((step) => step.id), ["name", "email", "done"]);
+});
+
 test("conditional knowledge steps stay off the normal cursor until their topic is requested", () => {
   const knowledgeWorkflow: ActionFlow = {
     ...flow,

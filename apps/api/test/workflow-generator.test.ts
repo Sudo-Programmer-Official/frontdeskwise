@@ -89,6 +89,10 @@ test("SalonFlow prompt is generated from the active business context", () => {
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.knowledgeSource, "verified_business_knowledge");
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.allowedFacts, "pricing");
   assert.equal(result.steps.find((step) => step.id === "pricing")?.config?.resumeBehavior, "return_to_previous_step");
+  assert.deepEqual(result.steps.slice(-5).map((step) => step.id), ["contact-email", "save-lead", "try-demo", "request-demo", "support-handoff"]);
+  assert.equal(result.steps.find((step) => step.id === "save-lead")?.type, "create_lead");
+  assert.ok(result.fields.some((field) => field.key === "name" && field.required));
+  assert.ok(result.fields.some((field) => field.key === "email" && field.required));
   assert.equal(JSON.stringify(result.steps.find((step) => step.id === "pricing")).includes("$65"), false);
   assert.equal(result.steps.some((step) => step.id === "fit-explanation"), false);
   assert.equal(result.steps.find((step) => step.id === "try-demo")?.config?.normalConversionEndpoint, true);
@@ -106,6 +110,62 @@ test("SalonFlow prompt is generated from the active business context", () => {
   assert.equal(result.fields.some((field) => field.question.includes("PlanCraftAI")), false);
   assert.equal(result.fields.some((field) => field.key === "usage_type"), false);
   assert.equal(result.steps.some((step) => step.id === "request-demo"), true);
+});
+
+test("short demo goal expands from Business Brain without inventing contact or demo data", () => {
+  const result = generateWorkflow("Capture contact details and guide them to a demo.", [], {
+    businessContext: {
+      businessName: "Salon Management Software for More Bookings",
+      businessType: "local_business",
+      summary: "SalonFlow is salon software for online booking and client reminders.",
+      services: [{ value: "Online booking" }, { value: "Client reminders" }],
+      primaryGoal: "request_demo",
+      approvedActions: [{ key: "request_demo", name: "Request a demo", actionType: "request_demo" }],
+      discoveredCtas: [{ label: "Request a demo", url: "https://salonflow.example/demo" }],
+      pricing: { verified: false },
+    },
+  });
+
+  assert.equal(result.intent, "business_fit");
+  assert.deepEqual(result.steps.map((step) => step.id), [
+    "business-type",
+    "main-goal",
+    "current-software",
+    "relevant-capabilities",
+    "pricing",
+    "integrations",
+    "contact-name",
+    "contact-email",
+    "save-lead",
+    "request-demo",
+    "support-handoff",
+  ]);
+  assert.deepEqual(result.fields.map((field) => field.key), ["business_type", "main_goal", "current_software", "name", "email"]);
+  assert.equal(result.fields.some((field) => field.key === "phone"), false);
+  assert.equal(result.steps.find((step) => step.id === "save-lead")?.type, "create_lead");
+  assert.equal(result.steps.find((step) => step.id === "request-demo")?.config?.actionKey, "request_demo");
+  assert.equal(result.steps.find((step) => step.id === "request-demo")?.config?.destinationUrl, "https://salonflow.example/demo");
+  assert.match(String(result.steps.find((step) => step.id === "contact-email")?.config?.generationReason), /Required for lead capture/);
+  assert.match(String(result.steps.find((step) => step.id === "request-demo")?.config?.generationReason), /selected primary conversion action/);
+  assert.ok(result.missingInformation?.some((item) => /pricing is not verified/i.test(item)));
+});
+
+test("missing demo context is surfaced instead of turning into a guessed URL", () => {
+  const result = generateWorkflow("Capture contact details and guide them to a demo.", [], {
+    businessContext: {
+      businessName: "SalonFlow",
+      businessType: "Salon",
+      summary: "Salon software for bookings.",
+      services: [{ value: "Online booking" }],
+      pricing: { verified: true },
+    },
+  });
+  const demoStep = result.steps.find((step) => step.type === "redirect");
+  assert.equal(result.intent, "business_fit");
+  assert.equal(demoStep?.config?.destinationUrl, undefined);
+  assert.equal(demoStep?.config?.generationStatus, "missing");
+  assert.match(String(demoStep?.config?.generationReason), /approve a demo action|verified destination/i);
+  assert.doesNotMatch(JSON.stringify(result), /https?:\/\//);
 });
 
 test("workflow generation cache keys are tenant, workflow, action, and context scoped", () => {

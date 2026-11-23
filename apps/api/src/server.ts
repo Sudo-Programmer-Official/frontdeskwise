@@ -83,7 +83,9 @@ import {
 } from "./workflow-engine.js";
 import { recomputeWorkflowResume, type WorkflowResumePlan } from "./workflow-resume.js";
 import { planRecommendationMessage, planRecommendationPayload, recommendPlan, type PlanRecommendation } from "./workflow-plan.js";
-import { nextTenantPublicationVersion, tenantPublicationHash } from "./tenant-publication.js";
+import { nextTenantPublicationVersion, tenantPublicationHash, workflowConfigHash } from "./tenant-publication.js";
+import { findDuplicateWorkflowName, workflowNameForAction } from "./workflow-names.js";
+import { findCompatibleAction, projectActionCapability } from "./action-capabilities.js";
 import { jackrabbitProviderForToken, type JackrabbitProvider } from "./jackrabbit-provider.js";
 import {
   answerabilityDecision,
@@ -206,6 +208,18 @@ import {
   type BusinessFactKind,
   type BusinessFactSourceType,
 } from "./business-knowledge.js";
+import {
+  BUSINESS_QNA_SOURCE_TYPES,
+  BUSINESS_QNA_STATUSES,
+  findCompatibleQna,
+  normalizeQnaQuestion,
+  qnaIsRuntimeUsable,
+  qnaStatusAfterFactRefresh,
+  type BusinessQna,
+  type BusinessQnaSourceReference,
+  type BusinessQnaSourceType,
+  type BusinessQnaStatus,
+} from "./business-qna.js";
 import { buildWorkflowContext } from "./workflow-context.js";
 import { validateWorkflowTenantIsolation, workflowIsolationMessage, type WorkflowIsolationResult } from "./workflow-isolation.js";
 import { buildCanonicalBusinessModel, createBusinessContextSnapshot, type BusinessContextSnapshot } from "./business-context.js";
@@ -506,10 +520,15 @@ type ProactiveTrigger = "delay" | "scroll" | "exit" | "returning";
 type ProactiveBehavior = "teaser" | "open";
 type ProactiveFrequency = "session" | "24h" | "visit";
 type CitationVisibility = "always" | "contextual" | "hidden";
+type WidgetQuickActionKind = "KNOWLEDGE" | "WORKFLOW" | "ACTION" | "HANDOFF";
 
 type WidgetQuickAction = {
   label: string;
   question: string;
+  kind?: WidgetQuickActionKind;
+  targetId?: string;
+  approved?: boolean;
+  generated?: boolean;
 };
 
 type AgentConfig = {
@@ -697,6 +716,12 @@ type Message = {
     validationStatus?: "accepted" | "fallback";
     validationReason?: string | null;
     validationLatencyMs?: number;
+    qnaMatch?: boolean;
+    qnaMatchConfidence?: number;
+    qnaLookupLatencyMs?: number;
+    qnaId?: string | null;
+    qnaStatus?: BusinessQnaStatus | null;
+    fallbackToRag?: boolean;
   };
   createdAt: string;
 };
@@ -902,6 +927,7 @@ type ActionSubmission = {
 };
 
 type KnowledgeGap = {
+  id?: string;
   question: string;
   occurrenceCount: number;
   status: "open" | "resolved" | "ignored";
@@ -914,6 +940,10 @@ type KnowledgeGap = {
   indexError: string | null;
   intent: RetrievalIntent | null;
   reason: KnowledgeGapReason | "legacy_unknown";
+  resolutionType?: "OWNER_QNA" | null;
+  resolvedQnaId?: string | null;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
 };
 
 type EvaluationExpectation = "grounded" | "fallback";
@@ -990,6 +1020,7 @@ type Business = {
   internalNotes: InternalNote[];
   leads: Lead[];
   knowledgeGaps: Map<string, KnowledgeGap>;
+  qnas: BusinessQna[];
   businessContextSnapshot?: BusinessContextSnapshot | null;
   agentConfig: AgentConfig;
   publishedAgentConfig: AgentConfig | null;
@@ -1055,10 +1086,7 @@ function isInternalDemoSlug(slug: string): boolean {
 
 function defaultQuickActions(businessName: string): WidgetQuickAction[] {
   return [
-    { label: "Explore services", question: `What services does ${businessName} offer?` },
-    { label: "Pricing", question: "What does pricing look like?" },
-    { label: "Get started", question: "How do I get started?" },
-    { label: "Ask a question", question: "" },
+    { label: "Ask a question", question: "What would you like help with?", kind: "KNOWLEDGE", approved: true, generated: true },
   ];
 }
 
@@ -1081,7 +1109,11 @@ function normalizedWidgetQuickActions(value: unknown, businessName: string): Wid
       const record = asRecord(item);
       const label = typeof record.label === "string" ? record.label.trim().slice(0, 48) : "";
       const question = typeof record.question === "string" ? record.question.trim().slice(0, 300) : "";
-      return label ? { label, question } : null;
+      const kind = ["KNOWLEDGE", "WORKFLOW", "ACTION", "HANDOFF"].includes(String(record.kind)) ? String(record.kind) as WidgetQuickActionKind : undefined;
+      const targetId = typeof record.targetId === "string" && record.targetId.trim() ? record.targetId.trim().slice(0, 120) : undefined;
+      const approved = typeof record.approved === "boolean" ? record.approved : undefined;
+      const generated = typeof record.generated === "boolean" ? record.generated : undefined;
+      return label ? { label, question, ...(kind ? { kind } : {}), ...(targetId ? { targetId } : {}), ...(approved !== undefined ? { approved } : {}), ...(generated !== undefined ? { generated } : {}) } : null;
     })
     .filter((item): item is WidgetQuickAction => Boolean(item))
     .slice(0, 4);
@@ -2836,6 +2868,7 @@ function makeBusiness(input: {
     internalNotes: [],
     leads: [],
     knowledgeGaps: new Map(),
+    qnas: [],
     agentConfig: defaultConfig(input.name),
     publishedAgentConfig: null,
     publishedAgentConfigHash: null,
@@ -2955,7 +2988,10 @@ async function syncWebsitePricingFacts(business: Business): Promise<void> {
     fact.observedAt,
   ].join("|");
   const existingSignatures = new Set(existing.map(signature));
-  if (next.length === existing.length && next.every((fact) => existingSignatures.has(signature(fact)))) return;
+  if (next.length === existing.length && next.every((fact) => existingSignatures.has(signature(fact)))) {
+    await syncBusinessQnaStatuses(business);
+    return;
+  }
 
   business.facts = business.facts.filter((fact) => !(fact.sourceType === "website" && fact.kind === "pricing"));
   business.facts.push(...next);
@@ -2967,6 +3003,7 @@ async function syncWebsitePricingFacts(business: Business): Promise<void> {
     if (!isMissingDatabaseTable(error)) throw error;
     app.log.warn({ businessId: business.id }, "Website pricing facts are not persisted until the business facts table is available");
   }
+  await syncBusinessQnaStatuses(business);
 }
 
 async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): Promise<void> {
@@ -3868,6 +3905,53 @@ async function loadBusinessFactRows(businessId: string): Promise<Record<string, 
   }
 }
 
+function businessQnaFromRow(row: Record<string, unknown>): BusinessQna {
+  const status = BUSINESS_QNA_STATUSES.includes(String(row.status) as BusinessQnaStatus)
+    ? String(row.status) as BusinessQnaStatus
+    : "NEEDS_REVIEW";
+  const sourceType = BUSINESS_QNA_SOURCE_TYPES.includes(String(row.source_type) as BusinessQnaSourceType)
+    ? String(row.source_type) as BusinessQnaSourceType
+    : "OWNER";
+  const sourceReferences = Array.isArray(row.source_references)
+    ? row.source_references.filter((item): item is BusinessQnaSourceReference => Boolean(item && typeof item === "object")) as BusinessQnaSourceReference[]
+    : [];
+  return {
+    id: String(row.id),
+    organizationId: typeof row.organization_id === "string" ? row.organization_id : null,
+    businessId: String(row.business_id),
+    canonicalQuestion: String(row.canonical_question ?? ""),
+    canonicalAnswer: String(row.canonical_answer ?? ""),
+    variants: Array.isArray(row.variants) ? row.variants.filter((item): item is string => typeof item === "string").slice(0, 50) : [],
+    status,
+    sourceType,
+    sourceReferences,
+    answerGapId: typeof row.answer_gap_id === "string" ? row.answer_gap_id : null,
+    createdBy: typeof row.created_by === "string" ? row.created_by : null,
+    updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at ?? row.created_at),
+    lastReviewedAt: row.last_reviewed_at ? toIso(row.last_reviewed_at) : null,
+    validUntil: row.valid_until ? toIso(row.valid_until) : null,
+    timesUsed: Number(row.times_used ?? 0),
+    lastUsedAt: row.last_used_at ? toIso(row.last_used_at) : null,
+  };
+}
+
+async function loadBusinessQnaRows(businessId: string): Promise<Record<string, unknown>[]> {
+  if (!pool) return [];
+  try {
+    const result = await pool.query<Record<string, unknown>>(
+      "select * from business_qna where business_id = $1 order by updated_at desc, created_at desc",
+      [businessId],
+    );
+    return result.rows;
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+    app.log.warn({ businessId }, "Business Q&A table is not available yet");
+    return [];
+  }
+}
+
 async function loadBusinessContextSnapshot(businessId: string): Promise<BusinessContextSnapshot | null> {
   if (!pool) return null;
   try {
@@ -3909,7 +3993,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   const row = businessResult.rows[0];
   const businessId = String(row.id);
   const contextSnapshot = await loadBusinessContextSnapshot(businessId);
-  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult, actionResourceRows, businessFactRows, actionSubmissionRows] = await Promise.all([
+  const [sourceResult, chunkResult, conversationResult, leadResult, gapResult, actionResult, configResult, actionResourceRows, businessFactRows, actionSubmissionRows, businessQnaRows] = await Promise.all([
     pool.query<Record<string, unknown>>("select * from business_sources where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from knowledge_chunks where business_id = $1 order by created_at", [businessId]),
     pool.query<Record<string, unknown>>("select * from conversations where business_id = $1 order by created_at", [businessId]),
@@ -3920,6 +4004,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     loadActionResourceRows(businessId),
     loadBusinessFactRows(businessId),
     loadActionSubmissionRows(businessId),
+    loadBusinessQnaRows(businessId),
   ]);
   const conversationIds = conversationResult.rows.map((item) => String(item.id));
   const messageResult = conversationIds.length
@@ -4114,6 +4199,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     knowledgeGaps: new Map(gapResult.rows.map((gap) => [
       String(gap.question).toLowerCase().replace(/\s+/g, " ").trim(),
       {
+        id: typeof gap.id === "string" ? gap.id : undefined,
         question: String(gap.question),
         occurrenceCount: Number(gap.occurrence_count),
         status: gap.status === "resolved" ? "resolved" : gap.status === "ignored" ? "ignored" : "open",
@@ -4132,8 +4218,13 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         reason: ["no_authoritative_source", "low_confidence_evidence", "answer_generation_failed", "grounding_check_failed"].includes(String(gap.reason))
           ? String(gap.reason) as KnowledgeGapReason
           : "legacy_unknown",
+        resolutionType: gap.resolution_type === "OWNER_QNA" ? "OWNER_QNA" : null,
+        resolvedQnaId: typeof gap.resolved_qna_id === "string" ? gap.resolved_qna_id : null,
+        resolvedAt: gap.resolved_at ? toIso(gap.resolved_at) : null,
+        resolvedBy: typeof gap.resolved_by === "string" ? gap.resolved_by : null,
       } satisfies KnowledgeGap,
     ])),
+    qnas: businessQnaRows.map(businessQnaFromRow),
     agentConfig: config ? agentConfigFromValue({
       assistantName: config.assistant_name,
       welcomeMessage: config.welcome_message,
@@ -4211,6 +4302,11 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   // their live state until the first explicit publish writes a snapshot.
   if (loaded.agentPublishedAt && !loaded.publishedAgentConfig) {
     loaded.publishedAgentConfig = cloneAgentConfig(loaded.agentConfig);
+  }
+  try {
+    await syncBusinessQnaStatuses(loaded);
+  } catch (error) {
+    app.log.warn({ error, businessId: loaded.id }, "Business Q&A conflict refresh deferred");
   }
   for (const gap of loaded.knowledgeGaps.values()) {
     if (gap.status !== "resolved" || !gap.approvedAnswer) continue;
@@ -4627,6 +4723,197 @@ async function persistGap(business: Business, gap: KnowledgeGap): Promise<void> 
   }
 }
 
+function normalizedBusinessQna(input: unknown, business: Business, existing?: BusinessQna, actorId: string | null = null): BusinessQna {
+  const body = asRecord(input);
+  const canonicalQuestion = optionalString(body.canonicalQuestion ?? body.question ?? existing?.canonicalQuestion, 1_000)?.trim();
+  const canonicalAnswer = optionalString(body.canonicalAnswer ?? body.answer ?? existing?.canonicalAnswer, 4_000)?.trim();
+  if (!canonicalQuestion) throw httpError(400, "canonicalQuestion is required");
+  if (!canonicalAnswer) throw httpError(400, "canonicalAnswer is required");
+  const variants = Array.isArray(body.variants)
+    ? body.variants.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()).slice(0, 50)
+    : existing?.variants ?? [];
+  const statusValue = typeof body.status === "string" ? body.status.toUpperCase() : existing?.status ?? "VERIFIED";
+  const sourceTypeValue = typeof body.sourceType === "string" ? body.sourceType.toUpperCase() : existing?.sourceType ?? "OWNER";
+  if (!BUSINESS_QNA_STATUSES.includes(statusValue as BusinessQnaStatus)) throw httpError(400, "Unsupported Q&A status");
+  if (!BUSINESS_QNA_SOURCE_TYPES.includes(sourceTypeValue as BusinessQnaSourceType)) throw httpError(400, "Unsupported Q&A source type");
+  const now = new Date().toISOString();
+  const sourceReferences = Array.isArray(body.sourceReferences)
+    ? body.sourceReferences.filter((item): item is BusinessQnaSourceReference => Boolean(item && typeof item === "object")).slice(0, 20)
+    : existing?.sourceReferences ?? [];
+  return {
+    id: existing?.id ?? (typeof body.id === "string" ? body.id : randomUUID()),
+    organizationId: business.organizationId ?? null,
+    businessId: business.id,
+    canonicalQuestion,
+    canonicalAnswer,
+    variants: [...new Set(variants.filter((variant) => normalizeQnaQuestion(variant) !== normalizeQnaQuestion(canonicalQuestion)))].slice(0, 50),
+    status: statusValue as BusinessQnaStatus,
+    sourceType: sourceTypeValue as BusinessQnaSourceType,
+    sourceReferences,
+    answerGapId: existing?.answerGapId ?? (typeof body.answerGapId === "string" ? body.answerGapId : null),
+    createdBy: existing?.createdBy ?? actorId,
+    updatedBy: actorId ?? existing?.updatedBy ?? null,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    lastReviewedAt: existing?.lastReviewedAt ?? (statusValue === "VERIFIED" ? now : null),
+    validUntil: body.validUntil === null ? null : optionalString(body.validUntil ?? existing?.validUntil, 80),
+    timesUsed: existing?.timesUsed ?? 0,
+    lastUsedAt: existing?.lastUsedAt ?? null,
+  };
+}
+
+async function persistBusinessQna(business: Business, qna: BusinessQna): Promise<void> {
+  if (!pool) return;
+  const organizationId = qna.organizationId ?? business.organizationId ?? await businessOrganizationId(business);
+  const createdBy = await appUserIdForActor(qna.createdBy);
+  const updatedBy = await appUserIdForActor(qna.updatedBy);
+  qna.organizationId = organizationId;
+  await pool.query(
+    `insert into business_qna
+       (id, organization_id, business_id, canonical_question, canonical_answer, variants, status, source_type,
+        source_references, answer_gap_id, created_by, updated_by, created_at, updated_at, last_reviewed_at, valid_until, times_used, last_used_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+     on conflict (id) do update set
+       canonical_question = excluded.canonical_question,
+       canonical_answer = excluded.canonical_answer,
+       variants = excluded.variants,
+       status = excluded.status,
+       source_type = excluded.source_type,
+       source_references = excluded.source_references,
+       answer_gap_id = excluded.answer_gap_id,
+       updated_by = excluded.updated_by,
+       updated_at = excluded.updated_at,
+       last_reviewed_at = excluded.last_reviewed_at,
+       valid_until = excluded.valid_until,
+       times_used = excluded.times_used,
+       last_used_at = excluded.last_used_at`,
+    [
+      qna.id,
+      organizationId,
+      business.id,
+      qna.canonicalQuestion,
+      qna.canonicalAnswer,
+      qna.variants,
+      qna.status,
+      qna.sourceType,
+      JSON.stringify(qna.sourceReferences),
+      qna.answerGapId,
+      createdBy,
+      updatedBy,
+      qna.createdAt,
+      qna.updatedAt,
+      qna.lastReviewedAt,
+      qna.validUntil,
+      qna.timesUsed,
+      qna.lastUsedAt,
+    ],
+  );
+}
+
+async function appUserIdForActor(actorId: string | null): Promise<string | null> {
+  if (!pool || !actorId) return null;
+  const direct = await pool.query<{ id: string }>("select id from app_users where id = $1 limit 1", [actorId]);
+  if (direct.rowCount) return direct.rows[0].id;
+  const legacy = await pool.query<{ app_user_id: string }>(
+    `select u.id as app_user_id
+     from workspace_users wu
+     join app_users u on u.email_normalized = lower(trim(wu.email))
+     where wu.id = $1 limit 1`,
+    [actorId],
+  );
+  return legacy.rows[0]?.app_user_id ?? null;
+}
+
+async function persistBusinessQnaStatus(business: Business, qna: BusinessQna): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    "update business_qna set status = $3, updated_at = now() where business_id = $1 and id = $2",
+    [business.id, qna.id, qna.status],
+  );
+}
+
+async function syncBusinessQnaStatuses(business: Business): Promise<void> {
+  for (const qna of business.qnas) {
+    const nextStatus = qnaStatusAfterFactRefresh(qna, business.facts);
+    if (nextStatus === qna.status) continue;
+    qna.status = nextStatus;
+    await persistBusinessQnaStatus(business, qna);
+  }
+}
+
+async function markBusinessQnaUsed(business: Business, qna: BusinessQna): Promise<void> {
+  qna.timesUsed += 1;
+  qna.lastUsedAt = new Date().toISOString();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `update business_qna set times_used = times_used + 1, last_used_at = now()
+       where business_id = $1 and id = $2 and status = 'VERIFIED'`,
+      [business.id, qna.id],
+    );
+  } catch (error) {
+    if (!isMissingDatabaseTable(error)) throw error;
+  }
+}
+
+async function replaceBusinessQnaIndex(business: Business, qna: BusinessQna): Promise<"queued" | "ready"> {
+  const sourceUrl = `qna:${qna.id}`;
+  const previousSource = business.sources.find((source) => source.url === sourceUrl);
+  const sourceId = previousSource?.id ?? randomUUID();
+  const source: Source = {
+    id: sourceId,
+    url: sourceUrl,
+    canonicalUrl: sourceUrl,
+    title: `Q&A: ${qna.canonicalQuestion}`.slice(0, 240),
+    contentType: "faq",
+    pageType: "faq",
+    crawlStatus: "ready",
+    contentHash: contentHash(`${sourceUrl}:${qna.canonicalAnswer}`),
+    lastCrawledAt: new Date().toISOString(),
+  };
+  const chunk: KnowledgeChunk = {
+    id: randomUUID(),
+    sourceId,
+    content: `${qna.canonicalQuestion}\n${qna.variants.join("\n")}\n${qna.canonicalAnswer}`,
+    contentHash: contentHash(`${qna.canonicalQuestion}\n${qna.variants.join("\n")}\n${qna.canonicalAnswer}`),
+    metadata: {
+      sourceType: "knowledge_answer",
+      qnaId: qna.id,
+      canonicalQuestion: qna.canonicalQuestion,
+      variants: qna.variants,
+      pageType: "faq",
+    },
+  };
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("delete from knowledge_chunks where business_id = $1 and source_id = $2", [business.id, sourceId]);
+      await client.query("delete from business_sources where business_id = $1 and id = $2", [business.id, sourceId]);
+      await client.query(
+        `insert into business_sources (id, business_id, source_url, canonical_url, title, content_type, page_type, crawl_status, content_hash, last_crawled_at)
+         values ($1, $2, $3, $3, $4, 'faq', 'faq', 'ready', $5, now())`,
+        [sourceId, business.id, sourceUrl, source.title, source.contentHash],
+      );
+      await client.query(
+        `insert into knowledge_chunks (id, business_id, source_id, content, content_hash, metadata)
+         values ($1, $2, $3, $4, $5, $6)`,
+        [chunk.id, business.id, sourceId, chunk.content, chunk.contentHash, JSON.stringify(chunk.metadata)],
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  business.sources = business.sources.filter((candidate) => candidate.id !== sourceId).concat(source);
+  business.chunks = business.chunks.filter((candidate) => candidate.sourceId !== sourceId).concat(chunk);
+  const indexingStatus = pool ? await enqueueAndRunEmbeddingJob(business) : "ready";
+  return indexingStatus === "queued" || (pool && !embeddingsConfigured()) ? "queued" : "ready";
+}
+
 async function setKnowledgeIndexState(
   business: Business,
   gap: KnowledgeGap,
@@ -4724,6 +5011,14 @@ async function replaceKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap
 
 async function ensureKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap): Promise<void> {
   if (gap.status !== "resolved" || !gap.approvedAnswer) return;
+  const qna = business.qnas.find((candidate) => candidate.answerGapId === gap.id || normalizeQnaQuestion(candidate.canonicalQuestion) === normalizeQnaQuestion(gap.question));
+  if (qna) {
+    if (qna.status === "ARCHIVED") return;
+    const expectedQnaContentHash = contentHash(`${qna.canonicalQuestion}\n${qna.variants.join("\n")}\n${qna.canonicalAnswer}`);
+    const indexedQnaChunk = business.chunks.find((chunk) => chunk.metadata.qnaId === qna.id && chunk.contentHash === expectedQnaContentHash);
+    if (!indexedQnaChunk) await replaceBusinessQnaIndex(business, qna);
+    return;
+  }
   const expectedContentHash = contentHash(`${gap.question}\n${gap.approvedAnswer}`);
   const indexedChunk = business.chunks.find((chunk) => chunk.metadata.sourceType === "knowledge_answer"
     && chunk.metadata.knowledgeGapQuestion === gap.question
@@ -4740,10 +5035,18 @@ async function ensureKnowledgeAnswerIndex(business: Business, gap: KnowledgeGap)
   if (pool && !embeddingReady) await enqueueAndRunEmbeddingJob(business);
 }
 
-async function resolveKnowledgeGap(business: Business, question: string, approvedAnswer: string, answerMode: KnowledgeAnswerMode = "knowledge"): Promise<{ gap: KnowledgeGap; indexingStatus: "queued" | "ready" | "failed" }> {
+async function resolveKnowledgeGap(
+  business: Business,
+  question: string,
+  approvedAnswer: string,
+  answerMode: KnowledgeAnswerMode = "knowledge",
+  actorId: string | null = null,
+  variants: string[] = [],
+): Promise<{ gap: KnowledgeGap; qna: BusinessQna; indexingStatus: "queued" | "ready" | "failed" }> {
   const key = question.toLowerCase().replace(/\s+/g, " ").trim();
   const gap = business.knowledgeGaps.get(key);
   if (!gap) throw httpError(404, "Knowledge gap not found");
+  const persistedActorId = await appUserIdForActor(actorId);
   gap.status = "resolved";
   gap.approvedAnswer = approvedAnswer;
   gap.answerMode = answerMode;
@@ -4751,13 +5054,37 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
   gap.updatedAt = gap.lastSeenAt;
   gap.indexStatus = "pending";
   gap.indexError = null;
+  const compatible = findCompatibleQna(question, business.qnas, 0.78);
+  const qna = normalizedBusinessQna({
+    ...(compatible?.qna ?? {}),
+    canonicalQuestion: compatible?.qna.canonicalQuestion ?? gap.question,
+    canonicalAnswer: approvedAnswer,
+    variants: [...(compatible?.qna.variants ?? []), gap.question, ...variants],
+    status: "VERIFIED",
+    sourceType: compatible?.qna.sourceType === "WEBSITE_DERIVED" ? "OWNER_CONFIRMED" : "OWNER_CONFIRMED",
+    answerGapId: compatible?.qna.answerGapId ?? gap.id ?? null,
+    sourceReferences: [
+      ...(compatible?.qna.sourceReferences ?? []).filter((reference) => reference.type !== "ANSWER_GAP" || reference.id !== gap.id),
+      { type: "ANSWER_GAP", id: gap.id ?? null, label: `Asked by visitors ${gap.occurrenceCount} times`, occurredAt: gap.lastSeenAt },
+      ...(actorId ? [{ type: "OWNER", id: actorId, label: "Owner confirmed" } satisfies BusinessQnaSourceReference] : []),
+    ],
+  }, business, compatible?.qna, persistedActorId);
+  const existingQnaIndex = compatible ? business.qnas.findIndex((candidate) => candidate.id === compatible.qna.id) : -1;
+  if (existingQnaIndex >= 0) business.qnas[existingQnaIndex] = qna;
+  else business.qnas.push(qna);
+  gap.resolutionType = "OWNER_QNA";
+  gap.resolvedQnaId = qna.id;
+  gap.resolvedAt = gap.lastSeenAt;
+  gap.resolvedBy = persistedActorId;
+  await persistBusinessQna(business, qna);
   if (pool) {
     try {
       await pool.query(
         `update knowledge_gaps
-         set status = 'resolved', approved_answer = $3, answer_mode = $4, last_seen_at = $5, updated_at = now(), index_status = 'pending', index_error = null
+         set status = 'resolved', approved_answer = $3, answer_mode = $4, last_seen_at = $5, updated_at = now(), index_status = 'pending', index_error = null,
+             resolution_type = 'OWNER_QNA', resolved_qna_id = $6, resolved_at = now(), resolved_by = $7
          where business_id = $1 and question = $2`,
-        [business.id, gap.question, approvedAnswer, answerMode, gap.lastSeenAt],
+        [business.id, gap.question, approvedAnswer, answerMode, gap.lastSeenAt, qna.id, persistedActorId],
       );
     } catch (error) {
       if (!isMissingDatabaseColumn(error)) throw error;
@@ -4770,10 +5097,10 @@ async function resolveKnowledgeGap(business: Business, question: string, approve
     }
   }
   try {
-    return { gap, indexingStatus: await replaceKnowledgeAnswerIndex(business, gap) };
+    return { gap, qna, indexingStatus: await replaceBusinessQnaIndex(business, qna) };
   } catch (error) {
     app.log.error({ error, businessId: business.id, question: gap.question }, "Knowledge answer saved but indexing failed");
-    return { gap, indexingStatus: "failed" };
+    return { gap, qna, indexingStatus: "failed" };
   }
 }
 
@@ -4910,6 +5237,74 @@ function assertPublishableWorkflows(business: Business): void {
     .map((workflow) => `${workflow.actionKey}: ${workflow.result.issues.slice(0, 2).map((item) => item.code).join(", ")}`)
     .join("; ");
   throw httpError(409, `Workflow verification failed before publication${failures ? ` (${failures})` : ""}`);
+}
+
+function inferredWidgetQuickActionKind(action: WidgetQuickAction): WidgetQuickActionKind {
+  const text = `${action.label} ${action.question}`.toLowerCase();
+  if (/talk to|speak to|contact (the )?team|human|person/.test(text)) return "HANDOFF";
+  if (/book|appointment|booking|reserve|schedule|quote|estimate|demo|trial|tour|start free|free trial|check availability|availability|request service|service request|find a class|emergency help|contact sales|talk to sales/.test(text)) return "WORKFLOW";
+  return "KNOWLEDGE";
+}
+
+async function assertPublishableQuickActions(
+  business: Business,
+  quickActions: WidgetQuickAction[],
+  humanHandoffEnabled: boolean,
+): Promise<void> {
+  const failures: string[] = [];
+  for (const action of quickActions) {
+    const label = action.label || "Unnamed quick action";
+    if (!action.question.trim()) {
+      failures.push(`"${label}" needs a customer question`);
+      continue;
+    }
+    if (action.approved === false || (action.generated === true && action.approved !== true)) {
+      failures.push(`"${label}" still needs owner approval`);
+      continue;
+    }
+
+    const inferredKind = inferredWidgetQuickActionKind(action);
+    const kindMismatch = inferredKind === "HANDOFF"
+      ? action.kind !== undefined && action.kind !== "HANDOFF"
+      : (action.kind === "KNOWLEDGE" || action.kind === "HANDOFF") && action.kind !== inferredKind;
+    if (kindMismatch) {
+      failures.push(`"${label}" is marked ${(action.kind ?? "unknown").toLowerCase()} but promises ${inferredKind.toLowerCase()}`);
+      continue;
+    }
+    const kind = action.kind ?? inferredKind;
+    if (kind === "KNOWLEDGE") {
+      if (!business.onboardingValidation.knowledgeReady) failures.push(`"${label}" requires verified knowledge`);
+      continue;
+    }
+    if (kind === "HANDOFF") {
+      if (!humanHandoffEnabled) failures.push(`"${label}" requires human handoff to be enabled`);
+      continue;
+    }
+
+    const target = action.targetId
+      ? business.actions.find((candidate) => candidate.id === action.targetId || candidate.key === action.targetId)
+      : null;
+    if (!target) {
+      failures.push(`"${label}" is not connected to a published action`);
+      continue;
+    }
+    if (kind === "WORKFLOW" && !target.steps?.length) {
+      failures.push(`"${label}" must connect to a published workflow`);
+      continue;
+    }
+    const readiness = await actionReadinessForBusiness(business, target);
+    if (!readiness.ready) {
+      failures.push(`"${label}" cannot run yet (${readiness.reason.replaceAll("_", " ")})`);
+      continue;
+    }
+    const publishedTarget = business.publishedActions?.find((candidate) => candidate.id === target.id || candidate.key === target.key);
+    if (!publishedTarget || workflowConfigHash(target) !== workflowConfigHash(publishedTarget)) {
+      failures.push(`"${label}" requires the connected action to be published`);
+    }
+  }
+  if (failures.length) {
+    throw httpError(409, `Quick action validation failed before publication: ${failures.slice(0, 4).join("; ")}`);
+  }
 }
 
 function hashAccessToken(token: string): string {
@@ -5367,7 +5762,7 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     };
   });
   const allowedStepTypes = new Set([
-    "ask", "capture", "form", "condition", "decision", "lookup", "recommend", "select", "confirm",
+    "ask", "capture", "form", "knowledge", "condition", "decision", "lookup", "recommend", "select", "confirm",
     "api_action", "create_lead", "book", "generate_link", "redirect", "notify", "handoff", "complete",
   ]);
   const sourceSteps = Array.isArray(body.steps) ? body.steps : (base.steps ?? []);
@@ -5375,6 +5770,15 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     const source = asRecord(value);
     const type = typeof source.type === "string" && allowedStepTypes.has(source.type) ? source.type : "ask";
     const id = (optionalString(source.id, 120) ?? `step_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_");
+    const conditionText = optionalString(source.conditionText, 1_000)
+      ?? (typeof source.condition === "string" ? optionalString(source.condition, 1_000) : undefined);
+    const conditionSource = asRecord(source.condition);
+    const conditionField = optionalString(conditionSource.field, 120);
+    const condition = conditionField ? {
+      field: conditionField,
+      ...(optionalString(conditionSource.equals, 160) ? { equals: optionalString(conditionSource.equals, 160) as string } : {}),
+      ...(optionalString(conditionSource.notEquals, 160) ? { notEquals: optionalString(conditionSource.notEquals, 160) as string } : {}),
+    } : undefined;
     const branches = Array.isArray(source.branches) ? source.branches.map((branchValue) => {
       const branch = asRecord(branchValue);
       const when = asRecord(branch.when);
@@ -5399,11 +5803,14 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     return {
       id,
       type: type as NonNullable<ActionFlow["steps"]>[number]["type"],
+      ...(typeof source.enabled === "boolean" ? { enabled: source.enabled } : {}),
       ...(optionalString(source.label, 160) ? { label: optionalString(source.label, 160) as string } : {}),
+      ...(conditionText ? { conditionText } : {}),
       ...(optionalString(source.fieldKey, 120) ? { fieldKey: optionalString(source.fieldKey, 120) as string } : {}),
       ...(optionalString(source.question, 500) ? { question: optionalString(source.question, 500) as string } : {}),
       ...(typeof source.required === "boolean" ? { required: source.required } : {}),
       ...(Array.isArray(source.options) ? { options: source.options.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 120)).slice(0, 30) } : {}),
+      ...(condition ? { condition } : {}),
       ...(optionalString(source.nextStepId, 120) ? { nextStepId: optionalString(source.nextStepId, 120) as string } : {}),
       ...(branches?.length ? { branches } : {}),
       ...(Object.keys(config).length ? { config } : {}),
@@ -7415,6 +7822,9 @@ async function workspacePayload(business: Business) {
       failedSources: failedSourceCount,
       structuredFactCount: business.facts.filter((fact) => fact.active).length,
       factConflictCount: factConflicts.length,
+      qnaCount: business.qnas.length,
+      verifiedQnaCount: business.qnas.filter((qna) => qna.status === "VERIFIED").length,
+      conflictedQnaCount: business.qnas.filter((qna) => qna.status === "CONFLICTED").length,
       status: knowledgeStatus,
       indexed: sourceCount > 0 && meaningfulChunkCount > 0,
       semantic,
@@ -8087,7 +8497,12 @@ function contentEvidenceScore(
 function memoryRetrieval(business: Business, question: string, expandedQuery = question, intent = classifyQuestionIntent(question)): RetrievalResult {
   const startedAt = Date.now();
   const tokens = retrievalTokens(expandedQuery, intent);
-  const matches = business.chunks.map((chunk) => {
+  const matches = business.chunks.filter((chunk) => {
+    const qnaId = typeof chunk.metadata.qnaId === "string" ? chunk.metadata.qnaId : null;
+    if (!qnaId) return true;
+    const qna = business.qnas.find((candidate) => candidate.id === qnaId);
+    return Boolean(qna && qnaIsRuntimeUsable(qna));
+  }).map((chunk) => {
     const lower = chunk.content.toLowerCase();
     const score = tokens.reduce((total, token) => total + (lower.includes(token) ? 1 : 0), 0);
     return { chunk, score, evidenceScore: contentEvidenceScore(chunk.content, expandedQuery, intent, null, null, chunk.metadata) };
@@ -8136,6 +8551,13 @@ async function databaseRetrieval(business: Business, question: string, expandedQ
        from knowledge_chunks
        where business_id = $1
          and search_vector @@ to_tsquery('simple', $2)
+         and (metadata ->> 'qnaId' is null or exists (
+           select 1 from business_qna q
+           where q.id::text = metadata ->> 'qnaId'
+             and q.business_id = $1
+             and q.status = 'VERIFIED'
+             and (q.valid_until is null or q.valid_until > now())
+         ))
        order by lexical_score desc
        limit 20`,
       [business.id, lexicalQuery || "frontdeskwise-never-match"],
@@ -8159,6 +8581,13 @@ async function databaseRetrieval(business: Business, question: string, expandedQ
            and embedding is not null
            and embedding_model = $3
            and embedding_dimensions = $4
+           and (metadata ->> 'qnaId' is null or exists (
+             select 1 from business_qna q
+             where q.id::text = metadata ->> 'qnaId'
+               and q.business_id = $1
+               and q.status = 'VERIFIED'
+               and (q.valid_until is null or q.valid_until > now())
+           ))
          order by embedding <=> $2::vector
          limit 20`,
         [business.id, vectorLiteral(queryVector), embeddingModel(), embeddingDimensions()],
@@ -8404,6 +8833,9 @@ async function answerQuestion(
   const initialIntent = classifyQuestionIntent(question);
   const existingGap = business.knowledgeGaps.get(question.toLowerCase().replace(/\s+/g, " ").trim());
   const approvedGap = resolvedKnowledgeAnswer(business, question, initialIntent);
+  const qnaLookupStartedAt = performance.now();
+  const qnaMatch = findCompatibleQna(question, business.qnas, 0.78);
+  const qnaLookupLatencyMs = Math.max(0, Math.round(performance.now() - qnaLookupStartedAt));
   if (/^(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you)\b[.!? ]*$/i.test(question.trim())) {
     const modelUsage: ModelUsage = {
       route: "tier0",
@@ -8448,6 +8880,60 @@ async function answerQuestion(
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
     };
   }
+  if (qnaMatch && qnaIsRuntimeUsable(qnaMatch.qna)) {
+    const qnaValidation = validateCustomerResponse({
+      question,
+      answer: qnaMatch.qna.canonicalAnswer,
+      route: "knowledge",
+      grounded: true,
+      confidenceScore: qnaMatch.score,
+      hasReliableEvidence: true,
+      evidence: qnaMatch.qna.canonicalAnswer,
+    });
+    performanceTiming.validationMs += qnaValidation.latencyMs;
+    if (!qnaValidation.accepted || looksLikePromptInjection(qnaMatch.qna.canonicalAnswer)) {
+      qnaMatch.qna.status = "NEEDS_REVIEW";
+      await persistBusinessQnaStatus(business, qnaMatch.qna);
+    } else {
+    void markBusinessQnaUsed(business, qnaMatch.qna).catch((error) => {
+      app.log.warn({ error, businessId: business.id, qnaId: qnaMatch.qna.id }, "Business Q&A usage metric could not be recorded");
+    });
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "verified_business_qna",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
+    return {
+      answer: qnaMatch.qna.canonicalAnswer,
+      grounded: true,
+      citations: qnaMatch.qna.sourceReferences
+        .filter((reference) => Boolean(reference.url))
+        .map((reference) => ({ title: reference.label ?? "Business Q&A", url: reference.url as string, pageType: "faq" })),
+      knowledgeGap: null,
+      confidenceScore: Math.min(0.99, qnaMatch.score),
+      confidenceBand: "high" as const,
+      retrieval: {
+        mode: "business_qna",
+        intent: initialIntent,
+        candidateCount: business.qnas.length,
+        topScore: qnaMatch.score,
+        qnaMatch: true,
+        qnaMatchConfidence: qnaMatch.score,
+        qnaLookupLatencyMs,
+        qnaId: qnaMatch.qna.id,
+        qnaStatus: qnaMatch.qna.status,
+        fallbackToRag: false,
+        ...modelUsage,
+      },
+      modelUsage,
+      performance: { ...performanceTiming, retrievalMs: qnaLookupLatencyMs, backendTotalMs: performance.now() - answerStartedAt },
+    };
+    }
+  }
   const workflowStep = options.workflowStep ?? options.workflow?.step;
   const scopedFacts = workflowScopedFacts(business, options.workflow, workflowStep);
   const primaryCtaForAnswer = options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, initialIntent));
@@ -8482,6 +8968,12 @@ async function answerQuestion(
         sourceLabel: businessFactSourceLabel(structured.fact),
         factId: structured.fact.id,
         conflictCount: structured.conflicts,
+        qnaMatch: Boolean(qnaMatch),
+        qnaMatchConfidence: qnaMatch?.score,
+        qnaLookupLatencyMs,
+        qnaId: qnaMatch?.qna.id ?? null,
+        qnaStatus: qnaMatch?.qna.status ?? null,
+        fallbackToRag: true,
         ...modelUsage,
       },
       modelUsage,
@@ -8513,7 +9005,7 @@ async function answerQuestion(
       quickActions: [knowledgeGapContactAction],
       confidenceScore: 0,
       confidenceBand: "low" as const,
-      retrieval: { mode: "pricing_requires_verified_fact", candidateCount: 0, topScore: 0, ...modelUsage },
+      retrieval: { mode: "pricing_requires_verified_fact", candidateCount: 0, topScore: 0, qnaMatch: Boolean(qnaMatch), qnaMatchConfidence: qnaMatch?.score, qnaLookupLatencyMs, qnaId: qnaMatch?.qna.id ?? null, qnaStatus: qnaMatch?.qna.status ?? null, fallbackToRag: true, ...modelUsage },
       modelUsage,
       primaryCta: undefined,
       performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
@@ -8556,6 +9048,12 @@ async function answerQuestion(
     answerabilityThreshold: answerability.threshold,
     answerability: directSensitiveEvidence ? answerability.reason : "insufficient_sensitive_claim_evidence",
     candidates: retrieval.candidates,
+    qnaMatch: Boolean(qnaMatch),
+    qnaMatchConfidence: qnaMatch?.score,
+    qnaLookupLatencyMs,
+    qnaId: qnaMatch?.qna.id ?? null,
+    qnaStatus: qnaMatch?.qna.status ?? null,
+    fallbackToRag: true,
   };
 
   const decision = routeQuestion({
@@ -10428,7 +10926,8 @@ async function evaluateBusiness(business: Business, requestedLimit: number) {
     const answer = await answerQuestion(business, evaluationCase.question, { recordGap: false });
     const latencyMs = Date.now() - startedAt;
     const citationTypes = answer.citations.map((citation) => {
-      const source = business.sources.find((item) => item.id === citation.sourceId);
+      const sourceId = "sourceId" in citation ? citation.sourceId : undefined;
+      const source = sourceId ? business.sources.find((item) => item.id === sourceId) : undefined;
       return source ? sourceSemanticType(source) : undefined;
     }).filter((type): type is string => Boolean(type));
     const primarySourceType = citationTypes[0];
@@ -17727,7 +18226,7 @@ app.post("/api/v1/widget/:siteKey/leads", async (request, reply) => {
 app.get("/api/v1/demo/:slug/knowledge-gaps", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  await requireBusinessTeamAccess(business, request, "viewer");
   const gaps = [...business.knowledgeGaps.values()].sort((left, right) => right.occurrenceCount - left.occurrenceCount);
   // Keep the first clustering pass deterministic and cheap. Intent-aware
   // normalization collapses common wording variants without requiring an
@@ -17781,7 +18280,7 @@ app.get("/api/v1/demo/:slug/knowledge-gaps", async (request) => {
 app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  const actorId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
   const body = asRecord(request.body);
   const question = requiredString(body.question, "question", 1_000);
@@ -17793,7 +18292,7 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/resolve", async (request) => {
   const targetQuestions = [...new Set([question, ...questions])];
   let result: Awaited<ReturnType<typeof resolveKnowledgeGap>> | null = null;
   for (const targetQuestion of targetQuestions) {
-    result = await resolveKnowledgeGap(business, targetQuestion, approvedAnswer, answerMode);
+    result = await resolveKnowledgeGap(business, targetQuestion, approvedAnswer, answerMode, actorId, targetQuestions);
   }
   return result;
 });
@@ -17814,6 +18313,86 @@ app.post("/api/v1/demo/:slug/knowledge-gaps/ignore", async (request) => {
   return { gap };
 });
 
+app.get("/api/v1/demo/:slug/knowledge/qna", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireBusinessTeamAccess(business, request, "viewer");
+  await syncBusinessQnaStatuses(business);
+  const query = (request.query as Record<string, unknown> | undefined) ?? {};
+  const search = optionalString(query.q, 240)?.toLowerCase();
+  const status = optionalString(query.status, 40)?.toUpperCase();
+  if (status && !BUSINESS_QNA_STATUSES.includes(status as BusinessQnaStatus)) throw httpError(400, "Unsupported Q&A status filter");
+  const qnas = business.qnas
+    .filter((qna) => !status || qna.status === status)
+    .filter((qna) => !search || [qna.canonicalQuestion, qna.canonicalAnswer, ...qna.variants].some((value) => value.toLowerCase().includes(search)))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return { qnas, counts: Object.fromEntries(BUSINESS_QNA_STATUSES.map((item) => [item, business.qnas.filter((qna) => qna.status === item).length])) };
+});
+
+app.post("/api/v1/demo/:slug/knowledge/qna", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actorId = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  const qna = normalizedBusinessQna(request.body, business, undefined, actorId.id);
+  const duplicate = findCompatibleQna(qna.canonicalQuestion, business.qnas, 0.9);
+  if (duplicate) throw httpError(409, `This question may already be covered by: ${duplicate.qna.canonicalQuestion}`);
+  qna.status = qnaStatusAfterFactRefresh(qna, business.facts);
+  business.qnas.push(qna);
+  await persistBusinessQna(business, qna);
+  const indexingStatus = qna.status === "ARCHIVED" ? "ready" : await replaceBusinessQnaIndex(business, qna);
+  return reply.code(201).send({ qna, indexingStatus });
+});
+
+app.put("/api/v1/demo/:slug/knowledge/qna/:qnaId", async (request) => {
+  const params = request.params as { slug?: string; qnaId?: string };
+  const business = await getBusiness(params.slug);
+  const actorId = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  const qnaId = requiredString(params.qnaId, "qnaId", 120);
+  const index = business.qnas.findIndex((candidate) => candidate.id === qnaId);
+  if (index < 0) throw httpError(404, "Business Q&A item not found");
+  const qna = normalizedBusinessQna(request.body, business, business.qnas[index], actorId.id);
+  const duplicate = findCompatibleQna(qna.canonicalQuestion, business.qnas.filter((candidate) => candidate.id !== qna.id), 0.9);
+  if (duplicate) throw httpError(409, `This question may already be covered by: ${duplicate.qna.canonicalQuestion}`);
+  qna.status = qnaStatusAfterFactRefresh(qna, business.facts);
+  business.qnas[index] = qna;
+  await persistBusinessQna(business, qna);
+  const indexingStatus = qna.status === "ARCHIVED" ? "ready" : await replaceBusinessQnaIndex(business, qna);
+  return { qna, indexingStatus };
+});
+
+app.post("/api/v1/demo/:slug/knowledge/qna/:qnaId/review", async (request) => {
+  const params = request.params as { slug?: string; qnaId?: string };
+  const business = await getBusiness(params.slug);
+  const actorId = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  const qna = business.qnas.find((candidate) => candidate.id === requiredString(params.qnaId, "qnaId", 120));
+  if (!qna) throw httpError(404, "Business Q&A item not found");
+  const body = asRecord(request.body);
+  qna.status = body.status === "STALE" ? "STALE" : "VERIFIED";
+  qna.updatedBy = actorId.id;
+  qna.updatedAt = new Date().toISOString();
+  qna.lastReviewedAt = new Date().toISOString();
+  await persistBusinessQna(business, qna);
+  if (qna.status === "VERIFIED") await replaceBusinessQnaIndex(business, qna);
+  return { qna };
+});
+
+app.post("/api/v1/demo/:slug/knowledge/qna/:qnaId/archive", async (request) => {
+  const params = request.params as { slug?: string; qnaId?: string };
+  const business = await getBusiness(params.slug);
+  const actorId = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  const qna = business.qnas.find((candidate) => candidate.id === requiredString(params.qnaId, "qnaId", 120));
+  if (!qna) throw httpError(404, "Business Q&A item not found");
+  qna.status = "ARCHIVED";
+  qna.updatedBy = actorId.id;
+  qna.updatedAt = new Date().toISOString();
+  await persistBusinessQna(business, qna);
+  return { qna };
+});
+
 function isKnowledgeEvaluationMessage(message: Message): boolean {
   if (message.role !== "assistant" || !message.retrieval) return false;
   // These are conversation/system events, not evidence about knowledge
@@ -17827,7 +18406,7 @@ function isKnowledgeEvaluationMessage(message: Message): boolean {
 app.get("/api/v1/demo/:slug/retrieval-diagnostics", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
-  await requireDemoOwner(business, request);
+  await requireBusinessTeamAccess(business, request, "viewer");
   const query = (request.query as Record<string, unknown> | undefined) ?? {};
   const requestedPage = Number(query.page ?? 1);
   const requestedLimit = Number(query.limit ?? 25);
@@ -18029,10 +18608,30 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   const actions = await Promise.all(configuredActions.map(async (action) => {
     const readiness = await actionReadinessForBusiness(business, action);
     const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action) : { ok: true } as const;
+    const capability = projectActionCapability(configuredActions, action);
+    const publishedAction = business.publishedActions?.find((candidate) => candidate.id === action.id || candidate.key === action.key) ?? null;
+    const workflowStatus = !business.publishedAgentConfig
+      ? "DRAFT"
+      : publishedAction
+        ? workflowConfigHash(action) === workflowConfigHash(publishedAction) ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES"
+        : agentPublishingPayload(business).status === "LIVE" ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES";
     return {
       ...action,
       readiness,
       isPrimary: business.primaryActionId === action.id && readiness.ready,
+      setupStatus: capability.setupStatus,
+      capability: {
+        intent: capability.intent,
+        completionType: capability.completionType,
+        destination: capability.destination,
+        provider: capability.provider,
+        requiredInputs: capability.requiredInputs,
+        recommendedInputs: capability.recommendedInputs,
+      },
+      workflowCount: capability.workflowCount,
+      workflowIds: capability.workflowIds,
+      workflowNames: capability.workflowNames,
+      workflowStatus,
       ...(workflowIsolation.ok
         ? {}
         : {
@@ -18115,6 +18714,16 @@ app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
   if (organizationId) action.organizationId = organizationId;
   const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
+  const reusableAction = findCompatibleAction(
+    business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled"),
+    action,
+  );
+  if (reusableAction) return reply.code(200).send({ action: reusableAction, reused: true });
+  const workflowName = workflowNameForAction(action);
+  const activeWorkflows = business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled");
+  if (workflowName && findDuplicateWorkflowName(activeWorkflows, workflowName)) {
+    throw httpError(409, `A workflow named “${workflowName}” already exists`);
+  }
   if (business.actions.some((item) => item.key === action.key)) throw httpError(409, "An action with this key already exists");
   business.actions.push(action);
   await persistAction(business, action);
@@ -18144,6 +18753,11 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
   if (organizationId) action.organizationId = organizationId;
   const workflowIsolation = action.steps?.length ? await workflowIsolationForAction(business, action, body) : { ok: true } as const;
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
+  const workflowName = workflowNameForAction(action);
+  const activeWorkflows = business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled");
+  if (workflowName && findDuplicateWorkflowName(activeWorkflows, workflowName, action.id)) {
+    throw httpError(409, `A workflow named “${workflowName}” already exists`);
+  }
   if (action.origin === "discovered" && action.enabled && action.lifecycleStatus === "needs_review") {
     if (action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
     if (action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");
@@ -18439,6 +19053,12 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
   requireWritableBusiness(business);
   const body = asRecord(request.body);
   const publish = body.publish === true;
+  const candidateQuickActions = Array.isArray(body.widgetQuickActions)
+    ? normalizedWidgetQuickActions(body.widgetQuickActions, business.name)
+    : business.agentConfig.widgetQuickActions;
+  const candidateHandoffEnabled = typeof body.humanHandoffEnabled === "boolean"
+    ? body.humanHandoffEnabled
+    : business.agentConfig.humanHandoffEnabled;
   if (publish) {
     if (business.onboardingValidation.status !== "valid" || !business.onboardingValidation.knowledgeReady) {
       throw httpError(409, `${business.onboardingValidation.message} ${business.onboardingValidation.suggestedAction}`);
@@ -18451,6 +19071,7 @@ app.post("/api/v1/demo/:slug/agent-config", async (request) => {
       throw httpError(409, "Install the widget before publishing your AI front desk");
     }
     assertPublishableWorkflows(business);
+    await assertPublishableQuickActions(business, candidateQuickActions, candidateHandoffEnabled);
   }
   if (typeof body.assistantName === "string" && body.assistantName.trim()) business.agentConfig.assistantName = body.assistantName.trim().slice(0, 120);
   if (typeof body.welcomeMessage === "string" && body.welcomeMessage.trim()) business.agentConfig.welcomeMessage = body.welcomeMessage.trim().slice(0, 1_000);

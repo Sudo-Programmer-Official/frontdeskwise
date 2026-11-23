@@ -31,12 +31,12 @@ export type AppRoute =
   | { kind: "auth-reset"; mode: "resetPassword"; oobCode?: string }
   | { kind: "auth-callback" }
   | { kind: "agent-shortcut"; agentTab: AgentRouteTab; testQuestion?: string }
-  | { kind: "demo"; demoId: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
+  | { kind: "demo"; demoId: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string; workflowId?: string; workflowActionId?: string }
   | { kind: "demo-access"; token: string }
   | { kind: "partner"; section: PartnerRouteSection }
   | { kind: "onboarding"; step: OnboardingRouteStep }
   | { kind: "billing-success"; sessionId?: string }
-  | { kind: "workspace"; businessSlug: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string }
+  | { kind: "workspace"; businessSlug: string; view: WorkspaceView; agentTab?: AgentRouteTab; testQuestion?: string; workflowId?: string; workflowActionId?: string }
   | { kind: "workspace-settings"; view: "settings" | "team" | "connections" | "billing"; tab: SettingsRouteTab }
   | { kind: "platform"; section: PlatformRouteSection; organizationId?: string; businessId?: string }
   | { kind: "not-found"; path: string };
@@ -74,6 +74,18 @@ function appendTestQuestion(path: string, question: string | undefined): string 
   return normalized ? `${path}?q=${encodeURIComponent(normalized)}` : path;
 }
 
+function workflowIdFromQuery(query: URLSearchParams, view: WorkspaceView): string | undefined {
+  if (view !== "workflows") return undefined;
+  const workflowId = query.get("workflowId")?.trim();
+  return workflowId || undefined;
+}
+
+function workflowActionIdFromQuery(query: URLSearchParams, view: WorkspaceView): string | undefined {
+  if (view !== "workflows") return undefined;
+  const actionId = query.get("actionId")?.trim();
+  return actionId || undefined;
+}
+
 export function parseRoute(location: Pick<Location, "pathname" | "search"> = window.location): AppRoute {
   const path = cleanPath(location.pathname);
   const segments = path.split("/").filter(Boolean).map(decodeSegment);
@@ -95,7 +107,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     return { kind: "auth", mode: "signin", ...(returnTo ? { returnTo } : {}) };
   }
   if (segments[0] === "agent") {
-    const agentTab = segments[1] && agentTabs.has(segments[1] as AgentRouteTab) ? segments[1] as AgentRouteTab : "behavior";
+    const agentTab = segments[1] && agentTabs.has(segments[1] as AgentRouteTab) ? segments[1] as AgentRouteTab : "capabilities";
     const testQuestion = testQuestionFromQuery(query, agentTab);
     return { kind: "agent-shortcut", agentTab, ...(testQuestion ? { testQuestion } : {}) };
   }
@@ -106,12 +118,15 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     }
     if (!segments[1]) return { kind: "not-found", path };
     if (segments[2] === "agent") {
-      const agentTab = segments[3] && agentTabs.has(segments[3] as AgentRouteTab) ? segments[3] as AgentRouteTab : "behavior";
+      const agentTab = segments[3] && agentTabs.has(segments[3] as AgentRouteTab) ? segments[3] as AgentRouteTab : "capabilities";
       const testQuestion = testQuestionFromQuery(query, agentTab);
       return { kind: "demo", demoId: segments[1], view: agentTab === "test" ? "conversations" : "agent", agentTab, ...(testQuestion ? { testQuestion } : {}) };
     }
     const candidate = segments[2] as WorkspaceView | undefined;
-    return { kind: "demo", demoId: segments[1], view: candidate && workspaceViews.has(candidate) ? candidate : "overview" };
+    const view = candidate && workspaceViews.has(candidate) ? candidate : "overview";
+    const workflowId = workflowIdFromQuery(query, view);
+    const workflowActionId = workflowActionIdFromQuery(query, view);
+    return { kind: "demo", demoId: segments[1], view, ...(workflowId ? { workflowId } : {}), ...(workflowActionId ? { workflowActionId } : {}) };
   }
   if (segments[0] === "onboarding") {
     const step = segments[1] && ["business", "knowledge", "agent", "install"].includes(segments[1]) ? segments[1] as OnboardingRouteStep : "index";
@@ -150,12 +165,15 @@ export function parseRoute(location: Pick<Location, "pathname" | "search"> = win
     const businessSlug = segments[1];
     if (!businessSlug) return { kind: "not-found", path };
     if (segments[2] === "agent") {
-      const agentTab = segments[3] && agentTabs.has(segments[3] as AgentRouteTab) ? segments[3] as AgentRouteTab : "behavior";
+      const agentTab = segments[3] && agentTabs.has(segments[3] as AgentRouteTab) ? segments[3] as AgentRouteTab : "capabilities";
       const testQuestion = testQuestionFromQuery(query, agentTab);
       return { kind: "workspace", businessSlug, view: agentTab === "test" ? "conversations" : "agent", agentTab, ...(testQuestion ? { testQuestion } : {}) };
     }
     const candidate = segments[2] as WorkspaceView | undefined;
-    return { kind: "workspace", businessSlug, view: candidate && workspaceViews.has(candidate) ? candidate : "overview" };
+    const view = candidate && workspaceViews.has(candidate) ? candidate : "overview";
+    const workflowId = workflowIdFromQuery(query, view);
+    const workflowActionId = workflowActionIdFromQuery(query, view);
+    return { kind: "workspace", businessSlug, view, ...(workflowId ? { workflowId } : {}), ...(workflowActionId ? { workflowActionId } : {}) };
   }
   return { kind: "not-found", path };
 }
@@ -192,10 +210,16 @@ export function routePath(route: AppRoute): string {
   if (route.kind === "demo") {
     const base = `/demo/${encodeURIComponent(route.demoId)}`;
     if (route.view === "agent" || route.view === "conversations") {
-      const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "behavior");
+    const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "capabilities");
       return appendTestQuestion(`${base}/agent/${agentTab}`, agentTab === "test" ? route.testQuestion : undefined);
     }
-    return route.view === "overview" ? base : `${base}/${route.view}`;
+    if (route.view === "overview") return base;
+    const path = `${base}/${route.view}`;
+    if (route.view !== "workflows") return path;
+    const query = new URLSearchParams();
+    if (route.workflowId) query.set("workflowId", route.workflowId);
+    if (route.workflowActionId) query.set("actionId", route.workflowActionId);
+    return query.toString() ? `${path}?${query.toString()}` : path;
   }
   if (route.kind === "demo-access") return `/demo/access?token=${encodeURIComponent(route.token)}`;
   if (route.kind === "partner") return route.section === "overview" ? "/partner" : `/partner/${route.section}`;
@@ -214,20 +238,26 @@ export function routePath(route: AppRoute): string {
   if (route.kind === "workspace") {
     const base = `/app/${encodeURIComponent(route.businessSlug)}`;
     if (route.view === "agent" || route.view === "conversations") {
-      const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "behavior");
+    const agentTab = route.agentTab ?? (route.view === "conversations" ? "test" : "capabilities");
       return appendTestQuestion(`${base}/agent/${agentTab}`, agentTab === "test" ? route.testQuestion : undefined);
     }
-    return route.view === "overview" ? base : `${base}/${route.view}`;
+    if (route.view === "overview") return base;
+    const path = `${base}/${route.view}`;
+    if (route.view !== "workflows") return path;
+    const query = new URLSearchParams();
+    if (route.workflowId) query.set("workflowId", route.workflowId);
+    if (route.workflowActionId) query.set("actionId", route.workflowActionId);
+    return query.toString() ? `${path}?${query.toString()}` : path;
   }
   return route.kind === "not-found" ? route.path : "/";
 }
 
-export function workspaceRoute(businessSlug: string, view: WorkspaceView, options: { agentTab?: AgentRouteTab; testQuestion?: string } = {}): AppRoute {
-  return { kind: "workspace", businessSlug, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}) };
+export function workspaceRoute(businessSlug: string, view: WorkspaceView, options: { agentTab?: AgentRouteTab; testQuestion?: string; workflowId?: string; workflowActionId?: string } = {}): AppRoute {
+  return { kind: "workspace", businessSlug, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}), ...(options.workflowId?.trim() ? { workflowId: options.workflowId.trim() } : {}), ...(options.workflowActionId?.trim() ? { workflowActionId: options.workflowActionId.trim() } : {}) };
 }
 
-export function demoRoute(demoId: string, view: WorkspaceView = "overview", options: { agentTab?: AgentRouteTab; testQuestion?: string } = {}): AppRoute {
-  return { kind: "demo", demoId, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}) };
+export function demoRoute(demoId: string, view: WorkspaceView = "overview", options: { agentTab?: AgentRouteTab; testQuestion?: string; workflowId?: string; workflowActionId?: string } = {}): AppRoute {
+  return { kind: "demo", demoId, view, ...(options.agentTab ? { agentTab: options.agentTab } : {}), ...(options.testQuestion?.trim() ? { testQuestion: options.testQuestion.trim() } : {}), ...(options.workflowId?.trim() ? { workflowId: options.workflowId.trim() } : {}), ...(options.workflowActionId?.trim() ? { workflowActionId: options.workflowActionId.trim() } : {}) };
 }
 
 export function settingsRoute(tab: SettingsRouteTab): AppRoute {

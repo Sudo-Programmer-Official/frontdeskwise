@@ -11,6 +11,7 @@ export type WorkflowFieldDraft = {
 export type WorkflowStepDraft = {
   id: string;
   type: string;
+  enabled?: boolean;
   label?: string;
   fieldKey?: string;
   answerType?: WorkflowFieldDraft["type"];
@@ -18,7 +19,19 @@ export type WorkflowStepDraft = {
   required?: boolean;
   options?: string[];
   condition?: string;
+  conditionText?: string;
   config?: Record<string, unknown>;
+};
+
+type WorkflowGenerationStatus = "verified" | "suggested" | "missing";
+type WorkflowGenerationSource = "owner_goal" | "business_context" | "verified_business_knowledge" | "approved_action" | "integration" | "industry_pattern" | "missing_information";
+
+/** Owner-facing provenance persisted in step.config; the runtime ignores it. */
+type WorkflowGenerationReason = {
+  generationSource: WorkflowGenerationSource;
+  generationStatus: WorkflowGenerationStatus;
+  generationReason: string;
+  generationEvidence?: string[];
 };
 
 export const KNOWLEDGE_STEP_TYPE = "knowledge" as const;
@@ -79,6 +92,7 @@ export type WorkflowGenerationResult = {
   description: string;
   steps: WorkflowStepDraft[];
   fields: WorkflowFieldDraft[];
+  missingInformation?: string[];
   executionMode?: string;
   provider?: string;
 };
@@ -177,6 +191,78 @@ function capture(
   };
 }
 
+function withGenerationReason(step: WorkflowStepDraft, reason: WorkflowGenerationReason): WorkflowStepDraft {
+  return {
+    ...step,
+    config: {
+      ...(step.config ?? {}),
+      generationSource: reason.generationSource,
+      generationStatus: reason.generationStatus,
+      generationReason: reason.generationReason,
+      ...(reason.generationEvidence?.length ? { generationEvidence: reason.generationEvidence } : {}),
+    },
+  };
+}
+
+function actionLooksLikeDemo(action: { key?: string; name?: string; actionType?: string }): boolean {
+  return /demo|trial|tour|start/i.test(`${action.key ?? ""} ${action.name ?? ""} ${action.actionType ?? ""}`);
+}
+
+function contextHasBusinessEvidence(context: WorkflowGenerationContext): boolean {
+  const business = context.businessContext;
+  if (!business) return false;
+  const knownType = Boolean(business.businessType?.trim() && !/^unknown$|local[_ -]?business/i.test(business.businessType.trim()));
+  return knownType
+    || Boolean(business.summary?.trim())
+    || Boolean(business.services?.length || business.products?.length || business.audiences?.length || business.knowledgeSummary?.length)
+    || Boolean(context.knownBusinessKnowledge?.length);
+}
+
+function hasDemoConversionContext(context: WorkflowGenerationContext): boolean {
+  const business = context.businessContext;
+  return Boolean(
+    business?.primaryGoal && /demo|trial|tour|start/i.test(business.primaryGoal)
+      || business?.approvedActions?.some(actionLooksLikeDemo)
+      || business?.discoveredCtas?.some((cta) => /demo|trial|tour|start/i.test(`${cta.label} ${cta.url ?? ""}`))
+      || context.availableActionTypes?.some((actionType) => /demo|trial|tour|start/i.test(actionType))
+      || business?.existingWorkflows?.some((workflow) => /demo|trial|tour|start/i.test(`${workflow.key} ${workflow.name} ${workflow.actionType}`)),
+  );
+}
+
+function isSalonOrBeautyContext(context: WorkflowGenerationContext): boolean {
+  return /salon|beauty|spa|barber/i.test(`${context.businessContext?.businessType ?? ""} ${context.businessContext?.businessName ?? ""} ${context.businessContext?.summary ?? ""}`);
+}
+
+function currentSoftwareIsRelevant(context: WorkflowGenerationContext): boolean {
+  return isSalonOrBeautyContext(context)
+    || context.businessContext?.existingWorkflows?.some((workflow) => workflow.fieldKeys.some((fieldKey) => /software|platform|integration/i.test(fieldKey))) === true
+    || /software|platform|integration|booking|client management/i.test(`${context.businessContext?.summary ?? ""} ${(context.businessContext?.services ?? []).map((item) => item.value).join(" ")} ${(context.businessContext?.products ?? []).map((item) => item.value).join(" ")}`);
+}
+
+function isVerifiedContextEntry(entry: { value: string; provenance?: WorkflowContextProvenance }): boolean {
+  return !entry.provenance?.authority || entry.provenance.authority === "verified";
+}
+
+function hasCapabilityKnowledge(context: WorkflowGenerationContext): boolean {
+  const business = context.businessContext;
+  return Boolean(
+    business?.services?.some((item) => isVerifiedContextEntry(item) && item.value.trim())
+      || business?.products?.some((item) => isVerifiedContextEntry(item) && item.value.trim())
+      || business?.knowledgeSummary?.some((item) => isVerifiedContextEntry(item) && /feature|capabilit|booking|reminder|payment|client|software|service|integration/i.test(item.value))
+      || context.knownBusinessKnowledge?.some((item) => /feature|capabilit|booking|reminder|payment|client|software|service|integration/i.test(item)),
+  );
+}
+
+function hasIntegrationKnowledge(context: WorkflowGenerationContext): boolean {
+  const business = context.businessContext;
+  return Boolean(
+    context.availableProviders?.length
+      || business?.providers?.length
+      || business?.services?.some((item) => isVerifiedContextEntry(item) && /integration|connect|sync|software|platform/i.test(item.value))
+      || business?.knowledgeSummary?.some((item) => isVerifiedContextEntry(item) && /integration|connect|sync|software|platform/i.test(item.value)),
+  );
+}
+
 function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationContext = {}): WorkflowFieldDraft[] {
   if (intent === "plan_selection") {
     const businessName = businessLabel(context);
@@ -205,7 +291,9 @@ function generatedFields(intent: WorkflowIntent, context: WorkflowGenerationCont
     return [
       field("business_type", "Business type", "select", `What kind of ${businessType} do you run?`, true, ["Small salon", "Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
       field("main_goal", "Main goal", "select", "What are you mainly trying to improve?", true, ["Online booking", "Online booking + reminders", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
-      field("current_software", "Current software", "text", "Are you using any salon software today?"),
+      ...(currentSoftwareIsRelevant(context) ? [field("current_software", "Current software", "text", "Are you using any relevant software today?")] : []),
+      field("name", "Name", "text", "What’s your name?"),
+      field("email", "Email", "email", "What email address should we use?"),
     ];
   }
   return [];
@@ -374,54 +462,150 @@ function enrollmentSteps(): WorkflowStepDraft[] {
   ];
 }
 
-function businessFitSteps(context: WorkflowGenerationContext): WorkflowStepDraft[] {
+function businessFitSteps(context: WorkflowGenerationContext, ownerGoal: string): WorkflowStepDraft[] {
   const business = context.businessContext;
   const businessName = businessLabel(context);
   const businessType = naturalBusinessType(context);
-  const primaryCta = business?.discoveredCtas?.find((cta) => cta.url && /try|demo|book|start/i.test(`${cta.label} ${cta.url}`))
-    ?? business?.discoveredCtas?.find((cta) => Boolean(cta.url));
-  const primaryLabel = primaryCta?.label?.trim() || "Try the demo";
   const requestDemoAction = business?.approvedActions?.find((action) => action.actionType === "request_demo" || /request.?demo/i.test(`${action.key} ${action.name}`));
+  const tryDemoAction = business?.approvedActions?.find((action) => action.key === "try_demo" || /try.?demo|trial/i.test(`${action.key} ${action.name}`));
   const hasRequestDemoAction = Boolean(requestDemoAction || business?.discoveredCtas?.some((cta) => /request.?demo/i.test(cta.label)));
-  const primaryAction = business?.approvedActions?.find((action) => action.key === "try_demo")
-    ?? business?.approvedActions?.find((action) => !/request.?demo/i.test(`${action.key} ${action.name}`) && /try|start|see|view|demo|trial/i.test(`${action.key} ${action.name}`));
-  return [
-    capture("business-type", "Business type", "business_type", `What kind of ${businessType} do you run?`, ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"]),
-    capture("main-goal", "Main goal", "main_goal", "What are you mainly trying to improve?", ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
-    capture("current-software", "Current software", "current_software", "Are you using any salon software today?"),
-    {
-      id: "relevant-capabilities",
-      type: "recommend",
-      label: "Relevant capabilities",
-      question: `Match verified ${businessName} features to the visitor’s needs.`,
-      config: { ...interruptionConfig, reviewStatus: "verified", dataSource: "verified_business_knowledge", requiresVerifiedData: true, basedOn: ["business_type", "main_goal"] },
-    },
-    answerFromKnowledge("pricing", "Pricing", "pricing", "pricing", {
-      conditional: true,
-      reviewStatus: business?.pricing?.verified ? "verified" : "needs_owner_confirmation",
-    }),
-    {
+  const explicitRequestOnly = /request\s+(?:a\s+)?demo\s+only\s+when|only\s+when\s+(?:the\s+visitor\s+)?explicitly|explicitly\s+requested/i.test(ownerGoal);
+  const ownerPrefersTryDemo = /try\s+(?:the\s+)?demo|sales intent|self.?serve|start a trial/i.test(ownerGoal);
+  const primaryGoal = business?.primaryGoal ?? "";
+  const primaryGoalRequestsDemo = /request.?demo|request a demo/i.test(primaryGoal);
+  const primaryGoalPrefersTryDemo = /try.?demo|trial|self.?serve/i.test(primaryGoal);
+  const useRequestDemo = !explicitRequestOnly
+    && Boolean(requestDemoAction || business?.discoveredCtas?.some((cta) => /request.?demo/i.test(cta.label)))
+    && !ownerPrefersTryDemo
+    && !primaryGoalPrefersTryDemo
+    && (primaryGoalRequestsDemo || !tryDemoAction);
+  const selectedAction = useRequestDemo
+    ? requestDemoAction
+    : tryDemoAction ?? business?.approvedActions?.find((action) => !/request.?demo/i.test(`${action.key} ${action.name}`) && actionLooksLikeDemo(action));
+  const selectedCta = business?.discoveredCtas?.find((cta) => {
+    const text = `${cta.label} ${cta.url ?? ""}`;
+    return useRequestDemo ? /request.?demo/i.test(text) : /try|demo|trial|start/i.test(text);
+  }) ?? business?.discoveredCtas?.find((cta) => Boolean(cta.url));
+  const selectedLabel = selectedAction?.name?.trim() || selectedCta?.label?.trim() || (useRequestDemo ? "Request a demo" : "Try the demo");
+  const selectedActionKnown = Boolean(selectedAction || selectedCta?.url);
+  const capabilitiesKnown = hasCapabilityKnowledge(context);
+  const pricingKnown = business?.pricing?.verified === true;
+  const integrationsKnown = hasIntegrationKnowledge(context);
+  const steps: WorkflowStepDraft[] = [
+    withGenerationReason(
+      capture("business-type", "Business type", "business_type", `What kind of ${businessType} do you run?`, isSalonOrBeautyContext(context) ? ["Salon", "Barbershop", "Spa", "Beauty studio", "Other"] : ["Professional service", "Retail or ecommerce", "Software or technology", "Other"]),
+      { generationSource: "business_context", generationStatus: "suggested", generationReason: "Suggested from the business context so the journey can match the visitor to the right capabilities.", generationEvidence: business?.businessType ? [businessType] : undefined },
+    ),
+    withGenerationReason(
+      capture("main-goal", "Main goal", "main_goal", "What are you mainly trying to improve?", ["Online booking", "Client management", "Reminders", "Staff management", "Payments", "Reviews / loyalty", "More bookings"]),
+      { generationSource: "owner_goal", generationStatus: "suggested", generationReason: "The owner wants visitors guided to a relevant next step, so this is the minimum useful qualification question." },
+    ),
+  ];
+  if (currentSoftwareIsRelevant(context)) {
+    steps.push(withGenerationReason(
+      capture("current-software", "Current software", "current_software", "Are you using any relevant software today?"),
+      { generationSource: "business_context", generationStatus: "suggested", generationReason: "Suggested from the business context because current software can affect fit and integration questions.", generationEvidence: [businessType, "software compatibility is relevant"] },
+    ));
+  }
+  steps.push(withGenerationReason({
+    id: "relevant-capabilities",
+    type: "recommend",
+    label: "Relevant capabilities",
+    question: `Match only verified ${businessName} capabilities to the visitor’s needs.`,
+    config: { ...interruptionConfig, reviewStatus: capabilitiesKnown ? "verified" : "needs_owner_confirmation", dataSource: "verified_business_knowledge", requiresVerifiedData: true, basedOn: ["business_type", "main_goal"], ...(!capabilitiesKnown ? { reviewReason: "No verified capabilities are available in Business Brain." } : {}) },
+  }, {
+    generationSource: capabilitiesKnown ? "verified_business_knowledge" : "missing_information",
+    generationStatus: capabilitiesKnown ? "verified" : "missing",
+    generationReason: capabilitiesKnown ? "Matches capabilities already present in verified Business Brain knowledge." : "Missing information — add verified capabilities before publishing this matching step.",
+  }));
+  steps.push(withGenerationReason(answerFromKnowledge("pricing", "Pricing", "pricing", "pricing", {
+    conditional: true,
+    reviewStatus: pricingKnown ? "verified" : "needs_owner_confirmation",
+  }), {
+    generationSource: pricingKnown ? "verified_business_knowledge" : "missing_information",
+    generationStatus: pricingKnown ? "verified" : "missing",
+    generationReason: pricingKnown ? "Answers pricing questions from verified Business Brain knowledge and resumes the journey." : "Missing information — pricing is not verified, so the assistant must say it is not verified.",
+  }));
+  steps.push(withGenerationReason(answerFromKnowledge("integrations", "Integrations", "integrations", "services", {
+    conditional: true,
+    reviewStatus: integrationsKnown ? "verified" : "needs_owner_confirmation",
+  }), {
+    generationSource: integrationsKnown ? "verified_business_knowledge" : "missing_information",
+    generationStatus: integrationsKnown ? "verified" : "missing",
+    generationReason: integrationsKnown ? "Answers integration questions only from verified services, providers, or Business Brain knowledge." : "Missing information — no verified integration details are available.",
+  }));
+  steps.push(withGenerationReason(capture("contact-name", "Name", "name", "What’s your name?"), {
+    generationSource: "owner_goal",
+    generationStatus: "suggested",
+    generationReason: "Required for lead capture before offering the demo path.",
+  }));
+  steps.push(withGenerationReason(capture("contact-email", "Email", "email", "What email address should we use?"), {
+    generationSource: "owner_goal",
+    generationStatus: "suggested",
+    generationReason: "Required for lead capture and demo follow-up.",
+  }));
+  steps.push(withGenerationReason({
+    id: "save-lead",
+    type: "create_lead",
+    label: "Save lead",
+    config: { ...interruptionConfig, failureBehavior: "handoff" },
+  }, {
+    generationSource: "owner_goal",
+    generationStatus: "suggested",
+    generationReason: "Saves the captured contact details before the conversion action is offered.",
+  }));
+  if (useRequestDemo) {
+    steps.push(withGenerationReason({
+      id: "request-demo",
+      type: "redirect",
+      label: selectedLabel,
+      question: `Ready to request a demo of ${businessName}?`,
+      config: { ...interruptionConfig, buttonLabel: selectedLabel, destinationSource: "approved_action", normalConversionEndpoint: true, ...(selectedAction?.key ? { actionKey: selectedAction.key } : {}), ...(selectedCta?.url ? { destinationUrl: selectedCta.url } : {}), ...(!selectedActionKnown ? { reviewStatus: "needs_owner_confirmation", requiresVerifiedData: true, reviewReason: "Connect or approve the primary demo action before publishing." } : {}) },
+    }, {
+      generationSource: selectedActionKnown ? "approved_action" : "missing_information",
+      generationStatus: selectedActionKnown ? "verified" : "missing",
+      generationReason: selectedActionKnown ? "Matches the selected primary conversion action in the business context." : "Missing information — approve a Request Demo action or provide its verified destination.",
+      generationEvidence: selectedAction?.name ? [selectedAction.name] : undefined,
+    }));
+  } else {
+    steps.push(withGenerationReason({
       id: "try-demo",
       type: "redirect",
-      label: primaryLabel,
+      label: selectedLabel,
       question: `Ready to see how ${businessName} can help?`,
-      config: { ...interruptionConfig, buttonLabel: primaryLabel, destinationSource: "approved_action", normalConversionEndpoint: true, ...(primaryAction?.key ? { actionKey: primaryAction.key } : {}), ...(primaryCta?.url ? { destinationUrl: primaryCta.url } : {}) },
-    },
-    ...(hasRequestDemoAction ? [{
+      config: { ...interruptionConfig, buttonLabel: selectedLabel, destinationSource: "approved_action", normalConversionEndpoint: true, ...(selectedAction?.key ? { actionKey: selectedAction.key } : {}), ...(selectedCta?.url ? { destinationUrl: selectedCta.url } : {}), ...(!selectedActionKnown ? { reviewStatus: "needs_owner_confirmation", requiresVerifiedData: true, reviewReason: "Connect or approve the primary demo action before publishing." } : {}) },
+    }, {
+      generationSource: selectedActionKnown ? "approved_action" : "missing_information",
+      generationStatus: selectedActionKnown ? "verified" : "missing",
+      generationReason: selectedActionKnown ? "Matches the selected primary conversion action in the business context." : "Missing information — approve a demo action or provide its verified destination.",
+      generationEvidence: selectedAction?.name ? [selectedAction.name] : undefined,
+    }));
+  }
+  if (hasRequestDemoAction && !useRequestDemo) {
+    steps.push(withGenerationReason({
       id: "request-demo",
       type: "redirect",
       label: "Request a demo",
       question: "If you would like the team to walk you through it, request a demo.",
       config: { ...interruptionConfig, buttonLabel: "Request a demo", destinationSource: "approved_action", explicitRequestOnly: true, conditional: true, trigger: "explicit_guided_demo_request", ...(requestDemoAction?.key ? { actionKey: requestDemoAction.key } : {}) },
-    } satisfies WorkflowStepDraft] : []),
-    {
-      id: "support-handoff",
-      type: "handoff",
-      label: "Support / handoff",
-      question: "If you need account help or a person, I’ll connect you with the team.",
-      config: { ...interruptionConfig, trigger: "explicit_support_or_human_request", conditional: true, failureBehavior: "handoff" },
-    },
-  ];
+    }, {
+      generationSource: explicitRequestOnly ? "owner_goal" : "approved_action",
+      generationStatus: "verified",
+      generationReason: explicitRequestOnly ? "The owner asked for a team demo only when the visitor explicitly requests it." : "Keeps the approved Request Demo action available for explicit requests without replacing the primary path.",
+    }));
+  }
+  steps.push(withGenerationReason({
+    id: "support-handoff",
+    type: "handoff",
+    label: "Support / handoff",
+    question: "If you need account help or a person, I’ll connect you with the team.",
+    config: { ...interruptionConfig, trigger: "explicit_support_or_human_request", conditional: true, failureBehavior: "handoff" },
+  }, {
+    generationSource: "industry_pattern",
+    generationStatus: "suggested",
+    generationReason: "Provides a safe path for account help or human requests instead of guessing.",
+  }));
+  return steps;
 }
 
 function mergeFields(baseFields: WorkflowFieldDraft[], generated: WorkflowFieldDraft[]): WorkflowFieldDraft[] {
@@ -438,13 +622,22 @@ export function inferWorkflowIntent(description: string, context: WorkflowGenera
 
   // Owner-authored intent is deliberately checked before action metadata. The
   // action template is useful context, but must never override the goal.
-  if (context.businessContext && /good fit|relevant capabilit|business type|try the demo|primary conversion|salon|beauty/i.test(ownerGoal)) return "business_fit";
-  if (/\b(plan|plans|pricing|solo|team|usage|recommend|right fit|best fit)\b/.test(ownerGoal)
+  if (/\b(plan|plans|solo|usage|right fit|best fit)\b/.test(ownerGoal)
     && !/swim|lesson|child|student|jackrabbit/.test(ownerGoal)) return "plan_selection";
   if (/swim|lesson|child|student|jackrabbit|class/.test(ownerGoal)) return "enrollment";
-  if (/tour|visit/.test(ownerGoal)) return "tour";
+  if (/\b(tour|visit)\b/.test(ownerGoal)) return "tour";
   if (/quote|estimate/.test(ownerGoal)) return "quote";
+
+  // Keep an explicit business-fit goal ahead of generic support/service words
+  // that may appear in the owner's fallback or handoff instructions.
+  if (context.businessContext && /good fit|relevant capabilit|business type|try the demo|primary conversion|salon|beauty/i.test(ownerGoal)) return "business_fit";
   if (/support|service|issue|repair/.test(ownerGoal)) return "service";
+
+  // A terse sales goal becomes business-fit only when the active Business
+  // Brain can ground it in a real business and a known demo/conversion path.
+  // Without that evidence, keep the generic lead journey and do not guess.
+  if (context.businessContext && contextHasBusinessEvidence(context)
+    && /capture|contact|lead|guide|convert|sales|demo/.test(ownerGoal)) return "business_fit";
   if (/demo/.test(ownerGoal)) return "demo";
   if (/book|schedule|appointment|reserve/.test(ownerGoal)) return "booking";
 
@@ -463,7 +656,7 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
     : intent === "enrollment"
       ? enrollmentSteps()
       : intent === "business_fit"
-        ? businessFitSteps(context)
+        ? businessFitSteps(context, description)
       : intent === "booking" || intent === "tour"
         ? [
           capture("service", "Service", "service", "What would you like to book?"),
@@ -558,6 +751,10 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
       : intent === "business_fit"
         ? businessName ? `Help visitors find the right ${businessName} fit` : "Help visitors find the right fit"
       : context.actionName ?? "Workflow";
+  const missingInformation = [...new Set(steps.flatMap((step) => {
+    const config = step.config ?? {};
+    return config.generationStatus === "missing" && typeof config.generationReason === "string" ? [config.generationReason] : [];
+  }))];
   return {
     intent,
     name: defaultName,
@@ -567,6 +764,7 @@ export function generateWorkflow(description: string, baseFields: WorkflowFieldD
     // merge fields from the previous draft because that is the exact path by
     // which a previous tenant's qualification questions can survive a switch.
     fields: mergeFields(intent === "business_fit" ? [] : baseFields, generated),
+    ...(missingInformation.length ? { missingInformation } : {}),
     ...(intent === "enrollment" ? { executionMode: "PROVIDER_FLOW", provider: "jackrabbit" } : {}),
   };
 }

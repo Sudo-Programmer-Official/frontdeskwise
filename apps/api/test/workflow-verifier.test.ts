@@ -31,6 +31,20 @@ test("workflow verifier catches missing fields, cycles, and unverified links", (
   assert.ok(result.issues.some((issue) => issue.code === "unverified_link_source"));
 });
 
+test("disabled steps do not satisfy required-field verification", () => {
+  const draft: ActionFlow = {
+    ...swim,
+    id: "disabled-required-step",
+    steps: [
+      { id: "age", type: "capture", fieldKey: "child_age", enabled: false },
+      { id: "done", type: "complete" },
+    ],
+  };
+  const result = verifyWorkflowDefinition(draft);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "required_field_not_captured" && issue.fieldKey === "child_age"));
+});
+
 test("workflow set verification is the publication gate for versioned actions", () => {
   const swim = defaultActionFlows("British Swim School", "swim school", (key) => `action-${key}`)
     .find((action) => action.key === "enroll_child");

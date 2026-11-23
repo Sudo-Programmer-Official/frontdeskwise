@@ -27,3 +27,7 @@ An owner or operator of a local service business who loses opportunities because
 - Actions require explicit configuration and an auditable event.
 - Public demos are clearly labeled as sandbox previews.
 
+## Upcoming features
+
+- Multilingual support: English is the currently supported agent language. In a later phase, add configurable visitor-facing languages, language detection, and grounded answer translation while preserving citations, actions, and human handoff behavior across languages.
+

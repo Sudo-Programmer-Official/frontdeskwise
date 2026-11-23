@@ -218,6 +218,28 @@ test("normal conversion and guided demo requests stay inside the active workflow
   );
 });
 
+test("a primary Action never bypasses an active Workflow regardless of completion type", () => {
+  for (const executionMode of ["DIRECT_LINK", "FORM_FLOW", "PROVIDER_FLOW"] as const) {
+    const primaryAction: ActionFlow = {
+      ...action,
+      id: `primary-${executionMode.toLowerCase()}`,
+      key: `primary_${executionMode.toLowerCase()}`,
+      name: "Primary conversion outcome",
+      executionMode,
+      isPrimary: true,
+      steps: [{ id: "qualification", type: "capture", fieldKey: "preferred_days" }],
+    } as ActionFlow;
+    const decision = decideConversationRoute({
+      message: "Saturday mornings",
+      activeAction: primaryAction,
+      actionState: createActionState(primaryAction),
+    });
+    assert.equal(decision.route, "WORKFLOW_CONTINUATION");
+    assert.equal(decision.reason, "active_workflow_has_priority");
+    assert.equal(decision.activeWorkflowId, primaryAction.id);
+  }
+});
+
 test("workflow answers stay on the journey while explicit handoff takes priority", () => {
   const state = createActionState(action);
   const continuation = decideConversationRoute({ message: "Saturday mornings", activeAction: action, actionState: state });

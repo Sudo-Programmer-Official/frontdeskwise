@@ -30,6 +30,7 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  Package,
   RefreshCw,
   RotateCcw,
   Scale,
@@ -388,6 +389,19 @@ interface ActionFlow {
   createdAt: string;
   updatedAt: string;
   isPrimary?: boolean;
+  workflowStatus?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  setupStatus?: "DRAFT" | "NEEDS_SETUP" | "READY";
+  workflowCount?: number;
+  workflowIds?: string[];
+  workflowNames?: string[];
+  capability?: {
+    intent: string;
+    completionType: "link" | "provider" | "phone" | "email" | "handoff" | "webhook" | "collect_details";
+    destination: string | null;
+    provider: string | null;
+    requiredInputs: string[];
+    recommendedInputs: string[];
+  };
 }
 
 type ActionEditorEntry = "actions" | "primary" | "test";
@@ -415,6 +429,24 @@ interface KnowledgeGap {
   intent?: string | null;
   reason?: string | null;
   variants?: string[];
+  resolvedQnaId?: string | null;
+}
+
+interface KnowledgeQna {
+  id: string;
+  canonicalQuestion: string;
+  canonicalAnswer: string;
+  variants: string[];
+  status: "VERIFIED" | "NEEDS_REVIEW" | "CONFLICTED" | "STALE" | "ARCHIVED";
+  sourceType: "OWNER" | "OWNER_CONFIRMED" | "WEBSITE_DERIVED";
+  sourceReferences: Array<{ type: string; id?: string | null; label?: string | null; url?: string | null }>;
+  answerGapId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastReviewedAt: string | null;
+  validUntil: string | null;
+  timesUsed: number;
+  lastUsedAt: string | null;
 }
 
 interface OrganizationDocument {
@@ -496,6 +528,10 @@ interface WidgetInstall {
 interface WidgetQuickAction {
   label: string;
   question: string;
+  kind?: "KNOWLEDGE" | "WORKFLOW" | "ACTION" | "HANDOFF";
+  targetId?: string;
+  approved?: boolean;
+  generated?: boolean;
 }
 
 interface AgentSaveModel {
@@ -620,7 +656,7 @@ interface WorkspaceSource {
   lastCrawledAt: string;
 }
 
-type KnowledgeTab = "overview" | "sources" | "gaps" | "quality";
+type KnowledgeTab = "overview" | "sources" | "qna" | "gaps" | "quality";
 type KnowledgeGapFilter = "open" | "resolved" | "ignored" | "all";
 type KnowledgeGapSort = "mostAsked" | "newest" | "highestImpact";
 type KnowledgeQualityFilter = "all" | "grounded" | "fallback" | "needsReview";
@@ -685,7 +721,7 @@ interface WorkspacePayload {
   onboarding?: OnboardingValidation;
   publishing?: AgentPublishing;
   publishedAt?: string | null;
-  knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
+  knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; qnaCount?: number; verifiedQnaCount?: number; conflictedQnaCount?: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
   workflowContext?: WorkflowBusinessContext;
   stats?: WorkspaceStats;
 }
@@ -921,6 +957,8 @@ interface AdminCertificationPayload {
     recent: Array<{ id: string; type: string; normalizedQuestion: string | null; reason: string | null; businessName: string; businessSlug: string; occurredAt: string }>;
   };
 }
+
+type WorkflowPerformance = NonNullable<WorkspaceStats["conversionFunnels"]>[number];
 
 interface AdminExperienceSignal {
   id: string;
@@ -1380,10 +1418,7 @@ const workspaceLogoLoadFailed = ref(false);
 const widgetTheme = ref<"light" | "dark" | "auto">("auto");
 const widgetPosition = ref<"bottom-right" | "bottom-left">("bottom-right");
 const widgetQuickActions = ref<WidgetQuickAction[]>([
-  { label: "Explore services", question: "What services do you offer?" },
-  { label: "Pricing", question: "What does pricing look like?" },
-  { label: "Get started", question: "How do I get started?" },
-  { label: "Ask a question", question: "" },
+  { label: "Ask a question", question: "What would you like help with?", kind: "KNOWLEDGE", approved: true, generated: true },
 ]);
 const proactiveEnabled = ref(false);
 const proactiveDelaySeconds = ref(20);
@@ -1451,8 +1486,17 @@ const leadPhone = ref("");
 const leadIntent = ref("");
 const leadSavedMessage = ref("");
 const knowledgeGaps = ref<KnowledgeGap[]>([]);
+const knowledgeQnas = ref<KnowledgeQna[]>([]);
 const retrievalDiagnostics = ref<RetrievalDiagnostic[]>([]);
 const knowledgeTab = ref<KnowledgeTab>("overview");
+const knowledgeQnaSearch = ref("");
+const knowledgeQnaStatusFilter = ref<KnowledgeQna["status"] | "ALL">("ALL");
+const knowledgeQnaDrawerOpen = ref(false);
+const selectedKnowledgeQna = ref<KnowledgeQna | null>(null);
+const knowledgeQnaDraft = ref({ question: "", answer: "", variants: "", validUntil: "" });
+const knowledgeQnaSaving = ref(false);
+const knowledgeQnaError = ref("");
+const knowledgeQnaMessage = ref("");
 const knowledgeGapFilter = ref<KnowledgeGapFilter>("open");
 const knowledgeGapSort = ref<KnowledgeGapSort>("highestImpact");
 const knowledgeGapSearch = ref("");
@@ -1502,6 +1546,10 @@ const integrationLoading = ref(false);
 const integrationError = ref("");
 const integrationMessage = ref("");
 const nativeIntegrationFormOpen = ref(false);
+const integrationHowItWorksOpen = ref(false);
+const advancedAiConnectionsOpen = ref(false);
+const mcpDrawerOpen = ref(false);
+const mcpPermissionsOpen = ref<string | null>(null);
 const mcpProvider = ref<McpConnection["provider"]>("hubspot");
 const mcpDisplayName = ref("");
 const mcpServerUrl = ref("");
@@ -1531,6 +1579,12 @@ const hubspotIntegration = computed(() => integrations.value.find((integration) 
 const webhookIntegration = computed(() => integrations.value.find((integration) => integration.provider === "webhook") ?? null);
 const jackrabbitIntegration = computed(() => integrations.value.find((integration) => integration.provider === "jackrabbit") ?? null);
 const hubspotMcpConnection = computed(() => mcpConnections.value.find((connection) => connection.provider === "hubspot") ?? null);
+const bookingIntegrationConfigured = computed(() => actionFlows.value.some((action) => {
+  const actionText = `${action.name} ${action.description} ${action.destination?.url ?? ""} ${action.completion.linkUrl ?? ""}`;
+  return actionProvider(action) === "booking"
+    || action.completion.completionMode === "booking_connector"
+    || /calendly|booking|schedule|appointment/i.test(actionText);
+}));
 const actionTriggerText = ref("");
 const actionTriggerPhraseInput = ref("");
 const actionEditorStage = ref<ActionEditorStage>("trigger");
@@ -1550,7 +1604,7 @@ const billingSuccessState = ref<BillingSuccessState>("activating");
 const billingSuccessExpectedPlanKey = ref("");
 let billingSuccessRunKey = "";
 const settingsTab = ref<SettingsTab>("general");
-const agentTab = ref<AgentTab>("behavior");
+const agentTab = ref<AgentTab>("capabilities");
 const profileMenuOpen = ref(false);
 const sidebarAccountMenuOpen = ref(false);
 const setupDismissed = ref(false);
@@ -1806,7 +1860,7 @@ const navSections: Array<{ label: string; items: WorkspaceNavItem[] }> = [
   ] },
   { label: "Convert", items: [
     { id: "leads", label: "Leads", icon: UserRoundPlus },
-    { id: "actions", label: "Booking & CTAs", icon: CalendarCheck },
+    { id: "actions", label: "Actions", icon: CalendarCheck },
   ] },
   { label: "Improve", items: [
     { id: "analytics", label: "Reports & recommendations", icon: ChartNoAxesCombined },
@@ -1952,6 +2006,7 @@ const visibleNavSections = computed(() => {
       { id: "leads" as View, label: "Assigned leads", icon: UserRoundPlus },
     ] },
     { label: "Improve", items: [
+      { id: "knowledge" as View, label: "Knowledge", icon: BookOpen },
       { id: "support" as View, label: "Help & support", icon: Headset },
     ] },
   ];
@@ -2087,6 +2142,15 @@ const knowledgeGapCounts = computed(() => ({
   ignored: knowledgeGaps.value.filter((gap) => gap.status === "ignored").length,
   all: knowledgeGaps.value.length,
 }));
+const knowledgeQnaCounts = computed(() => Object.fromEntries(["VERIFIED", "NEEDS_REVIEW", "CONFLICTED", "STALE", "ARCHIVED"].map((status) => [status, knowledgeQnas.value.filter((qna) => qna.status === status).length])) as Record<string, number>);
+const filteredKnowledgeQnas = computed(() => {
+  const search = knowledgeQnaSearch.value.trim().toLowerCase();
+  return knowledgeQnas.value
+    .filter((qna) => knowledgeQnaStatusFilter.value === "ALL" || qna.status === knowledgeQnaStatusFilter.value)
+    .filter((qna) => !search || [qna.canonicalQuestion, qna.canonicalAnswer, ...qna.variants].some((value) => value.toLowerCase().includes(search)))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+});
+const knowledgeQnaAttention = computed(() => knowledgeQnas.value.filter((qna) => qna.status === "CONFLICTED" || qna.status === "STALE"));
 const knowledgeGapIntentOptions = computed(() => [...new Set(knowledgeGaps.value.map((gap) => gap.intent).filter((intent): intent is string => Boolean(intent)))].sort());
 const filteredKnowledgeGaps = computed(() => {
   const search = knowledgeGapSearch.value.trim().toLowerCase();
@@ -2579,6 +2643,14 @@ function openCapabilityAction(target: GuidanceTarget) {
   openGuidance({ target });
 }
 
+function openAgentWorkflow(workflowId?: string) {
+  const options = workflowId?.trim() ? { workflowId: workflowId.trim() } : {};
+  const nextRoute = route.value.kind === "demo"
+    ? demoRoute(workspaceSlugForRoute(), "workflows", options)
+    : workspaceRoute(workspaceSlugForRoute(), "workflows", options);
+  commitRoute(nextRoute);
+}
+
 function openSetupStep(step: SetupStepId | null) {
   if (!step) {
     navigateToWorkspaceView("overview");
@@ -2684,12 +2756,119 @@ function openKnowledgeAnswer(gap: KnowledgeGap) {
   answerGapDrawerOpen.value = true;
 }
 
+function openKnowledgeQnaEditor(qna?: KnowledgeQna | null) {
+  if (!qna && !canManageTeam.value) return;
+  selectedKnowledgeQna.value = qna ?? null;
+  knowledgeQnaDraft.value = {
+    question: qna?.canonicalQuestion ?? "",
+    answer: qna?.canonicalAnswer ?? "",
+    variants: qna?.variants.filter((variant) => variant !== qna.canonicalQuestion).join("\n") ?? "",
+    validUntil: qna?.validUntil ? qna.validUntil.slice(0, 10) : "",
+  };
+  knowledgeQnaError.value = "";
+  knowledgeQnaMessage.value = "";
+  knowledgeQnaDrawerOpen.value = true;
+}
+
+function closeKnowledgeQnaEditor() {
+  if (knowledgeQnaSaving.value) return;
+  knowledgeQnaDrawerOpen.value = false;
+  selectedKnowledgeQna.value = null;
+}
+
+function qnaStatusLabel(status: KnowledgeQna["status"]): string {
+  return status === "NEEDS_REVIEW" ? "Needs review" : formatLabel(status);
+}
+
+function qnaSourceLabel(qna: KnowledgeQna): string {
+  if (qna.sourceType === "OWNER_CONFIRMED") return "Owner confirmed";
+  if (qna.sourceType === "WEBSITE_DERIVED") return "Website";
+  return "Owner";
+}
+
+async function saveKnowledgeQna() {
+  if (!canManageTeam.value || knowledgeQnaSaving.value) return;
+  const question = knowledgeQnaDraft.value.question.trim();
+  const answer = knowledgeQnaDraft.value.answer.trim();
+  if (!question || !answer) {
+    knowledgeQnaError.value = "Add both a question and an answer.";
+    return;
+  }
+  knowledgeQnaSaving.value = true;
+  knowledgeQnaError.value = "";
+  try {
+    const variants = knowledgeQnaDraft.value.variants.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+    const body = { canonicalQuestion: question, canonicalAnswer: answer, variants, validUntil: knowledgeQnaDraft.value.validUntil ? new Date(`${knowledgeQnaDraft.value.validUntil}T23:59:59.000Z`).toISOString() : null };
+    const endpoint = selectedKnowledgeQna.value
+      ? `/api/v1/demo/${demoSlug.value}/knowledge/qna/${encodeURIComponent(selectedKnowledgeQna.value.id)}`
+      : `/api/v1/demo/${demoSlug.value}/knowledge/qna`;
+    const response = await trackedFetch(apiUrl(endpoint), {
+      method: selectedKnowledgeQna.value ? "PUT" : "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as { qna?: KnowledgeQna; error?: string };
+    if (!response.ok || !payload.qna) throw new Error(payload.error ?? "Could not save this Q&A.");
+    const existingIndex = knowledgeQnas.value.findIndex((item) => item.id === payload.qna?.id);
+    if (existingIndex >= 0) knowledgeQnas.value[existingIndex] = payload.qna;
+    else knowledgeQnas.value.unshift(payload.qna);
+    knowledgeQnaMessage.value = "Answer added to verified business knowledge.";
+    knowledgeQnaDrawerOpen.value = false;
+    await refreshWorkspaceSummary(false);
+  } catch (error) {
+    knowledgeQnaError.value = error instanceof Error ? error.message : "Could not save this Q&A.";
+  } finally {
+    knowledgeQnaSaving.value = false;
+  }
+}
+
+async function archiveKnowledgeQna(qna: KnowledgeQna) {
+  if (!canManageTeam.value || knowledgeQnaSaving.value) return;
+  knowledgeQnaSaving.value = true;
+  knowledgeQnaError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/qna/${encodeURIComponent(qna.id)}/archive`), { method: "POST", headers: ownerHeaders() });
+    const payload = await response.json() as { qna?: KnowledgeQna; error?: string };
+    if (!response.ok || !payload.qna) throw new Error(payload.error ?? "Could not archive this Q&A.");
+    Object.assign(qna, payload.qna);
+  } catch (error) {
+    knowledgeQnaError.value = error instanceof Error ? error.message : "Could not archive this Q&A.";
+  } finally {
+    knowledgeQnaSaving.value = false;
+  }
+}
+
+async function reviewKnowledgeQna(qna: KnowledgeQna) {
+  if (!canManageTeam.value || knowledgeQnaSaving.value) return;
+  knowledgeQnaSaving.value = true;
+  knowledgeQnaError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/qna/${encodeURIComponent(qna.id)}/review`), { method: "POST", headers: { "content-type": "application/json", ...ownerHeaders() }, body: JSON.stringify({ status: "VERIFIED" }) });
+    const payload = await response.json() as { qna?: KnowledgeQna; error?: string };
+    if (!response.ok || !payload.qna) throw new Error(payload.error ?? "Could not review this Q&A.");
+    Object.assign(qna, payload.qna);
+  } catch (error) {
+    knowledgeQnaError.value = error instanceof Error ? error.message : "Could not review this Q&A.";
+  } finally {
+    knowledgeQnaSaving.value = false;
+  }
+}
+
 function closeKnowledgeAnswer() {
   if (knowledgeAnswerSaving.value) return;
   answerGapDrawerOpen.value = false;
   selectedKnowledgeGap.value = null;
   knowledgeAnswerError.value = "";
   knowledgeAnswerFailedGap.value = null;
+}
+
+function viewResolvedQna() {
+  const qna = knowledgeQnas.value.find((item) => item.id === selectedKnowledgeGap.value?.resolvedQnaId)
+    ?? knowledgeQnas.value.find((item) => item.canonicalQuestion === selectedKnowledgeGap.value?.question);
+  if (!qna) return;
+  closeKnowledgeAnswer();
+  knowledgeTab.value = "qna";
+  openKnowledgeQnaEditor(qna);
 }
 
 function toggleKnowledgeGapMenu(question: string) {
@@ -3191,10 +3370,7 @@ function clearWorkspaceState() {
   widgetTheme.value = "auto";
   widgetPosition.value = "bottom-right";
   widgetQuickActions.value = [
-    { label: "Explore services", question: "What services do you offer?" },
-    { label: "Pricing", question: "What does pricing look like?" },
-    { label: "Get started", question: "How do I get started?" },
-    { label: "Ask a question", question: "" },
+    { label: "Ask a question", question: "What would you like help with?", kind: "KNOWLEDGE", approved: true, generated: true },
   ];
   proactiveEnabled.value = false;
   proactiveDelaySeconds.value = 20;
@@ -3250,6 +3426,11 @@ function clearWorkspaceState() {
   leadStatusFilter.value = "all";
   leadExportMessage.value = "";
   knowledgeGaps.value = [];
+  knowledgeQnas.value = [];
+  knowledgeQnaSearch.value = "";
+  knowledgeQnaStatusFilter.value = "ALL";
+  knowledgeQnaDrawerOpen.value = false;
+  selectedKnowledgeQna.value = null;
   retrievalDiagnostics.value = [];
   knowledgeTab.value = "overview";
   knowledgeGapFilter.value = "open";
@@ -3342,9 +3523,9 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   widgetTheme.value = payload.agent?.widgetTheme ?? "auto";
   widgetPosition.value = payload.agent?.widgetPosition ?? "bottom-right";
   widgetQuickActions.value = payload.agent?.widgetQuickActions?.length
-    ? payload.agent.widgetQuickActions.map((action) => ({ label: action.label, question: action.question }))
-    : (payload.suggestedQuestions ?? []).slice(0, 4).map((question) => ({ label: question.slice(0, 48), question }));
-  if (!widgetQuickActions.value.length) widgetQuickActions.value = [{ label: "Ask a question", question: "" }];
+    ? payload.agent.widgetQuickActions.map((action) => ({ ...action }))
+    : [{ label: "Ask a question", question: "What would you like help with?", kind: "KNOWLEDGE", approved: true, generated: true }];
+  if (!widgetQuickActions.value.length) widgetQuickActions.value = [{ label: "Ask a question", question: "What would you like help with?", kind: "KNOWLEDGE", approved: true, generated: true }];
   proactiveEnabled.value = payload.agent?.proactiveEnabled ?? false;
   proactiveDelaySeconds.value = payload.agent?.proactiveDelaySeconds ?? 20;
   proactiveMessage.value = payload.agent?.proactiveMessage ?? "Looking for the right service? I can help.";
@@ -3981,10 +4162,16 @@ async function loadKnowledge() {
   knowledgeLoading.value = true;
   knowledgeError.value = "";
   try {
-    const gapsResponse = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps`), { headers: ownerHeaders() });
+    const [gapsResponse, qnaResponse] = await Promise.all([
+      trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge-gaps`), { headers: ownerHeaders() }),
+      trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/knowledge/qna`), { headers: ownerHeaders() }),
+    ]);
     if (!gapsResponse.ok) throw new Error("We could not load the knowledge review. Refresh the page and try again.");
     const gapsPayload = await gapsResponse.json() as { gaps?: KnowledgeGap[] };
+    const qnaPayload = await qnaResponse.json() as { qnas?: KnowledgeQna[]; error?: string };
+    if (!qnaResponse.ok) throw new Error(qnaPayload.error ?? "We could not load Business Q&A.");
     knowledgeGaps.value = gapsPayload.gaps ?? [];
+    knowledgeQnas.value = qnaPayload.qnas ?? [];
     for (const gap of knowledgeGaps.value) {
       if (answerDrafts.value[gap.question] === undefined) answerDrafts.value[gap.question] = gap.approvedAnswer ?? "";
       if (!gap.answerMode) gap.answerMode = "knowledge";
@@ -4213,9 +4400,14 @@ async function resolveKnowledgeGap(gap: KnowledgeGap) {
       headers: { "content-type": "application/json", ...ownerHeaders() },
       body: JSON.stringify({ question: gap.question, questions: gap.variants ?? [], approvedAnswer, answerMode: gap.answerMode || "knowledge" }),
     });
-    const payload = await response.json() as { gap?: KnowledgeGap; indexingStatus?: "queued" | "ready"; error?: string };
+    const payload = await response.json() as { gap?: KnowledgeGap; qna?: KnowledgeQna; indexingStatus?: "queued" | "ready" | "failed"; error?: string };
     if (!response.ok || !payload.gap) throw new Error(payload.error ?? "Could not save that answer.");
     Object.assign(gap, payload.gap);
+    if (payload.qna) {
+      const qnaIndex = knowledgeQnas.value.findIndex((item) => item.id === payload.qna?.id);
+      if (qnaIndex >= 0) knowledgeQnas.value[qnaIndex] = payload.qna;
+      else knowledgeQnas.value.unshift(payload.qna);
+    }
     answerDrafts.value[gap.question] = approvedAnswer;
     resolvedKnowledgeQuestion.value = gap.question;
     knowledgeTestContext.value = "answer";
@@ -5540,6 +5732,15 @@ function openWorkflowAction(actionId: string) {
   navigateToWorkspaceView("actions");
 }
 
+function openWorkflowForAction(action: ActionFlow, workflowIndex = 0) {
+  const workflowId = action.workflowIds?.[workflowIndex] ?? (action.workflowCount ? action.id : undefined);
+  const options = workflowId ? { workflowId } : { workflowActionId: action.id };
+  const nextRoute = route.value.kind === "demo"
+    ? demoRoute(workspaceSlugForRoute(), "workflows", options)
+    : workspaceRoute(workspaceSlugForRoute(), "workflows", options);
+  commitRoute(nextRoute);
+}
+
 function testWorkflowFromBuilder(actionId: string) {
   const action = actionFlows.value.find((item) => item.id === actionId);
   if (action) runActionTest(action);
@@ -5591,6 +5792,15 @@ function actionFunnelFor(action: ActionFlow) {
   return workspaceStats.value?.conversionFunnels?.find((funnel) => funnel.flowId === action.id || funnel.flowKey === action.key) ?? null;
 }
 
+const workflowPerformanceByAction = computed<Record<string, WorkflowPerformance>>(() => {
+  const performance: Record<string, WorkflowPerformance> = {};
+  for (const funnel of workspaceStats.value?.conversionFunnels ?? []) {
+    if (funnel.flowId) performance[funnel.flowId] = funnel;
+    if (funnel.flowKey) performance[funnel.flowKey] = funnel;
+  }
+  return performance;
+});
+
 function actionCompletionRate(action: ActionFlow): number {
   return actionFunnelFor(action)?.completionRate ?? 0;
 }
@@ -5599,22 +5809,103 @@ function actionDeliveriesFor(action: ActionFlow): ActionDelivery[] {
   return actionDeliveries.value.filter((delivery) => delivery.actionId === action.id);
 }
 
-function actionStatusLabel(action: ActionFlow): "Ready" | "Draft" | "Paused" | "Needs setup" | "Integration error" {
+function actionSetupStatus(action: ActionFlow): "Ready" | "Draft" | "Needs setup" {
+  if (action.setupStatus === "READY") return "Ready";
+  if (action.setupStatus === "DRAFT") return "Draft";
+  if (action.setupStatus === "NEEDS_SETUP") return "Needs setup";
+  if (action.readiness?.ready) return "Ready";
+  if (action.origin === "discovered" || action.lifecycleStatus === "needs_review") return "Draft";
+  return "Needs setup";
+}
+
+function actionStatusLabel(action: ActionFlow): "Ready" | "Draft" | "Disabled" | "Needs setup" | "Integration error" {
   const delivery = actionDeliveries.value.find((item) => item.actionId === action.id && item.status === "failed");
   if (delivery) return "Integration error";
-  if (!action.enabled) return "Paused";
+  if (!action.enabled) return "Disabled";
   if (actionNeedsProviderConnection(action)) return "Needs setup";
-  if (action.readiness) return action.readiness.ready ? "Ready" : "Needs setup";
-  if (action.executionMode === "DIRECT_LINK" && !(action.completion.linkUrl || action.destination?.url)) return "Needs setup";
-  if (!action.fields.length || !action.completion.createLead) return "Needs setup";
-  return action.updatedAt === action.createdAt ? "Draft" : "Ready";
+  return actionSetupStatus(action);
 }
 
 function actionStatusTone(status: ReturnType<typeof actionStatusLabel>): "active" | "draft" | "paused" | "attention" {
   if (status === "Ready") return "active";
-  if (status === "Paused") return "paused";
+  if (status === "Disabled") return "paused";
   if (status === "Integration error" || status === "Needs setup") return "attention";
   return "draft";
+}
+
+function actionCompletionLabel(action: ActionFlow): string {
+  switch (action.capability?.completionType) {
+    case "link": return "Send visitors to a page";
+    case "provider": return "Use a connected provider";
+    case "phone": return "Call the business";
+    case "email": return "Email the team";
+    case "handoff": return "Notify the team";
+    case "webhook": return "Send to CRM / webhook";
+    default:
+      switch (action.executionMode) {
+        case "DIRECT_LINK": return "Send visitors to a page";
+        case "PROVIDER_FLOW": return "Use a connected provider";
+        case "PHONE": return "Call the business";
+        case "EMAIL": return "Email the team";
+        case "HANDOFF": return "Notify the team";
+        case "API_ACTION": return "Send to CRM / webhook";
+        default: return "Collect details";
+      }
+  }
+}
+
+function actionOutcomeDetail(action: ActionFlow): string {
+  const destination = action.destination?.url || action.completion.linkUrl;
+  if (destination) return destination;
+  if (action.capability?.provider || actionProvider(action)) return `Connected ${formatLabel(action.capability?.provider || actionProvider(action) || "provider")}`;
+  if (action.executionMode === "PHONE") return "Verified business phone destination";
+  if (action.executionMode === "HANDOFF" || action.completion.notifyStaff) return "Send the completed request to your team";
+  return "FrontDeskWise collects the configured details";
+}
+
+function actionFieldLabel(key: string): string {
+  const known: Record<string, string> = { selected_slot: "Selected time", selected_class: "Selected class", preferred_date: "Preferred date", preferred_time: "Preferred time" };
+  return known[key] ?? formatLabel(key);
+}
+
+function actionRequiredInputLabels(action: ActionFlow): string[] {
+  return (action.capability?.requiredInputs ?? []).map(actionFieldLabel);
+}
+
+function actionRecommendedInputLabels(action: ActionFlow): string[] {
+  return (action.capability?.recommendedInputs ?? []).map(actionFieldLabel);
+}
+
+function actionCompletionChoice(action: ActionFlow): string {
+  switch (action.capability?.completionType) {
+    case "link": return "link";
+    case "provider": return "provider";
+    case "phone": return "phone";
+    case "email": return "email";
+    case "handoff": return "notify_team";
+    case "webhook": return "webhook";
+    default: return "collect_details";
+  }
+}
+
+function setActionCompletionChoice(value: string): void {
+  if (!actionDraft.value) return;
+  const mapping: Record<string, { executionMode: NonNullable<ActionFlow["executionMode"]>; completionMode?: ActionFlow["completion"]["completionMode"] }> = {
+    link: { executionMode: "DIRECT_LINK", completionMode: "external_provider" },
+    provider: { executionMode: "PROVIDER_FLOW", completionMode: "booking_connector" },
+    phone: { executionMode: "PHONE" },
+    email: { executionMode: "EMAIL" },
+    notify_team: { executionMode: "HANDOFF", completionMode: "human_follow_up" },
+    webhook: { executionMode: "API_ACTION", completionMode: "api_webhook" },
+    collect_details: { executionMode: "FORM_FLOW", completionMode: "native_form" },
+  };
+  const next = mapping[value] ?? mapping.collect_details;
+  actionDraft.value.executionMode = next.executionMode;
+  if (next.completionMode) actionDraft.value.completion.completionMode = next.completionMode;
+}
+
+function setActionCompletionChoiceFromEvent(event: Event): void {
+  setActionCompletionChoice((event.target as HTMLSelectElement).value);
 }
 
 function actionReadinessDetail(action: ActionFlow): string {
@@ -5861,12 +6152,14 @@ async function addActionTemplate(template: ActionTemplate) {
         workflow_id: payload.action.id,
         workflow_key: payload.action.key,
       });
-      trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_GENERATED, {
-        workflow_id: payload.action.id,
-        workflow_key: payload.action.key,
-      });
+      if (payload.action.steps?.length) {
+        trackProductEvent(MIXPANEL_EVENTS.WORKFLOW_GENERATED, {
+          workflow_id: payload.action.id,
+          workflow_key: payload.action.key,
+        });
+      }
     }
-    actionsMessage.value = "Flow added · review the questions before publishing";
+    actionsMessage.value = "Action added · generate a workflow when you’re ready";
     selectedActionId.value = payload.action?.id ?? "";
     actionTemplateChooserOpen.value = false;
     await loadActions();
@@ -7397,6 +7690,11 @@ function openNativeIntegrationForm(provider: "webhook" | "hubspot" | "jackrabbit
   nativeIntegrationFormOpen.value = true;
 }
 
+function openIntegrationSetup(provider: "webhook" | "hubspot" | "jackrabbit") {
+  navigateToWorkspaceView("connections");
+  openNativeIntegrationForm(provider);
+}
+
 function closeNativeIntegrationForm() {
   nativeIntegrationFormOpen.value = false;
   integrationManualMode.value = false;
@@ -7426,6 +7724,18 @@ function mcpProviderHelp(provider: McpConnection["provider"]): string {
   return "Use an HTTPS MCP server URL and bearer token provided by your software vendor.";
 }
 
+function openMcpConnectionDrawer() {
+  mcpError.value = "";
+  mcpMessage.value = "";
+  mcpDrawerOpen.value = true;
+}
+
+function closeMcpConnectionDrawer() {
+  mcpDrawerOpen.value = false;
+  mcpBearerToken.value = "";
+  mcpError.value = "";
+}
+
 async function connectMcpConnection() {
   if (!mcpServerUrl.value.trim() || !mcpBearerToken.value.trim() || mcpLoading.value) return;
   mcpLoading.value = true;
@@ -7447,6 +7757,9 @@ async function connectMcpConnection() {
     mcpBearerToken.value = "";
     mcpMessage.value = "Connected securely · read-only tools are enabled by default";
     await loadMcpConnections();
+    advancedAiConnectionsOpen.value = true;
+    mcpPermissionsOpen.value = null;
+    mcpDrawerOpen.value = false;
   } catch (error) {
     mcpError.value = error instanceof Error ? error.message : "Could not connect this MCP server.";
   } finally {
@@ -8449,7 +8762,7 @@ function startMarketingDemo() {
               <div v-if="nextSetupStep && setupProgressOpen" class="setup-progress-list"><div v-for="step in setupSteps" :key="step.id" :class="['setup-progress-step', { complete: step.complete }]" @click="step.complete ? undefined : openSetupStep(step.id)"><span>{{ step.complete ? '✓' : '○' }}</span><small>{{ step.label }}</small></div></div>
             </template>
           </div>
-          <div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ focusedTeamMode ? workspaceRoleLabel : `${activeOrganization?.billing.plan.displayName ?? 'Workspace'} plan` }}</small></span><span class="sidebar-account-chevron">⌄</span></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button v-if="canAccessBilling" type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div>
+          <div class="sidebar-account"><button class="sidebar-account-trigger" type="button" :aria-expanded="sidebarAccountMenuOpen" @click="sidebarAccountMenuOpen = !sidebarAccountMenuOpen; profileMenuOpen = false; notificationMenuOpen = false"><span class="sidebar-account-avatar">{{ authSnapshot ? authSnapshot.user.name.charAt(0).toUpperCase() : businessInitial }}</span><span class="sidebar-account-copy"><strong>{{ authSnapshot?.user.name ?? (businessName || 'Demo workspace') }}</strong><small>{{ focusedTeamMode ? workspaceRoleLabel : `${activeOrganization?.billing.plan.displayName ?? 'Workspace'} plan` }}</small></span><ChevronDown class="sidebar-account-chevron" :size="15" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="sidebarAccountMenuOpen" class="sidebar-account-menu"><button type="button" @click="openSettingsTab('general')">Account & settings</button><button v-if="canAccessBilling" type="button" @click="openSettingsTab('billing')">Billing</button><button type="button" @click="openHelpAndSupport">Help &amp; Support</button><button v-if="authSnapshot" type="button" @click="notificationMenuOpen = true; sidebarAccountMenuOpen = false">Notifications</button><button v-if="authSnapshot" type="button" class="danger-text" @click="sidebarAccountMenuOpen = false; signOut()">Sign out</button><button v-else type="button" @click="sidebarAccountMenuOpen = false; openAuth('signin')">Sign in</button></div></div>
         </div>
       </aside>
 
@@ -8513,6 +8826,7 @@ function startMarketingDemo() {
             :knowledge="workspaceKnowledge ?? null"
             :knowledge-gaps="knowledgeGaps"
             :knowledge-ready="setupSteps.find((step) => step.id === 'knowledge_ready')?.complete ?? false"
+            :suggested-questions="suggestedQuestions"
             :agent-tested="setupSteps.find((step) => step.id === 'agent_tested')?.complete ?? false"
             :installation-support-loading="installationSupportOwnerLoading"
             :installation-support-message="installationSupportOwnerMessage"
@@ -8520,6 +8834,7 @@ function startMarketingDemo() {
             :open-support-request="openSupportRequest"
             :test="agentTestModel"
             :capabilities="agentCapabilities"
+            :workflows="actionFlows"
             @select-tab="selectAgentTab"
             @save="saveAgent"
             @logo-preview="handleWorkspaceLogoPreview"
@@ -8539,6 +8854,7 @@ function startMarketingDemo() {
             @request-install-help="requestInstallationHelp"
             @clear-install-help-message="clearInstallationSupportOwnerState"
             @open-capability-action="openCapabilityAction"
+            @open-workflow="openAgentWorkflow"
           />
         </div>
 
@@ -8628,7 +8944,7 @@ function startMarketingDemo() {
 
           <article v-if="selectedInboxConversation?.notes?.length" class="panel inbox-notes-panel"><div class="panel-heading"><div><p class="eyebrow">Staff only</p><h3>Internal notes</h3><p>These notes stay in the Inbox and are never sent to the visitor.</p></div></div><div class="internal-note-list"><div v-for="note in selectedInboxConversation.notes" :key="note.id" class="internal-note"><strong>{{ note.authorName || 'Team member' }}</strong><small>{{ new Date(note.createdAt).toLocaleString() }}</small><p>{{ note.content }}</p></div></div></article>
 
-          <div class="panel lead-filters inbox-filter-bar"><div class="inbox-filter-copy"><span>Filter queue</span><small>Focus your next response</small></div><label><span>Status</span><select v-model="inboxStatusFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="FOLLOW_UP_PENDING">Follow-up pending</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option><option value="EXPIRED">Expired</option></select></label><label><span>Assignment</span><select v-model="inboxAssignmentFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span class="inbox-filter-result"><strong>{{ inboxTotal }}</strong> {{ inboxTotal === 1 ? 'thread' : 'threads' }}<i>·</i>{{ inboxUnreadCount }} unread</span></div>
+          <div class="panel lead-filters inbox-filter-bar"><div class="inbox-filter-copy"><span class="inbox-filter-icon" aria-hidden="true"><Package :size="16" :stroke-width="1.9" /></span><span><strong>Filter queue</strong><small>Focus your next response</small></span></div><label><span>Status</span><select v-model="inboxStatusFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All conversations</option><option value="WAITING_FOR_STAFF">Waiting for staff</option><option value="FOLLOW_UP_PENDING">Follow-up pending</option><option value="HUMAN_ACTIVE">Human active</option><option value="AI_ASSISTED">AI assisted</option><option value="AI_ACTIVE">AI active</option><option value="RESOLVED">Resolved</option><option value="EXPIRED">Expired</option></select></label><label><span>Assignment</span><select v-model="inboxAssignmentFilter" @change="inboxPage = 1; loadInbox()"><option value="all">All assignments</option><option value="mine">Assigned to me</option></select></label><span class="inbox-filter-result"><strong>{{ inboxTotal }}</strong> {{ inboxTotal === 1 ? 'thread' : 'threads' }}<i>·</i>{{ inboxUnreadCount }} unread</span></div>
 
           <div :class="['dashboard-grid', 'conversation-inbox-grid', { 'inbox-detail-open': selectedInboxConversation }]">
             <article class="panel table-panel inbox-table-panel">
@@ -8637,7 +8953,7 @@ function startMarketingDemo() {
               <div class="collection-viewport inbox-collection-viewport">
                 <div v-if="!inboxConversations.length" class="inbox-empty-state"><span class="inbox-empty-icon"><Inbox :size="22" :stroke-width="1.8" aria-hidden="true" /></span><strong>No conversations in this view</strong><p>Try a different filter or check back when a visitor needs your team.</p></div>
                 <button v-for="conversation in inboxConversations" :key="conversation.id" :class="['table-row', 'table-row-button', { selected: selectedInboxConversation?.id === conversation.id }]" type="button" @click="openInboxConversation(conversation)">
-                  <div class="lead-name"><span class="lead-avatar">{{ (conversation.lead?.name || 'V').charAt(0).toUpperCase() }}</span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small><small class="inbox-assignee-line">{{ inboxAssignmentLabel(conversation) }}<span v-if="conversation.assignedUserId && conversation.assignedUserId !== authSnapshot?.user.id"> · View only</span></small></span></div>
+                  <div class="lead-name"><span class="lead-avatar" aria-hidden="true"><Package :size="17" :stroke-width="1.9" /></span><span><strong>{{ conversation.lead?.name || 'Visitor conversation' }}</strong><small>{{ conversation.lastMessage?.content || 'No messages yet' }}</small><small class="inbox-assignee-line">{{ inboxAssignmentLabel(conversation) }}<span v-if="conversation.assignedUserId && conversation.assignedUserId !== authSnapshot?.user.id"> · View only</span></small></span></div>
                   <span :class="['status-pill', conversation.status === 'RESOLVED' ? 'booked' : conversation.status === 'HUMAN_ACTIVE' ? 'active' : conversation.status === 'AI_ACTIVE' || conversation.status === 'AI_ASSISTED' ? 'new' : 'qualified']"><span class="status-pill-dot"></span>{{ formatLabel(conversation.status) }}<b v-if="conversation.unreadCount">{{ conversation.unreadCount }}</b></span>
                   <small class="inbox-activity-time">{{ new Date(conversation.lastActivityAt).toLocaleString() }}</small>
                 </button>
@@ -8663,10 +8979,10 @@ function startMarketingDemo() {
         </div>
 
         <div v-else-if="view === 'team'" class="view-content">
-          <div class="section-toolbar"><div><p class="eyebrow">People and permissions</p><h2>Team access</h2><p>Invite staff, keep access business-scoped, and see who is active in the inbox.</p></div><span v-if="teamMessage" class="saved-message">✓ {{ teamMessage }}</span></div>
-          <p v-if="teamError" class="form-error">{{ teamError }}</p>
-          <article class="panel form-panel team-invite-panel"><div class="panel-heading"><div><p class="eyebrow">Invite people you trust</p><h2>Invite a team member</h2><p>They can sign in with this email to accept access.</p></div></div><form class="team-invite-form" @submit.prevent="inviteTeamMember"><div class="team-invite-grid"><label><span class="field-label">Name <span class="optional">Optional</span></span><input v-model="teamInviteName" type="text" autocomplete="name" placeholder="Alex Morgan" /></label><label><span class="field-label">Email</span><input v-model="teamInviteEmail" type="email" autocomplete="email" required placeholder="alex@business.com" /></label><label><span class="field-label">Role</span><select v-model="teamInviteRole"><option value="staff">Staff</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><div class="toolbar-actions"><button class="primary-button small" type="submit" :disabled="teamLoading || !teamInviteEmail.trim()">{{ teamLoading ? 'Inviting…' : 'Send invitation' }}</button><button class="outline-button small" type="button" :disabled="teamLoading" @click="loadTeam">Refresh</button></div></div></form></article>
-          <article class="panel table-panel team-table-panel"><div class="table-heading team-row"><span>Team member</span><span>Role</span><span>Status</span><span>Last active</span></div><div v-if="!teamMembers.length" class="diagnostics-empty">No team members found.</div><div v-for="member in teamMembers" :key="member.id" class="table-row team-row"><div class="lead-name"><span class="lead-avatar">{{ member.name.charAt(0).toUpperCase() }}</span><span><strong>{{ member.name }}</strong><small>{{ member.email }}</small></span></div><select v-if="member.role !== 'owner'" :value="member.role" :disabled="teamLoading" @change="updateTeamMember(member, String(($event.target as HTMLSelectElement).value) as TeamMember['role'])"><option value="admin">Admin</option><option value="staff">Staff</option><option value="viewer">Viewer</option></select><span v-else class="status-pill booked">Owner</span><span :class="['status-pill', member.status === 'active' ? 'booked' : 'qualified']">{{ member.status }}</span><small>{{ member.lastActiveAt ? new Date(member.lastActiveAt).toLocaleString() : 'Not active yet' }}</small></div></article>
+          <div class="section-toolbar team-page-header"><div><p class="eyebrow team-eyebrow"><UsersRound :size="15" :stroke-width="2" aria-hidden="true" /> People and permissions</p><h2>Team access</h2><p>Invite staff, keep access business-scoped, and see who is active in the inbox.</p></div><span v-if="teamMessage" class="saved-message team-success" role="status"><CircleCheck :size="16" :stroke-width="2" aria-hidden="true" /> {{ teamMessage }}</span></div>
+          <p v-if="teamError" class="form-error team-error" role="alert"><CircleAlert :size="16" :stroke-width="1.9" aria-hidden="true" /> {{ teamError }}</p>
+          <article class="panel form-panel team-invite-panel"><div class="panel-heading team-invite-heading"><span class="team-card-icon"><UserRoundPlus :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Invite people you trust</p><h2>Invite a team member</h2><p>They can sign in with this email to accept access.</p></div></div><form class="team-invite-form" @submit.prevent="inviteTeamMember"><div class="team-invite-grid"><label><span class="field-label"><UsersRound :size="14" :stroke-width="1.8" aria-hidden="true" /> Name <span class="optional">Optional</span></span><input v-model="teamInviteName" type="text" autocomplete="name" placeholder="Alex Morgan" /></label><label><span class="field-label"><Mail :size="14" :stroke-width="1.8" aria-hidden="true" /> Email</span><input v-model="teamInviteEmail" type="email" autocomplete="email" required placeholder="alex@business.com" /></label><label><span class="field-label"><ShieldCheck :size="14" :stroke-width="1.8" aria-hidden="true" /> Role</span><select v-model="teamInviteRole"><option value="staff">Staff</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><div class="toolbar-actions"><button class="primary-button small" type="submit" :disabled="teamLoading || !teamInviteEmail.trim()"><Send :size="15" :stroke-width="1.9" aria-hidden="true" />{{ teamLoading ? 'Inviting…' : 'Send invitation' }}</button><button class="outline-button small" type="button" :disabled="teamLoading" @click="loadTeam"><RefreshCw :size="15" :stroke-width="1.9" :class="{ 'is-spinning': teamLoading }" aria-hidden="true" />Refresh</button></div></div></form></article>
+          <article class="panel table-panel team-table-panel"><div class="table-heading team-row"><span class="team-table-heading"><UsersRound :size="14" :stroke-width="1.8" aria-hidden="true" /> Team member</span><span class="team-table-heading"><ShieldCheck :size="14" :stroke-width="1.8" aria-hidden="true" /> Role</span><span class="team-table-heading"><CircleCheck :size="14" :stroke-width="1.8" aria-hidden="true" /> Status</span><span class="team-table-heading"><Activity :size="14" :stroke-width="1.8" aria-hidden="true" /> Last active</span></div><div v-if="!teamMembers.length" class="diagnostics-empty">No team members found.</div><div v-for="member in teamMembers" :key="member.id" class="table-row team-row"><div class="lead-name"><span class="lead-avatar">{{ member.name.charAt(0).toUpperCase() }}</span><span><strong>{{ member.name }}</strong><small>{{ member.email }}</small></span></div><select v-if="member.role !== 'owner'" :value="member.role" :disabled="teamLoading" :aria-label="`Role for ${member.name}`" @change="updateTeamMember(member, String(($event.target as HTMLSelectElement).value) as TeamMember['role'])"><option value="admin">Admin</option><option value="staff">Staff</option><option value="viewer">Viewer</option></select><span v-else class="status-pill booked team-role-pill"><ShieldCheck :size="13" :stroke-width="1.9" aria-hidden="true" /> Owner</span><span :class="['status-pill', 'team-status-pill', member.status === 'active' ? 'booked' : 'qualified']"><CircleCheck v-if="member.status === 'active'" :size="13" :stroke-width="1.9" aria-hidden="true" /><CircleAlert v-else :size="13" :stroke-width="1.9" aria-hidden="true" /> {{ member.status }}</span><small class="team-last-active">{{ member.lastActiveAt ? new Date(member.lastActiveAt).toLocaleString() : 'Not active yet' }}</small></div></article>
         </div>
 
 
@@ -8682,6 +8998,7 @@ function startMarketingDemo() {
           <nav class="knowledge-tabs" role="tablist" aria-label="Knowledge sections">
             <button type="button" role="tab" :aria-selected="knowledgeTab === 'overview'" :class="{ active: knowledgeTab === 'overview' }" @click="knowledgeTab = 'overview'">Overview</button>
             <button type="button" role="tab" :aria-selected="knowledgeTab === 'sources'" :class="{ active: knowledgeTab === 'sources' }" @click="knowledgeTab = 'sources'">Sources <span>{{ knowledgeSourceRows.length }}</span></button>
+            <button type="button" role="tab" :aria-selected="knowledgeTab === 'qna'" :class="{ active: knowledgeTab === 'qna' }" @click="knowledgeTab = 'qna'">Q&amp;A <span>{{ knowledgeQnas.length }}</span></button>
             <button type="button" role="tab" :aria-selected="knowledgeTab === 'gaps'" :class="{ active: knowledgeTab === 'gaps' }" @click="knowledgeTab = 'gaps'">Answer gaps <span v-if="knowledgeGapCounts.open">{{ knowledgeGapCounts.open }}</span></button>
             <button type="button" role="tab" :aria-selected="knowledgeTab === 'quality'" :class="{ active: knowledgeTab === 'quality' }" @click="knowledgeTab = 'quality'">Quality</button>
           </nav>
@@ -8717,28 +9034,43 @@ function startMarketingDemo() {
               <div v-if="!authSnapshot" class="knowledge-auth-note">Sign in to upload private documents or refresh website knowledge.</div>
             </section>
 
+            <section v-else-if="knowledgeTab === 'qna'" class="knowledge-tab-content knowledge-qna-panel" aria-labelledby="knowledge-qna-heading">
+              <div class="knowledge-section-heading"><div><p class="eyebrow">Owner-maintained knowledge</p><h2 id="knowledge-qna-heading">Business Q&amp;A</h2><p>Verified answers visitors can use immediately, with their origin and usage kept visible.</p></div><button v-if="canManageTeam" class="primary-button small" type="button" @click="openKnowledgeQnaEditor()">Add Q&amp;A</button></div>
+              <div class="knowledge-qna-toolbar"><label>Search<input v-model="knowledgeQnaSearch" type="search" placeholder="Question or answer…" /></label><label>Status<select v-model="knowledgeQnaStatusFilter"><option value="ALL">All statuses</option><option value="VERIFIED">Verified</option><option value="NEEDS_REVIEW">Needs review</option><option value="CONFLICTED">Conflicted</option><option value="STALE">Stale</option><option value="ARCHIVED">Archived</option></select></label><span>{{ filteredKnowledgeQnas.length }} item{{ filteredKnowledgeQnas.length === 1 ? '' : 's' }} · {{ knowledgeQnaCounts.VERIFIED || 0 }} verified</span></div>
+              <div class="knowledge-qna-table" role="table" aria-label="Business Q&A">
+                <div class="knowledge-qna-table-head" role="row"><span>Question</span><span>Answer</span><span>Status</span><span>Source</span><span>Usage</span><span>Actions</span></div>
+                <div v-if="!filteredKnowledgeQnas.length" class="knowledge-empty-row">No Business Q&amp;A items match this view. Answer an open gap to create the first verified answer.</div>
+                <div v-for="qna in filteredKnowledgeQnas" :key="qna.id" class="knowledge-qna-table-row" role="row"><div><strong>{{ qna.canonicalQuestion }}</strong><small>{{ qna.variants.length }} variant{{ qna.variants.length === 1 ? '' : 's' }}</small></div><div><span>{{ qna.canonicalAnswer }}</span><small v-if="qna.answerGapId">Origin: Answer Gap</small></div><span :class="['status-pill', qna.status === 'VERIFIED' ? 'booked' : qna.status === 'CONFLICTED' || qna.status === 'STALE' ? 'new' : 'qualified']">{{ qnaStatusLabel(qna.status) }}</span><span class="knowledge-source-meta">{{ qnaSourceLabel(qna) }}<small>{{ formatKnowledgeRelativeTime(qna.updatedAt) }}</small></span><span class="knowledge-source-meta">{{ qna.timesUsed ? `Used ${qna.timesUsed} time${qna.timesUsed === 1 ? '' : 's'}` : 'Not used yet' }}<small v-if="qna.lastUsedAt">{{ formatKnowledgeRelativeTime(qna.lastUsedAt) }}</small></span><div class="knowledge-source-actions"><button class="text-button" type="button" @click="openKnowledgeQnaEditor(qna)">{{ canManageTeam ? 'Edit' : 'View' }}</button><button v-if="canManageTeam && qna.status !== 'VERIFIED' && qna.status !== 'ARCHIVED'" class="text-button" type="button" @click="reviewKnowledgeQna(qna)">Review</button><button v-if="canManageTeam && qna.status !== 'ARCHIVED'" class="text-button danger-text" type="button" @click="archiveKnowledgeQna(qna)">Archive</button></div></div>
+              </div>
+              <p v-if="knowledgeQnaMessage" class="saved-message">✓ {{ knowledgeQnaMessage }}</p><p v-if="knowledgeQnaError" class="form-error">{{ knowledgeQnaError }}</p>
+            </section>
+
             <section v-else-if="knowledgeTab === 'gaps'" class="knowledge-tab-content knowledge-gaps-panel" aria-labelledby="knowledge-gaps-heading">
               <div class="knowledge-section-heading"><div><p class="eyebrow">Conversation signals</p><h2 id="knowledge-gaps-heading">Answer gaps</h2><p>Cluster repeated question variants and rank the work by operational impact.</p></div><span class="knowledge-count-note">{{ knowledgeGapCounts.open }} open</span></div>
               <div class="knowledge-filter-bar knowledge-gap-filters"><div class="knowledge-filter-group" role="group" aria-label="Answer gap status"><button type="button" :class="{ active: knowledgeGapFilter === 'open' }" @click="knowledgeGapFilter = 'open'">Open <span>{{ knowledgeGapCounts.open }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'resolved' }" @click="knowledgeGapFilter = 'resolved'">Resolved <span>{{ knowledgeGapCounts.resolved }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'ignored' }" @click="knowledgeGapFilter = 'ignored'">Ignored <span>{{ knowledgeGapCounts.ignored }}</span></button><button type="button" :class="{ active: knowledgeGapFilter === 'all' }" @click="knowledgeGapFilter = 'all'">All <span>{{ knowledgeGapCounts.all }}</span></button></div><label class="knowledge-inline-filter">Search<input v-model="knowledgeGapSearch" type="search" placeholder="Question or intent…" /></label><label class="knowledge-inline-filter">Intent<select v-model="knowledgeGapIntentFilter"><option value="all">All intents</option><option v-for="intent in knowledgeGapIntentOptions" :key="intent" :value="intent">{{ intent }}</option></select></label><label class="knowledge-inline-filter">Frequency<select v-model="knowledgeGapFrequencyFilter"><option value="all">Any frequency</option><option value="10+">10+ times</option><option value="3+">3+ times</option><option value="1">Once</option></select></label><label class="knowledge-inline-filter">Date range<select v-model="knowledgeGapRange"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All time</option></select></label><label class="knowledge-sort-control"><span>Sort</span><select v-model="knowledgeGapSort"><option value="highestImpact">Highest impact</option><option value="mostAsked">Most asked</option><option value="newest">Newest</option></select></label></div>
               <div v-if="!visibleKnowledgeGaps.length" class="knowledge-empty-state"><CircleCheck :size="23" :stroke-width="1.8" aria-hidden="true" /><div><strong>{{ knowledgeGapFilter === 'open' ? 'No open answer gaps.' : 'No answer gaps in this view.' }}</strong><small>New low-confidence questions will appear here as visitors ask them.</small></div></div>
-              <div v-else class="knowledge-gap-queue"><article v-for="gap in visibleKnowledgeGaps" :key="gap.question" class="knowledge-gap-row"><div class="knowledge-gap-main"><div class="knowledge-gap-topline"><span :class="['status-pill', gap.status === 'resolved' ? 'booked' : gap.status === 'ignored' ? 'qualified' : 'new']">{{ gap.status === 'resolved' ? 'Resolved' : gap.status === 'ignored' ? 'Ignored' : 'Open' }}</span><span class="knowledge-gap-intent">{{ gap.intent || 'General intent' }}</span></div><h3>{{ gap.question }}</h3><p>{{ gap.occurrenceCount }}× asked · {{ gap.variants?.length ?? 1 }} question variant{{ (gap.variants?.length ?? 1) === 1 ? '' : 's' }} · Last seen {{ formatKnowledgeRelativeTime(gap.lastSeenAt) }}</p></div><div class="knowledge-gap-stats"><strong>{{ gap.occurrenceCount }}×</strong><span>asked</span><small>{{ gap.variants?.length ?? 1 }} variant{{ (gap.variants?.length ?? 1) === 1 ? '' : 's' }}</small></div><div class="knowledge-gap-actions"><button class="primary-button small" type="button" @click="openKnowledgeAnswer(gap)">{{ gap.status === 'resolved' ? 'Edit answer' : 'Answer' }}</button><div class="knowledge-gap-menu-wrap"><button class="outline-button small knowledge-gap-menu-trigger" type="button" aria-label="More answer gap actions" :aria-expanded="knowledgeGapMenuOpen === gap.question" @click="toggleKnowledgeGapMenu(gap.question)"><MoreHorizontal :size="16" :stroke-width="1.9" aria-hidden="true" /></button><div v-if="knowledgeGapMenuOpen === gap.question" class="knowledge-gap-menu" role="menu"><button type="button" role="menuitem" :disabled="Boolean(sourceActionLoading)" @click="knowledgeGapMenuOpen = null; refreshWebsiteKnowledge()">Refresh website knowledge</button><button v-if="gap.status === 'open'" type="button" role="menuitem" :disabled="knowledgeAnswerSaving" @click="ignoreKnowledgeGap(gap); knowledgeGapMenuOpen = null">Ignore</button><button type="button" role="menuitem" @click="viewKnowledgeGapConversation">View conversation</button><button type="button" role="menuitem" @click="viewKnowledgeGapRetrieval(gap)">View retrieval details</button></div></div></div></article><div v-if="knowledgeGapTotal" class="collection-pagination"><span>Showing {{ knowledgeGapRangeStart }}–{{ knowledgeGapRangeEnd }} of {{ knowledgeGapTotal }} clusters</span><div><button class="outline-button small" type="button" :disabled="!knowledgeGapHasPrevious" @click="knowledgeGapPage -= 1">Previous</button><button class="outline-button small" type="button" :disabled="!knowledgeGapHasNext" @click="knowledgeGapPage += 1">Next</button></div></div></div>
+              <div v-else class="knowledge-gap-queue"><article v-for="gap in visibleKnowledgeGaps" :key="gap.question" class="knowledge-gap-row"><div class="knowledge-gap-main"><div class="knowledge-gap-topline"><span :class="['status-pill', gap.status === 'resolved' ? 'booked' : gap.status === 'ignored' ? 'qualified' : 'new']">{{ gap.status === 'resolved' ? 'Resolved' : gap.status === 'ignored' ? 'Ignored' : 'Open' }}</span><span class="knowledge-gap-intent">{{ gap.intent || 'General intent' }}</span></div><h3>{{ gap.question }}</h3><p>{{ gap.occurrenceCount }}× asked · {{ gap.variants?.length ?? 1 }} question variant{{ (gap.variants?.length ?? 1) === 1 ? '' : 's' }} · Last seen {{ formatKnowledgeRelativeTime(gap.lastSeenAt) }}</p></div><div class="knowledge-gap-stats"><strong>{{ gap.occurrenceCount }}×</strong><span>asked</span><small>{{ gap.variants?.length ?? 1 }} variant{{ (gap.variants?.length ?? 1) === 1 ? '' : 's' }}</small></div><div class="knowledge-gap-actions"><button class="primary-button small" type="button" @click="openKnowledgeAnswer(gap)">{{ canManageTeam ? (gap.status === 'resolved' ? 'Edit answer' : 'Add answer') : 'View' }}</button><div class="knowledge-gap-menu-wrap"><button class="outline-button small knowledge-gap-menu-trigger" type="button" aria-label="More answer gap actions" :aria-expanded="knowledgeGapMenuOpen === gap.question" @click="toggleKnowledgeGapMenu(gap.question)"><MoreHorizontal :size="16" :stroke-width="1.9" aria-hidden="true" /></button><div v-if="knowledgeGapMenuOpen === gap.question" class="knowledge-gap-menu" role="menu"><button type="button" role="menuitem" :disabled="Boolean(sourceActionLoading)" @click="knowledgeGapMenuOpen = null; refreshWebsiteKnowledge()">Refresh website knowledge</button><button v-if="gap.status === 'open' && canManageTeam" type="button" role="menuitem" :disabled="knowledgeAnswerSaving" @click="ignoreKnowledgeGap(gap); knowledgeGapMenuOpen = null">Ignore</button><button type="button" role="menuitem" @click="viewKnowledgeGapConversation">View conversation</button><button type="button" role="menuitem" @click="viewKnowledgeGapRetrieval(gap)">View retrieval details</button></div></div></div></article><div v-if="knowledgeGapTotal" class="collection-pagination"><span>Showing {{ knowledgeGapRangeStart }}–{{ knowledgeGapRangeEnd }} of {{ knowledgeGapTotal }} clusters</span><div><button class="outline-button small" type="button" :disabled="!knowledgeGapHasPrevious" @click="knowledgeGapPage -= 1">Previous</button><button class="outline-button small" type="button" :disabled="!knowledgeGapHasNext" @click="knowledgeGapPage += 1">Next</button></div></div></div>
             </section>
 
             <section v-else class="knowledge-tab-content" aria-labelledby="knowledge-quality-heading">
               <div class="knowledge-section-heading"><div><p class="eyebrow">Answer quality</p><h2 id="knowledge-quality-heading">Recent answer checks</h2><p>Only real knowledge interactions appear here. Greetings, handoff events, and waiting-for-staff messages stay out.</p></div><span class="knowledge-count-note">{{ knowledgeQualityTotal }} checks · {{ knowledgeQualityRangeLabel }}</span></div>
+              <div v-if="knowledgeQnaAttention.length" class="knowledge-warning-row knowledge-qna-warning-list"><span class="knowledge-warning-icon">!</span><span><strong>{{ knowledgeQnaAttention.length }} Q&amp;A item{{ knowledgeQnaAttention.length === 1 ? '' : 's' }} need review</strong><small>Conflicted or stale answers are excluded from trusted runtime matching.</small></span><button class="text-button" type="button" @click="knowledgeTab = 'qna'">Review Q&amp;A →</button></div>
               <div class="knowledge-quality-toolbar"><label>Search<input v-model="knowledgeQualitySearch" type="search" placeholder="Question or answer…" @input="queueKnowledgeQualitySearch" /></label><label>Date range<select v-model="knowledgeQualityRange" @change="applyKnowledgeQualityFilters"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All time</option></select></label><div class="knowledge-filter-group knowledge-quality-filters" role="group" aria-label="Answer quality filters"><button type="button" :class="{ active: knowledgeQualityFilter === 'all' }" @click="knowledgeQualityFilter = 'all'; applyKnowledgeQualityFilters()">All</button><button type="button" :class="{ active: knowledgeQualityFilter === 'grounded' }" @click="knowledgeQualityFilter = 'grounded'; applyKnowledgeQualityFilters()">Grounded</button><button type="button" :class="{ active: knowledgeQualityFilter === 'fallback' }" @click="knowledgeQualityFilter = 'fallback'; applyKnowledgeQualityFilters()">Fallback</button><button type="button" :class="{ active: knowledgeQualityFilter === 'needsReview' }" @click="knowledgeQualityFilter = 'needsReview'; applyKnowledgeQualityFilters()">Needs review</button></div></div>
               <div class="knowledge-quality-table" role="table" aria-label="Recent answer checks"><div class="knowledge-quality-table-head" role="row"><span>Question</span><span>Confidence</span><span>Outcome</span><span>Sources</span><span>Time</span></div><div v-if="knowledgeQualityLoading" class="knowledge-empty-row">Loading answer checks…</div><div v-else-if="!visibleRetrievalDiagnostics.length" class="knowledge-empty-row">No answer checks match this filter.</div><div v-for="diagnostic in visibleRetrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="knowledge-quality-table-row" role="row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}%</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Fallback' }}</span><span class="knowledge-source-meta">{{ diagnostic.citations?.length ?? 0 }} source{{ (diagnostic.citations?.length ?? 0) === 1 ? '' : 's' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(diagnostic.createdAt) }}</span></div><div v-if="knowledgeQualityTotal" class="collection-pagination"><span>Showing {{ knowledgeQualityRangeStart }}–{{ knowledgeQualityRangeEnd }} of {{ knowledgeQualityTotal }}</span><div><button class="outline-button small" type="button" :disabled="knowledgeQualityLoading || !knowledgeQualityHasPrevious" @click="changeKnowledgeQualityPage(knowledgeQualityPage - 1)">Previous</button><button class="outline-button small" type="button" :disabled="knowledgeQualityLoading || !knowledgeQualityHasNext" @click="changeKnowledgeQualityPage(knowledgeQualityPage + 1)">Next</button></div></div></div>
             </section>
           </template>
 
           <div v-if="answerGapDrawerOpen && selectedKnowledgeGap" class="knowledge-drawer-backdrop" role="presentation" @click.self="closeKnowledgeAnswer">
-            <aside class="knowledge-answer-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledge-answer-heading"><div class="knowledge-drawer-header"><div><p class="eyebrow">Answer editor</p><h2 id="knowledge-answer-heading">Answer this question</h2></div><button class="knowledge-close-button" type="button" aria-label="Close answer editor" @click="closeKnowledgeAnswer">×</button></div><div class="knowledge-drawer-question"><span>Question cluster</span><strong>{{ selectedKnowledgeGap.question }}</strong><small>{{ selectedKnowledgeGap.occurrenceCount }}× asked · {{ selectedKnowledgeGap.variants?.length ?? 1 }} question variant{{ (selectedKnowledgeGap.variants?.length ?? 1) === 1 ? '' : 's' }} · {{ formatKnowledgeGapReason(selectedKnowledgeGap.reason) }}</small><div v-if="(selectedKnowledgeGap.variants?.length ?? 0) > 1" class="knowledge-variant-list"><span>Examples</span><small v-for="variant in selectedKnowledgeGap.variants" :key="variant">“{{ variant }}”</small></div></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="selectedKnowledgeGap.answerMode"><option value="knowledge">Knowledge answer — AI may summarize</option><option value="fixed_response">Fixed response — return controlled wording</option></select></label><label class="knowledge-answer-field"><span>Answer</span><textarea v-model="answerDrafts[selectedKnowledgeGap.question]" rows="9" placeholder="Write the answer the assistant should use…"></textarea><small>Keep it clear and specific. FrontDeskWise updates assistant knowledge automatically after you save.</small></label><p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p><div v-if="knowledgeAnswerSaving || knowledgeAnswerStatus" class="knowledge-answer-progress" role="status" aria-live="polite"><span :class="knowledgeAnswerStatus === 'Ready ✓' ? 'ready' : ''">{{ knowledgeAnswerSaving ? (knowledgeAnswerStatus || 'Saving…') : knowledgeAnswerStatus }}</span><small v-if="knowledgeAnswerStatus === 'Updating assistant knowledge…'">Your answer is saved. We’re making it available to the assistant.</small><small v-else-if="knowledgeAnswerStatus === 'Ready ✓'">The gap moved to Resolved.</small></div><div class="knowledge-drawer-actions"><button class="outline-button" type="button" :disabled="knowledgeAnswerSaving" @click="closeKnowledgeAnswer">Cancel</button><button class="primary-button" type="button" :disabled="!answerDrafts[selectedKnowledgeGap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(selectedKnowledgeGap)">{{ knowledgeAnswerSaving ? 'Saving…' : 'Save answer' }}</button></div></aside>
+            <aside class="knowledge-answer-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledge-answer-heading"><div class="knowledge-drawer-header"><div><p class="eyebrow">{{ canManageTeam ? 'Answer editor' : 'Answer review' }}</p><h2 id="knowledge-answer-heading">{{ canManageTeam ? 'Answer this question' : 'Review this question' }}</h2></div><button class="knowledge-close-button" type="button" aria-label="Close answer editor" @click="closeKnowledgeAnswer">×</button></div><div class="knowledge-drawer-question"><span>Question cluster</span><strong>{{ selectedKnowledgeGap.question }}</strong><small>{{ selectedKnowledgeGap.occurrenceCount }}× asked · {{ selectedKnowledgeGap.variants?.length ?? 1 }} question variant{{ (selectedKnowledgeGap.variants?.length ?? 1) === 1 ? '' : 's' }} · {{ formatKnowledgeGapReason(selectedKnowledgeGap.reason) }}</small><div v-if="(selectedKnowledgeGap.variants?.length ?? 0) > 1" class="knowledge-variant-list"><span>Examples</span><small v-for="variant in selectedKnowledgeGap.variants" :key="variant">“{{ variant }}”</small></div></div><label class="knowledge-answer-mode"><span>Answer behavior</span><select v-model="selectedKnowledgeGap.answerMode" :disabled="!canManageTeam"><option value="knowledge">Knowledge answer — AI may summarize</option><option value="fixed_response">Fixed response — return controlled wording</option></select></label><label class="knowledge-answer-field"><span>Answer</span><textarea v-model="answerDrafts[selectedKnowledgeGap.question]" :readonly="!canManageTeam" rows="9" placeholder="Write the answer the assistant should use…"></textarea><small>Keep it clear and specific. FrontDeskWise updates assistant knowledge automatically after you save.</small></label><p v-if="knowledgeAnswerError" class="form-error">{{ knowledgeAnswerError }} <button v-if="canManageTeam && knowledgeAnswerFailedGap" class="text-button" type="button" @click="resolveKnowledgeGap(knowledgeAnswerFailedGap)">Retry</button></p><div v-if="knowledgeAnswerSaving || knowledgeAnswerStatus" class="knowledge-answer-progress" role="status" aria-live="polite"><span :class="knowledgeAnswerStatus === 'Ready ✓' ? 'ready' : ''">{{ knowledgeAnswerSaving ? (knowledgeAnswerStatus || 'Saving…') : knowledgeAnswerStatus }}</span><small v-if="knowledgeAnswerStatus === 'Updating assistant knowledge…'">Your answer is saved. We’re making it available to the assistant.</small><small v-else-if="knowledgeAnswerStatus === 'Ready ✓'">The gap moved to Resolved.</small></div><div class="knowledge-drawer-actions"><button v-if="selectedKnowledgeGap.resolvedQnaId" class="text-button" type="button" :disabled="knowledgeAnswerSaving" @click="viewResolvedQna">View in Q&amp;A</button><button class="outline-button" type="button" :disabled="knowledgeAnswerSaving" @click="closeKnowledgeAnswer">Close</button><button v-if="canManageTeam" class="primary-button" type="button" :disabled="!answerDrafts[selectedKnowledgeGap.question]?.trim() || knowledgeAnswerSaving" @click="resolveKnowledgeGap(selectedKnowledgeGap)">{{ knowledgeAnswerSaving ? 'Saving…' : 'Save answer' }}</button></div></aside>
+          </div>
+          <div v-if="knowledgeQnaDrawerOpen" class="knowledge-drawer-backdrop" role="presentation" @click.self="closeKnowledgeQnaEditor">
+            <aside class="knowledge-answer-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledge-qna-editor-heading"><div class="knowledge-drawer-header"><div><p class="eyebrow">{{ selectedKnowledgeQna ? 'Q&amp;A editor' : 'New verified knowledge' }}</p><h2 id="knowledge-qna-editor-heading">{{ selectedKnowledgeQna ? 'Edit Business Q&amp;A' : 'Add Business Q&amp;A' }}</h2></div><button class="knowledge-close-button" type="button" aria-label="Close Q&A editor" @click="closeKnowledgeQnaEditor">×</button></div><label class="knowledge-answer-field"><span>Canonical question</span><input v-model="knowledgeQnaDraft.question" :readonly="!canManageTeam" type="text" placeholder="How much does your service cost?" /><small>Use the version you want owners to recognize in the knowledge base.</small></label><label class="knowledge-answer-field"><span>Answer</span><textarea v-model="knowledgeQnaDraft.answer" :readonly="!canManageTeam" rows="8" placeholder="Write the verified answer visitors should receive…"></textarea></label><label class="knowledge-answer-field"><span>Question variants</span><textarea v-model="knowledgeQnaDraft.variants" :readonly="!canManageTeam" rows="4" placeholder="One variant per line"></textarea><small>Variants let common wording map to this canonical answer.</small></label><label class="knowledge-answer-field"><span>Review until <span class="optional">Optional</span></span><input v-model="knowledgeQnaDraft.validUntil" :readonly="!canManageTeam" type="date" /><small>Useful for pricing, hours, availability, and other high-change facts.</small></label><p v-if="knowledgeQnaError" class="form-error">{{ knowledgeQnaError }}</p><div class="knowledge-drawer-actions"><button class="outline-button" type="button" :disabled="knowledgeQnaSaving" @click="closeKnowledgeQnaEditor">Close</button><button v-if="canManageTeam" class="primary-button" type="button" :disabled="knowledgeQnaSaving" @click="saveKnowledgeQna">{{ knowledgeQnaSaving ? 'Saving…' : 'Save verified Q&amp;A' }}</button></div></aside>
           </div>
         </div>
 
         <div v-else-if="view === 'workflows'" class="workflow-workspace-shell">
           <p v-if="workflowContextRefreshMessage" class="form-error workflow-context-refresh-message" role="status">{{ workflowContextRefreshMessage }}</p>
-          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
+          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :performance-by-workflow="workflowPerformanceByAction" :initial-workflow-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowId : undefined" :initial-action-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowActionId : undefined" :agent-tone="agentTone" :agent-primary-language="primaryLanguage" :agent-citation-visibility="citationVisibility" :agent-fallback-behavior="fallbackBehavior" :agent-human-handoff-enabled="humanHandoffEnabled" :agent-proactive-enabled="proactiveEnabled" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @open-agent-behavior="selectAgentTab('behavior')" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
@@ -8758,15 +9090,15 @@ function startMarketingDemo() {
               <div class="action-save-success-actions"><button v-if="!savedAction.isPrimary && canSetPrimaryAction(savedAction)" class="outline-button small" type="button" :disabled="actionsLoading" @click="setPrimaryAction(savedAction)">Set as primary</button><button v-if="canSetPrimaryAction(savedAction)" class="primary-button small" type="button" @click="runActionTest(savedAction)">Test flow</button></div>
             </div>
             <section class="primary-goal-card">
-              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose what visitors should do next' }}</h2><p>{{ primaryActionFlow ? 'This is the main action the assistant can recommend after relevant answers.' : 'Your assistant can answer questions, but no primary conversion goal is configured yet.' }}</p><div v-if="primaryActionFlow" class="primary-goal-details"><span>{{ formatLabel(primaryActionFlow.executionMode || 'FORM_FLOW') }} · {{ formatLabel(primaryActionFlow.attachmentPolicy || 'explicit_request_only') }}</span><span v-if="primaryActionFlow.executionMode === 'PROVIDER_FLOW'">Provider: {{ formatLabel(actionProvider(primaryActionFlow) || 'Not selected') }} · {{ providerIsConnected(actionProvider(primaryActionFlow)) ? 'Connected' : 'Needs connection' }}</span><a v-if="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" :href="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" target="_blank" rel="noreferrer">{{ primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url }}</a></div></div>
+              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose what visitors should do next' }}</h2><p>{{ primaryActionFlow ? 'This is the preferred outcome FrontDeskWise may recommend when no more specific workflow outcome takes precedence.' : 'Your assistant can answer questions, but no primary conversion goal is configured yet.' }}</p><div v-if="primaryActionFlow" class="primary-goal-details"><span>{{ actionCompletionLabel(primaryActionFlow) }} · {{ formatLabel(primaryActionFlow.attachmentPolicy || 'explicit_request_only') }}</span><span v-if="primaryActionFlow.executionMode === 'PROVIDER_FLOW'">Provider: {{ formatLabel(actionProvider(primaryActionFlow) || 'Not selected') }} · {{ providerIsConnected(actionProvider(primaryActionFlow)) ? 'Connected' : 'Needs connection' }}</span><a v-if="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" :href="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" target="_blank" rel="noreferrer">{{ primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url }}</a></div></div>
               <div class="primary-goal-actions"><span v-if="primaryActionFlow" class="primary-goal-status">✓ Active</span><template v-if="primaryActionFlow"><button class="outline-button small" type="button" @click="openPrimaryGoalChooser">Change goal</button><button class="primary-button small" type="button" @click="runActionTest(primaryActionFlow)">Test</button></template><button v-else class="primary-button small" type="button" @click="openPrimaryGoalChooser">Choose a primary goal</button></div>
               <div v-if="!primaryActionFlow && recommendedPrimaryAction" class="primary-goal-recommendation"><span>Recommended from your website</span><strong>{{ recommendedPrimaryAction.name }}</strong><small>{{ recommendedPrimaryAction.destination?.url || recommendedPrimaryAction.completion.linkUrl || 'Owner-confirmed action' }}</small></div>
             </section>
             <section v-if="actionFlows.length" class="action-dashboard-list">
               <div class="action-section-heading"><div><p class="eyebrow">Your actions</p><h3>Conversion flows</h3><p>Give visitors a clear next step and keep the outcome visible to your team.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
               <article v-for="action in actionFlows" :key="action.id" :class="['action-summary-card', { 'action-summary-card-saved': action.id === savedActionId }]">
-                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }} <span v-if="action.isPrimary" class="primary-action-label">Primary goal</span></h3><p>{{ action.description }}</p><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span><span v-if="action.executionMode">{{ action.executionMode }}</span><span v-if="action.executionMode === 'PROVIDER_FLOW' && actionProvider(action)">Provider: {{ formatLabel(actionProvider(action) || '') }} · {{ providerIsConnected(actionProvider(action)) ? 'Connected' : 'Needs connection' }}</span><span>{{ actionFunnelFor(action)?.started ?? 0 }} started</span><span>{{ actionFunnelFor(action)?.completed ?? 0 }} completed</span><span>{{ actionCompletionRate(action) }}% completion</span></div></div></div>
-                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><span v-if="action.isPrimary" class="current-primary-note">Current primary</span><button v-else class="outline-button small" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" :title="!canSetPrimaryAction(action) ? actionPrimarySetupHint(action) : undefined" @click="setPrimaryAction(action)">Set as primary</button><button v-if="(action.steps?.length ?? 0) > 1 || action.executionMode === 'PROVIDER_FLOW'" class="text-button" type="button" @click="openWorkflowAction(action.id)">Open workflow <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></button><button class="outline-button small" type="button" @click="runActionTest(action)">Test flow</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
+                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }}</h3><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}<template v-if="action.isPrimary"> · Primary</template></span><span v-if="action.workflowCount">Used by {{ action.workflowCount }} workflow{{ action.workflowCount === 1 ? '' : 's' }}</span></div><p class="action-card-description">{{ action.description }}</p><div class="action-card-outcome"><span class="eyebrow">Outcome</span><strong>{{ actionCompletionLabel(action) }}</strong><span>{{ actionOutcomeDetail(action) }}</span></div><div class="action-card-inputs"><div><span class="eyebrow">Required information</span><strong>{{ actionRequiredInputLabels(action).length ? actionRequiredInputLabels(action).join(' · ') : 'None' }}</strong></div><div v-if="actionRecommendedInputLabels(action).length"><span class="eyebrow">Useful for your business</span><strong>{{ actionRecommendedInputLabels(action).join(' · ') }}</strong></div></div><div v-if="action.workflowNames?.length" class="action-card-relationships"><span class="eyebrow">Used by</span><button v-for="(workflowName, workflowIndex) in action.workflowNames" :key="`${action.id}-${workflowName}`" class="text-button" type="button" @click="openWorkflowForAction(action, workflowIndex)">{{ workflowName }} <ArrowRight :size="12" :stroke-width="1.8" aria-hidden="true" /></button></div><p v-else class="action-card-no-workflow">No workflow currently guides visitors to this outcome.</p></div></div>
+                <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button v-if="!action.workflowCount" class="primary-button small" type="button" @click="openWorkflowForAction(action)">Generate workflow</button><button v-else class="text-button" type="button" @click="openWorkflowForAction(action)">Open workflow <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></button><button class="outline-button small" type="button" @click="runActionTest(action)">Test</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
               </article>
             </section>
             <section v-else class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="openActionTemplateChooser()">Create your first action <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
@@ -8777,7 +9109,20 @@ function startMarketingDemo() {
             <div class="action-editor-titlebar"><div><p class="eyebrow">Action editor</p><h2>{{ actionDraft.name }}</h2><p>{{ actionDraft.description }}</p></div><div class="action-editor-title-actions"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(actionDraft))}`]">{{ actionStatusLabel(actionDraft) }}</span><label class="toggle-row"><span>Active</span><input v-model="actionDraft.enabled" type="checkbox" /></label><button class="outline-button small" type="button" @click="actionAdvancedOpen = !actionAdvancedOpen">{{ actionAdvancedOpen ? 'Hide advanced' : 'Advanced' }}</button></div></div>
             <section class="action-funnel-summary"><div><p class="eyebrow">Last 30 days</p><h3>Conversion flow</h3></div><div class="action-funnel-steps"><div><strong>{{ actionFunnelFor(actionDraft)?.started ?? 0 }}</strong><span>Started</span></div><i></i><div><strong>{{ actionFunnelFor(actionDraft)?.formDisplayed ?? 0 }}</strong><span>Reached form</span></div><i></i><div><strong>{{ actionFunnelFor(actionDraft)?.submitted ?? 0 }}</strong><span>Submitted</span></div><i></i><div><strong>{{ actionFunnelFor(actionDraft)?.completed ?? 0 }}</strong><span>Completed</span></div><div class="action-funnel-rate"><strong>{{ actionCompletionRate(actionDraft) }}%</strong><span>Completion rate</span></div></div><small v-if="actionFunnelFor(actionDraft)?.dropOffs?.length">Biggest drop-off: {{ actionFunnelFor(actionDraft)?.dropOffs[0].label }} · {{ actionFunnelFor(actionDraft)?.dropOffs[0].count }} visitors</small></section>
             <section class="action-editor-layout">
+              <article class="panel action-outcome-panel">
+                <div class="action-stage-heading"><span class="action-stage-number">1</span><div><p class="eyebrow">Outcome</p><h3>What should visitors be able to accomplish?</h3><p>Configure the business outcome here. The Workflow page owns the questions and journey.</p></div></div>
+                <div class="action-two-column"><label>Action name<input v-model="actionDraft.name" type="text" placeholder="Request a demo" /></label><label>How does this complete?<select :value="actionCompletionChoice(actionDraft)" @change="setActionCompletionChoiceFromEvent"><option value="link">Send visitors to a page</option><option value="notify_team">Notify the team</option><option value="webhook">Send to CRM / webhook</option><option value="provider">Use a connected provider</option><option value="phone">Call the business</option><option value="collect_details">Collect details</option></select></label></div>
+                <label>What this Action accomplishes<textarea v-model="actionDraft.description" rows="2" placeholder="Send interested visitors to the verified demo page."></textarea></label>
+                <label v-if="actionCompletionChoice(actionDraft) === 'link'">Destination<input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://yourbusiness.com/demo" /><small class="form-help">Use the verified page visitors should open.</small></label>
+                <label v-if="actionCompletionChoice(actionDraft) === 'provider'">Connected provider<select v-model="actionDraft.provider"><option value="">Select a provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking system</option></select><small class="form-help">The provider remains the system of record for the final transaction.</small></label>
+                <div class="action-capability-summary"><div><span class="eyebrow">Required information</span><strong>{{ actionRequiredInputLabels(actionDraft).length ? actionRequiredInputLabels(actionDraft).join(' · ') : 'None' }}</strong><small>Technically required to complete this Action.</small></div><div><span class="eyebrow">Useful for your business</span><strong>{{ actionRecommendedInputLabels(actionDraft).length ? actionRecommendedInputLabels(actionDraft).join(' · ') : 'Workflow decides' }}</strong><small>Workflows may collect these when useful.</small></div></div>
+                <div v-if="actionDraft.workflowNames?.length" class="action-relationship-box"><div><p class="eyebrow">Used by</p><strong>{{ actionDraft.workflowCount }} workflow{{ actionDraft.workflowCount === 1 ? '' : 's' }}</strong></div><button v-for="(workflowName, workflowIndex) in actionDraft.workflowNames" :key="`${actionDraft.id}-editor-${workflowName}`" class="text-button" type="button" @click="openWorkflowForAction(actionDraft, workflowIndex)">{{ workflowName }} <ArrowRight :size="12" :stroke-width="1.8" aria-hidden="true" /></button></div><div v-else class="action-relationship-empty"><strong>No workflow currently guides visitors to this outcome.</strong><button class="outline-button small" type="button" @click="openWorkflowForAction(actionDraft)">Generate workflow</button></div>
+                <p class="form-help">Lead capture and qualification belong to Workflows. This Action only declares what must happen at the end.</p>
+              </article>
               <article class="panel action-config-panel">
+                <details class="action-advanced-editor" :open="actionAdvancedOpen">
+                  <summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen"><span><p class="eyebrow">Advanced settings</p><strong>Questions, triggers, and delivery</strong><small>Legacy fields remain available here without making Actions a second Workflow builder.</small></span><span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary>
+                  <div class="action-advanced-editor-body">
                 <nav class="action-flow-stepper" aria-label="Action stages"><button v-for="(stage, index) in actionEditorStageLabels" :key="stage.id" type="button" :class="{ active: actionEditorStage === stage.id }" @click="setActionStage(stage.id)"><span>{{ index + 1 }}</span><strong>{{ stage.label }}</strong><small>{{ stage.helper }}</small></button></nav>
                 <div class="action-stage-content">
                   <template v-if="actionEditorStage === 'trigger'">
@@ -8808,7 +9153,7 @@ function startMarketingDemo() {
                   <template v-else>
                     <div class="action-stage-heading"><span class="action-stage-number">5</span><div><p class="eyebrow">Deliver</p><h3>Where should the completed action go?</h3><p>Leads are saved first. Select an existing connection for an additional delivery.</p></div></div>
                     <div class="action-delivery-choice"><label>Deliver to<select :value="actionDraft.completion.connector?.provider ?? 'none'" @change="setActionConnectorProviderFromEvent"><option value="none">FrontDeskWise only</option><option value="email">Email the team</option><option v-if="integrations.some((integration) => integration.provider === 'webhook' && integration.connectionStatus === 'active')" value="generic_webhook">Webhook / automation</option><option v-if="integrations.some((integration) => integration.provider === 'hubspot' && integration.connectionStatus === 'active')" value="hubspot">HubSpot CRM</option></select></label><label v-if="actionConnectorProvider !== 'email' && actionConnectorProvider !== 'none'">Connected system<select :value="actionDraft.completion.connector?.integrationId ?? ''" @change="setActionConnectorIntegrationFromEvent"><option value="">Select a connected system…</option><option v-for="integration in activeActionIntegrations" :key="integration.id" :value="integration.id">{{ integration.displayName }}</option></select></label></div>
-                    <div v-if="!integrations.length" class="action-connection-empty"><strong>No integration connected</strong><span>Connect one in Settings when you need delivery outside FrontDeskWise.</span><button class="outline-button small" type="button" @click="openSettingsTab('integrations')">Connect an integration</button></div>
+                    <div v-if="!integrations.length" class="action-connection-empty"><strong>No CRM connected</strong><span>Choose where completed leads should go after they’re saved.</span><div class="action-connection-empty-actions"><button class="outline-button small" type="button" @click="openIntegrationSetup('hubspot')">Connect HubSpot</button><button class="text-button" type="button" @click="openIntegrationSetup('webhook')">Use Zapier</button></div></div>
                     <div v-else class="action-delivery-queue"><div class="panel-heading"><div><p class="eyebrow">Delivery history</p><h3>{{ actionDeliveriesFor(actionDraft).length ? 'Recent deliveries' : 'No deliveries yet' }}</h3></div><button class="text-button" type="button" :disabled="actionsLoading" @click="loadActions">Refresh</button></div><div v-for="delivery in actionDeliveriesFor(actionDraft)" :key="delivery.id" class="action-delivery-row"><span><strong>{{ delivery.provider }}</strong><small>{{ delivery.attempts }} attempt{{ delivery.attempts === 1 ? '' : 's' }} · {{ new Date(delivery.updatedAt).toLocaleString() }}</small></span><span :class="['status-pill', delivery.status === 'succeeded' ? 'booked' : delivery.status === 'failed' ? 'new' : 'qualified']">{{ delivery.status }}</span><button v-if="delivery.status === 'failed'" class="text-button" type="button" :disabled="actionsLoading" @click="retryActionDelivery(delivery)">Retry</button></div></div>
                   </template>
 
@@ -8817,13 +9162,15 @@ function startMarketingDemo() {
                     <div v-if="actionDraft.executionMode === 'DIRECT_LINK'" class="action-customer-copy"><div><p class="eyebrow">Customer-facing copy</p><p>These words are shown to visitors. The internal template name stays out of the conversation.</p></div><div class="action-two-column action-copy-grid"><label>Action name<input v-model="actionDraft.name" type="text" placeholder="Try the demo" /></label><label>Button label<input v-model="actionDraft.completion.linkLabel" type="text" placeholder="Try the demo" /></label></div><label>Message before button<textarea v-model="actionDraft.completion.message" rows="2" placeholder="You can try it here."></textarea></label></div>
                     <div class="action-two-column action-semantics-fields"><label>Execution mode<select v-model="actionDraft.executionMode"><option value="DIRECT_LINK">Direct link</option><option value="FORM_FLOW">Form flow</option><option value="PROVIDER_FLOW">Provider flow</option><option value="PHONE">Phone</option><option value="EMAIL">Email</option><option value="HANDOFF">Internal handoff</option><option value="API_ACTION">API action</option></select></label><label>When should this appear<select v-model="actionDraft.attachmentPolicy"><option value="sales_intent">When relevant to sales intent</option><option value="high_intent_only">Only for high intent</option><option value="explicit_request_only">Only when explicitly requested</option><option value="always">Frequently</option><option value="never_auto">Never automatically</option></select></label></div>
                     <label v-if="actionDraft.executionMode === 'PROVIDER_FLOW'">Provider<select v-model="actionDraft.provider"><option value="">Select a provider…</option><option value="jackrabbit">Jackrabbit</option></select><small class="form-help">The provider supplies live availability and the verified registration path. Connect it in Settings before making this action primary.</small></label>
-                    <div v-if="actionDraft.executionMode === 'PROVIDER_FLOW' && actionProvider(actionDraft) === 'jackrabbit'" class="action-provider-status"><div><strong>Jackrabbit</strong><span>{{ providerIsConnected('jackrabbit') ? 'Connected and ready to verify live classes.' : 'Not connected yet.' }}</span></div><span :class="['status-pill', providerIsConnected('jackrabbit') ? 'booked' : 'qualified']">{{ providerIsConnected('jackrabbit') ? 'Connected' : 'Needs connection' }}</span><button v-if="!providerIsConnected('jackrabbit')" class="outline-button small" type="button" @click="openSettingsTab('integrations')">Connect Jackrabbit</button></div>
+                    <div v-if="actionDraft.executionMode === 'PROVIDER_FLOW' && actionProvider(actionDraft) === 'jackrabbit'" class="action-provider-status"><div><strong>Jackrabbit</strong><span>{{ providerIsConnected('jackrabbit') ? 'Connected and ready to verify live classes.' : 'Not connected yet.' }}</span></div><span :class="['status-pill', providerIsConnected('jackrabbit') ? 'booked' : 'qualified']">{{ providerIsConnected('jackrabbit') ? 'Connected' : 'Needs connection' }}</span><button v-if="!providerIsConnected('jackrabbit')" class="outline-button small" type="button" @click="openIntegrationSetup('jackrabbit')">Connect Jackrabbit</button></div>
                     <label v-if="actionDraft.executionMode === 'DIRECT_LINK'">Destination URL<input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://yourbusiness.com/demo" /><small class="form-help">Use the verified page visitors should open. Direct-link actions need a destination before they can be primary.</small></label>
                     <label>Tracking key<input v-model="actionDraft.trackingKey" type="text" placeholder="try_demo" /><small class="form-help">Used for CTA and conversion analytics.</small></label>
                   </section>
 
                   <details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced settings <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Internal action key<input v-model="actionDraft.key" type="text" /></label><label>Trigger intents <input :value="actionDraft.triggerIntents.join(', ')" type="text" placeholder="contact, lead" @input="setActionTriggerIntents" /></label><label v-if="actionDraft.executionMode !== 'DIRECT_LINK'">Continue link <span class="optional">optional</span><input v-model="actionDraft.completion.linkUrl" type="url" placeholder="https://…" /></label><label>Completion mode<select v-model="actionDraft.completion.completionMode" @change="ensureCompletionLinkTemplate"><option value="native_form">FrontDeskWise native</option><option value="external_provider">External provider link</option><option value="booking_connector">Booking connector</option><option value="payment_link">Payment link</option><option value="human_follow_up">Human follow-up</option></select></label><template v-if="(actionDraft.completion.completionMode === 'external_provider' || actionDraft.completion.completionMode === 'payment_link') && actionDraft.completion.linkTemplate"><label>Provider completion URL<input v-model="actionDraft.completion.linkTemplate.baseUrl" type="url" placeholder="https://provider.example/register" @focus="ensureCompletionLinkTemplate" /></label><label>Prefill mappings <span class="optional">one per line · source.path=providerParameter</span><textarea :value="completionLinkMappingsText" rows="4" placeholder="parent_name=MFName&#10;email=MEmail&#10;student.name=S1FName" @input="setCompletionLinkMappingsFromEvent"></textarea></label></template><p class="form-help">Completion links only include fields you explicitly map. Provider-owned waivers, signatures, and payment details stay on the provider.</p></div></details>
                 </div>
+                  </div>
+                </details>
                 <div class="action-editor-footer"><button class="text-button danger-text" type="button" :disabled="actionsLoading" @click="removeAction">Delete action</button><span v-if="actionsMessage" class="saved-message">✓ {{ actionsMessage }}</span><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
               </article>
               <aside class="panel action-live-preview"><div class="action-preview-heading"><div><p class="eyebrow">Live customer preview</p><h3>What visitors will see</h3></div><span class="preview-live-dot">Live</span></div><div class="action-preview-window"><div class="action-preview-top"><span class="mini-orb"><img src="/frontdeskwise-logo-mark.png" alt="" aria-hidden="true" /></span><div><strong>{{ assistantName }}</strong><small>{{ businessName || 'Your business' }}</small></div><span class="online-dot"></span></div><div class="action-preview-thread"><div class="action-preview-bubble">{{ actionDraft.executionMode === 'DIRECT_LINK' ? actionCustomerMessage(actionDraft) : actionDraft.completion.message || 'Absolutely. I just need a few details.' }}</div><div class="action-preview-bubble visitor">{{ actionDraft.executionMode === 'DIRECT_LINK' ? actionTestQuestion(actionDraft) : `I’d like to ${actionDraft.name.toLowerCase()}.` }}</div><div v-if="actionDraft.executionMode === 'DIRECT_LINK' && (actionDraft.completion.linkUrl || actionDraft.destination?.url)" class="action-preview-link"><strong>{{ actionDraft.completion.linkLabel || actionDraft.name || 'Continue' }}</strong><small>{{ actionDraft.completion.linkUrl || actionDraft.destination?.url }}</small><button class="primary-button small" type="button">{{ actionDraft.completion.linkLabel || actionDraft.name || 'Continue' }}</button></div><div v-else class="action-preview-form"><div class="action-preview-bubble">Absolutely. I just need a few details.</div><label v-for="field in actionDraft.fields.filter((item) => item.visibility !== 'hidden').slice(0, 4)" :key="field.id">{{ field.label }} <span v-if="!field.required">optional</span><input :type="field.type === 'phone' ? 'tel' : field.type" disabled :placeholder="field.label" /></label><span v-if="!actionDraft.fields.length" class="action-inline-empty">Add questions to see the form preview.</span><button class="primary-button small" type="button">{{ actionDraft.completion.submitLabel || 'Send request' }}</button></div></div><div class="action-preview-input">Ask a question… <Send :size="14" :stroke-width="1.8" aria-hidden="true" /></div></div><p class="form-help">Updates appear here as you change questions, capture style, or completion behavior.</p></aside>
@@ -8837,19 +9184,44 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'connections'" class="view-content">
           <div class="section-toolbar">
-            <div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect business systems for reliable delivery, then give the assistant only the extra context it needs.</p></div>
+            <div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect the tools your business already uses.</p></div>
             <div class="toolbar-actions"><span v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</span><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="integrationLoading || mcpLoading" @click="loadIntegrations(); loadMcpConnections()">{{ integrationLoading || mcpLoading ? 'Working…' : 'Refresh' }}</button><button class="text-button" type="button" @click="openSupportReport('integration', hubspotIntegration?.provider ?? '', hubspotIntegration?.id ?? '')">Get help</button></div>
           </div>
           <p v-if="integrationError || mcpError" class="form-error">{{ integrationError || mcpError }}</p>
 
           <div class="integration-model-banner">
-            <div class="integration-model-copy"><span class="integration-model-icon"><Cable :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">One integration model</p><h3>Business systems first. AI tools when they help.</h3><p>Use deterministic connectors for outcomes that must complete. Use MCP when the assistant needs flexible CRM context or follow-up tools.</p></div></div>
-            <div class="integration-decision-rule"><span>Decision rule</span><strong>Critical completion actions → Business integrations</strong><strong>Agent lookup & context → MCP</strong></div>
+            <div class="integration-model-copy"><span class="integration-model-icon"><Cable :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Integrations</p><h3>Connect the systems your business already uses.</h3><p>FrontDeskWise uses business integrations for bookings, lead delivery, and other customer actions. Advanced AI tool connections are optional.</p><button class="integration-info-link" type="button" @click="integrationHowItWorksOpen = !integrationHowItWorksOpen">How integrations work <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><p v-if="integrationHowItWorksOpen" class="integration-how-it-works">Business integrations handle customer-facing actions. AI tool connections are an optional way to let FrontDeskWise look up information or help with follow-up work.</p></div></div>
           </div>
 
           <section class="integration-section">
-            <div class="integration-section-heading"><div><p class="eyebrow">Business integrations</p><h2>Connected apps</h2><p>Native and API-based connections power lead delivery, CRM sync, notifications, and other guaranteed workflows.</p></div><button class="primary-button small" type="button" @click="openNativeIntegrationForm('hubspot')">+ Add business integration</button></div>
-            <div class="integration-card-grid">
+            <div class="integration-section-heading"><div><p class="eyebrow">Business integrations</p><h2>Connect the tools your business already uses.</h2><p>Keep the setup focused on bookings, leads, and customer actions.</p></div></div>
+            <div class="integration-compact-grid">
+              <article class="panel integration-compact-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo hubspot-logo"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path :d="siHubspot.path" /></svg></span><div><h3>HubSpot</h3><small>CRM</small></div></div><span :class="['status-pill', hubspotIntegration?.connectionStatus === 'active' ? 'booked' : hubspotIntegration?.connectionStatus === 'error' ? 'new' : 'qualified']">{{ hubspotIntegration?.connectionStatus === 'active' ? 'Connected' : hubspotIntegration?.connectionStatus === 'error' ? 'Needs attention' : 'Not connected' }}</span></div>
+                <p>Send captured leads and follow-up data to HubSpot.</p>
+                <div class="integration-compact-meta"><span><strong>{{ hubspotIntegration ? 'Used for' : 'Best for' }}</strong>{{ hubspotIntegration ? 'Lead delivery · follow-up tasks' : 'Lead delivery and CRM sync' }}</span></div>
+                <div class="integration-card-actions"><button class="primary-button small" type="button" @click="openNativeIntegrationForm('hubspot')">{{ hubspotIntegration ? 'Manage' : 'Connect' }}</button></div>
+              </article>
+              <article class="panel integration-compact-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo automation-logo"><Workflow :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Zapier / Make</h3><small>Automation</small></div></div><span :class="['status-pill', webhookIntegration?.connectionStatus === 'active' ? 'booked' : webhookIntegration ? 'new' : 'qualified']">{{ webhookIntegration?.connectionStatus === 'active' ? 'Connected' : webhookIntegration ? 'Needs attention' : 'Not connected' }}</span></div>
+                <p>Send events to the workflows your team already uses.</p>
+                <div class="integration-compact-meta"><span><strong>{{ webhookIntegration ? 'Used for' : 'Best for' }}</strong>{{ webhookIntegration ? 'Lead and action events' : 'Flexible workflow automation' }}</span></div>
+                <div class="integration-card-actions"><button class="primary-button small" type="button" @click="openNativeIntegrationForm('webhook')">{{ webhookIntegration ? 'Manage' : 'Connect' }}</button></div>
+              </article>
+              <article class="panel integration-compact-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><CalendarCheck :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Booking tools</h3><small>Booking provider</small></div></div><span :class="['status-pill', bookingIntegrationConfigured ? 'booked' : 'qualified']">{{ bookingIntegrationConfigured ? 'Configured' : 'Not configured' }}</span></div>
+                <p>Use your booking page or provider for appointments.</p>
+                <div class="integration-compact-meta"><span><strong>{{ bookingIntegrationConfigured ? 'Used for' : 'Best for' }}</strong>{{ bookingIntegrationConfigured ? 'Appointment actions' : 'Calendly or custom booking links' }}</span></div>
+                <div class="integration-card-actions"><button class="primary-button small" type="button" @click="navigateToWorkspaceView('actions')">{{ bookingIntegrationConfigured ? 'Manage' : 'Configure' }}</button></div>
+              </article>
+              <article class="panel integration-compact-card">
+                <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><Waves :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Jackrabbit</h3><small>Class management</small></div></div><span :class="['status-pill', jackrabbitIntegration?.connectionStatus === 'active' ? 'booked' : jackrabbitIntegration?.connectionStatus === 'error' ? 'new' : 'qualified']">{{ jackrabbitIntegration?.connectionStatus === 'active' ? 'Connected' : jackrabbitIntegration?.connectionStatus === 'error' ? 'Needs attention' : 'Not connected' }}</span></div>
+                <p>Check live classes and availability for your customers.</p>
+                <div class="integration-compact-meta"><span><strong>{{ jackrabbitIntegration ? 'Used for' : 'Best for' }}</strong>{{ jackrabbitIntegration ? 'Live class lookup' : 'Class lookup and registration' }}</span></div>
+                <div class="integration-card-actions"><button class="primary-button small" type="button" @click="openNativeIntegrationForm('jackrabbit')">{{ jackrabbitIntegration ? 'Manage' : 'Connect' }}</button></div>
+              </article>
+            </div>
+            <div class="integration-card-grid integration-detailed-grid">
               <article class="panel business-integration-card">
                 <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><Waves :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Jackrabbit</h3><small>Class management · read-only availability</small></div></div><span :class="['status-pill', jackrabbitIntegration?.connectionStatus === 'active' ? 'booked' : jackrabbitIntegration?.connectionStatus === 'error' ? 'new' : jackrabbitIntegration ? 'qualified' : 'qualified']">{{ jackrabbitIntegration?.connectionStatus === 'active' ? 'Connected ✓' : jackrabbitIntegration?.connectionStatus === 'error' ? 'Needs attention' : jackrabbitIntegration ? formatLabel(jackrabbitIntegration.connectionStatus) : 'Not connected' }}</span></div>
                 <p class="integration-card-description">Find live classes and availability while Jackrabbit remains the system of record for registration, waivers, and payment.</p>
@@ -8883,7 +9255,42 @@ function startMarketingDemo() {
             <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>{{ integrationProvider === 'jackrabbit' ? 'Connect Jackrabbit' : 'Connect a business integration' }}</h3><p>FrontDeskWise keeps credentials server-side, encrypted at rest, and out of the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="jackrabbit">Jackrabbit</option><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : integrationProvider === 'jackrabbit' ? 'Jackrabbit' : 'Automation webhook'" /></label><label v-if="integrationProvider === 'jackrabbit'" class="integration-connect-wide">Customer API token <span class="optional">encrypted · never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste your Jackrabbit Customer API token" /><small>FrontDeskWise detects the Jackrabbit account automatically after validation. Enrollment, payment, waivers, and registration remain in Jackrabbit.</small></label><div v-if="integrationProvider === 'hubspot' && !integrationManualMode" class="integration-connect-wide integration-oauth-callout"><strong>Connect with HubSpot OAuth</strong><p>Authorize FrontDeskWise to create or update contacts in the selected HubSpot account. You will return here after authorization.</p><button class="primary-button small" type="button" :disabled="integrationLoading" @click="connectIntegration">{{ integrationLoading ? 'Opening HubSpot…' : 'Connect HubSpot' }}</button><button class="text-button" type="button" @click="integrationManualMode = true">Advanced / Manual connection</button></div><label v-if="integrationProvider === 'hubspot' && integrationManualMode" class="integration-connect-wide">Private app or service key <span class="optional">encrypted · advanced</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the provider token" /><small>Use this only for an account-local manual connection. Customer installs should use OAuth.</small></label><template v-else-if="integrationProvider === 'webhook'"><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button v-if="integrationProvider === 'webhook' || integrationProvider === 'jackrabbit' || integrationManualMode" class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : integrationProvider === 'jackrabbit' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : integrationProvider === 'jackrabbit' ? 'Connect Jackrabbit' : 'Test & connect securely →' }}</button></div></div>
           </section>
 
-          <section class="integration-section mcp-section">
+          <section class="integration-section advanced-ai-section">
+            <div class="advanced-ai-heading">
+              <button class="advanced-ai-toggle" type="button" @click="advancedAiConnectionsOpen = !advancedAiConnectionsOpen">
+                <span><p class="eyebrow">Advanced</p><h2>AI tool connections</h2><small>For businesses that want FrontDeskWise to use external tools for lookups and follow-up tasks.</small></span>
+                <span class="advanced-ai-toggle-state">{{ mcpConnections.length ? `${mcpConnections.length} connected` : 'Optional' }} <ChevronDown :size="16" :stroke-width="1.8" :class="{ rotated: advancedAiConnectionsOpen }" aria-hidden="true" /></span>
+              </button>
+              <button class="outline-button small" type="button" @click="openMcpConnectionDrawer">Connect AI tool</button>
+            </div>
+            <div v-if="advancedAiConnectionsOpen" class="advanced-ai-body">
+              <div v-if="!mcpConnections.length" class="advanced-ai-empty"><div><strong>No AI tools connected</strong><span>Add one only when FrontDeskWise needs context from another system.</span></div><button class="primary-button small" type="button" @click="openMcpConnectionDrawer">Connect AI tool</button></div>
+              <div v-else class="mcp-summary-list">
+                <article v-for="connection in mcpConnections" :key="connection.id" class="mcp-summary-card">
+                  <div class="mcp-summary-header"><div><strong>{{ connection.displayName }}</strong><small>{{ mcpProviderName(connection.provider) }}</small></div><span :class="['status-pill', connection.connectionStatus === 'active' ? 'booked' : connection.connectionStatus === 'error' ? 'new' : 'qualified']">{{ connection.connectionStatus === 'active' ? 'Connected' : formatLabel(connection.connectionStatus) }}</span></div>
+                  <div class="mcp-summary-tools"><strong>Allowed tools</strong><span v-for="tool in connection.tools.slice(0, 3)" :key="tool.name"><b :class="tool.allowed ? 'capability-check' : 'capability-pending'">{{ tool.allowed ? '✓' : '○' }}</b>{{ tool.title || tool.name }}</span><small v-if="connection.tools.length > 3">+{{ connection.tools.length - 3 }} more</small></div>
+                  <div class="mcp-summary-actions"><button class="outline-button small" type="button" @click="mcpPermissionsOpen = mcpPermissionsOpen === connection.id ? null : connection.id">{{ mcpPermissionsOpen === connection.id ? 'Hide permissions' : 'Manage permissions' }}</button><button class="text-button" type="button" :disabled="mcpLoading" @click="testMcpConnection(connection)">Test connection</button></div>
+                  <div v-if="mcpPermissionsOpen === connection.id" class="mcp-permission-editor"><div class="mcp-policy-note"><strong>{{ connection.tools.filter((tool) => tool.allowed).length }} of {{ connection.tools.length }} tools enabled</strong><span>Read-only tools are enabled by default. Turn on write tools only when you understand what they do.</span></div><div v-if="connection.tools.length" class="mcp-tool-list"><label v-for="tool in connection.tools" :key="tool.name" class="mcp-tool-row"><input v-model="tool.allowed" type="checkbox" :disabled="mcpLoading" /><span><strong>{{ tool.title || tool.name }}</strong><small>{{ tool.description || tool.name }}</small><em :class="tool.destructive ? 'tool-risk-danger' : tool.approvalRequired ? 'tool-risk-review' : 'tool-risk-safe'">{{ tool.destructive ? 'Destructive · review carefully' : tool.approvalRequired ? 'Write action · explicit permission' : 'Read-only · safe default' }}</em></span></label></div><div class="toolbar-actions"><button class="primary-button small" type="button" :disabled="mcpLoading" @click="saveMcpPermissions(connection)">Save permissions</button><button class="text-button danger-text" type="button" :disabled="mcpLoading" @click="disconnectMcpConnection(connection)">Disconnect</button></div></div>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <div v-if="mcpDrawerOpen" class="integration-drawer-backdrop" role="presentation" @click.self="closeMcpConnectionDrawer">
+            <aside class="integration-drawer" role="dialog" aria-modal="true" aria-labelledby="connect-ai-tool-title">
+              <div class="integration-drawer-header"><div><p class="eyebrow">Advanced AI connections</p><h2 id="connect-ai-tool-title">Connect an AI tool</h2><p>Give FrontDeskWise optional access to an external tool for lookups and follow-up tasks.</p></div><button class="auth-close" type="button" aria-label="Close" @click="closeMcpConnectionDrawer">×</button></div>
+              <label>Choose provider<select v-model="mcpProvider"><option value="hubspot">HubSpot MCP</option><option value="zapier">Zapier MCP</option><option value="make">Make MCP</option><option value="custom">Custom MCP server</option></select></label>
+              <label>Connection name<input v-model="mcpDisplayName" type="text" maxlength="120" :placeholder="`${mcpProviderName(mcpProvider)} workspace`" /></label>
+              <label>Server URL<input v-model="mcpServerUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://…" /></label>
+              <label>Access token<input v-model="mcpBearerToken" type="password" autocomplete="new-password" placeholder="Paste the token from your provider" /></label>
+              <p class="form-help">{{ mcpProviderHelp(mcpProvider) }}</p>
+              <p v-if="mcpError" class="form-error">{{ mcpError }}</p>
+              <p v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</p>
+              <div class="integration-drawer-actions"><button class="outline-button small" type="button" @click="closeMcpConnectionDrawer">Cancel</button><button class="primary-button small" type="button" :disabled="mcpLoading || !mcpServerUrl.trim() || !mcpBearerToken.trim()" @click="connectMcpConnection">{{ mcpLoading ? 'Testing connection…' : 'Test connection' }}</button></div>
+            </aside>
+          </div>
+
+          <section class="integration-section mcp-section legacy-mcp-section">
             <div class="integration-section-heading"><div><p class="eyebrow">AI tool connections (MCP)</p><h2>Give the assistant useful context</h2><p>MCP is for agent lookups and flexible follow-up tools. Every discovered tool is reviewed and permissioned separately.</p></div><span class="integration-section-badge"><Sparkles :size="14" :stroke-width="1.8" aria-hidden="true" /> Agent layer</span></div>
             <div class="dashboard-grid connection-setup-grid">
               <article class="panel form-panel">

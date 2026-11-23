@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { ArrowRight, Check, ChevronDown, GitBranch, GripVertical, Plus, Sparkles, Trash2, X } from "@lucide/vue";
+import { ArrowDown, ArrowRight, ArrowUp, Check, ChevronDown, Copy, Eye, EyeOff, GitBranch, GripVertical, MoreHorizontal, Plus, Sparkles, Trash2, X } from "@lucide/vue";
 import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, workflowGenerationCacheKey, type WorkflowBusinessContext, type WorkflowFieldDraft, type WorkflowStepDraft } from "../workflow-generator.js";
 import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 
-type WorkflowStep = WorkflowStepDraft & { nextStepId?: string; branches?: Record<string, string> };
+type WorkflowStep = WorkflowStepDraft & { enabled?: boolean; nextStepId?: string; branches?: Array<{ nextStepId?: string; when?: Record<string, string> }> };
 
 type KnowledgePreviewResult = {
   matchedTopic: string;
@@ -27,9 +27,36 @@ interface WorkflowAction {
   fields?: Array<WorkflowFieldDraft & { id?: string; visibility?: string }>;
   steps?: Array<Record<string, unknown>>;
   completion?: Record<string, unknown>;
+  destination?: { url: string; label?: string } | null;
   enabled?: boolean;
   readiness?: { ready?: boolean; reason?: string };
   workflowSafety?: { status?: string; code?: string; identifier?: string };
+  workflowStatus?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  setupStatus?: "DRAFT" | "NEEDS_SETUP" | "READY";
+  isPrimary?: boolean;
+  workflowCount?: number;
+  workflowIds?: string[];
+  workflowNames?: string[];
+  capability?: {
+    intent: string;
+    completionType: "link" | "provider" | "phone" | "email" | "handoff" | "webhook" | "collect_details";
+    destination: string | null;
+    provider: string | null;
+    requiredInputs: string[];
+    recommendedInputs: string[];
+  };
+  lifecycleStatus?: string;
+  updatedAt?: string;
+}
+
+interface WorkflowPerformance {
+  started: number;
+  formDisplayed: number;
+  submitted: number;
+  actionSucceeded: number;
+  completed: number;
+  completionRate: number;
+  dropOffs?: Array<{ fieldId?: string; label: string; count: number }>;
 }
 
 type CreateWorkflowMode = "action" | "template" | "describe";
@@ -51,6 +78,15 @@ const props = defineProps<{
   ownerHeaders: () => Record<string, string>;
   businessName?: string;
   businessContext?: WorkflowBusinessContext | null;
+  performanceByWorkflow?: Record<string, WorkflowPerformance>;
+  initialWorkflowId?: string;
+  initialActionId?: string;
+  agentTone?: "friendly" | "professional" | "concise" | "custom";
+  agentPrimaryLanguage?: string;
+  agentCitationVisibility?: "always" | "contextual" | "hidden";
+  agentFallbackBehavior?: "contact_form" | "human" | "unavailable";
+  agentHumanHandoffEnabled?: boolean;
+  agentProactiveEnabled?: boolean;
   publishingStatus?: "NOT_PUBLISHED" | "PUBLISHING" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
   publishError?: string;
 }>();
@@ -61,6 +97,7 @@ const emit = defineEmits<{
   (event: "open-action", actionId: string): void;
   (event: "test-workflow", actionId: string): void;
   (event: "publish-workflow"): void;
+  (event: "open-agent-behavior"): void;
 }>();
 
 const selectedWorkflowId = ref("");
@@ -77,6 +114,12 @@ const showTemplatePicker = ref(false);
 const workflowAssistInput = ref<HTMLTextAreaElement | null>(null);
 const workflowStepList = ref<HTMLElement | null>(null);
 const workflowGoalExpanded = ref(false);
+const openStepMenuId = ref("");
+const deleteStepIndex = ref(-1);
+const deleteStepDependents = ref<Array<{ index: number; label: string; reason: string }>>([]);
+const workflowVerificationOpen = ref(false);
+const undoMessage = ref("");
+const undoSnapshot = ref<{ steps: WorkflowStep[]; fields: WorkflowAction["fields"]; selectedStepIndex: number } | null>(null);
 const workflowTested = ref(false);
 const draftIsDirty = ref(false);
 const workflowGenerationKey = ref("");
@@ -84,6 +127,8 @@ const createWorkflowOpen = ref(false);
 const createWorkflowMode = ref<CreateWorkflowMode>("action");
 const createWorkflowActionId = ref("");
 const createWorkflowTemplateKey = ref("lead");
+const createWorkflowName = ref("");
+const createWorkflowNameSuggestion = ref("");
 const createWorkflowDescription = ref("");
 const createWorkflowLoading = ref(false);
 const createWorkflowError = ref("");
@@ -97,7 +142,34 @@ const customFieldKey = ref("");
 const knowledgePreviewStepId = ref("");
 const knowledgePreviewQuestion = ref("");
 const knowledgePreviewResult = ref<KnowledgePreviewResult | null>(null);
+const deleteWorkflowOpen = ref(false);
+const deleteWorkflowLoading = ref(false);
+const deleteWorkflowError = ref("");
+const hiddenWorkflowIds = ref(new Set<string>());
 let draftSourceId = "";
+let undoTimer: ReturnType<typeof setTimeout> | undefined;
+
+const selectedCreateWorkflowAction = computed(() => allActions.value.find((action) => action.id === createWorkflowActionId.value) ?? null);
+const plainEnglishInference = computed(() => {
+  const description = createWorkflowDescription.value.toLowerCase();
+  return {
+    leadCapture: /lead|contact|name|email|follow up|follow-up/.test(description),
+    demoAction: /demo|trial|tour|show|guide|send/.test(description),
+    contactFields: /lead|contact|name|email|follow up|follow-up/.test(description),
+  };
+});
+
+function workflowIntentForDescription(value: string): string | null {
+  const description = value.toLowerCase();
+  if (/demo|trial/.test(description)) return "demo_request";
+  if (/enroll|registration|swim lesson|class/.test(description)) return "enrollment";
+  if (/quote|estimate/.test(description)) return "quote_request";
+  if (/appointment|consultation|book|schedule|reservation|tour/.test(description)) return "appointment_booking";
+  if (/waitlist|waiting list/.test(description)) return "waitlist_join";
+  if (/call|phone/.test(description)) return "business_call";
+  if (/contact|lead|message|reach/.test(description)) return "team_contact";
+  return null;
+}
 
 const stepTypeGroups = [
   {
@@ -179,9 +251,14 @@ const allActions = computed(() => {
   return localAction && !actions.some((action) => action.id === localAction.id) ? [...actions, localAction] : actions;
 });
 const workflowActions = computed(() => allActions.value.filter((action) => {
-  const stepCount = Array.isArray(action.steps) ? action.steps.length : 0;
-  return action.workflowSafety?.status === "blocked" || stepCount > 1 || action.executionMode === "PROVIDER_FLOW" || (action.fields?.length ?? 0) > 2;
+  if (action.enabled === false || action.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(action.id)) return false;
+  return action.workflowSafety?.status === "blocked" || actionHasWorkflow(action);
 }));
+const duplicateCreateWorkflow = computed(() => {
+  const candidate = normalizeWorkflowName(createWorkflowName.value.slice(0, 160));
+  if (!candidate) return null;
+  return workflowActions.value.find((action) => normalizeWorkflowName(workflowDisplayName(action)) === candidate) ?? null;
+});
 const eligibleActions = computed(() => allActions.value
   .filter((action) => action.enabled !== false && action.workflowSafety?.status !== "blocked" && !actionHasWorkflow(action))
   .sort((left, right) => {
@@ -189,7 +266,62 @@ const eligibleActions = computed(() => allActions.value
     const rightDemo = /try|demo|start|book|request/i.test(right.name) ? 0 : 1;
     return leftDemo - rightDemo || left.name.localeCompare(right.name);
   }));
+const suggestedCreateWorkflowAction = computed(() => {
+  const intent = workflowIntentForDescription(createWorkflowDescription.value);
+  if (!intent) return null;
+  return eligibleActions.value.find((action) => action.capability?.intent === intent)
+    ?? eligibleActions.value.find((action) => workflowIntentForDescription(`${action.name} ${action.description ?? ""}`) === intent)
+    ?? null;
+});
 const selectedWorkflow = computed(() => workflowActions.value.find((action) => action.id === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
+const selectedWorkflowIsLive = computed(() => workflowStatus(selectedWorkflow.value ?? workflowDraft.value ?? ({} as WorkflowAction)) === "LIVE");
+
+const workflowPreferenceKey = computed(() => `frontdeskwise:last-workflow:${props.selectedBusinessId ?? props.workspaceBusinessId ?? props.businessContext?.businessId ?? props.demoSlug}`);
+
+function readLastSelectedWorkflowId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(workflowPreferenceKey.value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function workflowStatus(action: WorkflowAction): "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES" {
+  if (action.workflowStatus) return action.workflowStatus;
+  if (props.publishingStatus === "LIVE") return "LIVE";
+  return "DRAFT";
+}
+
+function workflowStatusLabel(action: WorkflowAction): string {
+  const status = workflowStatus(action);
+  if (status === "LIVE_WITH_UNPUBLISHED_CHANGES") return "Live · unpublished changes";
+  if (status === "LIVE") return "Live";
+  return "Draft";
+}
+
+function preferredWorkflowId(actions = workflowActions.value): string {
+  const explicit = props.initialWorkflowId?.trim();
+  if (explicit && actions.some((action) => action.id === explicit)) return explicit;
+  const remembered = readLastSelectedWorkflowId();
+  if (remembered && actions.some((action) => action.id === remembered)) return remembered;
+  const live = actions.find((action) => workflowStatus(action) === "LIVE" && action.isPrimary)
+    ?? actions.find((action) => workflowStatus(action) === "LIVE");
+  if (live) return live.id;
+  const mostRecentlyEdited = [...actions]
+    .filter((action) => action.updatedAt)
+    .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))[0];
+  return mostRecentlyEdited?.id ?? actions[0]?.id ?? "";
+}
+
+function rememberSelectedWorkflow(id: string): void {
+  if (!id || typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(workflowPreferenceKey.value, id);
+  } catch {
+    // localStorage is a UI convenience; a blocked storage API must not affect the workflow.
+  }
+}
 const draftSteps = computed(() => (workflowDraft.value?.steps ?? []) as unknown as WorkflowStep[]);
 const workflowProvider = computed(() => {
   const direct = workflowDraft.value?.provider?.trim();
@@ -206,9 +338,10 @@ const providerConnected = computed(() => {
   });
 });
 const readiness = computed(() => {
-  const hasQuestions = draftSteps.value.some((step) => Boolean(step.question?.trim() || step.fieldKey?.trim() || step.type === "form"));
-  const hasCompletion = draftSteps.value.some((step) => ["complete", "generate_link", "redirect", "book", "handoff"].includes(step.type ?? ""));
-  const hasFailurePath = draftSteps.value.some((step) => ["handoff", "notify"].includes(step.type ?? "") || Boolean(stepConfigValue(step, "failureBehavior")));
+  const activeSteps = draftSteps.value.filter((step) => step.enabled !== false);
+  const hasQuestions = activeSteps.some((step) => Boolean(step.question?.trim() || step.fieldKey?.trim() || step.type === "form"));
+  const hasCompletion = activeSteps.some((step) => ["complete", "generate_link", "redirect", "book", "handoff"].includes(step.type ?? ""));
+  const hasFailurePath = activeSteps.some((step) => ["handoff", "notify"].includes(step.type ?? "") || Boolean(stepConfigValue(step, "failureBehavior")));
   const providerReady = !workflowProvider.value || providerConnected.value;
   return [
     { label: "Workflow goal is defined", complete: Boolean(workflowDraft.value?.name?.trim()) },
@@ -228,7 +361,13 @@ const setupChecklist = computed(() => [
 ]);
 const setupProgressLabel = computed(() => `${setupChecklist.value.filter((item) => item.complete).length} of ${setupChecklist.value.length} checks complete`);
 const providerStep = computed(() => draftSteps.value.find((step) => step.type === "lookup" || step.type === "generate_link") ?? null);
-const providerFailureBehavior = computed(() => providerStep.value ? stepConfigValue(providerStep.value, "failureBehavior") : "capture_lead");
+const providerFailureBehavior = computed(() => providerStep.value ? stepConfigValue(providerStep.value, "failureBehavior") || "agent_default" : "agent_default");
+const workflowFallbackCustomized = computed(() => Boolean(providerStep.value && stepConfigValue(providerStep.value, "failureBehavior")));
+const agentFallbackLabel = computed(() => props.agentFallbackBehavior === "human" ? "Request human" : props.agentFallbackBehavior === "unavailable" ? "Say information unavailable" : "Offer contact form");
+const agentToneLabel = computed(() => formatLabel(props.agentTone ?? "friendly"));
+const agentCitationLabel = computed(() => props.agentCitationVisibility === "always" ? "Always show" : props.agentCitationVisibility === "hidden" ? "Hidden from visitors" : "Show when helpful");
+const agentHandoffLabel = computed(() => props.agentHumanHandoffEnabled === false ? "Disabled" : "Enabled");
+const agentProactiveLabel = computed(() => props.agentProactiveEnabled ? "Enabled" : "Off");
 const providerSummary = computed(() => workflowProvider.value ? formatLabel(workflowProvider.value) : "No provider required");
 const completionSummary = computed(() => {
   const completion = workflowDraft.value?.completion;
@@ -249,17 +388,160 @@ const workflowMetadata = computed(() => {
     : null;
 });
 const workflowTitle = computed(() => workflowMetadata.value?.name || workflowDraft.value?.name || "Workflow");
+const workflowOutcomeAction = computed(() => {
+  const actionId = workflowMetadata.value?.actionId || workflowDraft.value?.id;
+  return allActions.value.find((action) => action.id === actionId) ?? workflowDraft.value;
+});
 const workflowStatusSummary = computed(() => {
-  const published = props.publishingStatus === "LIVE" && !draftIsDirty.value;
-  const status = published ? "Published" : "Draft";
+  const status = draftIsDirty.value
+    ? "Unpublished changes"
+    : workflowStatus(selectedWorkflow.value ?? ({} as WorkflowAction)) === "LIVE"
+      ? "Live"
+      : workflowStatus(selectedWorkflow.value ?? ({} as WorkflowAction)) === "LIVE_WITH_UNPUBLISHED_CHANGES"
+        ? "Live · unpublished changes"
+        : "Draft";
   return `${status} · ${draftSteps.value.length} step${draftSteps.value.length === 1 ? "" : "s"} · ${providerSummary.value}`;
 });
+const selectedWorkflowPerformance = computed(() => {
+  const selected = selectedWorkflow.value;
+  if (!selected) return null;
+  return props.performanceByWorkflow?.[selected.id] ?? props.performanceByWorkflow?.[selected.key] ?? null;
+});
+const workflowRecommendation = computed(() => {
+  const performance = selectedWorkflowPerformance.value;
+  const dropOff = performance?.dropOffs?.[0];
+  if (!performance || performance.started <= 0 || !dropOff || dropOff.count <= 0) return null;
+  return {
+    label: dropOff.label,
+    count: dropOff.count,
+    message: `“${dropOff.label}” is the largest observed drop-off in this workflow. Review it before changing the journey.`,
+  };
+});
+
+type WorkflowDraftIssue = {
+  code: string;
+  message: string;
+  stepIndex?: number;
+};
+
+const workflowVerification = computed(() => verifyWorkflowDraft());
+const workflowVerificationIssues = computed(() => workflowVerification.value.issues);
+const workflowVerificationReady = computed(() => workflowVerification.value.ok);
+
+function workflowActiveSteps(): WorkflowStep[] {
+  return draftSteps.value.filter((step) => step.enabled !== false);
+}
+
+function workflowStepTargets(step: WorkflowStep, index: number, steps = draftSteps.value): string[] {
+  const targets = new Set<string>();
+  if (step.nextStepId) targets.add(step.nextStepId);
+  const branches = Array.isArray(step.branches) ? step.branches : [];
+  for (const branch of branches) {
+    if (branch && typeof branch === "object" && typeof branch.nextStepId === "string") targets.add(branch.nextStepId);
+  }
+  if (!targets.size) {
+    const next = steps.slice(index + 1).find((candidate) => candidate.enabled !== false);
+    if (next?.id) targets.add(next.id);
+  }
+  return [...targets];
+}
+
+function workflowFieldDependencies(step: WorkflowStep): Set<string> {
+  const dependencies = new Set<string>();
+  if (step.fieldKey) dependencies.add(step.fieldKey);
+  const config = step.config && typeof step.config === "object" && !Array.isArray(step.config) ? step.config : {};
+  for (const [key, value] of Object.entries(config)) {
+    if (key.endsWith("Field") && typeof value === "string") dependencies.add(value);
+    if (key === "searchFields" && typeof value === "string") value.split(",").map((item) => item.trim()).filter(Boolean).forEach((item) => dependencies.add(item));
+    if ((key === "requiredFields" || key === "fieldKeys") && Array.isArray(value)) value.filter((item): item is string => typeof item === "string").forEach((item) => dependencies.add(item));
+  }
+  return dependencies;
+}
+
+function verifyWorkflowDraft(): { ok: boolean; issues: WorkflowDraftIssue[] } {
+  const steps = draftSteps.value;
+  const activeSteps = workflowActiveSteps();
+  const issues: WorkflowDraftIssue[] = [];
+  const byId = new Map<string, { step: WorkflowStep; index: number }>();
+  for (const [index, step] of steps.entries()) {
+    if (!step.id) {
+      issues.push({ code: "missing_step_id", message: `Step ${index + 1} needs an id.`, stepIndex: index });
+      continue;
+    }
+    if (byId.has(step.id)) issues.push({ code: "duplicate_step_id", message: `Step id “${step.id}” is used more than once.`, stepIndex: index });
+    else byId.set(step.id, { step, index });
+  }
+  const entry = activeSteps[0];
+  if (activeSteps.length) {
+    const reachable = new Set<string>();
+    const visiting = new Set<string>();
+    const visit = (stepId: string): void => {
+      const entryForId = byId.get(stepId);
+      if (!entryForId) {
+        issues.push({ code: "unknown_step_target", message: `A step points to missing step “${stepId}”.` });
+        return;
+      }
+      if (entryForId.step.enabled === false) {
+        const nextTargets = workflowStepTargets(entryForId.step, entryForId.index);
+        nextTargets.forEach(visit);
+        return;
+      }
+      if (visiting.has(stepId)) {
+        issues.push({ code: "cycle_detected", message: `The workflow loops through “${entryForId.step.label || stepId}”.`, stepIndex: entryForId.index });
+        return;
+      }
+      if (reachable.has(stepId)) return;
+      reachable.add(stepId);
+      visiting.add(stepId);
+      workflowStepTargets(entryForId.step, entryForId.index).forEach(visit);
+      visiting.delete(stepId);
+    };
+    visit(entry.id);
+    for (const [index, step] of steps.entries()) {
+      if (step.enabled !== false && step.id && !reachable.has(step.id)) issues.push({ code: "unreachable_step", message: `“${step.label || step.id}” is not reachable from the start.`, stepIndex: index });
+    }
+    const terminalTypes = new Set(["complete", "redirect", "handoff"]);
+    for (const [index, step] of activeSteps.entries()) {
+      if (!terminalTypes.has(step.type) && !workflowStepTargets(step, steps.indexOf(step)).length) issues.push({ code: "non_terminal_step", message: `“${step.label || "This step"}” stops without a next step.`, stepIndex: steps.indexOf(step) });
+      if (step.type === "redirect" && !workflowDraft.value?.destination?.url && !workflowDraft.value?.completion?.linkUrl && !stepConfigValue(step, "linkSource")) {
+        issues.push({ code: "missing_destination", message: `“${step.label || "This step"}” needs a valid destination before publishing.`, stepIndex: steps.indexOf(step) });
+      }
+      if (["lookup", "book", "api_action"].includes(step.type) && !workflowProvider.value && !stepConfigValue(step, "provider")) {
+        issues.push({ code: "provider_missing", message: `“${step.label || "This step"}” needs a connected provider.`, stepIndex: steps.indexOf(step) });
+      }
+    }
+  }
+  const capturedFields = new Set(activeSteps.flatMap((step) => {
+    if (step.type === "form") {
+      const configured = step.config?.fieldKeys;
+      if (Array.isArray(configured)) return configured.filter((value): value is string => typeof value === "string");
+      return (workflowDraft.value?.fields ?? []).filter((field) => field.visibility !== "hidden").map((field) => field.key);
+    }
+    return step.fieldKey ? [step.fieldKey] : [];
+  }));
+  for (const field of workflowDraft.value?.fields ?? []) {
+    if (field.required && field.visibility !== "hidden" && !capturedFields.has(field.key) && !capturedFields.has(field.id ?? "")) {
+      issues.push({ code: "required_field_not_captured", message: `Required field “${field.label || field.key}” is never captured.` });
+    }
+  }
+  if (workflowDraft.value?.completion?.createLead && !activeSteps.some((step) => ["create_lead", "form"].includes(step.type))) {
+    issues.push({ code: "lead_capture_missing", message: "Lead capture is enabled, but the workflow has no lead or form step." });
+  }
+  const hasFallback = activeSteps.some((step) => ["handoff", "notify"].includes(step.type) || Boolean(stepConfigValue(step, "failureBehavior")))
+    || workflowDraft.value?.completion?.notifyStaff === true
+    || workflowDraft.value?.completion?.requiresStaff === true;
+  if (activeSteps.length && !hasFallback) {
+    issues.push({ code: "fallback_missing", message: "Add a handoff, notification, or fallback behavior before publishing." });
+  }
+  return { ok: issues.length === 0, issues };
+}
 
 function isConditionalStep(step: WorkflowStep): boolean {
   const config = step.config && typeof step.config === "object" && !Array.isArray(step.config)
     ? step.config as Record<string, unknown>
     : {};
-  const searchable = `${step.label ?? ""} ${step.question ?? ""} ${step.condition ?? ""}`;
+  if (config.mainPath === true) return false;
+  const searchable = `${step.label ?? ""} ${step.question ?? ""} ${stepConditionText(step)}`;
   const legacyConditionalCopy = !(step.type === "knowledge" && config.conditional === false) && /pricing|request a demo|support|handoff|human help|human handoff/i.test(searchable);
   return Boolean(step.condition || step.branches || config.trigger || (step.type === "knowledge" && config.conditional !== false) || config.conditional || step.type === "condition" || step.type === "handoff" || legacyConditionalCopy);
 }
@@ -341,13 +623,17 @@ function setWorkflowMetadata(action: WorkflowAction, name: string): void {
   ensureWorkflowCompletion(action).workflow = { name: name.trim().slice(0, 160), actionId: action.id };
 }
 
+function normalizeWorkflowName(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
 function workflowNameForTemplate(key: string): string {
   return workflowTemplates.find((template) => template.key === key)?.label ?? "Workflow";
 }
 
 function workflowDisplayName(action: WorkflowAction): string {
   const value = workflowCompletion(action).workflow;
-  if (value && typeof value === "object" && typeof (value as Record<string, unknown>).name === "string") return String((value as Record<string, unknown>).name);
+  if (value && typeof value === "object" && typeof (value as Record<string, unknown>).name === "string" && String((value as Record<string, unknown>).name).trim()) return String((value as Record<string, unknown>).name).trim();
   return action.name;
 }
 
@@ -355,16 +641,33 @@ function actionHasWorkflow(action: WorkflowAction): boolean {
   return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
 }
 
-function openCreateWorkflow(): void {
+function suggestedCreateWorkflowName(): string {
+  const action = allActions.value.find((candidate) => candidate.id === createWorkflowActionId.value);
+  if (!action) return createWorkflowMode.value === "template" ? workflowNameForTemplate(createWorkflowTemplateKey.value) : "Workflow";
+  return generatedWorkflowFor(action).name.trim() || "Workflow";
+}
+
+function updateCreateWorkflowNameSuggestion(force = false): void {
+  const suggestion = suggestedCreateWorkflowName();
+  const current = createWorkflowName.value.trim();
+  if (force || !current || current === createWorkflowNameSuggestion.value.trim()) createWorkflowName.value = suggestion;
+  createWorkflowNameSuggestion.value = suggestion;
+}
+
+function openCreateWorkflow(actionId?: string | MouseEvent): void {
   createWorkflowOpen.value = true;
   createWorkflowMode.value = "action";
   createWorkflowError.value = "";
   createNewActionOpen.value = false;
-  createWorkflowActionId.value = eligibleActions.value.find((action) => /try|demo/i.test(action.name))?.id
+  const requestedActionId = typeof actionId === "string" ? actionId : undefined;
+  createWorkflowActionId.value = (requestedActionId && eligibleActions.value.some((action) => action.id === requestedActionId) ? requestedActionId : undefined)
+    ?? eligibleActions.value.find((action) => /try|demo/i.test(action.name))?.id
     ?? eligibleActions.value[0]?.id
     ?? "";
   createWorkflowTemplateKey.value = "lead";
   createWorkflowDescription.value = defaultBusinessWorkflowDescription();
+  if (!requestedActionId && suggestedCreateWorkflowAction.value) createWorkflowActionId.value = suggestedCreateWorkflowAction.value.id;
+  updateCreateWorkflowNameSuggestion(true);
 }
 
 function closeCreateWorkflow(): void {
@@ -379,6 +682,13 @@ function selectCreateWorkflowMode(mode: CreateWorkflowMode): void {
   createWorkflowError.value = "";
   if (mode === "template") createWorkflowDescription.value = workflowNameForTemplate(createWorkflowTemplateKey.value);
   if (mode === "describe" && !createWorkflowDescription.value.trim()) createWorkflowDescription.value = defaultBusinessWorkflowDescription();
+  if (mode === "describe" && suggestedCreateWorkflowAction.value) createWorkflowActionId.value = suggestedCreateWorkflowAction.value.id;
+  updateCreateWorkflowNameSuggestion();
+}
+
+function updateCreateWorkflowTemplate(): void {
+  createWorkflowDescription.value = workflowNameForTemplate(createWorkflowTemplateKey.value);
+  updateCreateWorkflowNameSuggestion();
 }
 
 function openNewActionFlow(): void {
@@ -475,20 +785,28 @@ async function createInlineAction(): Promise<void> {
   try {
     const keyBase = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "custom_action";
     const key = allActions.value.some((action) => action.key === keyBase) ? `${keyBase}_${Date.now()}` : keyBase;
+    const isDemo = /demo|trial/.test(name.toLowerCase());
+    const isBooking = /book|appointment|schedule|tour/.test(name.toLowerCase());
+    const inlineFields = isDemo
+      ? []
+      : [
+        { id: "name", key: "name", label: "Name", type: "text", required: true, visibility: "visible", question: "What’s your name?" },
+        { id: "email", key: "email", label: "Email", type: "email", required: true, visibility: "visible", question: "What email address should we use?" },
+      ];
     const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions`), {
       method: "POST",
       headers: { "content-type": "application/json", ...props.ownerHeaders() },
       body: JSON.stringify({
         key,
-        actionType: "contact_team",
+        actionType: isDemo ? "request_demo" : isBooking ? "book_appointment" : "contact_team",
         name,
-        description: createNewActionDescription.value.trim() || `Help visitors with ${name.toLowerCase()}.`,
-        captureMode: "auto",
-        fields: [
-          { id: "name", key: "name", label: "Name", type: "text", required: true, visibility: "visible", question: "What’s your name?" },
-          { id: "email", key: "email", label: "Email", type: "email", required: true, visibility: "visible", question: "What email address should we use?" },
-        ],
-        completion: { createLead: true, leadStatus: "new", message: "Thanks — I’ve sent your request to the team.", notifyStaff: true, notifyChannels: ["in_app", "email"], notifyTargets: ["business_team"] },
+        description: createNewActionDescription.value.trim() || (isDemo ? "Send the visitor to the verified demo request destination." : `Help visitors with ${name.toLowerCase()}.`),
+        captureMode: isDemo ? "form" : "auto",
+        ...(isDemo ? { executionMode: "DIRECT_LINK", attachmentPolicy: "sales_intent", requiredFields: [] } : {}),
+        fields: inlineFields,
+        completion: isDemo
+          ? { createLead: false, leadStatus: "new", message: "You can continue to the demo request here.", submitLabel: "Continue to demo", linkLabel: "Continue to demo", notifyStaff: false, notifyChannels: [], notifyTargets: [] }
+          : { createLead: true, leadStatus: "new", message: "Thanks — I’ve sent your request to the team.", notifyStaff: true, notifyChannels: ["in_app", "email"], notifyTargets: ["business_team"] },
         enabled: true,
       }),
     });
@@ -514,6 +832,15 @@ async function createWorkflow(): Promise<void> {
     createWorkflowError.value = "Choose an action to connect to this workflow, or create one inline.";
     return;
   }
+  const requestedWorkflowName = createWorkflowName.value.trim().slice(0, 160);
+  if (!requestedWorkflowName) {
+    createWorkflowError.value = "Enter a name for this workflow.";
+    return;
+  }
+  if (duplicateCreateWorkflow.value) {
+    createWorkflowError.value = `A workflow named “${requestedWorkflowName}” already exists. Choose a different name or open the existing workflow.`;
+    return;
+  }
   if (actionHasWorkflow(action)) {
     selectedWorkflowId.value = action.id;
     workflowDraft.value = clone(action);
@@ -537,7 +864,7 @@ async function createWorkflow(): Promise<void> {
     nextAction.steps = generated.steps as unknown as Array<Record<string, unknown>>;
     nextAction.description = generated.description;
     nextAction.fields = generated.fields.length ? generated.fields : nextAction.fields;
-    setWorkflowMetadata(nextAction, generated.name);
+    setWorkflowMetadata(nextAction, requestedWorkflowName || generated.name);
     if (generated.executionMode) nextAction.executionMode = generated.executionMode;
     if (generated.provider) nextAction.provider = generated.provider;
     const workflowContextPayload = {
@@ -591,14 +918,61 @@ async function createWorkflow(): Promise<void> {
   }
 }
 
+function requestDeleteWorkflow(): void {
+  if (!workflowDraft.value || deleteWorkflowLoading.value) return;
+  deleteWorkflowError.value = "";
+  deleteWorkflowOpen.value = true;
+}
+
+function cancelDeleteWorkflow(): void {
+  if (deleteWorkflowLoading.value) return;
+  deleteWorkflowOpen.value = false;
+  deleteWorkflowError.value = "";
+}
+
+async function confirmDeleteWorkflow(): Promise<void> {
+  const workflow = workflowDraft.value;
+  if (!workflow || deleteWorkflowLoading.value) return;
+  const deletedWorkflowTitle = workflowTitle.value;
+  deleteWorkflowLoading.value = true;
+  deleteWorkflowError.value = "";
+  try {
+    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(workflow.id)}`), {
+      method: "DELETE",
+      headers: props.ownerHeaders(),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not delete this workflow.");
+    hiddenWorkflowIds.value = new Set([...hiddenWorkflowIds.value, workflow.id]);
+    if (locallyCreatedAction.value?.id === workflow.id) locallyCreatedAction.value = null;
+    selectedWorkflowId.value = "";
+    workflowDraft.value = null;
+    draftSourceId = "";
+    draftIsDirty.value = false;
+    deleteWorkflowOpen.value = false;
+    workflowSaveMessage.value = `Workflow “${deletedWorkflowTitle}” deleted.`;
+    emit("refresh");
+  } catch (error) {
+    deleteWorkflowError.value = error instanceof Error ? error.message : "Could not delete this workflow.";
+  } finally {
+    deleteWorkflowLoading.value = false;
+  }
+}
+
 watch(workflowActions, () => {
   if (!workflowActions.value.some((action) => action.id === selectedWorkflowId.value)) {
-    selectedWorkflowId.value = workflowActions.value[0]?.id ?? "";
+    selectedWorkflowId.value = preferredWorkflowId();
   }
   syncDraft();
 }, { immediate: true, deep: true });
 
-watch(selectedWorkflowId, () => {
+watch(() => props.initialActionId, (actionId) => {
+  if (!actionId || workflowActions.value.some((action) => action.id === actionId)) return;
+  void nextTick(() => openCreateWorkflow(actionId));
+}, { immediate: true });
+
+watch(selectedWorkflowId, (id) => {
+  rememberSelectedWorkflow(id);
   selectedStepIndex.value = -1;
   showTemplatePicker.value = false;
   workflowSaveError.value = "";
@@ -644,13 +1018,32 @@ function stepConfigValue(step: WorkflowStep, key: string): string {
   return typeof value === "string" || typeof value === "number" ? String(value) : "";
 }
 
+function stepGenerationReason(step: WorkflowStep): string {
+  return stepConfigValue(step, "generationReason");
+}
+
+function stepGenerationStatus(step: WorkflowStep): string {
+  return stepConfigValue(step, "generationStatus");
+}
+
+function stepGenerationStatusLabel(step: WorkflowStep): string {
+  const status = stepGenerationStatus(step);
+  return status === "missing" ? "Missing information" : status === "verified" ? "Grounded in context" : "Suggested";
+}
+
 function setStepConfig(step: WorkflowStep, key: string, value: string) {
   ensureStepConfig(step)[key] = value || undefined;
   markDirty();
 }
 
 function setStepConfigFromEvent(step: WorkflowStep, key: string, event: Event) {
-  setStepConfig(step, key, (event.target as HTMLInputElement | HTMLSelectElement).value);
+  const value = (event.target as HTMLInputElement | HTMLSelectElement).value;
+  if (key === "failureBehavior" && value === "agent_default") {
+    delete ensureStepConfig(step)[key];
+    markDirty();
+    return;
+  }
+  setStepConfig(step, key, value);
 }
 
 function defaultKnowledgeConfig(): Record<string, unknown> {
@@ -895,7 +1288,18 @@ function createCustomField(step: WorkflowStep): void {
 }
 
 function stepConditionText(step: WorkflowStep): string {
-  return typeof step.condition === "string" ? step.condition : "";
+  if (typeof step.condition === "string") return step.condition;
+  if (typeof step.conditionText === "string") return step.conditionText;
+  return stepConfigValue(step, "conditionText");
+}
+
+function updateStepCondition(step: WorkflowStep, event: Event): void {
+  const value = (event.target as HTMLTextAreaElement).value;
+  step.conditionText = value;
+  const config = ensureStepConfig(step);
+  if (value.trim()) config.conditionText = value.trim();
+  else delete config.conditionText;
+  markDirty();
 }
 
 function addWorkflowStep(type = "capture") {
@@ -916,11 +1320,140 @@ function addWorkflowStep(type = "capture") {
   markDirty();
 }
 
-function removeWorkflowStep(index: number) {
-  if (!workflowDraft.value?.steps) return;
-  workflowDraft.value.steps.splice(index, 1);
-  selectedStepIndex.value = Math.max(0, Math.min(selectedStepIndex.value, draftSteps.value.length - 1));
+function captureWorkflowUndo(message: string): void {
+  if (!workflowDraft.value) return;
+  undoSnapshot.value = {
+    steps: clone(draftSteps.value),
+    fields: clone(workflowDraft.value.fields ?? []),
+    selectedStepIndex: selectedStepIndex.value,
+  };
+  undoMessage.value = message;
+  if (undoTimer) clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => {
+    undoMessage.value = "";
+    undoSnapshot.value = null;
+  }, 8_000);
+}
+
+function undoLastWorkflowChange(): void {
+  if (!workflowDraft.value || !undoSnapshot.value) return;
+  workflowDraft.value.steps = clone(undoSnapshot.value.steps) as unknown as Array<Record<string, unknown>>;
+  workflowDraft.value.fields = clone(undoSnapshot.value.fields);
+  selectedStepIndex.value = undoSnapshot.value.selectedStepIndex;
   markDirty();
+  undoMessage.value = "Change undone.";
+  undoSnapshot.value = null;
+  if (undoTimer) clearTimeout(undoTimer);
+}
+
+function closeStepMenu(): void {
+  openStepMenuId.value = "";
+}
+
+function editWorkflowStep(index: number): void {
+  selectedStepIndex.value = index;
+  closeStepMenu();
+}
+
+function duplicateWorkflowStep(index: number): void {
+  if (!workflowDraft.value?.steps?.[index]) return;
+  captureWorkflowUndo("Step duplicated.");
+  const source = clone(draftSteps.value[index]);
+  const baseId = source.id || `step-${Date.now()}`;
+  const existingIds = new Set(draftSteps.value.map((step) => step.id));
+  let id = `${baseId}-copy`;
+  let suffix = 2;
+  while (existingIds.has(id)) id = `${baseId}-copy-${suffix++}`;
+  source.id = id;
+  source.label = `${source.label || stepTypeLabel(source.type)} (copy)`;
+  delete source.nextStepId;
+  source.enabled = true;
+  workflowDraft.value.steps.splice(index + 1, 0, source as unknown as Record<string, unknown>);
+  selectedStepIndex.value = index + 1;
+  closeStepMenu();
+  markDirty();
+}
+
+function moveWorkflowStepToMainPath(index: number): void {
+  const step = draftSteps.value[index];
+  if (!step) return;
+  const config = ensureStepConfig(step);
+  config.mainPath = true;
+  delete config.trigger;
+  if (step.type === "knowledge") config.conditional = false;
+  delete step.condition;
+  delete step.conditionText;
+  delete config.conditionText;
+  closeStepMenu();
+  markDirty();
+}
+
+function toggleWorkflowStep(index: number): void {
+  const step = draftSteps.value[index];
+  if (!step) return;
+  captureWorkflowUndo(step.enabled === false ? "Step enabled." : "Step disabled.");
+  step.enabled = step.enabled === false;
+  closeStepMenu();
+  markDirty();
+}
+
+function stepDependencyReasons(target: WorkflowStep, index: number): Array<{ index: number; label: string; reason: string }> {
+  const dependents: Array<{ index: number; label: string; reason: string }> = [];
+  const targetField = target.fieldKey?.trim();
+  const targetId = target.id;
+  for (const [candidateIndex, candidate] of draftSteps.value.entries()) {
+    if (candidateIndex <= index) continue;
+    const candidateDependencies = workflowFieldDependencies(candidate);
+    if (targetField && candidateDependencies.has(targetField)) {
+      dependents.push({ index: candidateIndex, label: candidate.label || stepTypeLabel(candidate.type), reason: `uses ${targetField}` });
+      continue;
+    }
+    if (targetId && (candidate.nextStepId === targetId || (Array.isArray(candidate.branches) && candidate.branches.some((branch) => branch?.nextStepId === targetId)))) {
+      dependents.push({ index: candidateIndex, label: candidate.label || stepTypeLabel(candidate.type), reason: "routes to this step" });
+    }
+  }
+  return dependents;
+}
+
+function requestDeleteWorkflowStep(index: number): void {
+  const step = draftSteps.value[index];
+  if (!step) return;
+  deleteStepIndex.value = index;
+  deleteStepDependents.value = stepDependencyReasons(step, index);
+  closeStepMenu();
+}
+
+function removeWorkflowSteps(indices: number[]): void {
+  if (!workflowDraft.value?.steps) return;
+  const removeIndexes = new Set(indices);
+  const removedIds = new Set(indices.map((index) => draftSteps.value[index]?.id).filter((id): id is string => Boolean(id)));
+  captureWorkflowUndo(indices.length > 1 ? "Steps removed." : "Step removed.");
+  workflowDraft.value.steps = draftSteps.value.filter((_, index) => !removeIndexes.has(index)).map((step) => {
+    const next = clone(step);
+    if (next.nextStepId && removedIds.has(next.nextStepId)) delete next.nextStepId;
+    if (Array.isArray(next.branches)) next.branches = next.branches.filter((branch) => !branch.nextStepId || !removedIds.has(branch.nextStepId));
+    return next as unknown as Record<string, unknown>;
+  });
+  selectedStepIndex.value = draftSteps.value.length ? Math.max(0, Math.min(selectedStepIndex.value, draftSteps.value.length - 1)) : -1;
+  deleteStepIndex.value = -1;
+  deleteStepDependents.value = [];
+  markDirty();
+}
+
+function confirmDeleteWorkflowStep(): void {
+  if (deleteStepIndex.value < 0) return;
+  const indexes = [deleteStepIndex.value];
+  if (deleteStepDependents.value.length) {
+    for (const dependent of deleteStepDependents.value) {
+      if (dependent.index > deleteStepIndex.value) indexes.push(dependent.index);
+    }
+  }
+  removeWorkflowSteps([...new Set(indexes)]);
+}
+
+function cancelDeleteWorkflowStep(): void {
+  deleteStepIndex.value = -1;
+  deleteStepDependents.value = [];
 }
 
 function moveWorkflowStep(index: number, direction: -1 | 1) {
@@ -930,6 +1463,7 @@ function moveWorkflowStep(index: number, direction: -1 | 1) {
   const steps = workflowDraft.value.steps;
   [steps[index], steps[nextIndex]] = [steps[nextIndex], steps[index]];
   selectedStepIndex.value = nextIndex;
+  closeStepMenu();
   markDirty();
 }
 
@@ -1025,7 +1559,7 @@ async function saveWorkflow() {
     if (!response.ok) throw new Error(payload.error ?? "Could not save this workflow.");
     if (payload.action) workflowDraft.value = clone(payload.action);
     draftIsDirty.value = false;
-    workflowSaveMessage.value = "Saved. Runtime will use the updated steps.";
+    workflowSaveMessage.value = "Draft saved. Runtime will use the updated steps. Live visitors stay on the published workflow until you publish.";
     emit("refresh");
   } catch (error) {
     workflowSaveError.value = error instanceof Error ? error.message : "Could not save this workflow.";
@@ -1060,6 +1594,11 @@ async function testWorkflow() {
 
 async function publishWorkflow() {
   if (!workflowDraft.value || workflowSaveLoading.value) return;
+  if (!workflowVerificationReady.value) {
+    workflowVerificationOpen.value = true;
+    workflowSaveError.value = "This workflow cannot be published yet. Review the verifier checks below.";
+    return;
+  }
   if (draftIsDirty.value) {
     await saveWorkflow();
     if (workflowSaveError.value) return;
@@ -1088,7 +1627,7 @@ onMounted(() => {
       <div class="workflow-page-heading">
         <p class="eyebrow">Workflow</p>
         <h2>{{ workflowTitle }}</h2>
-        <p class="workflow-header-status"><span :class="['workflow-status-dot', { published: props.publishingStatus === 'LIVE' && !draftIsDirty }]" aria-hidden="true"></span>{{ workflowStatusSummary }}<span class="workflow-header-separator">·</span>{{ draftIsDirty ? 'Unsaved changes' : 'Last saved' }}</p>
+        <p class="workflow-header-status"><span :class="['workflow-status-dot', { published: workflowStatus(selectedWorkflow ?? ({} as WorkflowAction)) === 'LIVE' && !draftIsDirty }]" aria-hidden="true"></span>{{ workflowStatusSummary }}<span class="workflow-header-separator">·</span>{{ draftIsDirty ? 'Unsaved changes' : 'Last saved' }}</p>
       </div>
       <div class="toolbar-actions workflow-page-actions">
         <button class="text-button workflow-header-secondary-action" type="button" @click="emit('refresh')">Refresh</button>
@@ -1101,16 +1640,28 @@ onMounted(() => {
     <div :class="['workflow-layout', { 'workflow-layout-empty': !workflowActions.length }]">
       <div v-if="workflowActions.length" class="workflow-selector-bar">
         <div class="workflow-selector-copy"><p class="eyebrow">Your workflows</p><strong>{{ workflowActions.length }} configured</strong></div>
-        <label class="workflow-library-select">Switch workflow<select v-model="selectedWorkflowId"><option v-for="action in workflowActions" :key="action.id" :value="action.id">{{ workflowDisplayName(action) }}</option></select></label>
-        <button class="outline-button small" type="button" @click="openCreateWorkflow"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Create workflow</button>
+        <label class="workflow-library-select">Switch workflow<select v-model="selectedWorkflowId"><option v-for="action in workflowActions" :key="action.id" :value="action.id">{{ workflowDisplayName(action) }} · {{ workflowStatusLabel(action) }}</option></select></label>
+        <div class="workflow-selector-actions"><button v-if="workflowDraft" class="text-button workflow-delete-action" type="button" @click="requestDeleteWorkflow"><Trash2 :size="14" :stroke-width="1.9" aria-hidden="true" />Delete workflow</button><button class="outline-button small" type="button" @click="openCreateWorkflow"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Create workflow</button></div>
       </div>
       <div v-else class="workflow-empty workflow-layout-empty-state"><span class="workflow-empty-icon"><GitBranch :size="28" :stroke-width="1.8" aria-hidden="true" /></span><strong>No workflows yet.</strong><p>Build your first guided customer journey with questions, branches, provider lookups, and a clear next step.</p><button class="primary-button" type="button" @click="openCreateWorkflow"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" />Create workflow</button></div>
 
       <main v-if="workflowDraft" class="workflow-builder">
         <section class="workflow-goal-summary" aria-labelledby="workflow-goal-heading">
           <div class="workflow-goal-summary-row"><div class="workflow-goal-icon"><Sparkles :size="17" :stroke-width="1.8" aria-hidden="true" /></div><div class="workflow-goal-copy"><p class="eyebrow">Workflow goal</p><h3 id="workflow-goal-heading">What should this workflow accomplish?</h3><p>{{ workflowDraft.description || 'Describe the customer outcome this workflow owns.' }}</p></div><button class="text-button workflow-goal-toggle" type="button" @click="workflowGoalExpanded = !workflowGoalExpanded">{{ workflowGoalExpanded ? 'Done' : 'Edit goal' }} <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
+          <div class="workflow-context-note"><strong>Generated with</strong><span>Owner goal</span><i>+</i><span>Business Brain</span><i>+</i><span>verified facts</span><i>+</i><span>approved actions</span></div>
           <div v-if="workflowGoalExpanded" class="workflow-goal-editor"><textarea ref="workflowAssistInput" v-model="workflowDescription" rows="4" placeholder="Example: Ask what kind of salon they run, match verified capabilities, then offer the right next step." @input="resizeWorkflowGoalEditor($event.target as HTMLTextAreaElement)" @keydown.meta.enter="generateStarter" @keydown.ctrl.enter="generateStarter"></textarea><div class="workflow-assist-footer"><span>Include what the customer needs and what should happen next. · {{ workflowDescription.length.toLocaleString() }} characters</span><button class="primary-button small" type="button" aria-label="Generate steps" :disabled="!workflowDescription.trim()" @click="generateStarter"><Sparkles :size="14" :stroke-width="1.8" aria-hidden="true" />Generate workflow</button></div><div class="workflow-template-flow"><button class="text-button workflow-template-trigger" type="button" @click="showTemplatePicker = !showTemplatePicker">Start with a template <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button><div v-if="showTemplatePicker" class="workflow-template-picker"><p>Choose a starting point</p><button v-for="template in workflowTemplates" :key="template.key" type="button" @click="applyTemplate(template.key)"><strong>{{ template.label }}</strong><small>{{ template.description }}</small></button></div></div></div>
           <div v-if="workflowDraft.workflowSafety?.status === 'blocked'" class="workflow-isolation-warning" role="alert"><strong>Previous draft blocked for safety.</strong><span>It referenced a different business context. Regenerate from the active Business Brain before saving.</span></div>
+        </section>
+
+        <section class="workflow-outcome-card" aria-labelledby="workflow-outcome-heading">
+          <div class="workflow-outcome-copy"><p class="eyebrow">Outcome</p><h3 id="workflow-outcome-heading">{{ workflowOutcomeAction?.name || 'Configured Action' }}</h3><div class="workflow-outcome-meta"><span :class="['status-pill', workflowOutcomeAction?.setupStatus === 'READY' ? 'booked' : 'new']">{{ workflowOutcomeAction?.setupStatus === 'READY' ? 'Ready' : workflowOutcomeAction?.setupStatus === 'DRAFT' ? 'Draft' : 'Needs setup' }}</span><span>{{ workflowOutcomeAction?.capability?.completionType === 'link' ? 'Send visitors to a page' : workflowOutcomeAction?.capability?.completionType === 'provider' ? 'Use a connected provider' : 'Action completion' }}</span></div><small>Actions define what happens. This Workflow owns the journey that gets visitors there.</small></div>
+          <button class="outline-button small" type="button" @click="emit('open-action', workflowMetadata?.actionId || workflowDraft?.id || '')">View action</button>
+        </section>
+
+        <section v-if="selectedWorkflowPerformance && selectedWorkflowPerformance.started > 0" class="workflow-insights-card" aria-labelledby="workflow-insights-heading">
+          <div class="workflow-insights-heading"><div><p class="eyebrow">Journey performance · last 30 days</p><h3 id="workflow-insights-heading">See what visitors are doing</h3><small>Observed from this workflow’s live funnel. Recommendations stay advisory.</small></div><span class="status-pill qualified">{{ selectedWorkflowPerformance.completionRate }}% complete</span></div>
+          <div class="workflow-insights-stats"><div><strong>{{ selectedWorkflowPerformance.started }}</strong><span>Started</span></div><div><strong>{{ selectedWorkflowPerformance.formDisplayed }}</strong><span>Reached form</span></div><div><strong>{{ selectedWorkflowPerformance.completed }}</strong><span>Completed</span></div><div><strong>{{ selectedWorkflowPerformance.completionRate }}%</strong><span>Completion</span></div></div>
+          <div v-if="workflowRecommendation" class="workflow-insight-recommendation"><span class="workflow-recommendation-mark">!</span><div><strong>Potential friction</strong><p>{{ workflowRecommendation.message }}</p><small>{{ workflowRecommendation.count }} visitor{{ workflowRecommendation.count === 1 ? '' : 's' }} stopped there.</small></div><button class="text-button" type="button" @click="workflowStepList?.scrollIntoView({ behavior: 'smooth', block: 'start' })">Review journey</button></div>
         </section>
 
         <section class="workflow-readiness-card" aria-labelledby="workflow-setup-heading">
@@ -1118,15 +1669,22 @@ onMounted(() => {
           <div v-if="setupStatusOpen" class="workflow-readiness-details"><span v-for="item in setupChecklist" :key="item.label" :class="{ complete: item.complete, incomplete: !item.complete }"><Check v-if="item.complete" :size="14" :stroke-width="2" aria-hidden="true" /><i v-else aria-hidden="true">○</i>{{ readinessLabel(item.label) }}</span><button v-if="readinessRemaining.length" class="text-button" type="button" @click="continueSetup">Continue setup <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
         </section>
 
+        <section v-if="workflowVerificationIssues.length" class="workflow-verifier-card" :class="{ expanded: workflowVerificationOpen }" aria-labelledby="workflow-verifier-heading">
+          <div class="workflow-verifier-summary"><div class="workflow-verifier-icon"><X :size="15" :stroke-width="2.2" aria-hidden="true" /></div><div><p class="eyebrow">Before publish</p><strong id="workflow-verifier-heading">{{ workflowVerificationIssues.length }} verifier check{{ workflowVerificationIssues.length === 1 ? '' : 's' }} need attention</strong><small>Draft changes stay safe, but this version is not ready to go live.</small></div><button class="text-button" type="button" @click="workflowVerificationOpen = !workflowVerificationOpen">{{ workflowVerificationOpen ? 'Hide checks' : 'Review checks' }} <ChevronDown :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div>
+          <div v-if="workflowVerificationOpen" class="workflow-verifier-issues"><div v-for="issue in workflowVerificationIssues" :key="`${issue.code}-${issue.message}`"><span class="workflow-verifier-bullet">!</span><span>{{ issue.message }}</span></div></div>
+        </section>
+
+        <div v-if="undoMessage" class="workflow-undo-toast" role="status"><span>{{ undoMessage }}</span><button type="button" @click="undoLastWorkflowChange">Undo</button></div>
+
         <div ref="workflowStepList" class="workflow-step-list">
           <div class="workflow-section-heading"><div><p class="eyebrow">Main path</p><h3>Customer journey</h3><p>Follow the path your customer experiences from first question to next step.</p></div><button class="outline-button small" type="button" @click="addWorkflowStep()"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Add step</button></div>
           <template v-for="(step, index) in workflowDisplaySteps" :key="step.id || index">
             <div v-if="index === workflowMainPathCount && workflowMainPathCount < workflowDisplaySteps.length" class="workflow-conditional-heading"><div><p class="eyebrow">Side paths</p><h4>Conditional paths</h4><p>These paths attach when the visitor asks for something specific.</p></div></div>
-          <article :class="['workflow-step-card', { selected: selectedStepIndex === workflowStepIndex(step), conditional: isConditionalStep(step) }]" @click="selectedStepIndex = workflowStepIndex(step)">
+          <article :class="['workflow-step-card', { selected: selectedStepIndex === workflowStepIndex(step), conditional: isConditionalStep(step), disabled: step.enabled === false }]" @click="selectedStepIndex = workflowStepIndex(step)">
             <div class="workflow-step-rail"><span>{{ workflowStepIndex(step) + 1 }}</span><i v-if="index < workflowDisplaySteps.length - 1"></i></div>
             <div class="workflow-step-body">
-              <div class="workflow-step-toolbar"><div class="workflow-step-title"><GripVertical :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-if="selectedStepIndex === workflowStepIndex(step)" v-model="step.label" type="text" aria-label="Workflow step label" @input="markDirty" /><strong v-else>{{ step.label || stepTypeLabel(step.type) }}</strong><span class="status-pill qualified">{{ stepTypeLabel(step.type) }}</span></div><div class="workflow-step-actions"><button class="workflow-edit-button" type="button" @click.stop="selectedStepIndex = selectedStepIndex === workflowStepIndex(step) ? -1 : workflowStepIndex(step)">{{ selectedStepIndex === workflowStepIndex(step) ? 'Done' : 'Edit' }}</button></div></div>
-              <div v-if="selectedStepIndex !== workflowStepIndex(step)" class="workflow-step-summary"><span>{{ step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select Edit to configure this step') }}</span><span v-if="step.condition" class="workflow-summary-tag">Condition</span><span v-if="step.config?.trigger || (step.config?.topic && step.config?.conditional !== false)" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
+              <div v-if="stepGenerationReason(step)" :class="['workflow-step-reason', { missing: stepGenerationStatus(step) === 'missing', verified: stepGenerationStatus(step) === 'verified' }]" role="note"><strong>Why this was added</strong><span>{{ stepGenerationReason(step) }}</span><small v-if="stepGenerationStatus(step) === 'missing'">{{ stepGenerationStatusLabel(step) }} · review before publishing</small></div>
+              <div v-if="selectedStepIndex !== workflowStepIndex(step)" class="workflow-step-summary"><span>{{ step.type === 'knowledge' ? `${formatLabel(stepConfigValue(step, 'topic') || 'Knowledge topic')} · ${formatLabel(stepConfigValue(step, 'allowedFacts') || 'Verified business knowledge')}` : step.question || step.fieldKey || (step.type === 'condition' ? 'Add a condition' : step.type === 'lookup' ? 'Find availability with a provider' : 'Select step actions to configure this step') }}</span><span v-if="stepConditionText(step)" class="workflow-summary-tag">Condition</span><span v-if="isConditionalStep(step)" class="workflow-summary-tag">Conditional</span><span v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-summary-tag">{{ formatLabel(stepConfigValue(step, 'provider') || 'Provider') }}</span><span v-if="step.config?.reviewStatus" class="workflow-summary-tag">{{ formatLabel(String(step.config.reviewStatus)) }}</span></div>
               <div v-else>
                 <div v-if="step.type === 'capture'" class="workflow-capture-config">
                   <div class="workflow-step-grid">
@@ -1142,9 +1700,9 @@ onMounted(() => {
                 <div v-else class="workflow-step-grid"><label>Step type<select v-model="step.type" @change="handleStepTypeChange(step)"><optgroup v-for="group in stepTypeGroups" :key="group.label" :label="group.label"><option v-for="type in group.options" :key="type.value" :value="type.value">{{ type.label }}</option></optgroup></select></label><label v-if="step.type === 'ask' || step.type === 'form'">Field<select v-model="step.fieldKey" @change="markDirty"><option value="">No stored field</option><option v-for="field in workflowDraft.fields ?? []" :key="field.key" :value="field.key">{{ field.label || field.key }}</option></select></label><label v-if="step.type === 'ask' || step.type === 'form' || step.type === 'recommend' || step.type === 'confirm'">Customer-facing question<input v-model="step.question" type="text" placeholder="What should the assistant ask?" @input="markDirty" /></label><label v-if="step.type === 'ask' || step.type === 'form'" class="toggle-row"><span>Required</span><input v-model="step.required" type="checkbox" @change="markDirty" /></label></div>
                 <div v-if="step.type === 'knowledge'" class="workflow-knowledge-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Knowledge</p><strong>Answer from verified business knowledge</strong><small>Keep facts in Business Brain. This step stores only the topic and response policy.</small></div><span class="status-pill booked">Verified source</span></div><div class="workflow-step-grid"><label>Trigger / topic<input :value="stepConfigValue(step, 'topic')" type="text" placeholder="Pricing" @input="setStepConfigFromEvent(step, 'topic', $event)" /></label><label>Knowledge source<select :value="stepConfigValue(step, 'knowledgeSource')" @change="setStepConfigFromEvent(step, 'knowledgeSource', $event)"><option value="verified_business_knowledge">Verified business knowledge</option></select></label><label>Allowed facts<select :value="stepConfigValue(step, 'allowedFacts')" @change="setStepConfigFromEvent(step, 'allowedFacts', $event)"><option value="pricing">Pricing only</option><option value="policies">Policy facts</option><option value="services">Services and capabilities</option><option value="locations">Locations and hours</option><option value="all">All verified business knowledge</option></select></label><label>If verified<select :value="stepConfigValue(step, 'verifiedBehavior')" @change="setStepConfigFromEvent(step, 'verifiedBehavior', $event)"><option value="answer_naturally">Answer naturally</option></select></label><label>If unavailable<select :value="stepConfigValue(step, 'unavailableBehavior')" @change="setStepConfigFromEvent(step, 'unavailableBehavior', $event)"><option value="say_not_verified">Say information is not verified</option></select></label><label>After answering<select :value="stepConfigValue(step, 'resumeBehavior')" @change="setStepConfigFromEvent(step, 'resumeBehavior', $event)"><option value="return_to_previous_step">Resume previous workflow state</option></select></label><label>CTA behavior<select :value="stepConfigValue(step, 'ctaBehavior')" @change="setStepConfigFromEvent(step, 'ctaBehavior', $event)"><option value="keep_current_if_available">Keep current CTA if already available</option></select></label></div><div class="workflow-knowledge-preview"><div class="workflow-knowledge-preview-heading"><div><p class="eyebrow">Preview / test</p><strong>Try a visitor question</strong><small>This simulates routing and response policy. It does not generate or store a business fact.</small></div><span class="workflow-preview-badge">Simulation</span></div><div class="workflow-knowledge-preview-input"><input v-model="knowledgePreviewQuestion" type="text" placeholder="How much does it cost?" @keydown.enter.prevent="runKnowledgePreview(step)" /><button class="outline-button small" type="button" :disabled="!knowledgePreviewQuestion.trim()" @click="runKnowledgePreview(step)">Run preview</button></div><div class="workflow-knowledge-examples"><span>Examples</span><button v-for="example in knowledgePreviewExamples(step)" :key="example" type="button" @click="runKnowledgePreview(step, example)">{{ example }}</button></div><dl v-if="knowledgePreviewStepId === step.id && knowledgePreviewResult" class="workflow-knowledge-preview-result"><div><dt>Matched topic</dt><dd>{{ knowledgePreviewResult.matchedTopic }}</dd></div><div><dt>Evidence</dt><dd>{{ knowledgePreviewResult.evidence }}</dd></div><div><dt>Response behavior</dt><dd>{{ knowledgePreviewResult.responseBehavior }}</dd></div><div><dt>Resume</dt><dd>{{ knowledgePreviewResult.resumeBehavior }}</dd></div><div><dt>CTA retained</dt><dd>{{ knowledgePreviewResult.ctaRetained }}</dd></div></dl></div></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
-                <div v-if="step.type === 'condition'" class="workflow-condition-box"><span class="workflow-condition-icon"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" /></span><label>Condition in plain English<textarea v-model="step.condition" rows="2" placeholder="If the visitor is ready to register, continue to the provider lookup." @input="markDirty"></textarea></label></div>
+                <div v-if="step.type === 'condition'" class="workflow-condition-box"><span class="workflow-condition-icon"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" /></span><label>Condition in plain English<textarea :value="stepConditionText(step)" rows="2" placeholder="If the visitor is ready to register, continue to the provider lookup." @input="updateStepCondition(step, $event)"></textarea></label></div>
                 <div v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-provider-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Provider</p><strong>{{ step.type === 'lookup' ? 'Find availability' : 'Complete with provider' }}</strong></div><span :class="['status-pill', providerConnected ? 'booked' : 'new']">{{ providerConnected ? 'Connected' : 'Needs connection' }}</span></div><div class="workflow-step-grid"><label>Provider<select :value="stepConfigValue(step, 'provider')" @change="setStepConfigFromEvent(step, 'provider', $event)"><option value="">Select provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking provider</option><option value="crm">CRM / automation</option></select></label><label v-if="step.type === 'lookup'">Operation<select :value="stepConfigValue(step, 'operation')" @change="setStepConfigFromEvent(step, 'operation', $event)"><option value="find_locations">Find locations</option><option value="find_classes">Find classes</option><option value="get_availability">Get availability</option><option value="get_class_price">Get class price</option></select></label><label v-if="step.type === 'lookup'">Search fields<input :value="stepConfigValue(step, 'searchFields')" type="text" placeholder="location, schedule, age" @input="setStepConfigFromEvent(step, 'searchFields', $event)" /></label></div><small class="form-help">We’ll use the provider for this step and explain what happens if it is unavailable.</small></div>
-                <details class="workflow-advanced-settings" :open="stepAdvancedOpen"><summary @click.prevent="stepAdvancedOpen = !stepAdvancedOpen">Advanced <span>{{ stepAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div class="workflow-step-footer"><label>If this step fails<select :value="stepConfigValue(step, 'failureBehavior')" @change="setStepConfigFromEvent(step, 'failureBehavior', $event)"><option value="handoff">Hand off to staff</option><option value="capture_lead">Save details and follow up</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></label><label>Next step<select v-model="step.nextStepId" @change="markDirty"><option value="">Continue in order</option><option v-for="nextStep in draftSteps.filter((candidate) => candidate.id !== step.id)" :key="nextStep.id" :value="nextStep.id">{{ nextStep.label || nextStep.id }}</option></select></label></div><div class="workflow-step-management"><button type="button" :disabled="workflowStepIndex(step) === 0" @click.stop="moveWorkflowStep(workflowStepIndex(step), -1)">Move up</button><button type="button" :disabled="workflowStepIndex(step) === draftSteps.length - 1" @click.stop="moveWorkflowStep(workflowStepIndex(step), 1)">Move down</button><button class="danger-text" type="button" @click.stop="removeWorkflowStep(workflowStepIndex(step))">Delete step</button></div><details class="workflow-technical-details"><summary>Technical details <span>Show</span></summary><div><code>{{ step.id || 'generated-step' }}</code><code>type: {{ step.type }}</code><pre>{{ JSON.stringify(step.config || {}, null, 2) }}</pre></div></details></details>
+                <details class="workflow-advanced-settings" :open="stepAdvancedOpen"><summary @click.prevent="stepAdvancedOpen = !stepAdvancedOpen">Advanced <span>{{ stepAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div class="workflow-step-footer"><label>If this step fails<select :value="stepConfigValue(step, 'failureBehavior') || 'agent_default'" @change="setStepConfigFromEvent(step, 'failureBehavior', $event)"><option value="agent_default">Use Agent default</option><option value="handoff">Hand off to staff</option><option value="capture_lead">Save details and follow up</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></label><label>Next step<select v-model="step.nextStepId" @change="markDirty"><option value="">Continue in order</option><option v-for="nextStep in draftSteps.filter((candidate) => candidate.id !== step.id)" :key="nextStep.id" :value="nextStep.id">{{ nextStep.label || nextStep.id }}</option></select></label></div><div class="workflow-step-management"><button type="button" :disabled="workflowStepIndex(step) === 0" @click.stop="moveWorkflowStep(workflowStepIndex(step), -1)">Move up</button><button type="button" :disabled="workflowStepIndex(step) === draftSteps.length - 1" @click.stop="moveWorkflowStep(workflowStepIndex(step), 1)">Move down</button><button class="danger-text" type="button" @click.stop="requestDeleteWorkflowStep(workflowStepIndex(step))">Delete step</button></div><details class="workflow-technical-details"><summary>Technical details <span>Show</span></summary><div><code>{{ step.id || 'generated-step' }}</code><code>type: {{ step.type }}</code><pre>{{ JSON.stringify(step.config || {}, null, 2) }}</pre></div></details></details>
               </div>
             </div>
           </article>
@@ -1156,7 +1714,13 @@ onMounted(() => {
           <button class="workflow-advanced-toggle" type="button" :aria-expanded="workflowAdvancedOpen" @click="workflowAdvancedOpen = !workflowAdvancedOpen"><span><p class="eyebrow">Advanced</p><strong id="workflow-advanced-heading">Provider, fallback, and completion</strong><small>{{ providerSummary }} · {{ completionSummary }}</small></span><span class="workflow-advanced-toggle-action">{{ workflowAdvancedOpen ? 'Hide' : 'Show' }} <ChevronDown :size="15" :stroke-width="1.8" aria-hidden="true" /></span></button>
           <div v-if="workflowAdvancedOpen" class="workflow-advanced-content">
             <div class="workflow-advanced-row"><div><span class="workflow-advanced-label">Provider</span><strong>{{ providerSummary }}</strong><small>{{ providerStep ? 'Used for live availability or external actions.' : 'Optional for a workflow that only asks questions and routes visitors.' }}</small></div><button v-if="!providerStep" class="outline-button small" type="button" @click="configureProvider">Add provider</button><button v-else class="text-button" type="button" @click="selectedStepIndex = draftSteps.findIndex((step) => step.id === providerStep?.id)">Edit provider step</button></div>
-            <div class="workflow-advanced-row"><div><span class="workflow-advanced-label">Fallback behavior</span><strong>{{ providerStep ? formatLabel(providerFailureBehavior) : 'Use the configured handoff path' }}</strong><small>Keep the visitor moving when a provider or step is unavailable.</small></div><select v-if="providerStep" :value="providerFailureBehavior" @change="setStepConfigFromEvent(providerStep, 'failureBehavior', $event)"><option value="capture_lead">Capture the request and notify the team</option><option value="handoff">Hand off to staff</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></div>
+            <div class="workflow-advanced-row"><div><span class="workflow-advanced-label">Agent defaults</span><strong>Inherited from Agent Behavior</strong><small>Global behavior is shared across this customer journey unless you customize a workflow step.</small><button class="text-button workflow-fallback-link" type="button" @click="emit('open-agent-behavior')">Manage Agent defaults →</button></div><span class="workflow-inherited-badge">Shared</span></div>
+            <div class="workflow-advanced-row workflow-defaults-grid"><div><span class="workflow-advanced-label">Fallback</span><strong>{{ workflowFallbackCustomized ? formatLabel(providerFailureBehavior) : agentFallbackLabel }}</strong><small>{{ workflowFallbackCustomized ? 'Workflow-specific override' : 'Inherited from Agent Behavior' }}</small></div><select v-if="providerStep" :value="providerFailureBehavior" aria-label="Workflow fallback behavior" @change="setStepConfigFromEvent(providerStep, 'failureBehavior', $event)"><option value="agent_default">Use Agent default</option><option value="capture_lead">Capture the request and notify the team</option><option value="handoff">Hand off to staff</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></div>
+            <div class="workflow-advanced-row workflow-defaults-grid"><div><span class="workflow-advanced-label">Tone</span><strong>{{ agentToneLabel }}</strong><small>Inherited from Agent Behavior</small></div><span class="workflow-inherited-badge">Inherited</span></div>
+            <div class="workflow-advanced-row workflow-defaults-grid"><div><span class="workflow-advanced-label">Language</span><strong>{{ props.agentPrimaryLanguage || 'English' }}</strong><small>Inherited from Agent Behavior</small></div><span class="workflow-inherited-badge">Inherited</span></div>
+            <div class="workflow-advanced-row workflow-defaults-grid"><div><span class="workflow-advanced-label">Answer sources</span><strong>{{ agentCitationLabel }}</strong><small>Inherited from Agent Behavior · workflow knowledge stays verified</small></div><span class="workflow-inherited-badge">Inherited</span></div>
+            <div class="workflow-advanced-row workflow-defaults-grid"><div><span class="workflow-advanced-label">Human handoff</span><strong>{{ agentHandoffLabel }}</strong><small>Global handoff behavior remains available to this workflow.</small></div><span class="workflow-inherited-badge">Inherited</span></div>
+            <div class="workflow-advanced-row workflow-defaults-grid"><div><span class="workflow-advanced-label">Proactive engagement</span><strong>{{ agentProactiveLabel }}</strong><small>Applies when the workflow is entered from proactive engagement.</small></div><span class="workflow-inherited-badge">Inherited</span></div>
             <div class="workflow-advanced-row"><div><span class="workflow-advanced-label">Completion behavior</span><strong>{{ completionSummary }}</strong><small>What the visitor sees after the journey reaches its outcome.</small></div><button class="text-button" type="button" @click="openAction">Edit action settings</button></div>
           </div>
         </section>
@@ -1165,6 +1729,19 @@ onMounted(() => {
     </div>
 
     <p v-if="workflowSaveError" class="form-error">{{ workflowSaveError }}</p><p v-if="workflowSaveMessage" class="saved-message">✓ {{ workflowSaveMessage }}</p><div v-if="workflowDraft && workflowDraft.readiness?.ready === false" class="workflow-save-note"><X :size="15" :stroke-width="1.8" aria-hidden="true" /> This workflow is still in setup. Review the readiness checklist before making the action primary.</div>
+
+    <div v-if="deleteStepIndex >= 0 && draftSteps[deleteStepIndex]" class="workflow-modal-backdrop" role="presentation" @click.self="cancelDeleteWorkflowStep">
+      <section class="workflow-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-step-title">
+        <button class="workflow-modal-close" type="button" aria-label="Close" @click="cancelDeleteWorkflowStep">×</button>
+        <p class="eyebrow">Remove step</p>
+        <h2 id="delete-step-title">Remove “{{ draftSteps[deleteStepIndex].label || stepTypeLabel(draftSteps[deleteStepIndex].type) }}” from this workflow?</h2>
+        <p v-if="deleteStepDependents.length" class="workflow-confirm-warning">{{ deleteStepDependents.length === 1 ? 'A later step depends on this answer.' : 'Later steps depend on this answer.' }} Update those steps first, or remove them together.</p>
+        <p v-else class="workflow-confirm-warning">This may affect qualification and later steps that depend on it.</p>
+        <div v-if="deleteStepDependents.length" class="workflow-dependent-list"><div v-for="dependent in deleteStepDependents" :key="`${dependent.label}-${dependent.reason}`"><strong>{{ dependent.label }}</strong><span>{{ dependent.reason }}</span></div></div>
+        <p class="workflow-confirm-note">Your published workflow remains untouched until you publish a new version.</p>
+        <div class="workflow-modal-actions"><button class="outline-button small" type="button" @click="cancelDeleteWorkflowStep">Cancel</button><button class="primary-button small danger-button" type="button" @click="confirmDeleteWorkflowStep">{{ deleteStepDependents.length ? 'Remove both' : 'Remove step' }}</button></div>
+      </section>
+    </div>
 
     <div v-if="createWorkflowOpen" class="workflow-modal-backdrop" role="presentation" @click.self="closeCreateWorkflow">
       <section class="workflow-create-modal" role="dialog" aria-modal="true" aria-labelledby="create-workflow-title">
@@ -1181,10 +1758,13 @@ onMounted(() => {
         </div>
 
         <div class="workflow-create-fields">
-          <label v-if="createWorkflowMode === 'action' || createWorkflowMode === 'template' || createWorkflowMode === 'describe'">Action <span class="optional">what the assistant can do</span><select v-model="createWorkflowActionId"><option value="" disabled>Choose an action…</option><option v-for="action in eligibleActions" :key="action.id" :value="action.id">{{ action.name }}</option></select></label>
+          <label>Workflow name <span class="optional">must be unique in this business</span><input v-model="createWorkflowName" type="text" maxlength="160" placeholder="Lead qualification" /></label>
+          <p v-if="duplicateCreateWorkflow" class="workflow-name-warning" role="alert">A workflow with this name already exists. Choose a different name or open the existing workflow.</p>
+          <label v-if="createWorkflowMode === 'action' || createWorkflowMode === 'template'">Action <span class="optional">what the assistant can do</span><select v-model="createWorkflowActionId" @change="updateCreateWorkflowNameSuggestion()"><option value="" disabled>Choose an action…</option><option v-for="action in eligibleActions" :key="action.id" :value="action.id">{{ action.name }}</option></select></label>
+          <div v-if="createWorkflowMode === 'describe'" class="workflow-inference-preview"><p class="eyebrow">Suggested from your description</p><div class="workflow-inference-list"><span v-if="plainEnglishInference.contactFields">✓ Capture name and email</span><span v-if="plainEnglishInference.leadCapture">✓ Save the visitor as a lead</span><span v-if="plainEnglishInference.demoAction">✓ Offer the demo action</span><span v-if="plainEnglishInference.demoAction">✓ Guide interested visitors to the demo page</span></div><strong>Primary conversion: {{ selectedCreateWorkflowAction?.name || 'Choose a conversion action' }}</strong><small>FrontDeskWise will add lead capture as part of the journey; it does not replace the demo action.</small></div>
           <div v-if="!eligibleActions.length" class="workflow-create-empty"><strong>No eligible actions yet.</strong><span>Create one inline, then continue without leaving Workflows.</span></div>
           <button class="workflow-inline-action-button" type="button" @click="openNewActionFlow"><Plus :size="15" :stroke-width="1.9" aria-hidden="true" /> Create new action</button>
-          <label v-if="createWorkflowMode === 'template'">Template <select v-model="createWorkflowTemplateKey" @change="createWorkflowDescription = workflowNameForTemplate(createWorkflowTemplateKey)"><option v-for="template in workflowTemplates" :key="template.key" :value="template.key">{{ template.label }}</option></select></label>
+          <label v-if="createWorkflowMode === 'template'">Template <select v-model="createWorkflowTemplateKey" @change="updateCreateWorkflowTemplate"><option v-for="template in workflowTemplates" :key="template.key" :value="template.key">{{ template.label }}</option></select></label>
         <label v-if="createWorkflowMode === 'describe' || createWorkflowMode === 'action'">Workflow goal <textarea v-model="createWorkflowDescription" rows="4" placeholder="Describe the customer journey this workflow should complete…" @input="resizeWorkflowGoalEditor($event.target as HTMLTextAreaElement)"></textarea><small class="workflow-goal-count">{{ createWorkflowDescription.length.toLocaleString() }} characters</small></label>
         </div>
 
@@ -1196,7 +1776,21 @@ onMounted(() => {
         </div>
 
         <p v-if="createWorkflowError" class="form-error">{{ createWorkflowError }}</p>
-        <div v-if="!createNewActionOpen" class="workflow-modal-actions"><button class="outline-button small" type="button" @click="closeCreateWorkflow">Cancel</button><button class="primary-button small" type="button" :disabled="createWorkflowLoading || !createWorkflowActionId" @click="createWorkflow">{{ createWorkflowLoading ? 'Creating…' : 'Create workflow' }}</button></div>
+        <div v-if="!createNewActionOpen" class="workflow-modal-actions"><button class="outline-button small" type="button" @click="closeCreateWorkflow">Cancel</button><button class="primary-button small" type="button" :disabled="createWorkflowLoading || !createWorkflowActionId || !createWorkflowName.trim() || Boolean(duplicateCreateWorkflow)" @click="createWorkflow">{{ createWorkflowLoading ? 'Creating…' : 'Create workflow' }}</button></div>
+      </section>
+    </div>
+
+    <div v-if="deleteWorkflowOpen && workflowDraft" class="workflow-modal-backdrop" role="presentation" @click.self="cancelDeleteWorkflow">
+      <section class="workflow-confirm-modal workflow-delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-workflow-title">
+        <button class="workflow-modal-close" type="button" aria-label="Close" @click="cancelDeleteWorkflow">×</button>
+        <p class="eyebrow">Delete workflow</p>
+        <h2 id="delete-workflow-title">Delete “{{ workflowTitle }}”?</h2>
+        <div class="workflow-delete-warning"><Trash2 :size="18" :stroke-width="1.9" aria-hidden="true" /><div><strong>This archives the workflow and its linked action.</strong><span>It will be removed from this workflow list. Visitors keep the current published version until you publish again.</span></div></div>
+        <p v-if="selectedWorkflowIsLive" class="workflow-confirm-warning">This workflow is live. The current published version stays unchanged until you publish the updated agent configuration.</p>
+        <p v-else class="workflow-confirm-warning">{{ draftIsDirty ? 'You have unsaved changes that will be discarded.' : 'This action cannot be undone from Workflows.' }}</p>
+        <p class="workflow-confirm-note">Deleting a workflow does not delete conversation history or leads already captured.</p>
+        <p v-if="deleteWorkflowError" class="form-error" role="alert">{{ deleteWorkflowError }}</p>
+        <div class="workflow-modal-actions"><button class="outline-button small" type="button" :disabled="deleteWorkflowLoading" @click="cancelDeleteWorkflow">Cancel</button><button class="primary-button small danger-button" type="button" :disabled="deleteWorkflowLoading" @click="confirmDeleteWorkflow">{{ deleteWorkflowLoading ? 'Deleting…' : 'Delete workflow' }}</button></div>
       </section>
     </div>
   </div>
@@ -1378,6 +1972,10 @@ onMounted(() => {
 .workflow-create-choice strong { color: #29466d; font-size: 12px; }
 .workflow-create-choice small { color: #788ba3; font-size: 11px; line-height: 1.4; }
 .workflow-create-fields { display: grid; gap: 13px; margin-top: 18px; }
+.workflow-inference-preview { display: grid; gap: 8px; padding: 13px; border: 1px solid #dce8f7; border-radius: 10px; background: #f7faff; }
+.workflow-inference-list { display: grid; gap: 5px; color: #315b8e; font-size: 11px; line-height: 1.4; }
+.workflow-inference-preview strong { color: #29466d; font-size: 12px; }
+.workflow-inference-preview small { color: #788ba3; font-size: 10px; line-height: 1.4; }
 .workflow-create-fields > label, .workflow-new-action-panel > label { display: grid; gap: 6px; color: #4d6077; font-size: 11px; font-weight: 700; }
 .workflow-create-fields select, .workflow-create-fields textarea, .workflow-new-action-panel input, .workflow-new-action-panel textarea { width: 100%; box-sizing: border-box; padding: 10px 11px; border: 1px solid #cbd9e8; border-radius: 8px; color: #263950; background: #fff; font: inherit; font-size: 12px; font-weight: 500; }
 .workflow-create-fields textarea, .workflow-new-action-panel textarea { resize: vertical; line-height: 1.45; }
@@ -1644,6 +2242,17 @@ onMounted(() => {
 .workflow-goal-copy .eyebrow { margin-bottom: 4px; }
 .workflow-goal-copy h3 { margin: 0 0 4px; color: #2e415d; font-size: 15px; letter-spacing: -.02em; }
 .workflow-goal-copy p:not(.eyebrow) { display: -webkit-box; margin: 0; overflow: hidden; color: #71829a; font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.workflow-outcome-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 18px; border: 1px solid #dce7f5; border-radius: 13px; background: linear-gradient(120deg, #f8fbff, #fff); }
+.workflow-outcome-copy { display: grid; gap: 5px; min-width: 0; }
+.workflow-outcome-copy .eyebrow { margin: 0; }
+.workflow-outcome-copy h3 { margin: 0; color: #2e415d; font-size: 15px; }
+.workflow-outcome-copy small { color: #7b8ba1; font-size: 10px; line-height: 1.45; }
+.workflow-outcome-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: #617893; font-size: 10px; font-weight: 700; }
+.workflow-outcome-meta .status-pill { width: max-content; }
+.workflow-context-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 12px; margin-top: 14px; border-top: 1px solid #edf1f5; color: #6f8198; font-size: 10px; }
+.workflow-context-note strong { color: #8a98a9; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.workflow-context-note span { padding: 4px 7px; border: 1px solid #dce6f2; border-radius: 999px; color: #4f6682; background: #f8fbff; font-weight: 700; }
+.workflow-context-note i { color: #aab7c7; font-style: normal; }
 .workflow-goal-toggle { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; padding: 4px 0; font-size: 11px; }
 .workflow-goal-toggle svg { transition: transform .15s ease; }
 .workflow-goal-editor { display: grid; gap: 12px; padding-top: 15px; margin-top: 15px; border-top: 1px solid #edf1f5; }
@@ -1686,6 +2295,13 @@ onMounted(() => {
 .workflow-step-card.conditional .workflow-step-rail span { color: #62799e; background: #f0f4fa; }
 .workflow-step-title strong { color: #2e415d; font-size: 13px; }
 .workflow-step-summary { min-height: 24px; color: #75859a; font-size: 12px; }
+.workflow-step-reason { display: grid; gap: 3px; padding: 9px 10px; margin-top: 9px; border: 1px solid #dce8f7; border-radius: 8px; color: #60728a; background: #f7fbff; font-size: 11px; line-height: 1.4; }
+.workflow-step-reason strong { color: #385a88; font-size: 10px; font-weight: 800; letter-spacing: .03em; }
+.workflow-step-reason small { color: #9a6b1e; font-size: 10px; font-weight: 700; }
+.workflow-step-reason.verified { border-color: #d7eade; background: #f5fbf7; }
+.workflow-step-reason.verified strong { color: #287356; }
+.workflow-step-reason.missing { border-color: #f1d9a8; background: #fffaf0; }
+.workflow-step-reason.missing strong { color: #98691a; }
 .workflow-advanced-card { border-top: 1px solid #e4eaf1; border-bottom: 1px solid #e4eaf1; }
 .workflow-advanced-toggle { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 16px 0; border: 0; color: #304563; background: transparent; text-align: left; cursor: pointer; }
 .workflow-advanced-toggle > span:first-child { display: grid; gap: 3px; min-width: 0; }
@@ -1700,12 +2316,75 @@ onMounted(() => {
 .workflow-advanced-label { color: #8a98a9; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .workflow-advanced-row strong { color: #304563; font-size: 12px; }
 .workflow-advanced-row small { color: #8190a3; font-size: 11px; line-height: 1.4; }
+.workflow-fallback-link { justify-self: start; padding: 0; font-size: 10px; }
 .workflow-advanced-row select { width: min(100%, 290px); min-height: 36px; }
+.workflow-inherited-badge { display: inline-flex; align-items: center; justify-content: center; align-self: center; padding: 5px 8px; border-radius: 999px; color: #315d93; background: #eef5ff; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.workflow-defaults-grid { align-items: flex-start; }
 .workflow-layout-empty-state { align-content: center; justify-items: center; min-height: clamp(300px, 42vh, 500px); box-sizing: border-box; padding: 40px 24px; border: 1px solid #dfe8f3; border-radius: 16px; background: radial-gradient(circle at 50% 0%, #f7faff 0%, #fff 58%); text-align: center; }
 .workflow-workspace .workflow-step-list { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 10px; }
 .workflow-workspace .workflow-step-list > .workflow-step-card,
 .workflow-workspace .workflow-step-list > .workflow-conditional-heading,
 .workflow-workspace .workflow-step-list > .workflow-empty { grid-column: 1 / -1; }
+
+.workflow-step-card.disabled { border-color: #e4e8ee; background: #fafbfc; opacity: .78; }
+.workflow-step-card.disabled .workflow-step-title strong, .workflow-step-card.disabled .workflow-step-summary { color: #8b98a8; }
+.workflow-hidden-badge { display: inline-flex; align-items: center; gap: 3px; padding: 3px 6px; border-radius: 999px; color: #7b8796; background: #eef1f5; font-size: 10px; font-weight: 750; }
+.workflow-step-menu { position: relative; }
+.workflow-more-button { display: grid !important; place-items: center; width: 29px !important; height: 29px !important; border-color: #dce4ed !important; color: #5e7086 !important; }
+.workflow-more-button:hover { color: #2458b2 !important; background: #f5f8fc !important; }
+.workflow-step-menu-popover { position: absolute; z-index: 12; top: calc(100% + 7px); right: 0; display: grid; min-width: 174px; padding: 5px; border: 1px solid #d9e3ef; border-radius: 10px; background: #fff; box-shadow: 0 14px 34px rgba(33, 56, 91, .16); }
+.workflow-step-menu-popover button { display: flex !important; align-items: center; justify-content: flex-start; gap: 8px; width: 100% !important; height: auto !important; padding: 8px 9px !important; border: 0 !important; border-radius: 7px !important; color: #455b77 !important; background: transparent !important; font-size: 11px; font-weight: 650; text-align: left; }
+.workflow-step-menu-popover button:hover:not(:disabled) { color: #2458b2 !important; background: #f3f7fd !important; }
+.workflow-step-menu-popover button:disabled { color: #b7c0cb !important; cursor: not-allowed; opacity: 1; }
+.workflow-step-menu-popover .danger-menu-item { color: #b34135 !important; }
+.workflow-step-menu-popover .danger-menu-item:hover { color: #9c3026 !important; background: #fff7f6 !important; }
+.workflow-step-menu-divider { height: 1px; margin: 4px 3px; background: #edf1f5; }
+.workflow-verifier-card { padding: 13px 14px; border: 1px solid #f0d7c9; border-radius: 12px; background: #fffaf7; }
+.workflow-verifier-summary { display: flex; align-items: center; gap: 10px; }
+.workflow-verifier-summary > div:nth-child(2) { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.workflow-verifier-summary .eyebrow { margin: 0; color: #b05d3f; }
+.workflow-verifier-summary strong { color: #70402f; font-size: 13px; }
+.workflow-verifier-summary small { color: #9b776a; font-size: 10px; }
+.workflow-verifier-icon { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border: 1px solid #f0cbb9; border-radius: 50%; color: #b45b3d; background: #fff0e9; }
+.workflow-verifier-summary .text-button { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; padding: 5px 0; color: #9a573e; font-size: 11px; }
+.workflow-verifier-issues { display: grid; gap: 7px; padding: 11px 0 1px 38px; margin-top: 11px; border-top: 1px solid #f4e2d9; }
+.workflow-verifier-issues > div { display: flex; align-items: flex-start; gap: 7px; color: #795448; font-size: 11px; line-height: 1.4; }
+.workflow-verifier-bullet { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: 0 0 14px; border-radius: 50%; color: #a54e31; background: #fbe5db; font-size: 9px; font-weight: 800; }
+.workflow-undo-toast { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 1px solid #cfe6da; border-radius: 9px; color: #2f654e; background: #f4fbf7; font-size: 12px; }
+.workflow-undo-toast button { padding: 0; border: 0; color: #1f6a4b; background: transparent; font-size: 11px; font-weight: 800; cursor: pointer; }
+.workflow-confirm-modal { position: relative; width: min(500px, 100%); padding: 27px; border: 1px solid #dbe5f0; border-radius: 17px; background: #fff; box-shadow: 0 22px 70px rgba(20, 42, 74, .22); }
+.workflow-confirm-modal h2 { margin: 5px 35px 10px 0; color: #243758; font-size: 22px; letter-spacing: -.035em; line-height: 1.2; }
+.workflow-confirm-warning { margin: 0; color: #6c4f47; font-size: 13px; line-height: 1.5; }
+.workflow-confirm-note { margin: 15px 0 0; color: #8896a7; font-size: 11px; line-height: 1.45; }
+.workflow-dependent-list { display: grid; gap: 7px; padding: 10px 11px; margin-top: 13px; border: 1px solid #f0dfd7; border-radius: 9px; background: #fffaf7; }
+.workflow-dependent-list div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; color: #72584e; font-size: 11px; }
+.workflow-dependent-list strong { color: #5e4037; }
+.workflow-dependent-list span { color: #9a776b; text-align: right; }
+.workflow-confirm-modal .danger-button { background: #b64b3e; border-color: #b64b3e; }
+.workflow-confirm-modal .danger-button:hover { background: #9f392e; border-color: #9f392e; }
+.workflow-insights-card { padding: 14px; border: 1px solid #dfe8f3; border-radius: 12px; background: #fbfdff; }
+.workflow-insights-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.workflow-insights-heading h3 { margin: 3px 0 2px; color: #304563; font-size: 14px; }
+.workflow-insights-heading small { color: #8190a3; font-size: 10px; }
+.workflow-insights-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding-top: 12px; margin-top: 11px; border-top: 1px solid #edf1f5; }
+.workflow-insights-stats div { display: grid; gap: 2px; }
+.workflow-insights-stats strong { color: #2f4f7c; font-size: 16px; letter-spacing: -.02em; }
+.workflow-insights-stats span { color: #8190a3; font-size: 10px; }
+.workflow-insight-recommendation { display: flex; align-items: center; gap: 9px; padding: 10px 0 0; margin-top: 11px; border-top: 1px solid #edf1f5; }
+.workflow-recommendation-mark { display: grid; place-items: center; width: 23px; height: 23px; flex: 0 0 23px; border-radius: 50%; color: #9a6631; background: #fff3dc; font-size: 11px; font-weight: 800; }
+.workflow-insight-recommendation > div { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.workflow-insight-recommendation strong { color: #6e5133; font-size: 11px; }
+.workflow-insight-recommendation p, .workflow-insight-recommendation small { margin: 0; color: #8a7763; font-size: 10px; line-height: 1.4; }
+.workflow-insight-recommendation .text-button { flex: 0 0 auto; padding: 4px 0; color: #8d622e; font-size: 10px; }
+.workflow-selector-actions { display: flex; align-items: center; justify-content: flex-end; gap: 11px; flex: 0 0 auto; }
+.workflow-delete-action { display: inline-flex; align-items: center; gap: 5px; padding: 7px 0; color: #b34135; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.workflow-delete-action:hover { color: #922c23; }
+.workflow-name-warning { padding: 9px 10px; margin: -4px 0 0; border: 1px solid #f0d2c9; border-radius: 8px; color: #9b4d3c; background: #fff8f6; font-size: 11px; line-height: 1.4; }
+.workflow-delete-warning { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; margin: 15px 0 13px; border: 1px solid #f0d2c9; border-radius: 10px; color: #a64e3e; background: #fff8f6; }
+.workflow-delete-warning > svg { flex: 0 0 auto; margin-top: 1px; }
+.workflow-delete-warning > div { display: grid; gap: 3px; }
+.workflow-delete-warning strong { color: #704037; font-size: 12px; }
+.workflow-delete-warning span { color: #8a645c; font-size: 11px; line-height: 1.45; }
 
 @media (max-width: 820px) {
   .workflow-sticky-header { position: static; margin: -10px 0 0; padding-inline: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
@@ -1716,6 +2395,7 @@ onMounted(() => {
   .workflow-library-select { flex: 1 1 100%; order: 3; }
   .workflow-library-select select { width: 100%; }
   .workflow-goal-summary-row { align-items: flex-start; }
+  .workflow-outcome-card { align-items: flex-start; flex-direction: column; }
   .workflow-readiness-details { padding-left: 0; }
 }
 @media (max-width: 520px) {
@@ -1730,5 +2410,12 @@ onMounted(() => {
   .workflow-knowledge-preview-input { align-items: stretch; flex-direction: column; }
   .workflow-knowledge-preview-input .outline-button { align-self: flex-start; }
   .workflow-knowledge-preview-result { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workflow-step-menu-popover { right: -2px; }
+  .workflow-dependent-list div { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .workflow-dependent-list span { text-align: left; }
+  .workflow-insights-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workflow-insight-recommendation { align-items: flex-start; flex-wrap: wrap; }
+  .workflow-insight-recommendation .text-button { margin-left: 32px; }
+  .workflow-selector-actions { width: 100%; justify-content: space-between; order: 4; }
 }
 </style>

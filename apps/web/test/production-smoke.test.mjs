@@ -75,7 +75,7 @@ test("owner production controls remain present", () => {
     assert.match(app, new RegExp(`label: "${operatingStage}"`));
   }
   assert.match(app, /label: "Handoff & alerts"/);
-  assert.match(app, /label: "Booking & CTAs"/);
+  assert.match(app, /label: "Actions"/);
   assert.match(app, /Your AI front desk is ready/);
   assert.match(app, /sidebar-account/);
   assert.match(app, /agent-tabs/);
@@ -123,7 +123,7 @@ test("owner UI uses the shared product design language", () => {
   assert.match(markdownRenderer, /markdownToSafeHtml/);
   assert.match(styles, /font-weight: 500; line-height: 1\.35/);
   assert.match(styles, /team-row \.lead-name > span:last-child/);
-  assert.match(app, /class="field-label">Name <span class="optional">Optional/);
+  assert.match(app, /Name <span class="optional">Optional/);
   assert.match(app, /from "@lucide\/vue"/);
   assert.match(app, /from "simple-icons"/);
   assert.match(app, /class="provider-logo"/);
@@ -599,6 +599,10 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   for (const marker of [
     "Workflow goal",
     "Create workflow",
+    "Workflow name",
+    "must be unique in this business",
+    "Delete workflow",
+    "This archives the workflow and its linked action.",
     "Use an existing action",
     "Start from a template",
     "Describe it in plain English",
@@ -617,6 +621,8 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   }
   assert.doesNotMatch(workflowWorkspace, /Customer preview|Workflow preview/);
   assert.match(workflowWorkspace, /@click="openCreateWorkflow"/);
+  assert.match(workflowWorkspace, /duplicateCreateWorkflow/);
+  assert.match(workflowWorkspace, /method: "DELETE"/);
   assert.doesNotMatch(workflowWorkspace, /@click="emit\('open-action', ''\)"/);
   assert.match(workflowWorkspace, /actions\/\$\{encodeURIComponent\(action\.id\)\}/);
   assert.match(apiServer, /workflowActionId/);

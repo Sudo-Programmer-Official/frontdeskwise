@@ -53,6 +53,7 @@ function stepTargets(action: ActionFlow, step: ActionStep): string[] {
 }
 
 function stepCaptureKeys(action: ActionFlow, step: ActionStep): string[] {
+  if (step.enabled === false) return [];
   if (step.fieldKey) return [step.fieldKey];
   if (step.type !== "form") return [];
   const configured = step.config?.fieldKeys;
@@ -113,6 +114,7 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
     if (!reachable.has(step.id)) issues.push(issue("unreachable_step", `Workflow step is unreachable from the entry point: ${step.id}`, step.id));
   }
   for (const step of steps.filter((candidate) => reachable.has(candidate.id))) {
+    if (step.enabled === false) continue;
     if (!terminalStepTypes.has(step.type) && !stepTargets(action, step).length) issues.push(issue("non_terminal_step", `Workflow path stops before a terminal step: ${step.id}`, step.id));
     for (const target of stepTargets(action, step)) if (!byId.has(target)) issues.push(issue("unknown_step_target", `Workflow step ${step.id} targets missing step ${target}`, step.id));
   }
@@ -132,6 +134,10 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
   const inspectPath = (stepId: string, fields: Set<string>, verifiedProviderOutput: boolean, stack: string[] = []): void => {
     const step = byId.get(stepId);
     if (!step || stack.includes(stepId)) return;
+    if (step.enabled === false) {
+      for (const target of stepTargets(action, step)) inspectPath(target, fields, verifiedProviderOutput, [...stack, stepId]);
+      return;
+    }
     const nextFields = new Set([...fields, ...stepCaptureKeys(action, step)]);
     const signature = `${stepId}|${[...nextFields].sort().join(",")}|${verifiedProviderOutput}`;
     if (pathSeen.has(signature)) return;
