@@ -218,6 +218,8 @@ export type ConversationActionState = {
     offeredAt?: string;
     savedAt?: string;
     declinedAt?: string;
+    returnedAt?: string;
+    convertedAt?: string;
   };
   selectedActionResourceId?: string;
   completionUrl?: string;

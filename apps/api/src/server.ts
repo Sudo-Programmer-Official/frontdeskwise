@@ -144,8 +144,18 @@ import {
   decideConversationRoute,
   isExitRescueDecline,
   isExitRescueIntent,
-  workflowHasMeaningfulEngagement,
 } from "./conversation-orchestrator.js";
+import {
+  declineExitRescueState,
+  exitRescueFunnelMetrics,
+  exitRescueNotificationDetails,
+  hasRecoverableContact,
+  markExitRescueConverted,
+  markExitRescueReturned,
+  offerExitRescueState,
+  saveExitRescueState,
+  shouldOfferExitRescue,
+} from "./exit-rescue.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { extractHandoffContact, hasHandoffContactChannel, mergeHandoffContacts, type HandoffContact } from "./handoff-contact.js";
 import {
@@ -818,6 +828,8 @@ type ConversionEventType =
   | "LEAD_CAPTURED"
   | "EXIT_RESCUE_OFFERED"
   | "EXIT_RESCUE_SAVED"
+  | "EXIT_RESCUE_RETURNED"
+  | "EXIT_RESCUE_CONVERTED"
   | "EXIT_RESCUE_DECLINED"
   | "BOOKING_LINK_OPENED"
   | "CONVERSATION_ABANDONED"
@@ -855,7 +867,7 @@ const conversionEventTypes = new Set<ConversionEventType>([
   "FLOW_STARTED", "FIELD_VIEWED", "FIELD_COMPLETED", "FIELD_ABANDONED",
   "FORM_DISPLAYED", "FORM_SUBMITTED", "ACTION_STARTED", "ACTION_SUCCEEDED",
   "ACTION_FAILED", "FLOW_COMPLETED", "CTA_SHOWN", "CTA_CLICKED", "DEMO_LINK_OPENED", "HANDOFF_REQUESTED",
-  "LEAD_CAPTURED", "EXIT_RESCUE_OFFERED", "EXIT_RESCUE_SAVED", "EXIT_RESCUE_DECLINED",
+  "LEAD_CAPTURED", "EXIT_RESCUE_OFFERED", "EXIT_RESCUE_SAVED", "EXIT_RESCUE_RETURNED", "EXIT_RESCUE_CONVERTED", "EXIT_RESCUE_DECLINED",
   "BOOKING_LINK_OPENED", "CONVERSATION_ABANDONED", "IMPROVEMENT_SIGNAL",
 ]);
 
@@ -7540,16 +7552,20 @@ function conversionFunnelPayload(business: Business) {
     }
     flows.set(event.flowId, flow);
   }
-  return [...flows.values()].map((flow) => ({
+  return [...flows.values()].map((flow) => {
+    const rescueMetrics = exitRescueFunnelMetrics(business.conversionEvents.filter((event) => event.flowId === flow.flowId));
+    return {
     flowId: flow.flowId,
     flowKey: flow.flowKey,
     name: flow.name,
     started: flow.started,
     formDisplayed: flow.formDisplayed,
     submitted: flow.submitted,
-    exitRescueOffered: flow.exitRescueOffered,
-    exitRescueSaved: flow.exitRescueSaved,
-    exitRescueDeclined: flow.exitRescueDeclined,
+    exitRescueOffered: rescueMetrics.offered,
+    exitRescueSaved: rescueMetrics.saved,
+    exitRescueReturned: rescueMetrics.returned,
+    exitRescueConverted: rescueMetrics.converted,
+    exitRescueDeclined: rescueMetrics.declined,
     actionSucceeded: flow.actionSucceeded,
     completed: flow.completed,
     abandoned: flow.abandoned,
@@ -7563,7 +7579,8 @@ function conversionFunnelPayload(business: Business) {
       .filter((field) => field.count > 0)
       .sort((left, right) => right.count - left.count)
       .slice(0, 5),
-  }));
+    };
+  });
 }
 
 async function embeddingReadinessForBusiness(business: Business) {
@@ -10135,29 +10152,18 @@ async function persistWorkflowLead(
   return persisted;
 }
 
-function hasRecoverableContact(state: ConversationActionState): boolean {
-  return Boolean(state.leadId || state.values.email?.trim() || state.values.phone?.trim());
-}
-
 async function offerExitRescue(
   business: Business,
   conversation: Conversation,
   action: ActionFlow,
   state: ConversationActionState,
 ): Promise<ConversationAnswerResult> {
-  const step = currentWorkflowStep(action, state);
-  state.exitRescue = {
-    status: "offered",
-    reason: "language",
-    returnStepId: step?.id ?? state.currentStepId ?? null,
-    offeredAt: new Date().toISOString(),
-  };
-  state.formShown = true;
+  const returnStepId = offerExitRescueState(action, state);
   await recordConversionEvent(business, {
     event: "EXIT_RESCUE_OFFERED",
     conversationId: conversation.id,
     flowId: action.id,
-    metadata: { returnStepId: state.exitRescue.returnStepId, trigger: "language" },
+    metadata: { returnStepId, trigger: "language" },
   });
   return actionAnswer(
     action,
@@ -10293,6 +10299,15 @@ async function continueWorkflowActionConversation(
   conversation.actionState = state;
   migrateWorkflowState(action, state);
   if (!state.currentStepId) state.currentStepId = action.steps?.[0]?.id;
+  const exitRescueReturned = markExitRescueReturned(state);
+  if (exitRescueReturned) {
+    await recordConversionEvent(business, {
+      event: "EXIT_RESCUE_RETURNED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { returnStepId: state.exitRescue?.returnStepId ?? state.currentStepId ?? null },
+    });
+  }
   const repeatable = repeatableWorkflowConfig(action);
   if (repeatable && !state.participants?.length) addWorkflowParticipant(state, repeatable.entityType);
   const automationOptions = { allowStaffSensitiveActions: !waitingForStaff(conversation) };
@@ -10356,13 +10371,7 @@ async function continueWorkflowActionConversation(
   const orchestration = preserveWorkflowState
     ? initialOrchestration
     : decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
-  if (state.exitRescue?.status === "offered" && isExitRescueDecline(question)) {
-    state.exitRescue = {
-      ...state.exitRescue,
-      status: "declined",
-      declinedAt: new Date().toISOString(),
-    };
-    state.formShown = false;
+  if (state.exitRescue?.status === "offered" && isExitRescueDecline(question) && declineExitRescueState(state)) {
     await recordConversionEvent(business, {
       event: "EXIT_RESCUE_DECLINED",
       conversationId: conversation.id,
@@ -10375,11 +10384,7 @@ async function continueWorkflowActionConversation(
     if (hasRecoverableContact(state)) {
       return actionAnswer(action, state, "No problem — I have your details and what you’re looking for. You can continue anytime.");
     }
-    if (
-      action.completion.createLead
-      && !state.exitRescue
-      && workflowHasMeaningfulEngagement(action, state)
-    ) {
+    if (shouldOfferExitRescue(action, state)) {
       return offerExitRescue(business, conversation, action, state);
     }
   }
@@ -10758,11 +10763,20 @@ async function completeActionConversation(
     return actionAnswer(action, state, "This action is not available right now. I can help you contact the team instead.");
   }
   const providerFallback = state.providerFallback ?? null;
+  const shouldRecordExitRescueConversion = state.exitRescue?.status === "saved" && !state.exitRescue.convertedAt;
   const structuredWorkflowMetadata = workflowLeadMetadata(action, state);
   const submission = await persistActionSubmission(business, action, conversation, state.values, state.sourcePage ?? null);
   if (submission.status === "completed") {
     state.status = "completed";
     state.formShown = false;
+    if (shouldRecordExitRescueConversion && markExitRescueConverted(state)) {
+      await recordConversionEvent(business, {
+        event: "EXIT_RESCUE_CONVERTED",
+        conversationId: conversation.id,
+        flowId: action.id,
+        metadata: { returnStepId: state.exitRescue?.returnStepId ?? null, leadId: state.leadId ?? null },
+      });
+    }
     return actionAnswer(action, state, canonicalizeCustomerCopy(business, action.completion.message));
   }
   state.status = "completed";
@@ -10833,6 +10847,14 @@ async function completeActionConversation(
     flowId: action.id,
     metadata: { flowKey: action.key, leadCaptured: Boolean(persistedLead) },
   });
+  if (shouldRecordExitRescueConversion && markExitRescueConverted(state)) {
+    await recordConversionEvent(business, {
+      event: "EXIT_RESCUE_CONVERTED",
+      conversationId: conversation.id,
+      flowId: action.id,
+      metadata: { returnStepId: state.exitRescue?.returnStepId ?? null, leadId: persistedLead?.id ?? state.leadId ?? null },
+    });
+  }
   if (action.completion.connector) {
     await recordConversionEvent(business, {
       event: "ACTION_STARTED",
@@ -10941,6 +10963,7 @@ async function submitActionForm(
       return actionAnswer(action, state, "Please add an email or phone number so the team can save your progress. You can keep asking questions here without submitting contact details yet.");
     }
     const returnStepId = state.exitRescue?.returnStepId ?? state.currentStepId ?? null;
+    const savedAt = new Date().toISOString();
     const pausedMetadata = {
       ...workflowLeadMetadata(action, state),
       journeyStatus: "paused",
@@ -10949,7 +10972,7 @@ async function submitActionForm(
       exitRescue: {
         reason: state.exitRescue?.reason ?? "language",
         returnStepId,
-        savedAt: new Date().toISOString(),
+        savedAt,
       },
     };
     const lead = await persistWorkflowLead(business, conversation, action, state, pausedMetadata, {
@@ -10957,12 +10980,13 @@ async function submitActionForm(
       metadata: pausedMetadata,
     });
     if (lead) await refreshWorkflowLeadMetadata(business, lead, pausedMetadata);
+    const notificationDetails = exitRescueNotificationDetails(business.name, action, state);
     if (action.completion.notifyStaff || action.completion.requiresStaff) {
       try {
         conversation.handoffNotificationStatus = await notifyStaff(business, conversation, {
           type: "lead_paused",
-          title: `Paused ${action.name} request`,
-          body: `${business.name} has a qualified visitor who asked to save their progress before completing ${action.name.toLowerCase()}.`,
+          title: notificationDetails.title,
+          body: notificationDetails.body,
           leadId: lead?.id ?? null,
           channels: action.completion.notifyChannels,
           targets: action.completion.notifyTargets,
@@ -10972,12 +10996,7 @@ async function submitActionForm(
         app.log.warn({ error: error instanceof Error ? error.message : "unknown paused-lead notification failure", businessId: business.id, conversationId: conversation.id }, "Paused lead saved but staff notification failed");
       }
     }
-    state.exitRescue = {
-      ...(state.exitRescue ?? { reason: "language", returnStepId }),
-      status: "saved",
-      savedAt: new Date().toISOString(),
-    };
-    state.formShown = false;
+    saveExitRescueState(state, savedAt);
     await recordConversionEvent(business, {
       event: "EXIT_RESCUE_SAVED",
       conversationId: conversation.id,
