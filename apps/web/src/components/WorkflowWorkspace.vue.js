@@ -199,9 +199,17 @@ function workflowOwnerActionId(workflow) {
         || (typeof metadataActionId === "string" ? metadataActionId.trim() : "")
         || workflow.id;
 }
+function hasWorkflowDefinition(workflow) {
+    return Array.isArray(workflow.steps) && workflow.steps.length > 0;
+}
 function workflowForAction(actionId) {
     return authoritativeWorkflows.value.find((workflow) => {
         if (workflow.enabled === false || workflow.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(workflowIdentity(workflow)))
+            return false;
+        // A relationship-only or zero-step projection is not an existing
+        // workflow. It must fall through to generated creation so the API can
+        // repair the same Action id instead of opening an empty draft.
+        if (!hasWorkflowDefinition(workflow))
             return false;
         return workflowIdentity(workflow) === actionId || workflowOwnerActionId(workflow) === actionId;
     }) ?? null;
@@ -209,7 +217,7 @@ function workflowForAction(actionId) {
 const workflowActions = computed(() => authoritativeWorkflows.value.filter((workflow) => {
     if (workflow.enabled === false || workflow.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(workflowIdentity(workflow)))
         return false;
-    return Boolean(workflow.workflowId || workflow.steps?.length || workflow.workflowSafety?.status === "blocked");
+    return Boolean(hasWorkflowDefinition(workflow) || workflow.workflowSafety?.status === "blocked");
 }));
 const duplicateCreateWorkflow = computed(() => {
     const candidate = normalizeWorkflowName(createWorkflowName.value.slice(0, 160));
@@ -808,9 +816,33 @@ function workflowGenerationContext(action) {
 function reportWorkflowGenerationDiagnostics(stage, details) {
     // Keep step-level diagnostics available to operators without exposing
     // schema names, ids, or validation internals in owner-facing copy.
-    if (typeof console !== "undefined" && typeof console.error === "function") {
-        console.error(`[workflow-generation:${stage}]`, details);
+    if (typeof console !== "undefined") {
+        const isFailure = stage.includes("validation") || stage === "read-after-write";
+        const writer = isFailure ? console.error : console.info;
+        if (typeof writer === "function")
+            writer(`[workflow-generation:${stage}]`, details);
     }
+}
+function workflowGenerationTrace(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const completion = source.completion && typeof source.completion === "object" && !Array.isArray(source.completion)
+        ? source.completion
+        : {};
+    const workflow = completion.workflow && typeof completion.workflow === "object" && !Array.isArray(completion.workflow)
+        ? completion.workflow
+        : {};
+    const steps = Array.isArray(source.steps) ? source.steps : [];
+    return {
+        workflowId: typeof source.workflowId === "string" ? source.workflowId : typeof source.id === "string" ? source.id : null,
+        actionId: typeof source.actionId === "string" ? source.actionId : typeof workflow.actionId === "string" ? workflow.actionId : null,
+        stepCount: steps.length,
+        stepTypes: [...new Set(steps.map((step) => step && typeof step === "object" ? step.type : null).filter((type) => typeof type === "string" && Boolean(type.trim())))],
+        completionWorkflowPresent: Object.keys(workflow).length > 0,
+        updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : null,
+        version: typeof source.version === "number" ? source.version : null,
+        publicationState: typeof source.publicationState === "string" ? source.publicationState : typeof source.status === "string" ? source.status : null,
+        publicationVersion: typeof source.publicationVersion === "number" ? source.publicationVersion : null,
+    };
 }
 function workflowTenantContext(action, createWorkflowBusinessId, createWorkflowOrganizationId) {
     return validateWorkflowTenantContext({
@@ -1012,6 +1044,11 @@ async function createWorkflow() {
             refreshWorkflowContext();
             return;
         }
+        reportWorkflowGenerationDiagnostics("request", {
+            businessId: createWorkflowPayload.businessId,
+            actionId: action.id,
+            trace: workflowGenerationTrace(createWorkflowPayload),
+        });
         const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/workflows`), {
             method: "POST",
             headers: { "content-type": "application/json", ...props.ownerHeaders() },
@@ -1029,6 +1066,11 @@ async function createWorkflow() {
             throw new Error(serverMessage);
         }
         const savedWorkflow = payload.workflow ?? payload.action;
+        reportWorkflowGenerationDiagnostics("api-response", {
+            businessId: createWorkflowPayload.businessId,
+            reused: payload.reused ?? false,
+            trace: workflowGenerationTrace(savedWorkflow),
+        });
         const persistedValidation = validateWorkflowGeneration({ steps: (savedWorkflow.steps ?? []), fields: savedWorkflow.fields ?? [] });
         if (!persistedValidation.ok || !(savedWorkflow.steps?.length ?? 0)) {
             reportWorkflowGenerationDiagnostics("read-after-write", {

@@ -146,6 +146,20 @@ test("Actions and Workflows share current relationships and provider readiness",
   assert.match(apiServer, /provider_follow_up/);
 });
 
+test("workflow creation never reuses a zero-step relationship projection", () => {
+  assert.match(workflowWorkspace, /function hasWorkflowDefinition\(workflow: WorkflowAction\)/);
+  assert.match(workflowWorkspace, /if \(!hasWorkflowDefinition\(workflow\)\)/);
+  assert.match(workflowWorkspace, /workflowActions.*hasWorkflowDefinition/s);
+  assert.match(workflowWorkspace, /workflowGeneration: true/);
+  assert.match(workflowWorkspace, /workflowGenerationTrace/);
+  assert.match(apiServer, /Generated workflow request trace/);
+  assert.match(apiServer, /phase: "db-write"/);
+  assert.match(apiServer, /phase: "db-read"/);
+  assert.match(apiServer, /Workflow list read trace/);
+  assert.match(apiServer, /Workflow by-id read trace/);
+  assert.match(apiServer, /Generated workflow read-after-write failed validation/);
+});
+
 test("owner UI uses the shared product design language", () => {
   assert.match(styles, /font-family:[^;]*Inter/);
   assert.match(styles, /select option\s*\{/);

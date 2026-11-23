@@ -652,16 +652,24 @@ export function normalizeCanonicalEnrollmentWorkflow(action: ActionFlow): Action
   // definition. Replacing it on the read path silently returned the old
   // canonical scaffold (including unlabeled steps) after a successful create.
   const ownerGeneratedWorkflow = Boolean(action.completion.workflow?.name?.trim());
-  const steps = (action.origin === "discovered" && !ownerGeneratedWorkflow) || !action.steps?.length
+  // A named owner-generated workflow is authoritative even when an older
+  // attempt persisted an empty steps array. Do not replace that incomplete
+  // record with the canonical scaffold: the workflow create endpoint must see
+  // the zero-step state and repair the same Action id from the generated
+  // definition. The canonical scaffold remains the fallback only for an
+  // unnamed discovered enrollment Action.
+  const steps = action.origin === "discovered" && !ownerGeneratedWorkflow
     ? canonicalEnrollmentSteps()
-    : action.steps.map((step) => ({ ...step, config: step.config ? { ...step.config } : undefined }));
+    : (action.steps ?? []).map((step) => ({ ...step, config: step.config ? { ...step.config } : undefined }));
   const firstStep = steps[0];
   if (firstStep?.config?.repeatableEntity === true) {
     firstStep.config = { ...firstStep.config, participantFieldKeys: ["customer_type", "child_age", "ability", "goal"] };
   }
   return {
     ...action,
-    ...(action.origin === "discovered" ? { name: "Find the right swim lesson", description: canonicalEnrollmentGoal } : {}),
+    ...(action.origin === "discovered" && !ownerGeneratedWorkflow
+      ? { name: "Find the right swim lesson", description: canonicalEnrollmentGoal }
+      : {}),
     fields,
     steps,
     requiredFields: fields.filter((item) => item.required && item.visibility !== "hidden").map((item) => item.key),

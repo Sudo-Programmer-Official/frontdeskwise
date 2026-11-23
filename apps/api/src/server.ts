@@ -2493,7 +2493,14 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
   const workflowSource = asRecord(completion.workflow);
   const workflowName = optionalString(workflowSource.name, 160);
   const workflowActionId = optionalString(workflowSource.actionId, 120);
-  const workflow = workflowName && workflowActionId ? { name: workflowName, actionId: workflowActionId } : undefined;
+  const workflowCreationRequestId = optionalString(workflowSource.creationRequestId, 120);
+  const workflow = workflowName && workflowActionId
+    ? {
+      name: workflowName,
+      actionId: workflowActionId,
+      ...(workflowCreationRequestId ? { creationRequestId: workflowCreationRequestId } : {}),
+    }
+    : undefined;
   const actionKey = String(row.action_key);
   const storedName = String(row.name);
   const legacyDemoName = actionKey === "open_link" && storedName === "Send visitors to a link";
@@ -6066,9 +6073,9 @@ function normalizedBusinessFact(input: unknown, businessId: string, existing?: B
   }
 }
 
-async function persistAction(business: Business, action: ActionFlow): Promise<void> {
-  if (!pool) return;
-  await pool.query(
+async function persistAction(business: Business, action: ActionFlow): Promise<Record<string, unknown> | null> {
+  if (!pool) return null;
+  const result = await pool.query<Record<string, unknown>>(
     `insert into business_actions
        (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
@@ -6106,7 +6113,8 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
        evidence = excluded.evidence,
        confidence = excluded.confidence,
        enabled = excluded.enabled,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at
+     returning id, business_id, steps, completion, version, updated_at`,
     [
       action.id,
       business.id,
@@ -6148,6 +6156,7 @@ async function persistAction(business: Business, action: ActionFlow): Promise<vo
       action.updatedAt,
     ],
   );
+  return result.rows[0] ?? null;
 }
 
 async function persistActionSubmission(
@@ -18936,6 +18945,36 @@ type OwnerWorkflowRecord = ActionFlow & {
   workflowSafety?: { status: "blocked"; code?: string; identifier?: string };
 };
 
+/** Compact internal trace for the workflow persistence boundary. Never expose
+ * this diagnostic shape in an owner-facing response. */
+function workflowTrace(value: unknown): {
+  workflowId: string | null;
+  actionId: string | null;
+  stepCount: number;
+  stepTypes: string[];
+  completionWorkflowPresent: boolean;
+  updatedAt: string | null;
+  version: number | null;
+} {
+  const source = asRecord(value);
+  const completion = asRecord(source.completion);
+  const workflow = asRecord(completion.workflow);
+  const steps = Array.isArray(source.steps) ? source.steps : [];
+  const stepTypes = [...new Set(steps.map((step) => asRecord(step).type).filter((type): type is string => typeof type === "string" && Boolean(type.trim())))];
+  const versionValue = source.version;
+  return {
+    workflowId: optionalString(source.workflowId, 120) ?? optionalString(source.id, 120),
+    actionId: optionalString(source.actionId, 120) ?? optionalString(workflow.actionId, 120),
+    stepCount: steps.length,
+    stepTypes,
+    completionWorkflowPresent: Object.keys(workflow).length > 0,
+    updatedAt: optionalString(source.updatedAt, 80) ?? optionalString(source.updated_at, 80),
+    version: typeof versionValue === "number" && Number.isFinite(versionValue)
+      ? versionValue
+      : typeof versionValue === "string" && Number.isFinite(Number(versionValue)) ? Number(versionValue) : null,
+  };
+}
+
 async function ownerWorkflowRecord(business: Business, action: ActionFlow): Promise<OwnerWorkflowRecord> {
   const readiness = await actionReadinessForBusiness(business, action);
   const workflowIsolation = await workflowIsolationForAction(business, action);
@@ -18985,6 +19024,11 @@ app.get("/api/v1/demo/:slug/workflows", async (request) => {
   await requireDemoOwner(business, request);
   const workflowActions = workflowRecordsForBusiness(business.actions);
   const workflows = await Promise.all(workflowActions.map((action) => ownerWorkflowRecord(business, action)));
+  app.log.info({
+    businessId: business.id,
+    publicationVersion: business.publishedConfigVersion,
+    workflows: workflows.map((workflow) => workflowTrace(workflow)),
+  }, "Workflow list read trace");
   return { businessId: business.id, workflows };
 });
 
@@ -18993,9 +19037,20 @@ app.get("/api/v1/demo/:slug/workflows/:workflowId", async (request) => {
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
   const workflowId = requiredString(params.workflowId, "workflowId", 120);
+  const workflowCandidate = business.actions.find((candidate) => candidate.id === workflowId) ?? null;
   const action = findStoredWorkflow(business.actions, workflowId);
-  if (!action) throw httpError(404, "Workflow not found");
-  return { businessId: business.id, workflow: await ownerWorkflowRecord(business, action) };
+  if (!action) {
+    app.log.warn({
+      businessId: business.id,
+      publicationVersion: business.publishedConfigVersion,
+      requestedWorkflowId: workflowId,
+      candidate: workflowTrace(workflowCandidate),
+    }, "Workflow by-id read found no complete stored record");
+    throw httpError(404, "Workflow not found");
+  }
+  const workflow = await ownerWorkflowRecord(business, action);
+  app.log.info({ businessId: business.id, publicationVersion: business.publishedConfigVersion, workflow: workflowTrace(workflow) }, "Workflow by-id read trace");
+  return { businessId: business.id, workflow };
 });
 
 app.get("/api/v1/demo/:slug/actions", async (request) => {
@@ -19177,11 +19232,24 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   const previousHasSteps = (previousAction.steps?.length ?? 0) > 0;
   const previousVerification = previousHasSteps ? verifyWorkflowDefinition(previousAction) : null;
   const previousOwnerSchemaDiagnostics = workflowOwnerSchemaDiagnostics(previousAction);
+  app.log.info({
+    phase: "previous-record",
+    businessId: business.id,
+    publicationVersion: business.publishedConfigVersion,
+    trace: workflowTrace(previousAction),
+  }, "Generated workflow previous-record trace");
   if (previousHasSteps && previousVerification?.ok && previousOwnerSchemaDiagnostics.length === 0) {
     // A stale Actions page can still submit Generate workflow after the
     // workflow was already persisted. Return the current workflow so the
     // owner is taken to the existing completed draft instead of seeing a
     // duplicate-creation error.
+    app.log.info({
+      phase: "reuse",
+      businessId: business.id,
+      publicationVersion: business.publishedConfigVersion,
+      trace: workflowTrace(previousAction),
+      idempotent: previousWorkflow?.creationRequestId === clientRequestId,
+    }, "Generated workflow reuse trace");
     return reply.code(200).send({
       action: previousAction,
       workflow: await ownerWorkflowRecord(business, previousAction),
@@ -19209,6 +19277,14 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
       },
     },
   };
+  app.log.info({
+    phase: "request",
+    businessId: business.id,
+    publicationVersion: business.publishedConfigVersion,
+    workflowId: actionId,
+    actionId,
+    trace: workflowTrace(actionInput),
+  }, "Generated workflow request trace");
   const action = normalizedAction(actionInput, previousAction);
   action.businessId = previousAction.businessId ?? business.id;
   const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
@@ -19234,7 +19310,14 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   // Persist first; only update the in-memory business snapshot after the
   // complete generated definition has been accepted by storage. If storage
   // fails, callers never receive a workflow id for an empty in-memory shell.
-  await persistAction(business, action);
+  app.log.info({ phase: "normalized", businessId: business.id, publicationVersion: business.publishedConfigVersion, trace: workflowTrace(action) }, "Generated workflow normalized trace");
+  const persistedRow = await persistAction(business, action);
+  app.log.info({
+    phase: "db-write",
+    businessId: business.id,
+    publicationVersion: business.publishedConfigVersion,
+    trace: workflowTrace(persistedRow ?? action),
+  }, "Generated workflow database write trace");
   business.actions[actionIndex] = action;
   await recordActionRegistryAudit({
     businessId: business.id,
@@ -19251,6 +19334,12 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   // not successful if its immediate authoritative read cannot return it.
   const committedBusiness = await getBusiness(params.slug);
   const committedWorkflow = findStoredWorkflow(committedBusiness.actions, action.id);
+  app.log.info({
+    phase: "db-read",
+    businessId: business.id,
+    publicationVersion: committedBusiness.publishedConfigVersion,
+    trace: workflowTrace(committedWorkflow),
+  }, "Generated workflow authoritative read trace");
   const committedOwnerSchemaDiagnostics = committedWorkflow ? workflowOwnerSchemaDiagnostics(committedWorkflow) : [{ code: "missing_steps" as const }];
   const committedVerification = committedWorkflow ? verifyWorkflowDefinition(committedWorkflow) : null;
   if (!committedWorkflow || committedWorkflow.steps?.length !== action.steps.length || committedOwnerSchemaDiagnostics.length > 0 || !committedVerification?.ok) {

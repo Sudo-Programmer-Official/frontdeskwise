@@ -72,3 +72,61 @@ test("British Swim one-click generation survives the persisted read path as 14 c
   assert.equal(validateWorkflowGeneration({ steps: readAfterWrite.steps as WorkflowStepDraft[], fields: generated.fields }).ok, true);
   assert.equal(verifyWorkflowDefinition(readAfterWrite).ok, true, JSON.stringify(verifyWorkflowDefinition(readAfterWrite).issues));
 });
+
+test("a zero-step named workflow is not replaced by the canonical scaffold on read", () => {
+  const incomplete: ActionFlow = {
+    ...action,
+    origin: "discovered",
+    name: "Find the right swim lesson",
+    description: "Owner-generated description that must survive the read path.",
+    steps: [],
+    completion: {
+      ...action.completion,
+      workflow: {
+        name: "Find the right swim lesson",
+        actionId: action.id,
+        creationRequestId: "british-swim-retry",
+      },
+    },
+  };
+
+  const readAfterWrite = normalizeCanonicalEnrollmentWorkflow(incomplete);
+  assert.equal(readAfterWrite.id, action.id);
+  assert.equal(readAfterWrite.steps?.length, 0);
+  assert.equal(readAfterWrite.name, incomplete.name);
+  assert.equal(readAfterWrite.description, incomplete.description);
+  assert.equal(readAfterWrite.completion.workflow?.creationRequestId, "british-swim-retry");
+  assert.deepEqual(workflowOwnerSchemaDiagnostics(readAfterWrite), [{ code: "missing_steps" }]);
+});
+
+test("retry repair keeps the existing workflow id while replacing its zero-step definition", () => {
+  const incomplete: ActionFlow = {
+    ...action,
+    steps: [],
+    completion: {
+      ...action.completion,
+      workflow: { name: "Find the right swim lesson", actionId: action.id, creationRequestId: "first-attempt" },
+    },
+  };
+  const generated = generateWorkflow(ENROLLMENT_WORKFLOW_GOAL, [], {
+    businessId: incomplete.businessId,
+    actionType: "enroll",
+    actionName: "Find the right swim lesson",
+    actionDescription: "Help parents find a suitable lesson and continue to verified registration.",
+    availableProviders: [],
+    businessContext: { businessId: incomplete.businessId, businessName: "British Swim School Tampa Bay", providers: [] },
+  });
+  const repaired: ActionFlow = {
+    ...incomplete,
+    steps: generated.steps as ActionFlow["steps"],
+    completion: {
+      ...incomplete.completion,
+      workflow: { ...incomplete.completion.workflow!, creationRequestId: "retry-attempt" },
+    },
+  };
+
+  assert.equal(repaired.id, incomplete.id);
+  assert.equal(repaired.steps?.length, 14);
+  assert.equal(workflowOwnerSchemaDiagnostics(repaired).length, 0);
+  assert.equal(verifyWorkflowDefinition(repaired).ok, true, JSON.stringify(verifyWorkflowDefinition(repaired).issues));
+});
