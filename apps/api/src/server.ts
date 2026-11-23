@@ -7,7 +7,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import rawBody from "fastify-raw-body";
 import type { PoolClient } from "pg";
 import Stripe from "stripe";
-import webpush from "web-push";
+import * as webpush from "web-push";
 import { createPoolFromEnv } from "./database.js";
 import { assertPublicUrl, CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
 import { assessOnboardingKnowledge, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
