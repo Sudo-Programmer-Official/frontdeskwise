@@ -46,6 +46,7 @@ interface WorkflowAction {
     recommendedInputs: string[];
   };
   lifecycleStatus?: string;
+  reviewReason?: string | null;
   updatedAt?: string;
 }
 
@@ -638,6 +639,10 @@ function workflowDisplayName(action: WorkflowAction): string {
 }
 
 function actionHasWorkflow(action: WorkflowAction): boolean {
+  // The API projection is the source of truth for the workflow library. Do
+  // not fall back to raw steps when it is present: that would resurrect an
+  // archived workflow here after Actions has correctly hidden the reference.
+  if (typeof action.workflowCount === "number") return action.workflowCount > 0;
   return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
 }
 
@@ -660,7 +665,7 @@ function openCreateWorkflow(actionId?: string | MouseEvent): void {
   createWorkflowError.value = "";
   createNewActionOpen.value = false;
   const requestedActionId = typeof actionId === "string" ? actionId : undefined;
-  createWorkflowActionId.value = (requestedActionId && eligibleActions.value.some((action) => action.id === requestedActionId) ? requestedActionId : undefined)
+  createWorkflowActionId.value = (requestedActionId && allActions.value.some((action) => action.id === requestedActionId && !actionHasWorkflow(action)) ? requestedActionId : undefined)
     ?? eligibleActions.value.find((action) => /try|demo/i.test(action.name))?.id
     ?? eligibleActions.value[0]?.id
     ?? "";
@@ -861,6 +866,15 @@ async function createWorkflow(): Promise<void> {
   try {
     const generated = generatedWorkflowFor(action);
     const nextAction = clone(action);
+    // Generating from an archived/disabled action is an explicit owner action:
+    // promote the new workflow to the current draft so it appears in both
+    // Actions and Workflows. Provider setup still remains visible as a
+    // separate readiness concern.
+    if (nextAction.enabled === false || nextAction.lifecycleStatus === "disabled") {
+      nextAction.enabled = true;
+      nextAction.lifecycleStatus = "active";
+      nextAction.reviewReason = undefined;
+    }
     nextAction.steps = generated.steps as unknown as Array<Record<string, unknown>>;
     nextAction.description = generated.description;
     nextAction.fields = generated.fields.length ? generated.fields : nextAction.fields;
@@ -875,6 +889,7 @@ async function createWorkflow(): Promise<void> {
     };
     const createWorkflowPayload = {
       ...nextAction,
+      workflowGeneration: true,
       businessId: createWorkflowBusinessId,
       organizationId: createWorkflowOrganizationId,
       workflowContext: workflowContextPayload,

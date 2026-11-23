@@ -102,6 +102,19 @@ test("workflow builder exposes a grouped verified-knowledge step", () => {
   assert.doesNotMatch(workflowGenerator, /pricing.*\$65|\$65.*pricing/);
 });
 
+test("Actions and Workflows share current relationships and provider readiness", () => {
+  assert.match(app, /connectionStatus === "active"/);
+  assert.match(app, /providerIsConnected\(provider\) \? "Connected" : "Needs setup"/);
+  assert.match(app, /!providerIsConnected\(actionProvider\(action\)\)/);
+  assert.match(workflowWorkspace, /typeof action\.workflowCount === "number"/);
+  assert.match(workflowWorkspace, /!actionHasWorkflow\(action\)/);
+  assert.match(workflowWorkspace, /promote the new workflow to the current draft/);
+  assert.match(workflowWorkspace, /workflowGeneration: true/);
+  assert.match(apiServer, /actionSupportsProviderFallback/);
+  assert.match(apiServer, /status: "unavailable"/);
+  assert.match(apiServer, /provider_follow_up/);
+});
+
 test("owner UI uses the shared product design language", () => {
   assert.match(styles, /font-family:[^;]*Inter/);
   assert.match(styles, /select option\s*\{/);

@@ -64,6 +64,7 @@ import {
   applyWorkflowInput,
   applyWorkflowValues,
   addWorkflowParticipant,
+  activateProviderFallback,
   completeActiveWorkflowParticipant,
   currentWorkflowStep,
   extractWorkflowValues,
@@ -78,6 +79,7 @@ import {
   workflowFormFields,
   workflowNextBestAction,
   workflowSummary,
+  providerFallbackStep,
   isSoftwareContextField,
   knownSoftwareProvider,
 } from "./workflow-engine.js";
@@ -9732,6 +9734,13 @@ function configuredActionProvider(action: ActionFlow): string | null {
   return actionProviderForFlow(action);
 }
 
+function actionSupportsProviderFallback(action: ActionFlow): boolean {
+  return action.executionMode === "PROVIDER_FLOW"
+    && Boolean(configuredActionProvider(action))
+    && Boolean(providerFallbackStep(action))
+    && Boolean(action.completion.createLead || action.completion.notifyStaff || action.completion.requiresStaff);
+}
+
 async function providerIntegrationConnected(businessId: string, provider: string | null): Promise<boolean> {
   if (!provider) return false;
   if (!pool) return provider === "jackrabbit" && jackrabbitEnvironmentFallbackAllowed() && Boolean(process.env.FRONTDESKWISE_JACKRABBIT_API_TOKEN?.trim());
@@ -9914,7 +9923,7 @@ async function resolveWorkflowActionResources(
         error: error instanceof Error ? error.message : "provider lookup failed",
         ...observabilityMetadata(observabilityForBusiness(business, { workflow: action })),
       }, "Action provider lookup failed");
-      return { status: "not_found", matches: [] };
+      return { status: "unavailable", matches: [] };
     }
   }
   return resolveAction(business.actionResources, {
@@ -9965,6 +9974,19 @@ async function advanceWorkflowAutomation(
             ? await resolveWorkflowActionResources(business, action, step, state)
             : step.config?.result;
       if (result !== undefined) state.lookupResults = { ...(state.lookupResults ?? {}), [step.id]: result };
+      if (step.type === "lookup" && result && typeof result === "object") {
+        const resultStatus = (result as Record<string, unknown>).status;
+        const fallbackReason = resultStatus === "unavailable"
+          ? "unavailable"
+          : resultStatus === "not_found" && Array.isArray((result as Record<string, unknown>).matches) && !(result as { matches: unknown[] }).matches.length
+            ? "not_found"
+            : null;
+        const provider = actionConfigString(step.config ?? {}, "provider") ?? configuredActionProvider(action);
+        if (fallbackReason && provider) {
+          const fallback = activateProviderFallback(action, state, provider, fallbackReason);
+          if (fallback) return fallback;
+        }
+      }
       if (step.type === "recommend" && isPlanSelectionWorkflow(action) && result && typeof result === "object") {
         const recommendation = (result as Record<string, unknown>).recommendation;
         if (recommendation && typeof recommendation === "object") persistPlanRecommendation(state, recommendation as PlanRecommendation);
@@ -10325,11 +10347,10 @@ async function continueActionConversation(
     action = detectAction(business.actions, question, business.primaryActionId);
     if (!action) return null;
     const readiness = await actionReadinessForBusiness(business, action);
-    if (!readiness.ready) {
-      // Provider-backed actions must fail closed. The ordinary knowledge path
-      // can still answer the visitor or offer a safe human follow-up, but a
-      // missing connection must never start a flow that cannot verify live
-      // availability or produce a trusted destination.
+    if (!readiness.ready && !(readiness.reason === "missing_provider_connection" && actionSupportsProviderFallback(action))) {
+      // A provider-backed action may start without its connection only when it
+      // has an explicit contact fallback. The runtime will never fabricate
+      // provider results; it will collect a request for the team instead.
       return null;
     }
     const state = createActionState(action);
@@ -10390,7 +10411,7 @@ async function continueActionConversation(
   }
 
   const activeReadiness = await actionReadinessForBusiness(business, action);
-  if (!activeReadiness.ready) return null;
+  if (!activeReadiness.ready && !(activeReadiness.reason === "missing_provider_connection" && actionSupportsProviderFallback(action))) return null;
 
   if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question);
 
@@ -10486,6 +10507,7 @@ async function completeActionConversation(
     ? candidates.find((match) => match.id === state.selectedActionResourceId)
     : candidates.length === 1 ? candidates[0] : undefined;
   const qualification = Object.fromEntries(Object.entries(state.values).filter(([key]) => !/^(email|phone|name|parent_name)$/i.test(key)));
+  const providerFallback = state.providerFallback ?? null;
   const structuredWorkflowMetadata = {
     workflow: action.key,
     workflowState: summary?.currentState ?? (state.status === "completed" ? "completed" : "collecting"),
@@ -10497,7 +10519,8 @@ async function completeActionConversation(
     selectedLocation: selectedResource?.location ?? state.values.location ?? null,
     schedulePreference: state.values.schedule_preference ?? null,
     providerObjectId: selectedResource?.providerObjectId ?? state.selectedActionResourceId ?? null,
-    conversionStage: state.completionUrl ? "registration_link_sent" : state.status === "completed" ? "qualified" : "in_progress",
+    conversionStage: providerFallback ? "provider_follow_up" : state.completionUrl ? "registration_link_sent" : state.status === "completed" ? "qualified" : "in_progress",
+    providerFallback,
   };
   const submission = await persistActionSubmission(business, action, conversation, state.values, state.sourcePage ?? null);
   if (submission.status === "completed") {
@@ -10510,7 +10533,9 @@ async function completeActionConversation(
   state.formShown = false;
   if (state.participants?.length) completeActiveWorkflowParticipant(state);
   conversation.actionTaken = action.key;
-  let answer = canonicalizeCustomerCopy(business, action.completion.message);
+  let answer = providerFallback
+    ? `I couldn’t check live ${providerFallback.provider} availability right now, so I won’t invent class options. I’ve saved your request and the team can help you find the right lesson.`
+    : canonicalizeCustomerCopy(business, action.completion.message);
   if (action.completion.linkTemplate && action.completion.completionMode !== "native_form" && action.completion.completionMode !== "human_follow_up") {
     try {
       const generated = generateCompletionLink(action.completion.linkTemplate, state.values);
@@ -10704,6 +10729,7 @@ async function submitActionForm(
     state.formShown = false;
     const formStep = currentWorkflowStep(action, state);
     if (formStep?.type === "form") transitionWorkflow(action, state, formStep.id);
+    if (state.providerFallback) return completeActionConversation(business, conversation, action, state);
     const next = await advanceWorkflowAutomation(business, action, state, { allowStaffSensitiveActions: !waitingForStaff(conversation) });
     if (!next || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
     if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, next)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
@@ -11349,7 +11375,10 @@ async function recordWidgetPerformance(
 }
 
 async function staffRecipients(business: Business): Promise<Array<{ id: string; email: string; name: string; role: "owner" | "admin" | "staff" }>> {
-  if (!pool) return [];
+  // The in-memory runtime has no workspace_users rows, but local demo owners
+  // still need to see the same in-app handoff/lead notification contract as a
+  // database-backed workspace.
+  if (!pool) return [{ id: "demo-owner", email: `${business.slug}@demo.frontdeskwise.local`, name: "Demo Owner", role: "owner" }];
   const result = await pool.query<Record<string, unknown>>(
     `select distinct u.id, u.email, u.name,
             case when om.role = 'owner' then 'owner' when om.role = 'admin' or bm.role = 'admin' then 'admin' else 'staff' end as effective_role
@@ -18778,10 +18807,11 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
     throw httpError(409, `A workflow named “${workflowName}” already exists`);
   }
   if (action.origin === "discovered" && action.enabled && action.lifecycleStatus === "needs_review") {
-    if (action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
-    if (action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");
+    const workflowGenerationRequested = body.workflowGeneration === true;
+    if (!workflowGenerationRequested && action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
+    if (!workflowGenerationRequested && action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");
     action.lifecycleStatus = "active";
-    action.reviewReason = null;
+    action.reviewReason = workflowGenerationRequested ? "owner_override" : null;
   }
   const duplicate = business.actions.find((item, index) => index !== actionIndex && item.key === action.key);
   if (duplicate) throw httpError(409, "An action with this key already exists");

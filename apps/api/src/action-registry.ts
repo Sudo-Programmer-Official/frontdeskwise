@@ -114,7 +114,7 @@ export type SafeActionResult = {
 };
 
 export type ActionResolution = {
-  status: "matched" | "ambiguous" | "not_found";
+  status: "matched" | "ambiguous" | "not_found" | "unavailable";
   matches: SafeActionResult[];
 };
 

@@ -123,12 +123,22 @@ function workflowName(action: ActionFlow): string {
 }
 
 export function actionRelationships(actions: ActionFlow[], action: ActionFlow): ActionRelationship {
+  const target = actions.find((candidate) => candidate.id === action.id);
+  const targetIsCurrent = Boolean(target && target.enabled !== false && target.lifecycleStatus !== "disabled");
+  if (!targetIsCurrent) return { workflowCount: 0, workflowIds: [], workflowNames: [] };
+
   const references = actions.filter((candidate) => {
+    // A workflow is only visible when its owner record is still current. This
+    // keeps archived/disabled workflows from being reported by Actions while
+    // the Workflows library correctly hides them.
+    if (!candidate.steps?.length || candidate.enabled === false || candidate.lifecycleStatus === "disabled") return false;
     const workflowActionId = candidate.completion.workflow?.actionId;
-    return Boolean(candidate.steps?.length && (candidate.id === action.id || workflowActionId === action.id));
+    const referencedActionId = workflowActionId ?? candidate.id;
+    return referencedActionId === action.id;
   });
-  const names = [...new Set(references.map(workflowName).filter(Boolean))];
-  return { workflowCount: references.length, workflowIds: references.map((reference) => reference.id), workflowNames: names };
+  const uniqueReferences = [...new Map(references.map((reference) => [reference.id, reference])).values()];
+  const names = [...new Set(uniqueReferences.map(workflowName).filter(Boolean))];
+  return { workflowCount: uniqueReferences.length, workflowIds: uniqueReferences.map((reference) => reference.id), workflowNames: names };
 }
 
 export function projectActionCapability(actions: ActionFlow[], action: ActionFlow): ActionCapabilityProjection {

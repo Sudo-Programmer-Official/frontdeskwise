@@ -67,7 +67,11 @@ test("capability projection separates execution requirements from recommended le
 });
 
 test("Action relationships count workflow references without changing persisted records", () => {
-  const action = actions().find((item) => item.key === "request_demo")!;
+  const action = {
+    ...actions().find((item) => item.key === "request_demo")!,
+    enabled: true,
+    lifecycleStatus: "active" as const,
+  };
   const workflow: ActionFlow = {
     ...action,
     id: "workflow-1",
@@ -80,6 +84,39 @@ test("Action relationships count workflow references without changing persisted 
     workflowCount: 1,
     workflowIds: ["workflow-1"],
     workflowNames: ["Help visitors find the right demo"],
+  });
+});
+
+test("Action relationships do not expose disabled or orphaned workflow references", () => {
+  const action = actions().find((item) => item.key === "request_demo")!;
+  const disabledWorkflow: ActionFlow = {
+    ...action,
+    id: "disabled-workflow",
+    key: "disabled_workflow",
+    name: "Archived demo journey",
+    enabled: false,
+    lifecycleStatus: "disabled",
+    steps: [{ id: "demo", type: "redirect" }],
+    completion: { ...action.completion, workflow: { name: "Archived demo journey", actionId: action.id } },
+  };
+  const orphanWorkflow: ActionFlow = {
+    ...action,
+    id: "orphan-workflow",
+    key: "orphan_workflow",
+    name: "Orphaned journey",
+    steps: [{ id: "demo", type: "redirect" }],
+    completion: { ...action.completion, workflow: { name: "Orphaned journey", actionId: "deleted-action" } },
+  };
+
+  assert.deepEqual(actionRelationships([action, disabledWorkflow, orphanWorkflow], action), {
+    workflowCount: 0,
+    workflowIds: [],
+    workflowNames: [],
+  });
+  assert.deepEqual(actionRelationships([{ ...action, enabled: false, lifecycleStatus: "disabled" }, disabledWorkflow], action), {
+    workflowCount: 0,
+    workflowIds: [],
+    workflowNames: [],
   });
 });
 

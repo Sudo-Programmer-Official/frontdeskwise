@@ -5676,14 +5676,16 @@ function actionProvider(action: ActionFlow | null): string | null {
 }
 
 function providerIsConnected(provider: string | null): boolean {
-  if (provider === "jackrabbit") return jackrabbitIntegration.value?.connectionStatus === "active";
-  return false;
+  if (!provider) return false;
+  const normalizedProvider = provider === "generic_webhook" ? "webhook" : provider.trim().toLowerCase();
+  return integrations.value.some((integration) => integration.provider.trim().toLowerCase() === normalizedProvider
+    && integration.connectionStatus === "active");
 }
 
 function actionNeedsProviderConnection(action: ActionFlow): boolean {
   return action.executionMode === "PROVIDER_FLOW"
-    && actionProvider(action) === "jackrabbit"
-    && !providerIsConnected("jackrabbit");
+    && Boolean(actionProvider(action))
+    && !providerIsConnected(actionProvider(action));
 }
 
 function actionPrimarySetupHint(action: ActionFlow): string {
@@ -5883,7 +5885,8 @@ function actionCompletionLabel(action: ActionFlow): string {
 function actionOutcomeDetail(action: ActionFlow): string {
   const destination = action.destination?.url || action.completion.linkUrl;
   if (destination) return destination;
-  if (action.capability?.provider || actionProvider(action)) return `Connected ${formatLabel(action.capability?.provider || actionProvider(action) || "provider")}`;
+  const provider = action.capability?.provider || actionProvider(action);
+  if (provider) return `${formatLabel(provider)} · ${providerIsConnected(provider) ? "Connected" : "Needs setup"}`;
   if (action.executionMode === "PHONE") return "Verified business phone destination";
   if (action.executionMode === "HANDOFF" || action.completion.notifyStaff) return "Send the completed request to your team";
   return "FrontDeskWise collects the configured details";

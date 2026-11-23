@@ -203,6 +203,11 @@ export type ConversationActionState = {
   workflowTrigger?: string;
   completedStepIds?: string[];
   lookupResults?: Record<string, unknown>;
+  /** Provider-backed lookup could not be completed; collect contact details instead. */
+  providerFallback?: {
+    provider: string;
+    reason: "unavailable" | "not_found";
+  };
   selectedActionResourceId?: string;
   completionUrl?: string;
   participants?: ActionParticipant[];

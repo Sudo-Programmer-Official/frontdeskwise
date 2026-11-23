@@ -13,6 +13,7 @@ import {
 import { JackrabbitProvider } from "../src/jackrabbit-provider.js";
 import {
   addWorkflowParticipant,
+  activateProviderFallback,
   applyWorkflowInput,
   currentWorkflowStep,
   extractWorkflowValues,
@@ -24,6 +25,7 @@ import {
   setWorkflowParticipantValue,
   workflowNextBestAction,
   workflowSummary,
+  providerFallbackStep,
 } from "../src/workflow-engine.js";
 
 const ids = (key: string) => `${key}-certification-id`;
@@ -60,6 +62,19 @@ test("British Swim School certification uses the canonical reference workflow", 
   ]);
   assert.equal(enrollment.provider, "jackrabbit");
   assert.equal(enrollment.version, 2);
+});
+
+test("provider fallback reuses the enrollment contact form and never fabricates a class", () => {
+  const state = createActionState(enrollment);
+  const fallback = activateProviderFallback(enrollment, state, "jackrabbit", "unavailable");
+
+  assert.equal(providerFallbackStep(enrollment)?.id, "parent-contact");
+  assert.equal(fallback?.id, "parent-contact");
+  assert.deepEqual(state.providerFallback, { provider: "jackrabbit", reason: "unavailable" });
+  assert.equal(state.currentStepId, "parent-contact");
+  assert.equal(state.formShown, true);
+  assert.equal(currentWorkflowStep(enrollment, state)?.id, "parent-contact");
+  assert.equal(state.lookupResults, undefined);
 });
 
 const goldenTurns: Array<{

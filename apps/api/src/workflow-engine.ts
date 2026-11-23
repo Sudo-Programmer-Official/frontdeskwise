@@ -105,6 +105,39 @@ export function workflowStep(action: ActionFlow, stepId: string | undefined): Ac
   return action.steps.find((step) => step.id === stepId) ?? null;
 }
 
+/**
+ * Select the safest existing form when a provider-backed lookup cannot run.
+ * Generated enrollment workflows already contain parent contact fields, so a
+ * fallback can reuse that form without inventing provider results or adding a
+ * second, provider-specific workflow shape.
+ */
+export function providerFallbackStep(action: ActionFlow): ActionStep | null {
+  const forms = (action.steps ?? []).filter((step) => step.type === "form");
+  return forms.find((step) => step.config?.providerFallback === true)
+    ?? forms.find((step) => {
+      const fieldKeys = Array.isArray(step.config?.fieldKeys)
+        ? step.config.fieldKeys.filter((value): value is string => typeof value === "string")
+        : [];
+      return fieldKeys.some((key) => /^(?:parent_name|name|email|phone)$/i.test(key));
+    })
+    ?? forms[0]
+    ?? null;
+}
+
+export function activateProviderFallback(
+  action: ActionFlow,
+  state: ConversationActionState,
+  provider: string,
+  reason: "unavailable" | "not_found",
+): ActionStep | null {
+  const fallback = providerFallbackStep(action);
+  if (!fallback) return null;
+  state.providerFallback = { provider, reason };
+  state.currentStepId = fallback.id;
+  state.formShown = true;
+  return fallback;
+}
+
 function nextSequentialStep(action: ActionFlow, step: ActionStep): ActionStep | null {
   if (!action.steps?.length) return null;
   if (step.nextStepId) return workflowStep(action, step.nextStepId);
