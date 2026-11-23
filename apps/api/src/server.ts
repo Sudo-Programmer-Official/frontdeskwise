@@ -5882,8 +5882,9 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
   const sourceCompletion = asRecord(body.completion);
   const workflowSource = asRecord(sourceCompletion.workflow);
   const workflowName = optionalString(workflowSource.name, 160);
+  const workflowCreationRequestId = optionalString(workflowSource.creationRequestId, 120) ?? base.completion.workflow?.creationRequestId;
   const workflow = workflowName
-    ? { name: workflowName, actionId: existing?.id ?? base.id }
+    ? { name: workflowName, actionId: existing?.id ?? base.id, ...(workflowCreationRequestId ? { creationRequestId: workflowCreationRequestId } : {}) }
     : base.completion.workflow;
   const leadStatus = sourceCompletion.leadStatus === "qualified" || sourceCompletion.leadStatus === "booked" ? sourceCompletion.leadStatus : base.completion.leadStatus;
   const submitLabel = optionalString(sourceCompletion.submitLabel, 160) ?? base.completion.submitLabel;
@@ -19070,6 +19071,92 @@ app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
     newValue: { origin: action.origin, lifecycleStatus: action.lifecycleStatus, enabled: action.enabled },
   });
   return reply.code(201).send({ action });
+});
+
+/**
+ * Create a generated workflow as one owner-visible operation.
+ *
+ * Workflows are stored as versioned Action records in this product, so this
+ * endpoint deliberately does not create a shell first. It validates the
+ * complete definition, persists the linked Action once, and returns that
+ * completed draft. The creation request id is retained in workflow metadata so
+ * a retry after a lost response returns the same draft instead of creating a
+ * second or empty record.
+ */
+app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actorUserId = await requireDemoOwner(business, request);
+  requireWritableBusiness(business);
+  const body = asRecord(request.body);
+  const actionId = requiredString(body.actionId, "actionId", 120);
+  const clientRequestId = optionalString(body.clientRequestId, 120);
+  if (!clientRequestId) throw httpError(400, "clientRequestId is required for generated workflow creation");
+
+  const actionIndex = business.actions.findIndex((item) => item.id === actionId);
+  if (actionIndex < 0) throw httpError(404, "Action not found");
+  const previousAction = business.actions[actionIndex];
+  const previousWorkflow = previousAction.completion.workflow;
+  if (previousWorkflow?.creationRequestId === clientRequestId && (previousAction.steps?.length ?? 0) > 0) {
+    return reply.code(200).send({ action: previousAction, workflow: previousAction, reused: true, idempotent: true });
+  }
+  // A metadata-only or zero-step record is an incomplete shell from an older
+  // creation attempt. It is safe to replace it with the complete generated
+  // draft; only a real persisted workflow should block a second creation.
+  if ((previousAction.steps?.length ?? 0) > 0) {
+    throw httpError(409, "This Action already has a workflow. Open the existing workflow instead of creating another one.");
+  }
+
+  const workflowSourceCompletion = asRecord(body.completion);
+  const workflowSource = asRecord(workflowSourceCompletion.workflow);
+  const workflowName = optionalString(body.workflowName, 160) ?? optionalString(workflowSource.name, 160) ?? optionalString(body.name, 160);
+  if (!workflowName) throw httpError(400, "workflowName is required");
+  const actionInput = {
+    ...body,
+    completion: {
+      ...workflowSourceCompletion,
+      workflow: {
+        ...workflowSource,
+        name: workflowName,
+        actionId,
+        creationRequestId: clientRequestId,
+      },
+    },
+  };
+  const action = normalizedAction(actionInput, previousAction);
+  action.businessId = previousAction.businessId ?? business.id;
+  const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
+  if (organizationId) action.organizationId = organizationId;
+  if (!action.steps?.length) throw httpError(400, "Generated workflow must include at least one step");
+
+  const workflowIsolation = await workflowIsolationForAction(business, action, body);
+  if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
+  const verification = verifyWorkflowDefinition(action);
+  if (!verification.ok) {
+    const message = verification.issues.filter((issue) => issue.severity === "error").slice(0, 4).map((issue) => issue.message).join("; ");
+    throw httpError(400, `Workflow validation failed before persistence: ${message}`);
+  }
+  const activeWorkflows = business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled");
+  if (findDuplicateWorkflowName(activeWorkflows, workflowName, action.id)) {
+    throw httpError(409, `A workflow named “${workflowName}” already exists`);
+  }
+
+  // Persist first; only update the in-memory business snapshot after the
+  // complete generated definition has been accepted by storage. If storage
+  // fails, callers never receive a workflow id for an empty in-memory shell.
+  await persistAction(business, action);
+  business.actions[actionIndex] = action;
+  await recordActionRegistryAudit({
+    businessId: business.id,
+    actionId: action.id,
+    actorUserId,
+    actorType: "owner",
+    eventType: "updated",
+    previousValue: { workflow: null },
+    newValue: { workflow: workflowName, creationRequestId: clientRequestId },
+    reason: "owner_override",
+  });
+  return reply.code(201).send({ action, workflow: action, created: true, idempotent: false });
 });
 
 app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {

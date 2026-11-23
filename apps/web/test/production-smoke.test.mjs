@@ -674,7 +674,11 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(workflowWorkspace, /duplicateCreateWorkflow/);
   assert.match(workflowWorkspace, /method: "DELETE"/);
   assert.doesNotMatch(workflowWorkspace, /@click="emit\('open-action', ''\)"/);
-  assert.match(workflowWorkspace, /actions\/\$\{encodeURIComponent\(action\.id\)\}/);
+  assert.match(workflowWorkspace, /workflows/);
+  assert.match(workflowWorkspace, /clientRequestId/);
+  assert.match(workflowWorkspace, /Creating your customer journey/);
+  assert.match(apiServer, /clientRequestId is required for generated workflow creation/);
+  assert.match(apiServer, /idempotent: true/);
   assert.match(apiServer, /workflowActionId/);
   for (const marker of [
     "WorkflowBusinessContext",

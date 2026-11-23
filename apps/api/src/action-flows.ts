@@ -134,6 +134,8 @@ export type ActionCompletion = {
   workflow?: {
     name: string;
     actionId: string;
+    /** Stable client key used to make generated-workflow creation idempotent. */
+    creationRequestId?: string;
   };
   completionMode?: CompletionMode;
   linkTemplate?: CompletionLinkTemplate;

@@ -37,6 +37,7 @@ const createWorkflowNameSuggestion = ref("");
 const createWorkflowDescription = ref("");
 const createWorkflowLoading = ref(false);
 const createWorkflowError = ref("");
+const createWorkflowRequestId = ref("");
 const createNewActionOpen = ref(false);
 const createNewActionName = ref("");
 const createNewActionDescription = ref("");
@@ -642,8 +643,12 @@ function ensureWorkflowCompletion(action) {
         action.completion = {};
     return action.completion;
 }
-function setWorkflowMetadata(action, name) {
-    ensureWorkflowCompletion(action).workflow = { name: name.trim().slice(0, 160), actionId: action.id };
+function setWorkflowMetadata(action, name, creationRequestId) {
+    ensureWorkflowCompletion(action).workflow = {
+        name: name.trim().slice(0, 160),
+        actionId: action.id,
+        ...(creationRequestId ? { creationRequestId } : {}),
+    };
 }
 function normalizeWorkflowName(value) {
     return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
@@ -658,11 +663,17 @@ function workflowDisplayName(action) {
     return action.name;
 }
 function actionHasWorkflow(action) {
-    // The API projection is the source of truth for the workflow library. Do
-    // not fall back to raw steps when it is present: that would resurrect an
-    // archived workflow here after Actions has correctly hidden the reference.
-    if (typeof action.workflowCount === "number")
-        return action.workflowCount > 0;
+    // A relationship count alone is not enough to navigate. Resolve projected
+    // workflow ids against the current business snapshot so a stale or
+    // inaccessible reference cannot send the owner to an empty builder.
+    if (typeof action.workflowCount === "number") {
+        if (action.workflowCount <= 0)
+            return false;
+        if (action.workflowIds?.length) {
+            return action.workflowIds.some((workflowId) => allActions.value.some((candidate) => candidate.id === workflowId && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"));
+        }
+        return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
+    }
     return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
 }
 function suggestedCreateWorkflowName() {
@@ -679,6 +690,8 @@ function updateCreateWorkflowNameSuggestion(force = false) {
     createWorkflowNameSuggestion.value = suggestion;
 }
 function openCreateWorkflow(actionId) {
+    if (!createWorkflowOpen.value)
+        createWorkflowRequestId.value = "";
     createWorkflowOpen.value = true;
     createWorkflowMode.value = "action";
     createWorkflowError.value = "";
@@ -700,6 +713,7 @@ function closeCreateWorkflow() {
     createWorkflowOpen.value = false;
     createNewActionOpen.value = false;
     createWorkflowError.value = "";
+    createWorkflowRequestId.value = "";
 }
 function selectCreateWorkflowMode(mode) {
     createWorkflowMode.value = mode;
@@ -870,12 +884,20 @@ async function createWorkflow() {
         return;
     }
     if (actionHasWorkflow(action)) {
-        selectedWorkflowId.value = action.id;
-        workflowDraft.value = clone(action);
-        draftSourceId = action.id;
-        draftIsDirty.value = false;
-        createWorkflowOpen.value = false;
-        return;
+        const linkedWorkflow = action.workflowIds?.map((workflowId) => allActions.value.find((candidate) => candidate.id === workflowId)).find((candidate) => Boolean(candidate && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"))
+            ?? ((action.steps?.length ?? 0) > 0 ? action : null);
+        if (linkedWorkflow) {
+            selectedWorkflowId.value = linkedWorkflow.id;
+            workflowDraft.value = clone(linkedWorkflow);
+            workflowDraft.value.steps ??= [];
+            draftSourceId = linkedWorkflow.id;
+            draftIsDirty.value = false;
+            createWorkflowOpen.value = false;
+            return;
+        }
+        // The relationship projection is stale or scoped incorrectly. Do not
+        // navigate to the Action record and pretend it is a workflow; let the
+        // generated-workflow endpoint reconcile the current record instead.
     }
     const createWorkflowBusinessId = props.selectedBusinessId ?? null;
     const createWorkflowOrganizationId = props.organizationId ?? props.businessContext?.organizationId ?? null;
@@ -892,6 +914,10 @@ async function createWorkflow() {
             createWorkflowError.value = `The generated workflow needs review before it can be saved: ${generated.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
             return;
         }
+        const clientRequestId = createWorkflowRequestId.value || (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `workflow-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`);
+        createWorkflowRequestId.value = clientRequestId;
         const nextAction = clone(action);
         // Generating from an archived/disabled action is an explicit owner action:
         // promote the new workflow to the current draft so it appears in both
@@ -905,7 +931,7 @@ async function createWorkflow() {
         nextAction.steps = generated.steps;
         nextAction.description = generated.description;
         nextAction.fields = generated.fields.length ? generated.fields : nextAction.fields;
-        setWorkflowMetadata(nextAction, requestedWorkflowName || generated.name);
+        setWorkflowMetadata(nextAction, requestedWorkflowName || generated.name, clientRequestId);
         if (generated.executionMode)
             nextAction.executionMode = generated.executionMode;
         if (generated.provider)
@@ -918,6 +944,9 @@ async function createWorkflow() {
         };
         const createWorkflowPayload = {
             ...nextAction,
+            actionId: action.id,
+            clientRequestId,
+            workflowName: requestedWorkflowName || generated.name,
             workflowGeneration: true,
             businessId: createWorkflowBusinessId,
             organizationId: createWorkflowOrganizationId,
@@ -933,8 +962,8 @@ async function createWorkflow() {
             refreshWorkflowContext();
             return;
         }
-        const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(action.id)}`), {
-            method: "PUT",
+        const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/workflows`), {
+            method: "POST",
             headers: { "content-type": "application/json", ...props.ownerHeaders() },
             body: JSON.stringify(createWorkflowPayload),
         });
@@ -946,15 +975,19 @@ async function createWorkflow() {
         if (!response.ok || !payload.action)
             throw new Error(payload.error ?? "Could not create this workflow.");
         const savedWorkflow = payload.action;
+        const persistedValidation = validateWorkflowGeneration({ steps: (savedWorkflow.steps ?? []), fields: savedWorkflow.fields ?? [] });
+        if (!persistedValidation.ok || !(savedWorkflow.steps?.length ?? 0)) {
+            throw new Error("The generated workflow was not returned with a complete step definition. Nothing was opened; try generation again.");
+        }
         locallyCreatedAction.value = savedWorkflow;
-        selectedWorkflowId.value = savedWorkflow.id;
         workflowDraft.value = clone(savedWorkflow);
-        workflowDraft.value.steps ??= [];
         draftSourceId = savedWorkflow.id;
         draftIsDirty.value = false;
         selectedStepIndex.value = savedWorkflow.steps?.length ? 0 : -1;
+        selectedWorkflowId.value = savedWorkflow.id;
         workflowSaveMessage.value = `Workflow created and linked to ${action.name}.`;
         createWorkflowOpen.value = false;
+        createWorkflowRequestId.value = "";
         emit("refresh");
     }
     catch (error) {
@@ -1733,6 +1766,8 @@ const __VLS_template = () => {
     __VLS_withDotValue(workflowSaveMessage, {});
     __VLS_withDotValue(deleteStepDependents, {});
     __VLS_withDotValue(createWorkflowOpen, {});
+    __VLS_withDotValue(createWorkflowLoading, {});
+    __VLS_withDotValue(createNewActionOpen, {});
     __VLS_withDotValue(createWorkflowMode, {});
     __VLS_withDotValue(duplicateCreateWorkflow, {});
     __VLS_withDotValue(selectedActionSetupWarning, {});
@@ -1740,8 +1775,6 @@ const __VLS_template = () => {
     __VLS_withDotValue(selectedCreateWorkflowAction, {});
     __VLS_withDotValue(eligibleActions, {});
     __VLS_withDotValue(createWorkflowDescription, {});
-    __VLS_withDotValue(createNewActionOpen, {});
-    __VLS_withDotValue(createWorkflowLoading, {});
     __VLS_withDotValue(createNewActionName, {});
     __VLS_withDotValue(createWorkflowError, {});
     __VLS_withDotValue(createWorkflowActionId, {});
@@ -1885,6 +1918,8 @@ const __VLS_template = () => {
     /** @type {__VLS_StyleScopedClasses['workflow-advanced-settings']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-modal-close']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-create-modal']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-generation-progress']} */ ;
+    /** @type {__VLS_StyleScopedClasses['workflow-generation-progress']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
     /** @type {__VLS_StyleScopedClasses['workflow-create-choice']} */ ;
     /** @type {__VLS_StyleScopedClasses['selected']} */ ;
@@ -4778,6 +4813,19 @@ const __VLS_template = () => {
             ...{ class: "workflow-modal-copy" },
         });
         /** @type {__VLS_StyleScopedClasses['workflow-modal-copy']} */ ;
+        if (createWorkflowLoading.value && !createNewActionOpen.value) {
+            __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
+                ...{ class: "workflow-generation-progress" },
+                role: "status",
+                'aria-live': "polite",
+            });
+            /** @type {__VLS_StyleScopedClasses['workflow-generation-progress']} */ ;
+            __VLS_asFunctionalElement1(__VLS_intrinsics.strong, __VLS_intrinsics.strong)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+            __VLS_asFunctionalElement1(__VLS_intrinsics.span, __VLS_intrinsics.span)({});
+        }
         __VLS_asFunctionalElement1(__VLS_intrinsics.div, __VLS_intrinsics.div)({
             ...{ class: "workflow-create-choice-list" },
             role: "tablist",
@@ -4791,7 +4839,7 @@ const __VLS_template = () => {
                         throw 0;
                     return (selectCreateWorkflowMode('action'));
                     // @ts-ignore
-                    [deleteStepDependents, createWorkflowOpen,];
+                    [deleteStepDependents, createWorkflowOpen, createWorkflowLoading, createNewActionOpen,];
                 } },
             type: "button",
             ...{ class: (['workflow-create-choice', { selected: createWorkflowMode.value === 'action' }]) },
@@ -5080,6 +5128,7 @@ const __VLS_template = () => {
                 ...{ onClick: (closeCreateWorkflow) },
                 ...{ class: "outline-button small" },
                 type: "button",
+                disabled: (createWorkflowLoading.value),
             });
             /** @type {__VLS_StyleScopedClasses['outline-button']} */ ;
             /** @type {__VLS_StyleScopedClasses['small']} */ ;
@@ -5091,7 +5140,7 @@ const __VLS_template = () => {
             });
             /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
             /** @type {__VLS_StyleScopedClasses['small']} */ ;
-            (createWorkflowLoading.value ? 'Creating…' : 'Create workflow');
+            (createWorkflowLoading.value ? 'Creating your customer journey…' : 'Create workflow');
         }
     }
     if (deleteWorkflowOpen.value && workflowDraft.value) {
@@ -5193,7 +5242,7 @@ const __VLS_template = () => {
         (deleteWorkflowLoading.value ? 'Deleting…' : 'Delete workflow');
     }
     // @ts-ignore
-    [workflowTitle, draftIsDirty, workflowDraft, createWorkflowName, duplicateCreateWorkflow, createWorkflowActionId, createWorkflowDescription, createWorkflowDescription, createNewActionOpen, createNewActionOpen, createNewActionName, createNewActionName, createNewActionDescription, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createWorkflowError, createWorkflowError, deleteWorkflowOpen, selectedWorkflowIsLive, deleteWorkflowError, deleteWorkflowError, deleteWorkflowLoading, deleteWorkflowLoading, deleteWorkflowLoading,];
+    [workflowTitle, draftIsDirty, workflowDraft, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createWorkflowLoading, createNewActionOpen, createNewActionOpen, createWorkflowName, duplicateCreateWorkflow, createWorkflowActionId, createWorkflowDescription, createWorkflowDescription, createNewActionName, createNewActionName, createNewActionDescription, createWorkflowError, createWorkflowError, deleteWorkflowOpen, selectedWorkflowIsLive, deleteWorkflowError, deleteWorkflowError, deleteWorkflowLoading, deleteWorkflowLoading, deleteWorkflowLoading,];
     return {};
 };
 void [__VLS_template];

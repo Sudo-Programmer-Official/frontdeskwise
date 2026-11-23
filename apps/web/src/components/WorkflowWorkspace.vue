@@ -135,6 +135,7 @@ const createWorkflowNameSuggestion = ref("");
 const createWorkflowDescription = ref("");
 const createWorkflowLoading = ref(false);
 const createWorkflowError = ref("");
+const createWorkflowRequestId = ref("");
 const createNewActionOpen = ref(false);
 const createNewActionName = ref("");
 const createNewActionDescription = ref("");
@@ -711,8 +712,12 @@ function ensureWorkflowCompletion(action: WorkflowAction): Record<string, unknow
   return action.completion;
 }
 
-function setWorkflowMetadata(action: WorkflowAction, name: string): void {
-  ensureWorkflowCompletion(action).workflow = { name: name.trim().slice(0, 160), actionId: action.id };
+function setWorkflowMetadata(action: WorkflowAction, name: string, creationRequestId?: string): void {
+  ensureWorkflowCompletion(action).workflow = {
+    name: name.trim().slice(0, 160),
+    actionId: action.id,
+    ...(creationRequestId ? { creationRequestId } : {}),
+  };
 }
 
 function normalizeWorkflowName(value: string): string {
@@ -730,10 +735,16 @@ function workflowDisplayName(action: WorkflowAction): string {
 }
 
 function actionHasWorkflow(action: WorkflowAction): boolean {
-  // The API projection is the source of truth for the workflow library. Do
-  // not fall back to raw steps when it is present: that would resurrect an
-  // archived workflow here after Actions has correctly hidden the reference.
-  if (typeof action.workflowCount === "number") return action.workflowCount > 0;
+  // A relationship count alone is not enough to navigate. Resolve projected
+  // workflow ids against the current business snapshot so a stale or
+  // inaccessible reference cannot send the owner to an empty builder.
+  if (typeof action.workflowCount === "number") {
+    if (action.workflowCount <= 0) return false;
+    if (action.workflowIds?.length) {
+      return action.workflowIds.some((workflowId) => allActions.value.some((candidate) => candidate.id === workflowId && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"));
+    }
+    return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
+  }
   return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
 }
 
@@ -751,6 +762,7 @@ function updateCreateWorkflowNameSuggestion(force = false): void {
 }
 
 function openCreateWorkflow(actionId?: string | MouseEvent): void {
+  if (!createWorkflowOpen.value) createWorkflowRequestId.value = "";
   createWorkflowOpen.value = true;
   createWorkflowMode.value = "action";
   createWorkflowError.value = "";
@@ -771,6 +783,7 @@ function closeCreateWorkflow(): void {
   createWorkflowOpen.value = false;
   createNewActionOpen.value = false;
   createWorkflowError.value = "";
+  createWorkflowRequestId.value = "";
 }
 
 function selectCreateWorkflowMode(mode: CreateWorkflowMode): void {
@@ -942,12 +955,20 @@ async function createWorkflow(): Promise<void> {
     return;
   }
   if (actionHasWorkflow(action)) {
-    selectedWorkflowId.value = action.id;
-    workflowDraft.value = clone(action);
-    draftSourceId = action.id;
-    draftIsDirty.value = false;
-    createWorkflowOpen.value = false;
-    return;
+    const linkedWorkflow = action.workflowIds?.map((workflowId) => allActions.value.find((candidate) => candidate.id === workflowId)).find((candidate): candidate is WorkflowAction => Boolean(candidate && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"))
+      ?? ((action.steps?.length ?? 0) > 0 ? action : null);
+    if (linkedWorkflow) {
+      selectedWorkflowId.value = linkedWorkflow.id;
+      workflowDraft.value = clone(linkedWorkflow);
+      workflowDraft.value.steps ??= [];
+      draftSourceId = linkedWorkflow.id;
+      draftIsDirty.value = false;
+      createWorkflowOpen.value = false;
+      return;
+    }
+    // The relationship projection is stale or scoped incorrectly. Do not
+    // navigate to the Action record and pretend it is a workflow; let the
+    // generated-workflow endpoint reconcile the current record instead.
   }
   const createWorkflowBusinessId = props.selectedBusinessId ?? null;
   const createWorkflowOrganizationId = props.organizationId ?? props.businessContext?.organizationId ?? null;
@@ -964,6 +985,10 @@ async function createWorkflow(): Promise<void> {
       createWorkflowError.value = `The generated workflow needs review before it can be saved: ${generated.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
       return;
     }
+    const clientRequestId = createWorkflowRequestId.value || (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `workflow-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`);
+    createWorkflowRequestId.value = clientRequestId;
     const nextAction = clone(action);
     // Generating from an archived/disabled action is an explicit owner action:
     // promote the new workflow to the current draft so it appears in both
@@ -977,7 +1002,7 @@ async function createWorkflow(): Promise<void> {
     nextAction.steps = generated.steps as unknown as Array<Record<string, unknown>>;
     nextAction.description = generated.description;
     nextAction.fields = generated.fields.length ? generated.fields : nextAction.fields;
-    setWorkflowMetadata(nextAction, requestedWorkflowName || generated.name);
+    setWorkflowMetadata(nextAction, requestedWorkflowName || generated.name, clientRequestId);
     if (generated.executionMode) nextAction.executionMode = generated.executionMode;
     if (generated.provider) nextAction.provider = generated.provider;
     const workflowContextPayload = {
@@ -988,6 +1013,9 @@ async function createWorkflow(): Promise<void> {
     };
     const createWorkflowPayload = {
       ...nextAction,
+      actionId: action.id,
+      clientRequestId,
+      workflowName: requestedWorkflowName || generated.name,
       workflowGeneration: true,
       businessId: createWorkflowBusinessId,
       organizationId: createWorkflowOrganizationId,
@@ -1003,27 +1031,31 @@ async function createWorkflow(): Promise<void> {
       refreshWorkflowContext();
       return;
     }
-    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(action.id)}`), {
-      method: "PUT",
+    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/workflows`), {
+      method: "POST",
       headers: { "content-type": "application/json", ...props.ownerHeaders() },
       body: JSON.stringify(createWorkflowPayload),
     });
-    const payload = await response.json() as { error?: string; action?: WorkflowAction };
+    const payload = await response.json() as { error?: string; action?: WorkflowAction; workflow?: WorkflowAction; idempotent?: boolean };
     if (!response.ok && response.status === 409 && /different workflow context|organization mismatch|context changed/i.test(payload.error ?? "")) {
       refreshWorkflowContext();
       return;
     }
     if (!response.ok || !payload.action) throw new Error(payload.error ?? "Could not create this workflow.");
     const savedWorkflow = payload.action;
+    const persistedValidation = validateWorkflowGeneration({ steps: (savedWorkflow.steps ?? []) as unknown as WorkflowStepDraft[], fields: savedWorkflow.fields ?? [] });
+    if (!persistedValidation.ok || !(savedWorkflow.steps?.length ?? 0)) {
+      throw new Error("The generated workflow was not returned with a complete step definition. Nothing was opened; try generation again.");
+    }
     locallyCreatedAction.value = savedWorkflow;
-    selectedWorkflowId.value = savedWorkflow.id;
     workflowDraft.value = clone(savedWorkflow);
-    workflowDraft.value.steps ??= [];
     draftSourceId = savedWorkflow.id;
     draftIsDirty.value = false;
     selectedStepIndex.value = savedWorkflow.steps?.length ? 0 : -1;
+    selectedWorkflowId.value = savedWorkflow.id;
     workflowSaveMessage.value = `Workflow created and linked to ${action.name}.`;
     createWorkflowOpen.value = false;
+    createWorkflowRequestId.value = "";
     emit("refresh");
   } catch (error) {
     createWorkflowError.value = error instanceof Error ? error.message : "Could not create this workflow.";
@@ -1875,7 +1907,15 @@ onMounted(() => {
         <p class="eyebrow">Workflows</p>
         <h2 id="create-workflow-title">Create workflow</h2>
         <h3 class="workflow-modal-question">What should this workflow help with?</h3>
-        <p class="workflow-modal-copy">Choose how this workflow should help visitors. You’ll stay in Workflows while it is generated and configured.</p>
+        <p class="workflow-modal-copy">Choose how this workflow should help visitors. FrontDeskWise will generate, validate, and save the complete draft before opening it.</p>
+
+        <div v-if="createWorkflowLoading && !createNewActionOpen" class="workflow-generation-progress" role="status" aria-live="polite">
+          <strong>Creating your customer journey…</strong>
+          <span>Understanding your goal</span>
+          <span>Reusing the selected Action</span>
+          <span>Building provider fallback</span>
+          <span>Validating and saving the draft</span>
+        </div>
 
         <div class="workflow-create-choice-list" role="tablist" aria-label="Workflow starting point">
           <button type="button" :class="['workflow-create-choice', { selected: createWorkflowMode === 'action' }]" @click="selectCreateWorkflowMode('action')"><span class="workflow-choice-radio" aria-hidden="true"></span><span><strong>Use an existing action</strong><small>Connect the journey to an action that already exists.</small></span></button>
@@ -1903,7 +1943,7 @@ onMounted(() => {
         </div>
 
         <p v-if="createWorkflowError" class="form-error">{{ createWorkflowError }}</p>
-        <div v-if="!createNewActionOpen" class="workflow-modal-actions"><button class="outline-button small" type="button" @click="closeCreateWorkflow">Cancel</button><button class="primary-button small" type="button" :disabled="createWorkflowLoading || !createWorkflowActionId || !createWorkflowName.trim() || Boolean(duplicateCreateWorkflow)" @click="createWorkflow">{{ createWorkflowLoading ? 'Creating…' : 'Create workflow' }}</button></div>
+        <div v-if="!createNewActionOpen" class="workflow-modal-actions"><button class="outline-button small" type="button" :disabled="createWorkflowLoading" @click="closeCreateWorkflow">Cancel</button><button class="primary-button small" type="button" :disabled="createWorkflowLoading || !createWorkflowActionId || !createWorkflowName.trim() || Boolean(duplicateCreateWorkflow)" @click="createWorkflow">{{ createWorkflowLoading ? 'Creating your customer journey…' : 'Create workflow' }}</button></div>
       </section>
     </div>
 
@@ -2090,6 +2130,9 @@ onMounted(() => {
 .workflow-create-modal h2 { margin: 4px 35px 7px 0; color: #1e3151; font-size: 27px; letter-spacing: -.045em; }
 .workflow-modal-question { margin: 0 0 6px; color: #304c70; font-size: 15px; }
 .workflow-modal-copy { max-width: 500px; margin: 0 0 21px; color: #71839a; font-size: 13px; line-height: 1.5; }
+.workflow-generation-progress { display: grid; gap: 5px; padding: 11px 12px; margin: -7px 0 14px; border: 1px solid #cfe0f5; border-radius: 10px; color: #55708f; background: #f6faff; font-size: 11px; line-height: 1.4; }
+.workflow-generation-progress strong { color: #245ea9; font-size: 12px; }
+.workflow-generation-progress span::before { content: "✓"; display: inline-block; width: 17px; color: #2d73d5; font-weight: 800; }
 .workflow-create-choice-list { display: grid; gap: 8px; }
 .workflow-create-choice { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 12px; border: 1px solid #dfe7f0; border-radius: 10px; background: #fff; color: #2b405e; text-align: left; cursor: pointer; }
 .workflow-create-choice:hover, .workflow-create-choice.selected { border-color: #9db9ed; background: #f7faff; }
