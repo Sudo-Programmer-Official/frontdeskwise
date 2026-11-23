@@ -45,6 +45,19 @@ test("workflow verifier blocks editor placeholder copy", () => {
   assert.ok(result.issues.some((issue) => issue.code === "placeholder_step" && issue.stepId === "start"));
 });
 
+test("provider lookups require an explicit fallback path", () => {
+  const broken: ActionFlow = {
+    ...swim,
+    id: "missing-provider-fallback",
+    steps: swim.steps?.map((step) => step.id === "registration-options"
+      ? { ...step, config: { ...step.config, failureBehavior: undefined, fallbackStepId: undefined } }
+      : step),
+  };
+  const result = verifyWorkflowDefinition(broken);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "provider_fallback_missing" && issue.stepId === "registration-options"));
+});
+
 test("disabled steps do not satisfy required-field verification", () => {
   const draft: ActionFlow = {
     ...swim,

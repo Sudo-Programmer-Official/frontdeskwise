@@ -11,9 +11,11 @@ export type WorkflowVerificationIssue = {
   | "non_terminal_step"
   | "required_field_not_captured"
   | "provider_missing"
+  | "provider_fallback_missing"
   | "provider_dependency_missing"
   | "unverified_link_source"
   | "placeholder_step"
+  | "unsupported_step_type"
   | "selection_dependency_missing"
   | "contact_boundary_missing";
   severity: WorkflowVerificationSeverity;
@@ -42,6 +44,10 @@ export type WorkflowSetVerificationResult = {
 const terminalStepTypes = new Set<ActionStep["type"]>(["complete", "redirect", "handoff"]);
 const providerStepTypes = new Set<ActionStep["type"]>(["lookup", "api_action", "book"]);
 const mutatingStepTypes = new Set<ActionStep["type"]>(["api_action", "book", "generate_link", "create_lead", "notify"]);
+const supportedStepTypes = new Set<ActionStep["type"]>([
+  "ask", "capture", "form", "knowledge", "condition", "decision", "lookup", "recommend", "select", "confirm",
+  "api_action", "create_lead", "book", "generate_link", "redirect", "notify", "handoff", "complete",
+]);
 
 function stepTargets(action: ActionFlow, step: ActionStep): string[] {
   const targets = new Set<string>();
@@ -102,6 +108,7 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
   for (const step of steps) {
     if (byId.has(step.id)) issues.push(issue("duplicate_step_id", `Workflow step id is duplicated: ${step.id}`, step.id));
     else byId.set(step.id, step);
+    if (!supportedStepTypes.has(step.type)) issues.push(issue("unsupported_step_type", `Workflow step ${step.id} uses an unsupported type`, step.id));
     if (containsWorkflowPlaceholder(step)) issues.push(issue("placeholder_step", `Workflow step ${step.id} contains editor placeholder text`, step.id));
   }
 
@@ -146,6 +153,14 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
   for (const step of steps.filter((candidate) => reachable.has(candidate.id))) {
     if (providerStepTypes.has(step.type) && !provider && typeof step.config?.provider !== "string") issues.push(issue("provider_missing", `Provider step ${step.id} has no configured provider`, step.id));
     const config = step.config ?? {};
+    if (step.type === "lookup" && (typeof config.provider === "string" || provider)) {
+      const hasFallback = typeof config.failureBehavior === "string" && Boolean(config.failureBehavior.trim())
+        || typeof config.fallbackStepId === "string" && Boolean(config.fallbackStepId.trim());
+      if (!hasFallback) issues.push(issue("provider_fallback_missing", `Provider step ${step.id} has no explicit fallback behavior`, step.id));
+      if (typeof config.fallbackStepId === "string" && config.fallbackStepId && !byId.has(config.fallbackStepId)) {
+        issues.push(issue("provider_fallback_missing", `Provider step ${step.id} points to an unknown fallback step`, step.id));
+      }
+    }
     if (config.requiresProviderResult === true) {
       const sourceId = typeof config.providerResultStepId === "string"
         ? config.providerResultStepId

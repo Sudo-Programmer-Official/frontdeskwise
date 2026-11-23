@@ -19099,7 +19099,8 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   const previousWorkflow = previousAction.completion.workflow;
   const previousHasSteps = (previousAction.steps?.length ?? 0) > 0;
   const previousVerification = previousHasSteps ? verifyWorkflowDefinition(previousAction) : null;
-  if (previousHasSteps && previousVerification?.ok) {
+  const previousHasOwnerFacingLabels = Boolean(previousAction.steps?.every((step) => Boolean(step.label?.trim())));
+  if (previousHasSteps && previousVerification?.ok && previousHasOwnerFacingLabels) {
     // A stale Actions page can still submit Generate workflow after the
     // workflow was already persisted. Return the current workflow so the
     // owner is taken to the existing completed draft instead of seeing a
@@ -19140,9 +19141,10 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   const workflowIsolation = await workflowIsolationForAction(business, action, body);
   if (!workflowIsolation.ok) throw httpError(409, workflowIsolationMessage(workflowIsolation));
   const verification = verifyWorkflowDefinition(action);
-  if (!verification.ok) {
+  const hasOwnerFacingLabels = Boolean(action.steps?.every((step) => Boolean(step.label?.trim())));
+  if (!verification.ok || !hasOwnerFacingLabels) {
     const message = verification.issues.filter((issue) => issue.severity === "error").slice(0, 4).map((issue) => issue.message).join("; ");
-    throw httpError(400, `Workflow validation failed before persistence: ${message}`);
+    throw httpError(400, `Workflow validation failed before persistence: ${message || "Every step needs a human-readable label"}`);
   }
   const activeWorkflows = business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled");
   if (findDuplicateWorkflowName(activeWorkflows, workflowName, action.id)) {
