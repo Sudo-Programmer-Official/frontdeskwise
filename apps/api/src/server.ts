@@ -180,7 +180,7 @@ import {
 } from "./experience-signals.js";
 import { syncOnboardingRecovery } from "./onboarding-recovery.js";
 import { verifyWorkflowDefinition, verifyWorkflowSet } from "./workflow-verifier.js";
-import { findStoredWorkflow, isStoredWorkflow, workflowRecordsForBusiness } from "./workflow-records.js";
+import { findStoredWorkflow, isStoredWorkflow, workflowOwnerSchemaDiagnostics, workflowRecordsForBusiness } from "./workflow-records.js";
 import {
   createActionConnector,
   type ActionConnectorProvider,
@@ -19176,8 +19176,8 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   const previousWorkflow = previousAction.completion.workflow;
   const previousHasSteps = (previousAction.steps?.length ?? 0) > 0;
   const previousVerification = previousHasSteps ? verifyWorkflowDefinition(previousAction) : null;
-  const previousHasOwnerFacingLabels = Boolean(previousAction.steps?.every((step) => Boolean(step.label?.trim())));
-  if (previousHasSteps && previousVerification?.ok && previousHasOwnerFacingLabels) {
+  const previousOwnerSchemaDiagnostics = workflowOwnerSchemaDiagnostics(previousAction);
+  if (previousHasSteps && previousVerification?.ok && previousOwnerSchemaDiagnostics.length === 0) {
     // A stale Actions page can still submit Generate workflow after the
     // workflow was already persisted. Return the current workflow so the
     // owner is taken to the existing completed draft instead of seeing a
@@ -19251,8 +19251,18 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
   // not successful if its immediate authoritative read cannot return it.
   const committedBusiness = await getBusiness(params.slug);
   const committedWorkflow = findStoredWorkflow(committedBusiness.actions, action.id);
-  if (!committedWorkflow || committedWorkflow.steps?.length !== action.steps.length) {
-    throw httpError(500, "Workflow was saved but could not be read back with its complete step definition");
+  const committedOwnerSchemaDiagnostics = committedWorkflow ? workflowOwnerSchemaDiagnostics(committedWorkflow) : [{ code: "missing_steps" as const }];
+  const committedVerification = committedWorkflow ? verifyWorkflowDefinition(committedWorkflow) : null;
+  if (!committedWorkflow || committedWorkflow.steps?.length !== action.steps.length || committedOwnerSchemaDiagnostics.length > 0 || !committedVerification?.ok) {
+    app.log.error({
+      businessId: business.id,
+      workflowId: action.id,
+      expectedStepCount: action.steps.length,
+      actualStepCount: committedWorkflow?.steps?.length ?? 0,
+      ownerSchemaDiagnostics: committedOwnerSchemaDiagnostics,
+      verificationIssues: committedVerification?.issues ?? [{ code: "missing_workflow_record" }],
+    }, "Generated workflow read-after-write failed validation");
+    throw httpError(500, "Workflow setup could not be completed. Please try again.");
   }
   return reply.code(201).send({ action: committedWorkflow, workflow: await ownerWorkflowRecord(committedBusiness, committedWorkflow), created: true, idempotent: false });
 });

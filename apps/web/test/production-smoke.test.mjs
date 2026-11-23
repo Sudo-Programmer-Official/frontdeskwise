@@ -683,10 +683,13 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(workflowWorkspace, /workflows/);
   assert.match(workflowWorkspace, /clientRequestId/);
   assert.match(workflowWorkspace, /Creating your customer journey/);
+  assert.match(workflowWorkspace, /We couldn’t finish setting up this workflow/);
+  assert.match(workflowWorkspace, /reportWorkflowGenerationDiagnostics/);
+  assert.doesNotMatch(workflowWorkspace, /complete step definition/);
   assert.match(apiServer, /clientRequestId is required for generated workflow creation/);
   assert.match(apiServer, /reused: true/);
   assert.match(apiServer, /previousWorkflow\?\.creationRequestId === clientRequestId/);
-  assert.match(apiServer, /previousHasOwnerFacingLabels/);
+  assert.match(apiServer, /workflowOwnerSchemaDiagnostics/);
   assert.match(apiServer, /allowStaleContextVersion: true/);
   assert.match(workflowIsolation, /allowStaleContextVersion/);
   assert.match(workflowWorkspace, /businessContext: props\.businessContext \?\? workflowContextPayload/);
@@ -696,7 +699,7 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(workflowWorkspace, /Loading workflows…/);
   assert.match(apiServer, /app\.get\("\/api\/v1\/demo\/:slug\/workflows"/);
   assert.match(apiServer, /app\.get\("\/api\/v1\/demo\/:slug\/workflows\/:workflowId"/);
-  assert.match(apiServer, /Workflow was saved but could not be read back/);
+  assert.match(apiServer, /Generated workflow read-after-write failed validation/);
   assert.match(apiServer, /ownerWorkflowRecord/);
   assert.match(workflowVerifier, /provider_fallback_missing/);
   assert.match(apiServer, /workflowActionId/);

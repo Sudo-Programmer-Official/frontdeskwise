@@ -3,6 +3,7 @@ import { ArrowRight, Check, ChevronDown, GitBranch, Plus, Sparkles, Trash2, X } 
 import { ENROLLMENT_WORKFLOW_GOAL, generateWorkflow, preserveWorkflowGoal, templateSteps, validateWorkflowGeneration, workflowGenerationCacheKey } from "../workflow-generator.js";
 import { validateWorkflowTenantContext, WORKFLOW_CONTEXT_REFRESH_MESSAGE } from "../workflow-tenant-context.js";
 const { defineProps, defineEmits, } = {};
+const WORKFLOW_GENERATION_RETRY_MESSAGE = "We couldn’t finish setting up this workflow. Please try again.";
 const props = defineProps();
 const emit = defineEmits();
 const selectedWorkflowId = ref("");
@@ -804,6 +805,13 @@ function workflowGenerationContext(action) {
         businessName,
     };
 }
+function reportWorkflowGenerationDiagnostics(stage, details) {
+    // Keep step-level diagnostics available to operators without exposing
+    // schema names, ids, or validation internals in owner-facing copy.
+    if (typeof console !== "undefined" && typeof console.error === "function") {
+        console.error(`[workflow-generation:${stage}]`, details);
+    }
+}
 function workflowTenantContext(action, createWorkflowBusinessId, createWorkflowOrganizationId) {
     return validateWorkflowTenantContext({
         selectedBusinessId: props.selectedBusinessId,
@@ -947,7 +955,13 @@ async function createWorkflow() {
     try {
         const generated = generatedWorkflowFor(action);
         if (!generated.validation.ok) {
-            createWorkflowError.value = `The generated workflow needs review before it can be saved: ${generated.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
+            reportWorkflowGenerationDiagnostics("client-validation", {
+                actionId: action.id,
+                workflowName: requestedWorkflowName,
+                issues: generated.validation.issues,
+                stepSummary: generated.steps.map((step, index) => ({ index: index + 1, id: step.id, type: step.type, label: step.label ?? null })),
+            });
+            createWorkflowError.value = WORKFLOW_GENERATION_RETRY_MESSAGE;
             return;
         }
         const clientRequestId = createWorkflowRequestId.value || (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -1008,12 +1022,22 @@ async function createWorkflow() {
             refreshWorkflowContext();
             return;
         }
-        if (!response.ok || (!payload.workflow && !payload.action))
-            throw new Error(payload.error ?? "Could not create this workflow.");
+        if (!response.ok || (!payload.workflow && !payload.action)) {
+            const serverMessage = payload.error ?? "Could not create this workflow.";
+            if (!response.ok && /workflow|step|schema|validation|internal server error/i.test(serverMessage))
+                throw new Error(WORKFLOW_GENERATION_RETRY_MESSAGE);
+            throw new Error(serverMessage);
+        }
         const savedWorkflow = payload.workflow ?? payload.action;
         const persistedValidation = validateWorkflowGeneration({ steps: (savedWorkflow.steps ?? []), fields: savedWorkflow.fields ?? [] });
         if (!persistedValidation.ok || !(savedWorkflow.steps?.length ?? 0)) {
-            throw new Error("The generated workflow was not returned with a complete step definition. Nothing was opened; try generation again.");
+            reportWorkflowGenerationDiagnostics("read-after-write", {
+                actionId: action.id,
+                workflowId: savedWorkflow.workflowId ?? savedWorkflow.id,
+                issues: persistedValidation.issues,
+                stepSummary: (savedWorkflow.steps ?? []).map((step, index) => ({ index: index + 1, id: step.id ?? null, type: step.type ?? null, label: step.label ?? null })),
+            });
+            throw new Error(WORKFLOW_GENERATION_RETRY_MESSAGE);
         }
         locallyCreatedAction.value = savedWorkflow;
         workflowDraft.value = clone(savedWorkflow);
@@ -1665,7 +1689,12 @@ function generateStarter() {
         : preserveWorkflowGoal(workflowDescription.value) ?? defaultBusinessWorkflowDescription();
     const result = generateWorkflow(ownerGoal, [], generationContext);
     if (!result.validation.ok) {
-        workflowSaveError.value = `The generated workflow needs review before it can be saved: ${result.validation.issues.slice(0, 3).map((issue) => issue.message).join("; ")}`;
+        reportWorkflowGenerationDiagnostics("editor-validation", {
+            workflowId: workflowDraft.value.id,
+            issues: result.validation.issues,
+            stepSummary: result.steps.map((step, index) => ({ index: index + 1, id: step.id, type: step.type, label: step.label ?? null })),
+        });
+        workflowSaveError.value = WORKFLOW_GENERATION_RETRY_MESSAGE;
         workflowVerificationOpen.value = true;
         return;
     }

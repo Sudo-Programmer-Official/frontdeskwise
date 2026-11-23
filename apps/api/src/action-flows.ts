@@ -305,19 +305,19 @@ const canonicalEnrollmentGoal = "Help parents find the right swim lesson for the
 
 function canonicalEnrollmentSteps(): ActionStep[] {
   return [
-    { id: "customer-type", type: "capture", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
-    { id: "student-age", type: "capture", fieldKey: "child_age" },
-    { id: "student-ability", type: "capture", fieldKey: "ability" },
-    { id: "student-goal", type: "capture", fieldKey: "goal" },
-    { id: "student-location", type: "capture", fieldKey: "location" },
-    { id: "student-schedule", type: "capture", fieldKey: "schedule_preference" },
+    { id: "customer-type", type: "capture", label: "Customer type", question: "Is this for a new student or someone already enrolled?", fieldKey: "customer_type", config: { repeatableEntity: true, entityType: "student", entityLabel: "child", participantFieldKeys: ["customer_type", "child_age", "ability", "goal"], maxParticipants: 8 } },
+    { id: "student-age", type: "capture", label: "Child’s age", question: "How old is your child?", fieldKey: "child_age" },
+    { id: "student-ability", type: "capture", label: "Swimming ability", question: "How comfortable is your child in the water?", fieldKey: "ability" },
+    { id: "student-goal", type: "capture", label: "Lesson goal", question: "What would you like your child to work toward?", fieldKey: "goal" },
+    { id: "student-location", type: "capture", label: "Location or ZIP code", question: "What location or ZIP code should I use to find classes?", fieldKey: "location" },
+    { id: "student-schedule", type: "capture", label: "Schedule preference", question: "Which days or schedule usually work best?", fieldKey: "schedule_preference" },
     { id: "registration-options", type: "lookup", label: "Find matching classes", config: { provider: "jackrabbit", resourceType: "registration", programField: "program", locationField: "location", dayField: "schedule_preference", searchFields: "child_age, ability, goal, location, schedule_preference", includeWaitlist: true, failureBehavior: "capture_lead", fallbackStepId: "parent-contact", providerUnavailableBehavior: "capture_request_and_notify" } },
     { id: "class-recommendations", type: "recommend", label: "Present matching classes", question: "I found these matching classes. Which one would you like to consider?", config: { sourceStepId: "registration-options", providerResultStepId: "registration-options", requiresProviderResult: true, maxResults: 5 } },
     { id: "class-selection", type: "select", label: "Let visitor select a class", question: "Reply with the number of the class you want.", config: { sourceStepId: "registration-options", providerResultStepId: "registration-options", requiresProviderResult: true, maxResults: 5 } },
     { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"], ensureContact: true, contactFields: ["email", "phone"], providerFallback: true } },
     { id: "save-lead", type: "create_lead", label: "Save parent request", config: { ensureContact: true, failureBehavior: "handoff" } },
-    { id: "enrollment-confirm", type: "confirm", question: "I have the class details. Shall I prepare the registration link?", config: { requiresSelection: true, requiresVerifiedProviderSelection: true } },
-    { id: "registration-link", type: "generate_link", label: "Generate registration link", config: { provider: "jackrabbit", completion: "external_provider", requiresSelection: true, requiresVerifiedProviderSelection: true, requiresContactBeforeHandoff: true } },
+    { id: "enrollment-confirm", type: "confirm", label: "Confirm registration path", question: "I have the class details. Shall I prepare the registration link?", config: { requiresSelection: true, requiresVerifiedProviderSelection: true } },
+    { id: "registration-link", type: "generate_link", label: "Generate registration link", config: { provider: "jackrabbit", completion: "external_provider", requiresSelection: true, requiresVerifiedProviderSelection: true, requiresContactBeforeHandoff: true, failureBehavior: "handoff" } },
     { id: "enrollment-complete", type: "complete", label: "Complete workflow", config: { requiresCompletionUrl: true } },
   ];
 }
@@ -647,7 +647,12 @@ export function normalizeCanonicalEnrollmentWorkflow(action: ActionFlow): Action
   };
   addField(field("ability", "Swimming ability", "select", "How comfortable is the student in the water?", true, ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"]), "child_age");
   addField(field("goal", "Lesson goal", "select", "What would you like the student to work on?", true, ["Learn to swim", "Water safety", "Build water confidence", "Improve technique", "Have fun"]), "ability");
-  const steps = action.origin === "discovered" || !action.steps?.length
+  // A discovered Action is the source for the owner’s generated workflow, but
+  // once the owner has named that workflow we must preserve the generated
+  // definition. Replacing it on the read path silently returned the old
+  // canonical scaffold (including unlabeled steps) after a successful create.
+  const ownerGeneratedWorkflow = Boolean(action.completion.workflow?.name?.trim());
+  const steps = (action.origin === "discovered" && !ownerGeneratedWorkflow) || !action.steps?.length
     ? canonicalEnrollmentSteps()
     : action.steps.map((step) => ({ ...step, config: step.config ? { ...step.config } : undefined }));
   const firstStep = steps[0];
