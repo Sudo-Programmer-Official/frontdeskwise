@@ -2936,8 +2936,30 @@ function clearTestResponse() {
 
 function runRoutedTestQuestion(question: string) {
   const normalizedQuestion = question.trim();
-  if (!normalizedQuestion || routedTestQuestion.value === normalizedQuestion && testAnswer.value) return;
+  // A routed question is a command, not persistent conversation state. The
+  // route can be applied more than once while auth/workspace data settles, so
+  // mark it as consumed before starting the async request. Previously we only
+  // stopped re-entry after an answer existed, which allowed duplicate requests
+  // while the test surface was still showing "Thinking…".
+  if (!normalizedQuestion || routedTestQuestion.value === normalizedQuestion) return;
   routedTestQuestion.value = normalizedQuestion;
+
+  // Consume the one-shot query immediately. This prevents a later route
+  // re-application (for example after session/workspace hydration) from
+  // starting the same test again, while preserving the current screen via a
+  // replaceState instead of a full navigation.
+  const currentRoute = route.value;
+  if (currentRoute.kind === "workspace" && currentRoute.testQuestion === normalizedQuestion) {
+    const { testQuestion: _testQuestion, ...routeWithoutQuestion } = currentRoute;
+    commitRoute(routeWithoutQuestion, true, false);
+  } else if (currentRoute.kind === "demo" && currentRoute.testQuestion === normalizedQuestion) {
+    const { testQuestion: _testQuestion, ...routeWithoutQuestion } = currentRoute;
+    commitRoute(routeWithoutQuestion, true, false);
+  } else if (currentRoute.kind === "agent-shortcut" && currentRoute.testQuestion === normalizedQuestion) {
+    const { testQuestion: _testQuestion, ...routeWithoutQuestion } = currentRoute;
+    commitRoute(routeWithoutQuestion, true, false);
+  }
+
   testQuestion.value = normalizedQuestion;
   clearTestResponse();
   testQuestion.value = normalizedQuestion;
