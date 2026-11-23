@@ -110,8 +110,10 @@ test("Actions and Workflows share current relationships and provider readiness",
   assert.match(app, /!providerIsConnected\(actionProvider\(action\)\)/);
   assert.match(app, /normalizeActionWorkflowProjection/);
   assert.match(app, /actionHasCurrentWorkflow/);
-  assert.match(workflowWorkspace, /typeof action\.workflowCount === "number"/);
-  assert.match(workflowWorkspace, /actionHasWorkflow\(action\)/);
+  assert.match(app, /loadWorkflows/);
+  assert.match(app, /workflowRecords/);
+  assert.match(workflowWorkspace, /authoritativeWorkflows/);
+  assert.match(workflowWorkspace, /workflowForAction/);
   assert.match(workflowWorkspace, /actionCanStartWorkflow/);
   assert.match(workflowWorkspace, /action\.archived === true/);
   assert.match(workflowWorkspace, /action\.reviewReason === "source_removed"/);
@@ -688,13 +690,14 @@ test("Workflows exposes an owner-safe step builder connected to Actions", () => 
   assert.match(apiServer, /allowStaleContextVersion: true/);
   assert.match(workflowIsolation, /allowStaleContextVersion/);
   assert.match(workflowWorkspace, /businessContext: props\.businessContext \?\? workflowContextPayload/);
-  assert.match(workflowWorkspace, /isJustCreatedWorkflow/);
-  assert.match(workflowWorkspace, /complete create response over that row/);
-  assert.match(workflowWorkspace, /workflowCount: localAction\.workflowCount/);
-  assert.match(workflowWorkspace, /const explicitAction = props\.initialActionId/);
-  assert.match(workflowWorkspace, /create endpoint returns a complete, validated workflow/);
-  assert.match(workflowWorkspace, /hasProjectedWorkflow/);
-  assert.match(workflowWorkspace, /stale workflow id/);
+  assert.match(workflowWorkspace, /props\.workflows/);
+  assert.match(workflowWorkspace, /emit\("open-workflow", savedWorkflow\.workflowId/);
+  assert.match(workflowWorkspace, /workflows\/\$\{encodeURIComponent/);
+  assert.match(workflowWorkspace, /Loading workflows…/);
+  assert.match(apiServer, /app\.get\("\/api\/v1\/demo\/:slug\/workflows"/);
+  assert.match(apiServer, /app\.get\("\/api\/v1\/demo\/:slug\/workflows\/:workflowId"/);
+  assert.match(apiServer, /Workflow was saved but could not be read back/);
+  assert.match(apiServer, /ownerWorkflowRecord/);
   assert.match(workflowVerifier, /provider_fallback_missing/);
   assert.match(apiServer, /workflowActionId/);
   for (const marker of [

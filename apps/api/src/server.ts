@@ -180,6 +180,7 @@ import {
 } from "./experience-signals.js";
 import { syncOnboardingRecovery } from "./onboarding-recovery.js";
 import { verifyWorkflowDefinition, verifyWorkflowSet } from "./workflow-verifier.js";
+import { findStoredWorkflow, isStoredWorkflow, workflowRecordsForBusiness } from "./workflow-records.js";
 import {
   createActionConnector,
   type ActionConnectorProvider,
@@ -18923,6 +18924,80 @@ async function workflowIsolationForAction(
   });
 }
 
+type OwnerWorkflowRecord = ActionFlow & {
+  workflowId: string;
+  actionId: string;
+  goal: string;
+  providerDependency: string | null;
+  publicationState: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  status: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  setupStatus: "DRAFT" | "NEEDS_SETUP" | "READY";
+  workflowStatus: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  workflowSafety?: { status: "blocked"; code?: string; identifier?: string };
+};
+
+async function ownerWorkflowRecord(business: Business, action: ActionFlow): Promise<OwnerWorkflowRecord> {
+  const readiness = await actionReadinessForBusiness(business, action);
+  const workflowIsolation = await workflowIsolationForAction(business, action);
+  const capability = projectActionCapability(business.actions, action);
+  const publishedAction = business.publishedActions?.find((candidate) => candidate.id === action.id || candidate.key === action.key) ?? null;
+  const workflowStatus: OwnerWorkflowRecord["workflowStatus"] = !business.publishedAgentConfig
+    ? "DRAFT"
+    : publishedAction
+      ? workflowConfigHash(action) === workflowConfigHash(publishedAction) ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES"
+      : agentPublishingPayload(business).status === "LIVE" ? "LIVE" : "LIVE_WITH_UNPUBLISHED_CHANGES";
+  const actionId = action.completion.workflow?.actionId?.trim() || action.id;
+  const blockedProjection = workflowIsolation.ok
+    ? {}
+    : {
+      workflowSafety: { status: "blocked" as const, code: workflowIsolation.code, identifier: workflowIsolation.identifier },
+      // Do not expose a known-contaminated workflow to the owner editor. The
+      // record remains addressable so the owner can regenerate it explicitly.
+      name: `${business.name} workflow`,
+      description: "This workflow was blocked because it referenced a different business context. Regenerate it from the active Business Brain.",
+      triggerPhrases: [],
+      triggerIntents: [],
+      provider: null,
+      destination: null,
+      steps: [],
+      fields: [],
+      completion: { createLead: false, leadStatus: "new" as const, message: "Regenerate this workflow from the active Business Brain.", notifyStaff: false },
+      executionMode: "FORM_FLOW" as const,
+    };
+  return {
+    ...action,
+    ...blockedProjection,
+    workflowId: action.id,
+    actionId,
+    goal: action.description,
+    providerDependency: actionProviderForFlow(action),
+    publicationState: workflowStatus,
+    status: workflowStatus,
+    readiness,
+    setupStatus: capability.setupStatus,
+    workflowStatus,
+  };
+}
+
+app.get("/api/v1/demo/:slug/workflows", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  const workflowActions = workflowRecordsForBusiness(business.actions);
+  const workflows = await Promise.all(workflowActions.map((action) => ownerWorkflowRecord(business, action)));
+  return { businessId: business.id, workflows };
+});
+
+app.get("/api/v1/demo/:slug/workflows/:workflowId", async (request) => {
+  const params = request.params as { slug?: string; workflowId?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  const workflowId = requiredString(params.workflowId, "workflowId", 120);
+  const action = findStoredWorkflow(business.actions, workflowId);
+  if (!action) throw httpError(404, "Workflow not found");
+  return { businessId: business.id, workflow: await ownerWorkflowRecord(business, action) };
+});
+
 app.get("/api/v1/demo/:slug/actions", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -19109,7 +19184,7 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
     // duplicate-creation error.
     return reply.code(200).send({
       action: previousAction,
-      workflow: previousAction,
+      workflow: await ownerWorkflowRecord(business, previousAction),
       reused: true,
       idempotent: previousWorkflow?.creationRequestId === clientRequestId,
     });
@@ -19171,15 +19246,24 @@ app.post("/api/v1/demo/:slug/workflows", async (request, reply) => {
     newValue: { workflow: workflowName, creationRequestId: clientRequestId },
     reason: "owner_override",
   });
-  return reply.code(201).send({ action, workflow: action, created: true, idempotent: false });
+  // Verify the persisted record through the same database-backed read path
+  // used by the Workflows page before reporting success. A workflow create is
+  // not successful if its immediate authoritative read cannot return it.
+  const committedBusiness = await getBusiness(params.slug);
+  const committedWorkflow = findStoredWorkflow(committedBusiness.actions, action.id);
+  if (!committedWorkflow || committedWorkflow.steps?.length !== action.steps.length) {
+    throw httpError(500, "Workflow was saved but could not be read back with its complete step definition");
+  }
+  return reply.code(201).send({ action: committedWorkflow, workflow: await ownerWorkflowRecord(committedBusiness, committedWorkflow), created: true, idempotent: false });
 });
 
-app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
-  const params = request.params as { slug?: string; actionId?: string };
+async function updateActionOrWorkflow(request: FastifyRequest) {
+  const params = request.params as { slug?: string; actionId?: string; workflowId?: string };
   const business = await getBusiness(params.slug);
   const actorUserId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
-  const actionIndex = business.actions.findIndex((item) => item.id === requiredString(params.actionId, "actionId", 120));
+  const targetId = params.actionId ?? params.workflowId;
+  const actionIndex = business.actions.findIndex((item) => item.id === requiredString(targetId, params.workflowId ? "workflowId" : "actionId", 120));
   if (actionIndex < 0) throw httpError(404, "Action not found");
   const previousAction = business.actions[actionIndex];
   const body = asRecord(request.body);
@@ -19244,7 +19328,10 @@ app.put("/api/v1/demo/:slug/actions/:actionId", async (request) => {
     reason: action.reviewReason,
   });
   return { action, primaryActionCleared };
-});
+}
+
+app.put("/api/v1/demo/:slug/actions/:actionId", updateActionOrWorkflow);
+app.put("/api/v1/demo/:slug/workflows/:workflowId", updateActionOrWorkflow);
 
 app.post("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
   const params = request.params as { slug?: string; actionId?: string };
@@ -19312,12 +19399,12 @@ app.delete("/api/v1/demo/:slug/actions/:actionId/primary", async (request) => {
   return { businessId: business.id, primaryActionId: null };
 });
 
-app.delete("/api/v1/demo/:slug/actions/:actionId", async (request) => {
-  const params = request.params as { slug?: string; actionId?: string };
+async function archiveActionOrWorkflow(request: FastifyRequest) {
+  const params = request.params as { slug?: string; actionId?: string; workflowId?: string };
   const business = await getBusiness(params.slug);
   const actorUserId = await requireDemoOwner(business, request);
   requireWritableBusiness(business);
-  const actionId = requiredString(params.actionId, "actionId", 120);
+  const actionId = requiredString(params.actionId ?? params.workflowId, params.workflowId ? "workflowId" : "actionId", 120);
   const actionIndex = business.actions.findIndex((item) => item.id === actionId);
   if (actionIndex < 0) throw httpError(404, "Action not found");
   const action = business.actions[actionIndex];
@@ -19356,7 +19443,10 @@ app.delete("/api/v1/demo/:slug/actions/:actionId", async (request) => {
     reason: "owner_override",
   });
   return { ok: true, actionId, archived: true };
-});
+}
+
+app.delete("/api/v1/demo/:slug/actions/:actionId", archiveActionOrWorkflow);
+app.delete("/api/v1/demo/:slug/workflows/:workflowId", archiveActionOrWorkflow);
 
 app.get("/api/v1/demo/:slug/action-resources", async (request) => {
   const params = request.params as { slug?: string };

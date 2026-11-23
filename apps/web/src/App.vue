@@ -390,6 +390,12 @@ interface ActionFlow {
   updatedAt: string;
   isPrimary?: boolean;
   workflowStatus?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  workflowId?: string;
+  actionId?: string;
+  goal?: string;
+  providerDependency?: string | null;
+  publicationState?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  status?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
   setupStatus?: "DRAFT" | "NEEDS_SETUP" | "READY";
   workflowCount?: number;
   workflowIds?: string[];
@@ -1564,11 +1570,15 @@ const mcpLoading = ref(false);
 const mcpError = ref("");
 const mcpMessage = ref("");
 const actionFlows = ref<ActionFlow[]>([]);
+const workflowRecords = ref<ActionFlow[]>([]);
 const actionTemplates = ref<ActionTemplate[]>([]);
 const actionDeliveries = ref<ActionDelivery[]>([]);
 const actionsLoading = ref(false);
 const actionsError = ref("");
 const actionsMessage = ref("");
+const workflowsLoading = ref(false);
+const workflowsError = ref("");
+let workflowsLoadGeneration = 0;
 const selectedActionId = ref("");
 const actionDraft = ref<ActionFlow | null>(null);
 const actionEditorEntry = ref<ActionEditorEntry>("actions");
@@ -3466,6 +3476,10 @@ function clearWorkspaceState() {
   integrations.value = [];
   mcpConnections.value = [];
   actionFlows.value = [];
+  workflowRecords.value = [];
+  workflowsLoading.value = false;
+  workflowsError.value = "";
+  workflowsLoadGeneration += 1;
   actionTemplates.value = [];
   actionDeliveries.value = [];
   selectedActionId.value = "";
@@ -5815,6 +5829,14 @@ function openWorkflowForAction(action: ActionFlow, workflowIndex = 0) {
   commitRoute(nextRoute);
 }
 
+function openWorkflowFromBuilder(workflowId: string) {
+  if (!workflowId.trim()) return;
+  const nextRoute = route.value.kind === "demo"
+    ? demoRoute(workspaceSlugForRoute(), "workflows", { workflowId: workflowId.trim() })
+    : workspaceRoute(workspaceSlugForRoute(), "workflows", { workflowId: workflowId.trim() });
+  commitRoute(nextRoute);
+}
+
 function testWorkflowFromBuilder(actionId: string) {
   const action = actionFlows.value.find((item) => item.id === actionId);
   if (action) runActionTest(action);
@@ -6120,11 +6142,33 @@ async function loadActions() {
     actionDeliveries.value = payload.deliveries ?? [];
     const selected = actionFlows.value.find((action) => action.id === selectedActionId.value) ?? null;
     selectAction(selected, selected ? actionEditorEntry.value : "actions");
+    await loadWorkflows();
   } catch (error) {
     if (loadGeneration !== actionsLoadGeneration || demoSlug.value !== slug) return;
     actionsError.value = error instanceof Error ? error.message : "Could not load conversation flows.";
   } finally {
     if (loadGeneration === actionsLoadGeneration && demoSlug.value === slug) actionsLoading.value = false;
+  }
+}
+
+async function loadWorkflows() {
+  if (!firebaseToken.value && !demoAccessToken.value) return;
+  const slug = demoSlug.value;
+  const loadGeneration = ++workflowsLoadGeneration;
+  workflowsLoading.value = true;
+  workflowsError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${encodeURIComponent(slug)}/workflows`), { headers: ownerHeaders() });
+    const payload = await response.json() as { workflows?: ActionFlow[]; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load workflows.");
+    if (loadGeneration !== workflowsLoadGeneration || demoSlug.value !== slug) return;
+    workflowRecords.value = payload.workflows ?? [];
+  } catch (error) {
+    if (loadGeneration !== workflowsLoadGeneration || demoSlug.value !== slug) return;
+    workflowsError.value = error instanceof Error ? error.message : "Could not load workflows.";
+    workflowRecords.value = [];
+  } finally {
+    if (loadGeneration === workflowsLoadGeneration && demoSlug.value === slug) workflowsLoading.value = false;
   }
 }
 
@@ -9145,7 +9189,7 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'workflows'" class="workflow-workspace-shell">
           <p v-if="workflowContextRefreshMessage" class="form-error workflow-context-refresh-message" role="status">{{ workflowContextRefreshMessage }}</p>
-          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :performance-by-workflow="workflowPerformanceByAction" :initial-workflow-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowId : undefined" :initial-action-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowActionId : undefined" :agent-tone="agentTone" :agent-primary-language="primaryLanguage" :agent-citation-visibility="citationVisibility" :agent-fallback-behavior="fallbackBehavior" :agent-human-handoff-enabled="humanHandoffEnabled" :agent-proactive-enabled="proactiveEnabled" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @open-agent-behavior="selectAgentTab('behavior')" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
+          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :workflows="workflowRecords" :workflows-loading="workflowsLoading" :workflows-error="workflowsError" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :performance-by-workflow="workflowPerformanceByAction" :initial-workflow-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowId : undefined" :initial-action-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowActionId : undefined" :agent-tone="agentTone" :agent-primary-language="primaryLanguage" :agent-citation-visibility="citationVisibility" :agent-fallback-behavior="fallbackBehavior" :agent-human-handoff-enabled="humanHandoffEnabled" :agent-proactive-enabled="proactiveEnabled" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @open-workflow="openWorkflowFromBuilder" @open-agent-behavior="selectAgentTab('behavior')" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">

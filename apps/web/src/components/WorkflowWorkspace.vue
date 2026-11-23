@@ -33,6 +33,12 @@ interface WorkflowAction {
   workflowSafety?: { status?: string; code?: string; identifier?: string };
   workflowStatus?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
   setupStatus?: "DRAFT" | "NEEDS_SETUP" | "READY";
+  workflowId?: string;
+  actionId?: string;
+  goal?: string;
+  providerDependency?: string | null;
+  publicationState?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
+  status?: "DRAFT" | "LIVE" | "LIVE_WITH_UNPUBLISHED_CHANGES";
   isPrimary?: boolean;
   workflowCount?: number;
   workflowIds?: string[];
@@ -71,6 +77,9 @@ interface IntegrationLike {
 
 const props = defineProps<{
   actions: unknown[];
+  workflows: unknown[];
+  workflowsLoading?: boolean;
+  workflowsError?: string;
   integrations: unknown[];
   demoSlug: string;
   selectedBusinessId?: string | null;
@@ -98,6 +107,7 @@ const emit = defineEmits<{
   (event: "refresh"): void;
   (event: "refresh-workspace"): void;
   (event: "open-action", actionId: string): void;
+  (event: "open-workflow", workflowId: string): void;
   (event: "test-workflow", actionId: string): void;
   (event: "publish-workflow"): void;
   (event: "open-agent-behavior"): void;
@@ -249,6 +259,10 @@ function asWorkflowAction(value: unknown): WorkflowAction | null {
   return candidate as unknown as WorkflowAction;
 }
 
+function workflowIdentity(workflow: WorkflowAction): string {
+  return workflow.workflowId?.trim() || workflow.id;
+}
+
 const allActions = computed(() => {
   const actions = props.actions.map(asWorkflowAction).filter((action): action is WorkflowAction => Boolean(action));
   const localAction = locallyCreatedAction.value;
@@ -268,13 +282,34 @@ const allActions = computed(() => {
   };
   return merged;
 });
-const workflowActions = computed(() => allActions.value.filter((action) => {
-  if (action.enabled === false || action.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(action.id)) return false;
-  // The create endpoint returns a complete, validated workflow before the
-  // parent Actions projection is refreshed. Keep that authoritative response
-  // visible even if its relationship count/IDs are still stale for one read.
-  const isJustCreatedWorkflow = locallyCreatedAction.value?.id === action.id && (action.steps?.length ?? 0) > 0;
-  return isJustCreatedWorkflow || action.workflowSafety?.status === "blocked" || actionHasWorkflow(action);
+const authoritativeWorkflows = computed(() => {
+  const workflows = props.workflows.map(asWorkflowAction).filter((workflow): workflow is WorkflowAction => Boolean(workflow));
+  const localWorkflow = locallyCreatedAction.value?.steps?.length ? locallyCreatedAction.value : null;
+  if (!localWorkflow) return workflows;
+  const existingIndex = workflows.findIndex((workflow) => workflowIdentity(workflow) === workflowIdentity(localWorkflow));
+  if (existingIndex < 0) return [...workflows, localWorkflow];
+  const merged = [...workflows];
+  merged[existingIndex] = { ...workflows[existingIndex], ...localWorkflow };
+  return merged;
+});
+function workflowOwnerActionId(workflow: WorkflowAction): string {
+  const metadata = workflowCompletion(workflow).workflow;
+  const metadataActionId = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>).actionId
+    : null;
+  return workflow.actionId?.trim()
+    || (typeof metadataActionId === "string" ? metadataActionId.trim() : "")
+    || workflow.id;
+}
+function workflowForAction(actionId: string): WorkflowAction | null {
+  return authoritativeWorkflows.value.find((workflow) => {
+    if (workflow.enabled === false || workflow.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(workflowIdentity(workflow))) return false;
+    return workflowIdentity(workflow) === actionId || workflowOwnerActionId(workflow) === actionId;
+  }) ?? null;
+}
+const workflowActions = computed(() => authoritativeWorkflows.value.filter((workflow) => {
+  if (workflow.enabled === false || workflow.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(workflowIdentity(workflow))) return false;
+  return Boolean(workflow.workflowId || workflow.steps?.length || workflow.workflowSafety?.status === "blocked");
 }));
 const duplicateCreateWorkflow = computed(() => {
   const candidate = normalizeWorkflowName(createWorkflowName.value.slice(0, 160));
@@ -349,7 +384,7 @@ const suggestedCreateWorkflowAction = computed(() => {
     ?? eligibleActions.value.find((action) => workflowIntentForDescription(`${action.name} ${action.description ?? ""}`) === intent)
     ?? null;
 });
-const selectedWorkflow = computed(() => workflowActions.value.find((action) => action.id === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
+const selectedWorkflow = computed(() => workflowActions.value.find((action) => workflowIdentity(action) === selectedWorkflowId.value) ?? workflowActions.value[0] ?? null);
 const selectedWorkflowIsLive = computed(() => workflowStatus(selectedWorkflow.value ?? workflowDraft.value ?? ({} as WorkflowAction)) === "LIVE");
 
 const workflowPreferenceKey = computed(() => `frontdeskwise:last-workflow:${props.selectedBusinessId ?? props.workspaceBusinessId ?? props.businessContext?.businessId ?? props.demoSlug}`);
@@ -378,18 +413,21 @@ function workflowStatusLabel(action: WorkflowAction): string {
 
 function preferredWorkflowId(actions = workflowActions.value): string {
   const explicit = props.initialWorkflowId?.trim();
-  if (explicit && actions.some((action) => action.id === explicit)) return explicit;
+  if (explicit && actions.some((action) => workflowIdentity(action) === explicit)) return explicit;
   const explicitAction = props.initialActionId?.trim();
-  if (explicitAction && actions.some((action) => action.id === explicitAction)) return explicitAction;
+  if (explicitAction) {
+    const actionWorkflow = actions.find((workflow) => workflow.id === explicitAction || workflow.workflowId === explicitAction || workflowOwnerActionId(workflow) === explicitAction);
+    if (actionWorkflow) return workflowIdentity(actionWorkflow);
+  }
   const remembered = readLastSelectedWorkflowId();
-  if (remembered && actions.some((action) => action.id === remembered)) return remembered;
+  if (remembered && actions.some((action) => workflowIdentity(action) === remembered)) return remembered;
   const live = actions.find((action) => workflowStatus(action) === "LIVE" && action.isPrimary)
     ?? actions.find((action) => workflowStatus(action) === "LIVE");
-  if (live) return live.id;
+  if (live) return workflowIdentity(live);
   const mostRecentlyEdited = [...actions]
     .filter((action) => action.updatedAt)
     .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))[0];
-  return mostRecentlyEdited?.id ?? actions[0]?.id ?? "";
+  return mostRecentlyEdited ? workflowIdentity(mostRecentlyEdited) : actions[0] ? workflowIdentity(actions[0]) : "";
 }
 
 function rememberSelectedWorkflow(id: string): void {
@@ -755,28 +793,7 @@ function workflowDisplayName(action: WorkflowAction): string {
 }
 
 function actionHasWorkflow(action: WorkflowAction): boolean {
-  // A relationship count alone is not enough to navigate. Resolve projected
-  // workflow ids against the current business snapshot so a stale or
-  // inaccessible reference cannot send the owner to an empty builder.
-  if (typeof action.workflowCount === "number") {
-    if (action.workflowCount <= 0) {
-      // Be tolerant of an older API projection while the business snapshot is
-      // refreshing. A current Action carrying its own steps is itself a
-      // workflow record and must not be hidden behind a stale zero count.
-      return (action.steps?.length ?? 0) > 0 && action.enabled !== false && action.lifecycleStatus !== "disabled";
-    }
-    if (action.workflowIds?.length) {
-      const hasProjectedWorkflow = action.workflowIds.some((workflowId) => allActions.value.some((candidate) => candidate.id === workflowId && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"));
-      if (hasProjectedWorkflow) return true;
-      // The relationship projection can briefly contain an inaccessible or
-      // stale workflow id after creation. The action's own persisted steps and
-      // completion metadata are authoritative for the current workflow and
-      // must keep it visible after a refresh.
-      return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
-    }
-    return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
-  }
-  return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
+  return Boolean(workflowForAction(action.id));
 }
 
 function suggestedCreateWorkflowName(): string {
@@ -985,21 +1002,15 @@ async function createWorkflow(): Promise<void> {
     createWorkflowError.value = `A workflow named “${requestedWorkflowName}” already exists. Choose a different name or open the existing workflow.`;
     return;
   }
-  if (actionHasWorkflow(action)) {
-    const linkedWorkflow = action.workflowIds?.map((workflowId) => allActions.value.find((candidate) => candidate.id === workflowId)).find((candidate): candidate is WorkflowAction => Boolean(candidate && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"))
-      ?? ((action.steps?.length ?? 0) > 0 ? action : null);
-    if (linkedWorkflow) {
-      selectedWorkflowId.value = linkedWorkflow.id;
-      workflowDraft.value = clone(linkedWorkflow);
-      workflowDraft.value.steps ??= [];
-      draftSourceId = linkedWorkflow.id;
-      draftIsDirty.value = false;
-      createWorkflowOpen.value = false;
-      return;
-    }
-    // The relationship projection is stale or scoped incorrectly. Do not
-    // navigate to the Action record and pretend it is a workflow; let the
-    // generated-workflow endpoint reconcile the current record instead.
+  const existingWorkflow = workflowForAction(action.id);
+  if (existingWorkflow) {
+    selectedWorkflowId.value = workflowIdentity(existingWorkflow);
+    workflowDraft.value = clone(existingWorkflow);
+    workflowDraft.value.steps ??= [];
+    draftSourceId = workflowIdentity(existingWorkflow);
+    draftIsDirty.value = false;
+    createWorkflowOpen.value = false;
+    return;
   }
   const createWorkflowBusinessId = props.selectedBusinessId ?? null;
   const createWorkflowOrganizationId = props.organizationId ?? props.businessContext?.organizationId ?? null;
@@ -1072,23 +1083,24 @@ async function createWorkflow(): Promise<void> {
       refreshWorkflowContext();
       return;
     }
-    if (!response.ok || !payload.action) throw new Error(payload.error ?? "Could not create this workflow.");
-    const savedWorkflow = payload.action;
+    if (!response.ok || (!payload.workflow && !payload.action)) throw new Error(payload.error ?? "Could not create this workflow.");
+    const savedWorkflow = payload.workflow ?? payload.action!;
     const persistedValidation = validateWorkflowGeneration({ steps: (savedWorkflow.steps ?? []) as unknown as WorkflowStepDraft[], fields: savedWorkflow.fields ?? [] });
     if (!persistedValidation.ok || !(savedWorkflow.steps?.length ?? 0)) {
       throw new Error("The generated workflow was not returned with a complete step definition. Nothing was opened; try generation again.");
     }
     locallyCreatedAction.value = savedWorkflow;
     workflowDraft.value = clone(savedWorkflow);
-    draftSourceId = savedWorkflow.id;
+    draftSourceId = workflowIdentity(savedWorkflow);
     draftIsDirty.value = false;
     selectedStepIndex.value = savedWorkflow.steps?.length ? 0 : -1;
-    selectedWorkflowId.value = savedWorkflow.id;
+    selectedWorkflowId.value = workflowIdentity(savedWorkflow);
     workflowSaveMessage.value = payload.reused
       ? `Opened the existing workflow linked to ${action.name}.`
       : `Workflow created and linked to ${action.name}.`;
     createWorkflowOpen.value = false;
     createWorkflowRequestId.value = "";
+    emit("open-workflow", savedWorkflow.workflowId ?? savedWorkflow.id);
     emit("refresh");
   } catch (error) {
     createWorkflowError.value = error instanceof Error ? error.message : "Could not create this workflow.";
@@ -1116,14 +1128,15 @@ async function confirmDeleteWorkflow(): Promise<void> {
   deleteWorkflowLoading.value = true;
   deleteWorkflowError.value = "";
   try {
-    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(workflow.id)}`), {
+    const workflowId = workflowIdentity(workflow);
+    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/workflows/${encodeURIComponent(workflowId)}`), {
       method: "DELETE",
       headers: props.ownerHeaders(),
     });
     const payload = await response.json() as { error?: string };
     if (!response.ok) throw new Error(payload.error ?? "Could not delete this workflow.");
-    hiddenWorkflowIds.value = new Set([...hiddenWorkflowIds.value, workflow.id]);
-    if (locallyCreatedAction.value?.id === workflow.id) locallyCreatedAction.value = null;
+    hiddenWorkflowIds.value = new Set([...hiddenWorkflowIds.value, workflowId]);
+    if (locallyCreatedAction.value && workflowIdentity(locallyCreatedAction.value) === workflowId) locallyCreatedAction.value = null;
     selectedWorkflowId.value = "";
     workflowDraft.value = null;
     draftSourceId = "";
@@ -1139,14 +1152,23 @@ async function confirmDeleteWorkflow(): Promise<void> {
 }
 
 watch(workflowActions, () => {
-  if (!workflowActions.value.some((action) => action.id === selectedWorkflowId.value)) {
+  if (!workflowActions.value.some((action) => workflowIdentity(action) === selectedWorkflowId.value)) {
     selectedWorkflowId.value = preferredWorkflowId();
   }
   syncDraft();
 }, { immediate: true, deep: true });
 
-watch(() => props.initialActionId, (actionId) => {
-  if (!actionId || workflowActions.value.some((action) => action.id === actionId)) return;
+watch(() => props.initialWorkflowId, (workflowId) => {
+  if (workflowId && workflowActions.value.some((workflow) => workflowIdentity(workflow) === workflowId)) selectedWorkflowId.value = workflowId;
+}, { immediate: true });
+
+watch([() => props.initialActionId, () => props.workflowsLoading], ([actionId, workflowsLoading]) => {
+  if (!actionId || workflowsLoading) return;
+  const existingWorkflow = workflowActions.value.find((workflow) => workflowIdentity(workflow) === actionId || workflowOwnerActionId(workflow) === actionId);
+  if (existingWorkflow) {
+    selectedWorkflowId.value = workflowIdentity(existingWorkflow);
+    return;
+  }
   void nextTick(() => openCreateWorkflow(actionId));
 }, { immediate: true });
 
@@ -1737,7 +1759,7 @@ async function saveWorkflow() {
   workflowSaveError.value = "";
   workflowSaveMessage.value = "";
   try {
-    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/actions/${encodeURIComponent(workflowDraft.value.id)}`), {
+    const response = await fetch(props.apiUrl(`/api/v1/demo/${encodeURIComponent(props.demoSlug)}/workflows/${encodeURIComponent(workflowDraft.value.workflowId ?? workflowDraft.value.id)}`), {
       method: "PUT",
       headers: { "content-type": "application/json", ...props.ownerHeaders() },
       body: JSON.stringify({
@@ -1746,9 +1768,13 @@ async function saveWorkflow() {
         ...(props.businessContext?.contextVersion !== undefined ? { workflowContextVersion: props.businessContext.contextVersion } : {}),
       }),
     });
-    const payload = await response.json() as { error?: string; action?: WorkflowAction };
+    const payload = await response.json() as { error?: string; action?: WorkflowAction; workflow?: WorkflowAction };
     if (!response.ok) throw new Error(payload.error ?? "Could not save this workflow.");
-    if (payload.action) workflowDraft.value = clone(payload.action);
+    const savedWorkflow = payload.workflow ?? payload.action;
+    if (savedWorkflow) {
+      workflowDraft.value = clone(savedWorkflow);
+      locallyCreatedAction.value = clone(savedWorkflow);
+    }
     draftIsDirty.value = false;
     workflowSaveMessage.value = "Draft saved. Runtime will use the updated steps. Live visitors stay on the published workflow until you publish.";
     emit("refresh");
@@ -1760,7 +1786,7 @@ async function saveWorkflow() {
 }
 
 function openAction() {
-  if (workflowDraft.value) emit("open-action", workflowDraft.value.id);
+  if (workflowDraft.value) emit("open-action", workflowOwnerActionId(workflowDraft.value));
 }
 
 function continueSetup() {
@@ -1827,14 +1853,16 @@ onMounted(() => {
       </div>
     </div>
     <p v-if="publishError" class="form-error workflow-publish-error" role="alert">{{ publishError }}</p>
+    <p v-if="workflowsError && !workflowDraft" class="form-error workflow-publish-error" role="alert">{{ workflowsError }}</p>
 
-    <div :class="['workflow-layout', { 'workflow-layout-empty': !workflowActions.length }]">
+    <div :class="['workflow-layout', { 'workflow-layout-empty': !workflowsLoading && !workflowActions.length && !workflowDraft }]">
+      <div v-if="workflowsLoading && !workflowActions.length && !workflowDraft" class="workflow-empty workflow-layout-empty-state" role="status"><span class="workflow-empty-icon"><GitBranch :size="28" :stroke-width="1.8" aria-hidden="true" /></span><strong>Loading workflows…</strong><p>Reading the latest saved journeys for this business.</p></div>
       <div v-if="workflowActions.length" class="workflow-selector-bar">
         <div class="workflow-selector-copy"><p class="eyebrow">Your workflows</p><strong>{{ workflowActions.length }} configured</strong></div>
-        <label class="workflow-library-select">Switch workflow<select v-model="selectedWorkflowId"><option v-for="action in workflowActions" :key="action.id" :value="action.id">{{ workflowDisplayName(action) }} · {{ workflowStatusLabel(action) }}</option></select></label>
+        <label class="workflow-library-select">Switch workflow<select v-model="selectedWorkflowId"><option v-for="action in workflowActions" :key="workflowIdentity(action)" :value="workflowIdentity(action)">{{ workflowDisplayName(action) }} · {{ workflowStatusLabel(action) }}</option></select></label>
         <div class="workflow-selector-actions"><button v-if="workflowDraft" class="text-button workflow-delete-action" type="button" @click="requestDeleteWorkflow"><Trash2 :size="14" :stroke-width="1.9" aria-hidden="true" />Delete workflow</button><button class="outline-button small" type="button" @click="openCreateWorkflow"><Plus :size="14" :stroke-width="1.9" aria-hidden="true" />Create workflow</button></div>
       </div>
-      <div v-else class="workflow-empty workflow-layout-empty-state"><span class="workflow-empty-icon"><GitBranch :size="28" :stroke-width="1.8" aria-hidden="true" /></span><strong>No workflows yet.</strong><p>Build your first guided customer journey with questions, branches, provider lookups, and a clear next step.</p><button class="primary-button" type="button" @click="openCreateWorkflow"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" />Create workflow</button></div>
+      <div v-else-if="!workflowsLoading && !workflowsError && !workflowDraft" class="workflow-empty workflow-layout-empty-state"><span class="workflow-empty-icon"><GitBranch :size="28" :stroke-width="1.8" aria-hidden="true" /></span><strong>No workflows yet.</strong><p>Build your first guided customer journey with questions, branches, provider lookups, and a clear next step.</p><button class="primary-button" type="button" @click="openCreateWorkflow"><Plus :size="16" :stroke-width="1.8" aria-hidden="true" />Create workflow</button></div>
 
       <main v-if="workflowDraft" class="workflow-builder">
         <section class="workflow-goal-summary" aria-labelledby="workflow-goal-heading">
