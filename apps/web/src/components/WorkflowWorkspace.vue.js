@@ -156,7 +156,23 @@ function asWorkflowAction(value) {
 const allActions = computed(() => {
     const actions = props.actions.map(asWorkflowAction).filter((action) => Boolean(action));
     const localAction = locallyCreatedAction.value;
-    return localAction && !actions.some((action) => action.id === localAction.id) ? [...actions, localAction] : actions;
+    if (!localAction)
+        return actions;
+    const existingIndex = actions.findIndex((action) => action.id === localAction.id);
+    if (existingIndex < 0)
+        return [...actions, localAction];
+    // Parent refreshes can briefly return the pre-generation projection for the
+    // same Action id. Merge the complete create response over that row so the
+    // newly generated steps cannot be discarded during reconciliation.
+    const merged = [...actions];
+    merged[existingIndex] = {
+        ...actions[existingIndex],
+        ...localAction,
+        workflowCount: localAction.workflowCount ?? actions[existingIndex].workflowCount,
+        workflowIds: localAction.workflowIds?.length ? localAction.workflowIds : actions[existingIndex].workflowIds,
+        workflowNames: localAction.workflowNames?.length ? localAction.workflowNames : actions[existingIndex].workflowNames,
+    };
+    return merged;
 });
 const workflowActions = computed(() => allActions.value.filter((action) => {
     if (action.enabled === false || action.lifecycleStatus === "disabled" || hiddenWorkflowIds.value.has(action.id))
@@ -284,6 +300,9 @@ function preferredWorkflowId(actions = workflowActions.value) {
     const explicit = props.initialWorkflowId?.trim();
     if (explicit && actions.some((action) => action.id === explicit))
         return explicit;
+    const explicitAction = props.initialActionId?.trim();
+    if (explicitAction && actions.some((action) => action.id === explicitAction))
+        return explicitAction;
     const remembered = readLastSelectedWorkflowId();
     if (remembered && actions.some((action) => action.id === remembered))
         return remembered;
@@ -678,7 +697,14 @@ function actionHasWorkflow(action) {
             return (action.steps?.length ?? 0) > 0 && action.enabled !== false && action.lifecycleStatus !== "disabled";
         }
         if (action.workflowIds?.length) {
-            return action.workflowIds.some((workflowId) => allActions.value.some((candidate) => candidate.id === workflowId && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"));
+            const hasProjectedWorkflow = action.workflowIds.some((workflowId) => allActions.value.some((candidate) => candidate.id === workflowId && (candidate.steps?.length ?? 0) > 0 && candidate.enabled !== false && candidate.lifecycleStatus !== "disabled"));
+            if (hasProjectedWorkflow)
+                return true;
+            // The relationship projection can briefly contain an inaccessible or
+            // stale workflow id after creation. The action's own persisted steps and
+            // completion metadata are authoritative for the current workflow and
+            // must keep it visible after a refresh.
+            return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
         }
         return Boolean((action.steps?.length ?? 0) > 0 || workflowCompletion(action).workflow);
     }
