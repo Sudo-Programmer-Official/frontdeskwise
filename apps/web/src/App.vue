@@ -1397,6 +1397,7 @@ const mobileMenuButton = ref<HTMLButtonElement | null>(null);
 const mobileDrawer = ref<HTMLElement | null>(null);
 let previousBodyOverflow = "";
 let sessionRedirecting = false;
+let verificationRefreshInFlight = false;
 const businessName = ref("");
 const businessLocation = ref("");
 const websiteBrandColors = ref<string[]>([]);
@@ -4890,7 +4891,32 @@ function stopInboxPolling() {
   inboxRefreshTimer = null;
 }
 
+async function refreshEmailVerificationState() {
+  if (typeof document === "undefined" || document.visibilityState !== "visible"
+    || verificationRefreshInFlight || authInitializing.value
+    || !authSnapshot.value || authSnapshot.value.user.emailVerified) return;
+  verificationRefreshInFlight = true;
+  try {
+    const previousSnapshot = authSnapshot.value;
+    const snapshot = await currentAuthSnapshot();
+    if (!snapshot || !authSnapshot.value) return;
+    authSnapshot.value = snapshot;
+    firebaseToken.value = await currentFirebaseToken();
+    if (!previousSnapshot.user.emailVerified && snapshot.user.emailVerified) {
+      verificationEmailMessage.value = "";
+      trackProductEventOnce(`email-verified:${snapshot.user.id}`, MIXPANEL_EVENTS.EMAIL_VERIFIED, { method: "verification_refresh" });
+      notifySuccess("Your email is verified. Workspace actions are now unlocked.", "Email verified");
+    }
+  } catch {
+    // Verification polling is opportunistic. Keep the current banner if the
+    // tab returns while the API or Firebase is temporarily unavailable.
+  } finally {
+    verificationRefreshInFlight = false;
+  }
+}
+
 function handleInboxVisibilityChange() {
+  void refreshEmailVerificationState();
   if (view.value !== "inbox") return;
   scheduleInboxPolling(document.visibilityState === "hidden" ? 60_000 : 0);
 }

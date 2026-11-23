@@ -15924,6 +15924,15 @@ app.get("/api/v1/auth/me", async (request) => {
     [authUser.identitySubject],
   );
   if (!result.rowCount) throw httpError(404, "FrontDeskWise account has not been bootstrapped");
+  // Email verification happens in Firebase, while the workspace snapshot uses
+  // the app_users copy for its access-state banner. Keep that projection in
+  // sync whenever the client reloads its authenticated session.
+  await pool.query(
+    `update app_users
+     set email_verified = $2, updated_at = now()
+     where id = $1 and email_verified is distinct from $2`,
+    [result.rows[0].id, authUser.emailVerified],
+  );
   return authSnapshot(result.rows[0].id);
 });
 

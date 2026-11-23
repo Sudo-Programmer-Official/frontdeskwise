@@ -26,6 +26,7 @@ const marketingComponent = await readFile(resolve(here, "../src/MarketingPage.vu
 const metadataScript = await readFile(resolve(here, "../scripts/generate-site-metadata.mjs"), "utf8");
 const index = await readFile(resolve(here, "../index.html"), "utf8");
 const pwa = await readFile(resolve(here, "../src/pwa.ts"), "utf8");
+const firebaseAuth = await readFile(resolve(here, "../src/auth/firebase.ts"), "utf8");
 const serviceWorker = await readFile(resolve(here, "../public/sw.js"), "utf8");
 const apiServer = await readFile(resolve(here, "../../api/src/server.ts"), "utf8");
 const pushMigration = await readFile(resolve(here, "../../../infra/db/074_web_push_subscriptions.sql"), "utf8");
@@ -461,6 +462,15 @@ test("invalid sessions refresh once and preserve the deep return route", () => {
   assert.match(app, /const authInitializing = ref/);
   assert.doesNotMatch(app, /auth-initializing-spinner|<LoaderCircle/);
   assert.doesNotMatch(app, /Your session may have expired/);
+});
+
+test("email verification refreshes the Firebase profile and workspace projection", () => {
+  assert.match(firebaseAuth, /if \(!user\.emailVerified\) await reload\(user\)/);
+  assert.match(firebaseAuth, /user\.getIdToken\(user\.emailVerified\)/);
+  assert.match(app, /refreshEmailVerificationState/);
+  assert.match(app, /method: "verification_refresh"/);
+  assert.match(apiServer, /set email_verified = \$2, updated_at = now\(\)/);
+  assert.match(apiServer, /email_verified is distinct from \$2/);
 });
 
 test("public SEO routes are unique, indexable, and statically packaged", () => {

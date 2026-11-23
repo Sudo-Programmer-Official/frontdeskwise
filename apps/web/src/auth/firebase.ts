@@ -225,7 +225,12 @@ export async function currentAuthSnapshot(organizationName?: string): Promise<Au
   const auth = await firebaseAuth();
   const user = auth.currentUser;
   if (!user) return null;
-  let token = await user.getIdToken();
+  // Firebase can keep the cached User object (and its ID token) marked as
+  // unverified after the user confirms the link in another tab. Refresh the
+  // profile before asking the API for the workspace snapshot so a normal page
+  // reload can observe the new emailVerified state without signing out.
+  if (!user.emailVerified) await reload(user);
+  let token = await user.getIdToken(user.emailVerified);
   let response = await fetch(`${apiOrigin()}/api/v1/auth/me`, { headers: { authorization: `Bearer ${token}` } });
   if (response.status === 401) {
     try {
