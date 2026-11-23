@@ -577,6 +577,7 @@ test("Agent Test keeps conversation loading local to the chat thread", () => {
   assert.match(app, /globalLoading: false/);
   assert.match(app, /testMessages\.value\.push\(\{\s*id: testMessageId\("user"\)/);
   assert.match(agent, /testWidgetState/);
+  assert.match(agent, /isOpen: true/);
   assert.match(agent, /createWidgetRenderer|<WidgetPreview/);
   assert.match(agent, /sessionHasGroundedAnswer/);
   assert.match(agent, /sessionHasCompletedAction/);
