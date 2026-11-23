@@ -3731,6 +3731,7 @@ async function selectBusiness(slug: string, nextViewOverride?: View) {
           : {}),
       }
       : {};
+    if (nextWorkspaceView === "agent") agentTab.value = routeAgentTab;
     commitRoute(workspaceRoute(slug, nextWorkspaceView, options), false, false);
   }
   await loadBusinessWorkspace(slug);
