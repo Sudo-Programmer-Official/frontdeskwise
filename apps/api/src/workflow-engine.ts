@@ -423,6 +423,12 @@ function optionForField(field: ActionField, input: string): string | null {
   if (field.key === "customer_type") {
     if (/\b(new|first|not enrolled|never)\b/.test(value)) return "New student";
     if (/\b(current|already|existing|enrolled)\b/.test(value)) return "Current student";
+    const describesChild = /\b(child|kid|son|daughter|student|swimmer|boy|girl)\b/.test(value);
+    const lessonSearch = /\b(looking for|find|need|want|search(?:ing)?|help)\b/.test(value)
+      && /\bswim(?:ming)?\s+lessons?\b/.test(value);
+    const givesChildAge = /\b(?:age\s*|(?:is|are)\s+|(?:she|he|they)\s+(?:is|are)\s+)?\d{1,3}\s*[- ]?year[- ]?old\b/i.test(value)
+      || /\b(?:age\s*|(?:is|are)\s+|(?:she|he|they)\s+(?:is|are)\s+)\d{1,3}\b/i.test(value);
+    if (describesChild && (lessonSearch || givesChildAge)) return "New student";
   }
   if (field.key === "ability") {
     if (/\b(beginner|can t(?:\s+\w+){0,2}\s+swim|cannot(?:\s+\w+){0,2}\s+swim|can not(?:\s+\w+){0,2}\s+swim|doesn t(?:\s+\w+){0,2}\s+swim|not comfortable|not really|just starting|new to swimming)\b/.test(value)) return "Beginner";
@@ -571,7 +577,8 @@ export function extractWorkflowValues(action: ActionFlow, input: string): Record
     ?? value.match(/\bActually\s*,?\s+([A-Z][a-z0-9'-]{2,40}(?:\s+[A-Z][a-z0-9'-]{2,40})?)/)?.[1]?.trim();
   const program = value.match(/\b(?:program|class)\s*(?:is|:)\s*([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim()
     ?? value.match(/\b(?:program|class)\s+([a-z0-9][a-z0-9 &'./-]{1,50}?)(?=\s+(?:in|at|on|for|and|but)\b|[,.!?]|$)/i)?.[1]?.trim();
-  const name = value.match(/\b(?:my name is|i am|i'm|parent(?:'s)? name is|guardian(?:'s)? name is)\s+([a-z][a-z .'-]{1,80})/i)?.[1]?.trim();
+  const name = value.match(/\b(?:my name is|parent(?:'s)? name is|guardian(?:'s)? name is)\s+([a-z][a-z .'-]{1,80})/i)?.[1]?.trim()
+    ?? value.match(/\b(?:i am|i'm)\s+(?!(?:looking|searching|trying|interested)\b)([a-z][a-z .'-]{1,80})/i)?.[1]?.trim();
   const softwareProvider = knownSoftwareProvider(value);
 
   for (const field of action.fields) {

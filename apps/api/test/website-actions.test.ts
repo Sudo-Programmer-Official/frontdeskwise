@@ -43,6 +43,16 @@ test("visitor request classification separates explanation from explicit action"
   assert.equal(classifyVisitorRequest("I want a demo").actionIntent, "demo");
 });
 
+test("a child swim-lesson search starts the matching workflow before knowledge answer routing", () => {
+  const actions = defaultActionFlows("British Swim School", "swim lessons and enrollment", (key) => `swim:${key}`);
+  const question = "I'm looking for swim lessons for my 6-year-old son.";
+  const request = classifyVisitorRequest(question);
+
+  assert.equal(request.mode, "informational");
+  assert.equal(request.actionIntent, "enrollment");
+  assert.equal(detectAction(actions, question)?.key, "enroll_child");
+});
+
 test("plan-selection requests route to a generated workflow before the primary lead action", () => {
   const planWorkflow = {
     id: "plan-workflow",

@@ -864,6 +864,19 @@ function workflowStartScore(action: ActionFlow, question: string): number {
   const fieldKeys = new Set(action.fields.map((field) => field.key));
   let score = 0;
 
+  // A parent looking for lessons is expressing conversion intent even when
+  // they are not using a command such as "enroll" or "sign up". Treat the
+  // canonical swim workflow as the owner of that journey so a knowledge
+  // answer cannot end the turn before qualification starts.
+  const swimLessonSearch = /\bswim(?:ming)?\s+lessons?\b/.test(value)
+    && /\b(looking for|find|need|want|search(?:ing)?|help)\b/.test(value)
+    && (/\b(child|kid|son|daughter|student|swimmer|boy|girl)\b/.test(value)
+      || /\b\d{1,3}\s*[- ]?year[- ]?old\b/.test(value));
+  if (fieldKeys.has("customer_type") && fieldKeys.has("child_age") && swimLessonSearch
+    && (action.key === "enroll_child" || action.actionType === "enroll")) {
+    score += 30;
+  }
+
   // Business-fit workflows need to be allowed to start from a visitor's
   // qualification statement. Those statements are intentionally not phrased
   // as commands ("I run a small salon..."), so transactional-only detection

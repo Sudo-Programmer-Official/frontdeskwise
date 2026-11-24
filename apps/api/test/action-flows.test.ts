@@ -12,6 +12,7 @@ import {
   actionTemplate,
   actionReadiness,
 } from "../src/action-flows.js";
+import { currentWorkflowStep, replayWorkflowTurn } from "../src/workflow-engine.js";
 import type { ActionField } from "../src/action-flows.js";
 
 const ids = (key: string) => key + "-id";
@@ -54,6 +55,18 @@ test("swim school enrollment uses progressive capture", () => {
   assert.ok(action!.fields.some((field) => field.key === "ability"));
   assert.ok(action!.fields.some((field) => field.key === "goal"));
   assert.equal(action!.steps?.find((step) => step.id === "student-ability")?.fieldKey, "ability");
+});
+
+test("child swim-lesson search pre-fills known fields and asks about ability next", () => {
+  const actions = defaultActionFlows("British Swim School", "swim lessons for students", ids);
+  const action = actions.find((item) => item.key === "enroll_child")!;
+  const replay = replayWorkflowTurn(action, createActionState(action), "I'm looking for swim lessons for my 6-year-old son.");
+
+  assert.deepEqual(replay.extracted, { customer_type: "New student", child_age: "6" });
+  assert.equal(replay.stateAfter.values.customer_type, "New student");
+  assert.equal(replay.stateAfter.values.child_age, "6");
+  assert.equal(currentWorkflowStep(action, replay.stateAfter)?.id, "student-ability");
+  assert.match(currentWorkflowStep(action, replay.stateAfter)?.question ?? "", /comfortable.*water/i);
 });
 
 test("canonical legacy enrollment workflows infer Jackrabbit narrowly", () => {
