@@ -575,6 +575,10 @@ test("Agent Test keeps conversation loading local to the chat thread", () => {
   assert.match(app, /const testMessages = ref<TestConversationMessage\[\]>/);
   assert.match(app, /function conversationFetch\(/);
   assert.match(app, /globalLoading: false/);
+  assert.match(app, /void refreshWorkspaceSummary\(false\)/);
+  assert.doesNotMatch(app, /Promise\.all\(\[refreshWorkspaceSummary\(false\), refreshAuthenticatedSnapshot\(\)\]\)/);
+  assert.match(app, /sameRestoredSession/);
+  assert.match(app, /workspaceAlreadyLoaded/);
   assert.match(app, /testMessages\.value\.push\(\{\s*id: testMessageId\("user"\)/);
   assert.match(agent, /testWidgetState/);
   assert.match(agent, /isOpen: true/);

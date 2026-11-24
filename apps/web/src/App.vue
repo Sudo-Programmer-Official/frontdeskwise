@@ -1408,6 +1408,8 @@ const mobileMenuButton = ref<HTMLButtonElement | null>(null);
 const mobileDrawer = ref<HTMLElement | null>(null);
 let previousBodyOverflow = "";
 let sessionRedirecting = false;
+let restoredFirebaseUserId = "";
+let restoringFirebaseUserId = "";
 let verificationRefreshInFlight = false;
 const businessName = ref("");
 const businessLocation = ref("");
@@ -3704,6 +3706,8 @@ async function refreshAuthenticatedSnapshot() {
 
 async function selectBusiness(slug: string, nextViewOverride?: View) {
   if (!slug) return;
+  const previousWorkspaceSlug = demoSlug.value;
+  const wasPublicDemo = publicDemoMode.value;
   const nextView = (authSnapshot.value && (roleForBusinessSlug(slug) === "staff" || roleForBusinessSlug(slug) === "viewer"))
     ? "inbox"
     : nextViewOverride ?? view.value;
@@ -3734,7 +3738,11 @@ async function selectBusiness(slug: string, nextViewOverride?: View) {
     if (nextWorkspaceView === "agent") agentTab.value = routeAgentTab;
     commitRoute(workspaceRoute(slug, nextWorkspaceView, options), false, false);
   }
-  await loadBusinessWorkspace(slug);
+  // Firebase's onIdTokenChanged also fires for ordinary token refreshes. The
+  // workspace is already hydrated in that case; reloading it here would clear
+  // the Agent Test conversation and briefly show the global loading overlay.
+  const workspaceAlreadyLoaded = previousWorkspaceSlug === slug && Boolean(workspaceStats.value) && !wasPublicDemo;
+  if (!workspaceAlreadyLoaded) await loadBusinessWorkspace(slug);
   if (route.value.kind === "workspace" && route.value.agentTab === "test" && route.value.testQuestion) {
     void runRoutedTestQuestion(route.value.testQuestion);
   }
@@ -7473,8 +7481,10 @@ function handleRouteChange() {
   void runWithGlobalLoading(() => applyRouteState(nextRoute));
 }
 
-async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string> } | null) {
+async function restoreAuthenticatedSession(user: { uid?: string; emailVerified?: boolean; getIdToken(): Promise<string> } | null) {
   if (!user) {
+    restoredFirebaseUserId = "";
+    restoringFirebaseUserId = "";
     firebaseToken.value = "";
     authSnapshot.value = null;
     isSuperAdmin.value = false;
@@ -7485,12 +7495,25 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     return;
   }
 
+  const userId = user.uid ?? "";
+  const sameRestoredSession = Boolean(userId && userId === restoredFirebaseUserId && authSnapshot.value);
+  if (sameRestoredSession && user.emailVerified === authSnapshot.value?.user.emailVerified) {
+    // Token changes are expected during a long-lived browser session. Keep the
+    // current workspace and conversation mounted; only replace the API token.
+    firebaseToken.value = await user.getIdToken();
+    authInitializing.value = false;
+    return;
+  }
+  if (userId && userId === restoringFirebaseUserId) return;
+  restoringFirebaseUserId = userId;
+
   try {
     firebaseToken.value = await user.getIdToken();
     const snapshot = await currentAuthSnapshot();
     if (!snapshot) throw new Error("Could not restore the FrontDeskWise account.");
     authSnapshot.value = snapshot;
     firebaseToken.value = await currentFirebaseToken();
+    restoredFirebaseUserId = userId || snapshot.user.id;
     identifyMixpanelUser(snapshot.user.id, {
       organization_id: snapshot.activeOrganizationId ?? undefined,
       user_role: snapshot.organizations[0]?.role,
@@ -7513,6 +7536,7 @@ async function restoreAuthenticatedSession(user: { getIdToken(): Promise<string>
     // must not sign the user out or erase their local identity.
     authError.value = friendlyAuthError(error, "Could not restore the FrontDeskWise session.");
   } finally {
+    if (restoringFirebaseUserId === userId) restoringFirebaseUserId = "";
     authInitializing.value = false;
   }
 }
@@ -8208,7 +8232,7 @@ async function askQuestion() {
     // loading state before refreshing owner-only summaries so the preview
     // cannot show a finished answer together with a stale "Thinking…" state.
     isAsking.value = false;
-    if (!publicDemoMode.value) void Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot()]);
+    if (!publicDemoMode.value) void refreshWorkspaceSummary(false);
   } catch (error) {
     if (requestGeneration !== testRequestGeneration) return;
     const message = error instanceof Error ? error.message : "Could not answer that question.";
@@ -8258,7 +8282,7 @@ async function submitActionForm(messageId: string, actionId: string, values: Rec
       });
     }
     isAsking.value = false;
-    void Promise.all([refreshWorkspaceSummary(false), refreshAuthenticatedSnapshot(), loadLeads(false)]);
+    void Promise.all([refreshWorkspaceSummary(false), loadLeads(false)]);
   } catch (error) {
     if (requestGeneration !== testRequestGeneration) return;
     leadsError.value = error instanceof Error ? error.message : "Could not submit this request.";
@@ -8309,7 +8333,7 @@ async function captureLead() {
     leadPhone.value = "";
     leadIntent.value = "";
     leadSavedMessage.value = "Lead captured · visible in Leads";
-    await Promise.all([loadLeads(), refreshWorkspaceSummary(), refreshAuthenticatedSnapshot()]);
+    await Promise.all([loadLeads(), refreshWorkspaceSummary()]);
     window.setTimeout(() => (leadSavedMessage.value = ""), 2600);
   } catch (error) {
     leadsError.value = error instanceof Error ? error.message : "Could not capture that lead.";
