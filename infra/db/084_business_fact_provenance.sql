@@ -1,7 +1,6 @@
 -- Preserve the evidence lifecycle for promoted website facts. Pricing and
 -- other critical facts need to be traceable to the crawl that produced them.
 alter table business_facts
-  add column if not exists source_url text,
   add column if not exists source_hash text,
   add column if not exists extracted_at timestamptz,
   add column if not exists last_seen_at timestamptz,
@@ -15,12 +14,6 @@ set extracted_at = coalesce(extracted_at, observed_at),
       else coalesce(nullif(verification_status, ''), 'NEEDS_REVIEW')
     end
 where extracted_at is null or last_seen_at is null or verification_status is null or verification_status = '';
-
-update business_facts fact
-set source_url = source.source_url
-from business_sources source
-where fact.source_url is null
-  and fact.source_id = source.id;
 
 alter table business_facts
   drop constraint if exists business_facts_verification_status_check,
