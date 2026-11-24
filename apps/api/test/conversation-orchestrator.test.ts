@@ -281,6 +281,16 @@ test("workflow answers stay on the journey while explicit handoff takes priority
   assert.equal(handoff.preserveWorkflowState, true);
 });
 
+test("human handoff intent wins before knowledge routing for natural variants", () => {
+  const state = createActionState(action);
+  for (const message of ["i wanna talk to somebody", "I want to speak to someone about this.", "I need help from a person"]) {
+    const decision = decideConversationRoute({ message, activeAction: action, actionState: state });
+    assert.equal(decision.route, "HUMAN_HANDOFF", message);
+    assert.equal(decision.reason, "explicit_human_request", message);
+    assert.equal(decision.interruptionIntent, null, message);
+  }
+});
+
 test("waiting for staff keeps visitor questions available to AI", () => {
   const state = createActionState(action);
   const decision = decideConversationRoute({

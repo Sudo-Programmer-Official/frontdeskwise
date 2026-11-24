@@ -2573,6 +2573,7 @@ function actionFromRow(row: Record<string, unknown>): ActionFlow {
     evidence: Array.isArray(row.evidence) ? row.evidence.filter((item): item is NonNullable<ActionFlow["evidence"]>[number] => Boolean(item && typeof item === "object")) as ActionFlow["evidence"] : [],
     confidence: Number(row.confidence ?? 0.5),
     enabled: row.enabled !== false,
+    archived: row.archived === true,
     createdAt: row.created_at ? toIso(row.created_at) : new Date().toISOString(),
     updatedAt: row.updated_at ? toIso(row.updated_at) : new Date().toISOString(),
   };
@@ -2651,7 +2652,16 @@ function businessFactFromRow(row: Record<string, unknown>): BusinessFact {
     sourceType,
     authority: typeof row.authority === "string" ? row.authority as BusinessFactAuthority : undefined,
     sourceId: typeof row.source_id === "string" ? row.source_id : null,
+    sourceUrl: typeof row.source_url === "string" ? row.source_url : null,
     sourceLabel: typeof row.source_label === "string" ? row.source_label : null,
+    sourceHash: typeof row.source_hash === "string" ? row.source_hash : null,
+    extractedAt: row.extracted_at ? toIso(row.extracted_at) : (row.observed_at ? toIso(row.observed_at) : undefined),
+    lastSeenAt: row.last_seen_at ? toIso(row.last_seen_at) : (row.observed_at ? toIso(row.observed_at) : undefined),
+    verificationStatus: row.verification_status === "VERIFIED"
+      || row.verification_status === "STALE"
+      || row.verification_status === "CONFLICTED"
+      ? row.verification_status
+      : undefined,
     confidence: row.confidence === null || row.confidence === undefined ? 1 : Number(row.confidence),
     freshnessPolicy: typeof row.freshness_policy === "string" ? row.freshness_policy as BusinessFactInput["freshnessPolicy"] : undefined,
     observedAt: row.observed_at ? toIso(row.observed_at) : new Date().toISOString(),
@@ -2977,6 +2987,13 @@ function websiteSourcesFromPages(pages: CrawledPage[]): { sources: Source[]; chu
   return { sources, chunks };
 }
 
+function stableBusinessFactId(value: string): string {
+  const hex = createHash("sha256").update(value).digest("hex").slice(0, 32).split("");
+  hex[12] = "5";
+  hex[16] = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8).join("")}-${hex.slice(8, 12).join("")}-${hex.slice(12, 16).join("")}-${hex.slice(16, 20).join("")}-${hex.slice(20, 32).join("")}`;
+}
+
 function websitePricingFactsForBusiness(
   business: Business,
   sources = business.sources,
@@ -2991,13 +3008,21 @@ function websitePricingFactsForBusiness(
         url: source.url,
         title: source.title,
         pageType: source.pageType,
+        contentHash: source.contentHash,
         lastCrawledAt: source.lastCrawledAt,
       })),
     chunks: chunks
       .filter((chunk) => sources.some((source) => source.id === chunk.sourceId && source.contentType === "web_page"))
       .map((chunk) => ({ sourceId: chunk.sourceId, content: chunk.content, metadata: chunk.metadata })),
   }).map((candidate) => normalizeBusinessFact({
-    id: randomUUID(),
+    id: stableBusinessFactId([
+      business.id,
+      candidate.sourceId,
+      candidate.subject.toLowerCase(),
+      candidate.predicate,
+      candidate.valueText.toLowerCase(),
+      candidate.sourceHash ?? "unknown-source",
+    ].join("|")),
     businessId: business.id,
     kind: candidate.kind,
     subject: candidate.subject,
@@ -3007,7 +3032,12 @@ function websitePricingFactsForBusiness(
     sourceType: "website",
     authority: trustedWebsite ? "owner_verified" : "website",
     sourceId: candidate.sourceId,
+    sourceUrl: candidate.sourceUrl,
     sourceLabel: candidate.sourceLabel,
+    sourceHash: candidate.sourceHash,
+    extractedAt: new Date().toISOString(),
+    lastSeenAt: candidate.observedAt,
+    verificationStatus: trustedWebsite ? "VERIFIED" : "NEEDS_REVIEW",
     confidence: candidate.confidence,
     freshnessPolicy: "daily",
     observedAt: candidate.observedAt,
@@ -3022,26 +3052,45 @@ function websitePricingFactsForBusiness(
 async function syncWebsitePricingFacts(business: Business): Promise<void> {
   const existing = business.facts.filter((fact) => fact.sourceType === "website" && fact.kind === "pricing");
   const next = websitePricingFactsForBusiness(business);
-  const signature = (fact: BusinessFact): string => [
+  const sourceKey = (fact: BusinessFact): string => [
+    // Website source rows are rebuilt on each crawl. Prefer the content hash
+    // so an unchanged page reuses its fact version, while a changed page
+    // creates a new version and marks the previous one stale.
+    fact.sourceHash ?? fact.sourceId ?? "",
+    fact.kind,
     fact.subject.toLowerCase(),
     fact.predicate.toLowerCase(),
-    fact.valueText.toLowerCase(),
-    fact.sourceId ?? "",
-    fact.authority,
-    fact.observedAt,
   ].join("|");
-  const existingSignatures = new Set(existing.map(signature));
-  if (next.length === existing.length && next.every((fact) => existingSignatures.has(signature(fact)))) {
+  const sameEvidence = (left: BusinessFact, right: BusinessFact): boolean => left.sourceHash === right.sourceHash
+    && left.valueText.toLowerCase() === right.valueText.toLowerCase()
+    && left.authority === right.authority
+    && left.active;
+  const existingByKey = new Map(existing.filter((fact) => fact.active).map((fact) => [sourceKey(fact), fact]));
+  const normalizedNext = next.map((fact) => {
+    const prior = existingByKey.get(sourceKey(fact));
+    return prior && sameEvidence(prior, fact)
+      ? { ...fact, id: prior.id, createdAt: prior.createdAt, extractedAt: prior.extractedAt, version: prior.version }
+      : prior
+        ? { ...fact, id: stableBusinessFactId(`${fact.id}|${fact.sourceHash ?? "unknown-source"}`), version: prior.version + 1 }
+        : fact;
+  });
+  const nextIds = new Set(normalizedNext.map((fact) => fact.id));
+  const now = new Date().toISOString();
+  const updatedExisting = existing.map((fact) => {
+    if (nextIds.has(fact.id)) return null;
+    return fact.active
+      ? { ...fact, active: false, verificationStatus: "STALE" as const, updatedAt: now }
+      : fact;
+  }).filter((fact): fact is BusinessFact => Boolean(fact));
+
+  business.facts = business.facts.filter((fact) => !(fact.sourceType === "website" && fact.kind === "pricing"));
+  business.facts.push(...updatedExisting, ...normalizedNext);
+  if (!pool) {
     await syncBusinessQnaStatuses(business);
     return;
   }
-
-  business.facts = business.facts.filter((fact) => !(fact.sourceType === "website" && fact.kind === "pricing"));
-  business.facts.push(...next);
-  if (!pool) return;
   try {
-    await pool.query("delete from business_facts where business_id = $1 and source_type = 'website' and kind = 'pricing'", [business.id]);
-    for (const fact of next) await persistBusinessFact(business, fact);
+    for (const fact of [...updatedExisting, ...normalizedNext]) await persistBusinessFact(business, fact);
   } catch (error) {
     if (!isMissingDatabaseTable(error)) throw error;
     app.log.warn({ businessId: business.id }, "Website pricing facts are not persisted until the business facts table is available");
@@ -3151,7 +3200,13 @@ async function replaceWebsiteSources(business: Business, pages: CrawledPage[]): 
       reason: "source_removed",
     });
   }
-  if (!pool) return;
+  // Keep the in-memory Business Brain current in local/demo mode too. The
+  // database branch below persists the crawl; the extractor itself should not
+  // disappear just because PostgreSQL is unavailable.
+  if (!pool) {
+    await syncWebsitePricingFacts(business);
+    return;
+  }
   await pool.query(
     `delete from knowledge_chunks
      where business_id = $1
@@ -3700,8 +3755,8 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
     for (const action of business.actions) {
       await client.query(
         `insert into business_actions
-           (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
+           (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, archived, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)
          on conflict (business_id, action_key) do update set
            action_type = excluded.action_type,
            name = excluded.name,
@@ -3736,6 +3791,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
            evidence = excluded.evidence,
            confidence = excluded.confidence,
            enabled = excluded.enabled,
+           archived = excluded.archived,
            updated_at = excluded.updated_at`,
         [
           action.id,
@@ -3774,6 +3830,7 @@ async function persistBusiness(business: Business, organizationIdOverride?: stri
           JSON.stringify(action.evidence),
           action.confidence,
           action.enabled,
+          action.archived === true,
           action.createdAt,
           action.updatedAt,
         ],
@@ -6014,6 +6071,7 @@ function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
     evidence,
     confidence: Number.isFinite(confidenceValue) ? Math.max(0, Math.min(1, confidenceValue)) : (base.confidence ?? 0.5),
     enabled,
+    archived: typeof body.archived === "boolean" ? body.archived : base.archived === true,
     version: existing ? Math.max(1, (existing.version ?? 1) + 1) : Math.max(1, base.version ?? 1),
     createdAt: existing?.createdAt ?? base.createdAt,
     updatedAt: now,
@@ -6078,8 +6136,8 @@ async function persistAction(business: Business, action: ActionFlow): Promise<Re
   if (!pool) return null;
   const result = await pool.query<Record<string, unknown>>(
     `insert into business_actions
-       (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
+       (id, business_id, action_key, action_type, name, description, trigger_phrases, trigger_intents, capture_mode, fields, steps, completion, mode, execution_mode, attachment_policy, tracking_key, destination, provider, priority, required_fields, optional_fields, handoff_behavior, version, conditions, safety_policy, source_url, source_type, source_label, classification_reason, discovered_at, origin, lifecycle_status, review_reason, evidence, confidence, enabled, archived, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)
      on conflict (business_id, action_key) do update set
        action_type = excluded.action_type,
        name = excluded.name,
@@ -6114,6 +6172,7 @@ async function persistAction(business: Business, action: ActionFlow): Promise<Re
        evidence = excluded.evidence,
        confidence = excluded.confidence,
        enabled = excluded.enabled,
+       archived = excluded.archived,
        updated_at = excluded.updated_at
      returning id, business_id, steps, completion, version, updated_at`,
     [
@@ -6153,6 +6212,7 @@ async function persistAction(business: Business, action: ActionFlow): Promise<Re
       JSON.stringify(action.evidence),
       action.confidence,
       action.enabled,
+      action.archived === true,
       action.createdAt,
       action.updatedAt,
     ],
@@ -6310,9 +6370,9 @@ async function persistBusinessFact(business: Business, fact: BusinessFact): Prom
   if (!pool) return;
   await pool.query(
     `insert into business_facts
-       (id, business_id, kind, subject, predicate, value, value_text, source_type, authority, source_id, source_label,
-        confidence, freshness_policy, observed_at, expires_at, active, version, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+       (id, business_id, kind, subject, predicate, value, value_text, source_type, authority, source_id, source_url, source_label,
+        source_hash, extracted_at, last_seen_at, verification_status, confidence, freshness_policy, observed_at, expires_at, active, version, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
      on conflict (id) do update set
        kind = excluded.kind,
        subject = excluded.subject,
@@ -6322,7 +6382,12 @@ async function persistBusinessFact(business: Business, fact: BusinessFact): Prom
        source_type = excluded.source_type,
        authority = excluded.authority,
        source_id = excluded.source_id,
+       source_url = excluded.source_url,
        source_label = excluded.source_label,
+       source_hash = excluded.source_hash,
+       extracted_at = excluded.extracted_at,
+       last_seen_at = excluded.last_seen_at,
+       verification_status = excluded.verification_status,
        confidence = excluded.confidence,
        freshness_policy = excluded.freshness_policy,
        observed_at = excluded.observed_at,
@@ -6341,7 +6406,12 @@ async function persistBusinessFact(business: Business, fact: BusinessFact): Prom
       fact.sourceType,
       fact.authority,
       fact.sourceId,
+      fact.sourceUrl,
       fact.sourceLabel,
+      fact.sourceHash,
+      fact.extractedAt,
+      fact.lastSeenAt,
+      fact.verificationStatus,
       fact.confidence,
       fact.freshnessPolicy,
       fact.observedAt,
@@ -8428,14 +8498,37 @@ function workflowPricingAnswer(
   business: Business,
   question: string,
   workflow: ActiveWorkflowAnswerContext | undefined,
+  currentPage?: string | null,
+  pricingFacts = canonicalVerifiedPricingFactsForAnswer(business),
 ): StructuredFactAnswer | null {
   const audience = workflowAudienceTerms(workflow);
 
-  const plans = canonicalVerifiedPricingFactsForAnswer(business)
+  const samePage = (fact: BusinessFact): boolean => {
+    if (!currentPage || !fact.sourceId) return false;
+    const source = business.sources.find((candidate) => candidate.id === fact.sourceId);
+    if (!source) return false;
+    try {
+      const requested = new URL(currentPage);
+      const sourceUrl = new URL(source.url);
+      return requested.origin === sourceUrl.origin && requested.pathname.replace(/\/+$/, "") === sourceUrl.pathname.replace(/\/+$/, "");
+    } catch {
+      return false;
+    }
+  };
+
+  const plans = pricingFacts
     .filter((fact) => !audience || !(audience.competing.test(`${fact.subject} ${fact.predicate} ${fact.valueText}`) && !audience.target.test(`${fact.subject} ${fact.predicate} ${fact.valueText}`)))
     .filter((fact) => /\$|€|£|\/month|per month|monthly|free/i.test(fact.valueText))
     .filter((fact, index, facts) => facts.findIndex((candidate) => `${candidate.subject}|${candidate.valueText}`.toLowerCase() === `${fact.subject}|${fact.valueText}`.toLowerCase()) === index)
     .sort((left, right) => {
+      const pagePriority = Number(samePage(right)) - Number(samePage(left));
+      if (pagePriority) return pagePriority;
+      const amount = (fact: BusinessFact): number => {
+        const match = /(?:[$€£])\s*([\d,]+(?:\.\d{1,2})?)/.exec(fact.valueText);
+        return match ? Number(match[1].replace(/,/g, "")) : Number.POSITIVE_INFINITY;
+      };
+      const amountPriority = amount(left) - amount(right);
+      if (Number.isFinite(amountPriority) && amountPriority) return amountPriority;
       const leftFree = /\bfree\b/i.test(`${left.subject} ${left.valueText}`) ? 1 : 0;
       const rightFree = /\bfree\b/i.test(`${right.subject} ${right.valueText}`) ? 1 : 0;
       return rightFree - leftFree;
@@ -8464,7 +8557,7 @@ function workflowPricingAnswer(
     ? cheapest
       ? `${canonicalizeCustomerCopy(business, selectedPlan.subject)} is the lowest-priced plan at ${selectedPlan.valueText}`
       : `${canonicalizeCustomerCopy(business, selectedPlan.subject)} costs ${selectedPlan.valueText}`
-    : plans.map((fact) => `${canonicalizeCustomerCopy(business, fact.subject)} at ${fact.valueText}`).join("; ");
+    : `${customerBusinessName(business)} starts at ${plans[0].valueText} for ${canonicalizeCustomerCopy(business, plans[0].subject)}${plans.length > 1 ? `. ${plans.slice(1).map((fact) => `${canonicalizeCustomerCopy(business, fact.subject)} is ${fact.valueText}`).join(". ")}` : ""}`;
   const citations = plans
     .map((fact) => {
       const source = fact.sourceId ? business.sources.find((item) => item.id === fact.sourceId) : null;
@@ -8475,12 +8568,72 @@ function workflowPricingAnswer(
     .slice(0, 2);
   const fact = selectedPlan ?? plans[0];
   return {
-    answer: audienceLabel ? `${audienceLabel}, ${summary}.` : selectedPlan ? `${summary}.` : `${customerBusinessName(business)} pricing: ${summary}.`,
+    answer: audienceLabel ? `${audienceLabel}, ${summary}.` : `${summary}.`,
     fact,
     confidenceScore: Math.min(0.99, 0.72 + fact.confidence * 0.2 + (fact.authority === "owner_verified" || fact.authority === "system_of_record" ? 0.06 : 0)),
     citations,
     conflicts: 0,
   };
+}
+
+/**
+ * Level two of the pricing contract: if the promotion job has not produced a
+ * canonical fact yet, a trusted crawl may still answer deterministically from
+ * directly extracted pricing evidence. This never invokes free-form model
+ * generation and is unavailable to unverified businesses.
+ */
+async function verifiedRetrievedPricingAnswer(
+  business: Business,
+  question: string,
+  currentPage?: string | null,
+  workflow?: ActiveWorkflowAnswerContext,
+): Promise<StructuredFactAnswer | null> {
+  if (business.ownershipStatus !== "verified" && !business.isInternalDemo && !isInternalDemoSlug(business.slug)) return null;
+  const queryContext = retrievalContext(business, question, undefined, currentPage, workflow);
+  const retrieval = await databaseRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, "pricing")
+    ?? memoryRetrieval(business, queryContext.normalizedQuery, queryContext.expandedQuery, "pricing");
+  const sourceById = new Map(business.sources.filter((source) => source.contentType === "web_page" && source.crawlStatus === "ready").map((source) => [source.id, source]));
+  const matches = retrieval.matches.filter((match) => sourceById.has(match.chunk.sourceId)).slice(0, 8);
+  if (!matches.length) return null;
+  const candidates = extractWebsitePricingCandidates({
+    sources: [...sourceById.values()].map((source) => ({
+      id: source.id,
+      url: source.url,
+      title: source.title,
+      pageType: source.pageType,
+      contentHash: source.contentHash,
+      lastCrawledAt: source.lastCrawledAt,
+    })),
+    chunks: matches.map((match) => ({ sourceId: match.chunk.sourceId, content: match.chunk.content, metadata: match.chunk.metadata })),
+  });
+  const facts = candidates.map((candidate) => normalizeBusinessFact({
+    id: stableBusinessFactId([
+      business.id,
+      candidate.sourceId,
+      candidate.subject.toLowerCase(),
+      candidate.valueText.toLowerCase(),
+      candidate.sourceHash ?? "unknown-source",
+    ].join("|")),
+    businessId: business.id,
+    kind: "pricing",
+    subject: candidate.subject,
+    predicate: candidate.predicate,
+    value: candidate.value,
+    valueText: candidate.valueText,
+    sourceType: "website",
+    authority: "owner_verified",
+    sourceId: candidate.sourceId,
+    sourceUrl: candidate.sourceUrl,
+    sourceLabel: candidate.sourceLabel,
+    sourceHash: candidate.sourceHash,
+    extractedAt: new Date().toISOString(),
+    lastSeenAt: candidate.observedAt,
+    verificationStatus: "VERIFIED",
+    confidence: candidate.confidence,
+    freshnessPolicy: "daily",
+    observedAt: candidate.observedAt,
+  }));
+  return workflowPricingAnswer(business, question, workflow, currentPage, facts);
 }
 
 function workflowScopedMatches(matches: RetrievalMatch[], workflow: ActiveWorkflowAnswerContext | undefined, intent: RetrievalIntent): RetrievalMatch[] {
@@ -9031,7 +9184,7 @@ async function answerQuestion(
   const primaryCtaForAnswer = options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, initialIntent));
   const allowedFacts = typeof workflowStep?.config?.allowedFacts === "string" ? workflowStep.config.allowedFacts : "all";
   const structured = initialIntent === "pricing"
-    ? (allowedFacts === "pricing" || allowedFacts === "all" ? workflowPricingAnswer(business, question, options.workflow) : null)
+    ? (allowedFacts === "pricing" || allowedFacts === "all" ? workflowPricingAnswer(business, question, options.workflow, options.currentPage) : null)
       ?? structuredFactAnswer(business, question, initialIntent, allowedFacts === "pricing" || allowedFacts === "all" ? canonicalVerifiedPricingFactsForAnswer(business) : scopedFacts)
     : structuredFactAnswer(business, question, initialIntent, scopedFacts);
   if (structured) {
@@ -9066,6 +9219,48 @@ async function answerQuestion(
         qnaId: qnaMatch?.qna.id ?? null,
         qnaStatus: qnaMatch?.qna.status ?? null,
         fallbackToRag: true,
+        ...modelUsage,
+      },
+      modelUsage,
+      primaryCta: primaryCtaForAnswer ?? undefined,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+    };
+  }
+  const retrievedPricing = initialIntent === "pricing"
+    ? await verifiedRetrievedPricingAnswer(business, question, options.currentPage, options.workflow)
+    : null;
+  if (retrievedPricing) {
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "verified_retrieved_pricing_evidence",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
+    return {
+      answer: answerWithGettingStartedCta(retrievedPricing.answer, initialIntent, primaryCtaForAnswer),
+      grounded: true,
+      citations: retrievedPricing.citations,
+      knowledgeGap: null,
+      confidenceScore: retrievedPricing.confidenceScore,
+      confidenceBand: retrievedPricing.confidenceScore >= 0.78 ? "high" as const : "medium" as const,
+      retrieval: {
+        mode: "verified_pricing_evidence",
+        intent: initialIntent,
+        candidateCount: retrievedPricing.citations.length,
+        topScore: retrievedPricing.confidenceScore,
+        sourceType: retrievedPricing.fact.sourceType,
+        sourceLabel: businessFactSourceLabel(retrievedPricing.fact),
+        factId: retrievedPricing.fact.id,
+        conflictCount: retrievedPricing.conflicts,
+        qnaMatch: Boolean(qnaMatch),
+        qnaMatchConfidence: qnaMatch?.score,
+        qnaLookupLatencyMs,
+        qnaId: qnaMatch?.qna.id ?? null,
+        qnaStatus: qnaMatch?.qna.status ?? null,
+        fallbackToRag: false,
         ...modelUsage,
       },
       modelUsage,
@@ -9756,6 +9951,12 @@ function workflowPrompt(action: ActionFlow, state: ConversationActionState, step
   return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
 }
 
+function gentleNumericFieldPrompt(field: ActionField): string {
+  const prompt = fieldPrompt(field).trim();
+  if (!prompt) return "Sure — could you share that?";
+  return `Sure — ${prompt.charAt(0).toLowerCase()}${prompt.slice(1)}`;
+}
+
 function joinWorkflowContext(parts: string[]): string {
   if (parts.length <= 1) return parts[0] ?? "";
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
@@ -10347,6 +10548,7 @@ async function continueWorkflowActionConversation(
   action: ActionFlow,
   question: string,
   starting = false,
+  sourcePage: string | null = null,
 ): Promise<ConversationAnswerResult> {
   const state = conversation.actionState ?? createActionState(action);
   conversation.actionState = state;
@@ -10464,7 +10666,7 @@ async function continueWorkflowActionConversation(
       question,
       returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
-    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state, step: knowledgeStep ?? undefined }, workflowStep: knowledgeStep ?? undefined });
+    const knowledge = await answerQuestion(business, question, { conversation, currentPage: sourcePage, workflow: { action, state, step: knowledgeStep ?? undefined }, workflowStep: knowledgeStep ?? undefined });
     const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
       ? workflowCtaForStep(business, action, resumePlan.step)
       : null;
@@ -10493,7 +10695,7 @@ async function continueWorkflowActionConversation(
       question,
       returnStepId: resumePlan.step?.id ?? state.currentStepId ?? null,
     });
-    const knowledge = await answerQuestion(business, question, { conversation, workflow: { action, state, step: knowledgeStep ?? undefined }, workflowStep: knowledgeStep ?? undefined });
+    const knowledge = await answerQuestion(business, question, { conversation, currentPage: sourcePage, workflow: { action, state, step: knowledgeStep ?? undefined }, workflowStep: knowledgeStep ?? undefined });
     const resumeCta = resumePlan.step?.type === "redirect" && workflowRequiredFieldsCaptured(action, state)
       ? workflowCtaForStep(business, action, resumePlan.step)
       : null;
@@ -10627,7 +10829,10 @@ async function continueWorkflowActionConversation(
           return actionAnswer(action, state, `Thanks — ${workflowPrompt(action, state, step, business)}`);
         }
         const input = applyWorkflowInput(action, state, question);
-        if (!input.ok) return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step, business)}`);
+        if (!input.ok) {
+          if (field?.type === "number") return actionAnswer(action, state, gentleNumericFieldPrompt(field));
+          return actionAnswer(action, state, `${input.error ?? "Please check that value."} ${workflowPrompt(action, state, step, business)}`);
+        }
         if (repeatable && input.value && repeatable.fieldKeys.includes(field?.key ?? step.fieldKey ?? "")) setWorkflowParticipantValue(state, field?.key ?? step.fieldKey ?? "", input.value);
         await recordConversionEvent(business, {
           event: "FIELD_COMPLETED",
@@ -10700,7 +10905,7 @@ async function continueActionConversation(
     // step can still expose the verified destination. The workflow engine
     // must own the opening turn, though; otherwise the direct-link shortcut
     // completes the action before qualification ever starts.
-    if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, true);
+    if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, true, options.sourcePage ?? null);
     const directCta = primaryCtaForAction(action);
     if (action.executionMode === "DIRECT_LINK" && directCta?.url) {
       state.status = "completed";
@@ -10747,7 +10952,7 @@ async function continueActionConversation(
   const activeReadiness = await actionReadinessForBusiness(business, action);
   if (!activeReadiness.ready && !(activeReadiness.reason === "missing_provider_connection" && actionSupportsProviderFallback(action))) return null;
 
-  if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question);
+  if (action.steps?.length) return continueWorkflowActionConversation(business, conversation, action, question, false, options.sourcePage ?? null);
 
   const state = conversation.actionState ?? createActionState(action);
   conversation.actionState = state;
@@ -10792,6 +10997,7 @@ async function continueActionConversation(
   } else {
     const validation = validateFieldValue(current, question);
     if (!validation.value) {
+      if (current.type === "number") return actionAnswer(action, state, gentleNumericFieldPrompt(current));
       return actionAnswer(action, state, (validation.error ?? ("Please share your " + current.label.toLowerCase() + ".")) + " " + fieldPrompt(current));
     }
     state.values[current.key] = validation.value;
@@ -11951,8 +12157,8 @@ function handoffAnswer(
       ? notificationStatus === "failed"
         ? "Your request is saved for the team. While we wait for someone to join here, what’s the best email or phone number to reach you if you step away? You can stay here and keep chatting with me while we wait."
         : "Absolutely — I’ve notified the team. While we wait for someone to join here, what’s the best email or phone number to reach you if you step away? You can stay here and keep chatting with me while we wait."
-      : notificationStatus === "sent"
-        ? "Your message has been sent to the team. A team member will reply here shortly. I’m still here if you have another question while you wait."
+      : notificationStatus !== "failed"
+        ? "Absolutely — I’ve notified the team. Someone can join here when available. I’m still here if you need anything while you wait."
         : "Your message has been saved for the team. A team member will reply here shortly. I’m still here if you have another question while you wait.",
     grounded: false,
     citations: [],
@@ -15702,7 +15908,9 @@ app.patch("/api/v1/admin/action-registry/:actionId", async (request) => {
   };
   await pool.query(
     `update business_actions
-     set enabled = $2, lifecycle_status = $3, review_reason = $4, updated_at = now()
+     set enabled = $2, lifecycle_status = $3, review_reason = $4,
+         archived = case when $2 then false else archived end,
+         updated_at = now()
      where id = $1`,
     [actionId, enabled, lifecycleStatus, reviewReason],
   );
@@ -19144,8 +19352,9 @@ app.get("/api/v1/demo/:slug/actions", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
   await requireDemoOwner(business, request);
-  // Keep disabled/archived definitions visible to owners so they can restore
-  // them; detectAction and the widget runtime still exclude them.
+  // Keep disabled definitions visible for owner review; archived definitions
+  // remain available to workflow/runtime reconciliation but are marked so the
+  // Actions dashboard can hide owner-deleted records.
   const configuredActions = business.actions;
   const organizationId = business.organizationId ?? await getBusinessOrganizationId(business);
   for (const action of configuredActions) {
@@ -19606,6 +19815,7 @@ async function archiveActionOrWorkflow(request: FastifyRequest) {
   const archived: ActionFlow = {
     ...action,
     enabled: false,
+    archived: true,
     lifecycleStatus: "disabled",
     reviewReason: "owner_override",
     version: Math.max(1, (action.version ?? 1) + 1),

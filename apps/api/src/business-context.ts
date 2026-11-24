@@ -208,8 +208,9 @@ function criticalFact(fact: BusinessFact): boolean {
 }
 
 function statusForFact(fact: BusinessFact, conflict: boolean, now: string | Date): BusinessContextStatus {
+  if (fact.verificationStatus === "STALE") return "STALE";
   if (factFreshnessScore(fact, now) < 0) return "STALE";
-  if (conflict) return "CONFLICTED";
+  if (conflict || fact.verificationStatus === "CONFLICTED") return "CONFLICTED";
   if (fact.authority === "system_of_record" || fact.authority === "owner_verified") return "VERIFIED";
   if (fact.authority === "inferred") return "INFERRED";
   if (fact.authority === "owner_knowledge" || fact.authority === "document" || fact.authority === "website") return "SUPPORTED";
@@ -218,15 +219,17 @@ function statusForFact(fact: BusinessFact, conflict: boolean, now: string | Date
 
 function provenanceForFact(fact: BusinessFact, sources: BusinessContextInput["sources"]): BusinessContextProvenance {
   const source = sourceForFact(fact, sources);
-  const authority = fact.sourceType === "website" ? "public_business_source" : fact.authority;
+  const authority = fact.sourceType === "website" && fact.authority !== "owner_verified" && fact.authority !== "system_of_record"
+    ? "public_business_source"
+    : fact.authority;
   return {
     sourceType: fact.sourceType,
     authority,
     sourceId: fact.sourceId,
-    sourceUrl: source?.url ?? null,
+    sourceUrl: source?.url ?? fact.sourceUrl,
     sourceLabel: fact.sourceLabel ?? source?.title ?? null,
     confidence: fact.confidence,
-    lastSeenAt: fact.observedAt,
+    lastSeenAt: fact.lastSeenAt,
     freshnessPolicy: fact.freshnessPolicy,
   };
 }

@@ -1,4 +1,5 @@
 import { normalizeImprovementQuestion } from "./improvement-signals.js";
+import { isExplicitHumanRequest } from "./handoff-policy.js";
 
 export type ExperienceSignalType =
   | "frustration"
@@ -72,7 +73,6 @@ export type ExperienceSignalAssessment = {
 };
 
 const correctionPattern = /\b(actually|no[,\s]+|not what i meant|that(?:'s| is) (?:wrong|not|incorrect)|i meant|correction|you(?:'re| are) wrong|that's not right)\b/i;
-const handoffPattern = /\b(?:can|could|may) i (?:just )?(?:talk|speak) (?:to|with) (?:a|someone|the) (?:person|human|team|staff)|(?:talk|speak) to (?:a|someone|the) (?:person|human|team|staff)|human agent|real person|call me|contact the team\b/i;
 const explicitFrustrationPatterns: Array<{ pattern: RegExp; weight: number; mild?: boolean }> = [
   { pattern: /\b(?:this|that) (?:is|was) stupid\b/i, weight: 3 },
   { pattern: /\b(?:this|that) (?:is|was) (?:not )?working\b/i, weight: 3 },
@@ -152,7 +152,7 @@ export function assessExperienceSignals(input: ExperienceSignalInput): Experienc
   const explicitFrustrationScore = frustrationMatches.reduce((total, match) => total + match.weight, 0);
   const isRepeated = repeatedQuestion(message, previous);
   const isCorrection = correctionPattern.test(message);
-  const requestedHandoff = Boolean(input.result?.handoff) || handoffPattern.test(message);
+  const requestedHandoff = Boolean(input.result?.handoff) || isExplicitHumanRequest(message);
   const hasWorkflowFailure = Boolean(
     input.workflow?.loopGuardTriggered
       || (input.workflow?.sameStepAttempts ?? 0) >= 2

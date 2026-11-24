@@ -126,6 +126,9 @@ function workflowMatchesActionIntent(action: ActionFlow, actionIntent: string, m
  */
 export function decideConversationRoute(input: ConversationOrchestrationInput): ConversationOrchestrationDecision {
   const message = input.message.trim();
+  // Human requests are a platform-level escape hatch. Resolve this intent
+  // before any knowledge or action classification can claim the turn.
+  const explicitHumanRequest = isExplicitHumanRequest(message);
   const request = classifyVisitorRequest(message);
   const conversationalIntent = classifyQuestionIntent(message);
   const active = hasActiveWorkflow(input.activeAction, input.actionState);
@@ -171,7 +174,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
     };
   }
 
-  if (isExplicitHumanRequest(message)) {
+  if (explicitHumanRequest) {
     return {
       route: "HUMAN_HANDOFF",
       conversationalIntent,

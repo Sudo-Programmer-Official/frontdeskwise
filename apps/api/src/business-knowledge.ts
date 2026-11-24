@@ -35,6 +35,7 @@ export const BUSINESS_FACT_SOURCE_TYPES = [
 export type BusinessFactSourceType = typeof BUSINESS_FACT_SOURCE_TYPES[number];
 export type BusinessFactAuthority = "system_of_record" | "owner_verified" | "owner_knowledge" | "document" | "website" | "inferred";
 export type BusinessFactFreshnessPolicy = "realtime" | "hourly" | "daily" | "until_replaced" | "never";
+export type BusinessFactVerificationStatus = "VERIFIED" | "NEEDS_REVIEW" | "STALE" | "CONFLICTED";
 
 export type BusinessFactValue = string | number | boolean | null | Record<string, unknown> | Array<string | number | boolean | null>;
 
@@ -49,7 +50,12 @@ export type BusinessFact = {
   sourceType: BusinessFactSourceType;
   authority: BusinessFactAuthority;
   sourceId: string | null;
+  sourceUrl: string | null;
   sourceLabel: string | null;
+  sourceHash: string | null;
+  extractedAt: string;
+  lastSeenAt: string;
+  verificationStatus: BusinessFactVerificationStatus;
   confidence: number;
   freshnessPolicy: BusinessFactFreshnessPolicy;
   observedAt: string;
@@ -193,6 +199,9 @@ export function normalizeBusinessFact(input: BusinessFactInput, now = new Date()
   if (!predicate) throw new Error("Business fact predicate is required");
   const observedAt = cleanText(input.observedAt, 80) || now;
   if (!safeDate(observedAt)) throw new Error("Business fact observedAt must be an ISO date");
+  const extractedAt = cleanText(input.extractedAt, 80) || observedAt;
+  const lastSeenAt = cleanText(input.lastSeenAt, 80) || observedAt;
+  if (!safeDate(extractedAt) || !safeDate(lastSeenAt)) throw new Error("Business fact provenance timestamps must be ISO dates");
   const expiresAt = input.expiresAt ? cleanText(input.expiresAt, 80) : null;
   if (expiresAt && !safeDate(expiresAt)) throw new Error("Business fact expiresAt must be an ISO date");
   if (expiresAt && safeDate(expiresAt)!.getTime() < safeDate(observedAt)!.getTime()) throw new Error("Business fact expiresAt must be after observedAt");
@@ -201,6 +210,11 @@ export function normalizeBusinessFact(input: BusinessFactInput, now = new Date()
   const value = safeValue(input.value);
   const valueText = cleanText(input.valueText, 1_000) || displayValue(value);
   if (!valueText) throw new Error("Business fact value is required");
+  const verificationStatus = input.verificationStatus === "VERIFIED"
+    || input.verificationStatus === "STALE"
+    || input.verificationStatus === "CONFLICTED"
+    ? input.verificationStatus
+    : authority === "system_of_record" || authority === "owner_verified" ? "VERIFIED" : "NEEDS_REVIEW";
   return {
     id: cleanText(input.id, 120),
     businessId: input.businessId,
@@ -212,7 +226,12 @@ export function normalizeBusinessFact(input: BusinessFactInput, now = new Date()
     sourceType,
     authority,
     sourceId: cleanText(input.sourceId, 240) || null,
+    sourceUrl: cleanText(input.sourceUrl, 2_000) || null,
     sourceLabel: cleanText(input.sourceLabel, 240) || null,
+    sourceHash: cleanText(input.sourceHash, 160) || null,
+    extractedAt: new Date(extractedAt).toISOString(),
+    lastSeenAt: new Date(lastSeenAt).toISOString(),
+    verificationStatus,
     confidence: Math.max(0, Math.min(1, Number.isFinite(Number(input.confidence)) ? Number(input.confidence) : 1)),
     freshnessPolicy,
     observedAt: new Date(observedAt).toISOString(),

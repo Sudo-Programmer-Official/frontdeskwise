@@ -69,3 +69,27 @@ test("manual facts normalize to a durable freshness policy", () => {
   assert.equal(normalized.freshnessPolicy, "until_replaced");
   assert.equal(normalized.observedAt, now);
 });
+
+test("promoted facts retain crawl provenance and verification state", () => {
+  const normalized = normalizeBusinessFact({
+    businessId: "business-1",
+    kind: "pricing",
+    subject: "Core",
+    predicate: "plan price",
+    value: { plan: "Core", amount: 65, currency: "USD", billingPeriod: "month" },
+    valueText: "$65/month",
+    sourceType: "website",
+    authority: "owner_verified",
+    sourceId: "pricing-page",
+    sourceUrl: "https://salonflow.studio/pricing",
+    sourceHash: "sha256:pricing-v1",
+    extractedAt: now,
+    lastSeenAt: now,
+  }, now);
+
+  assert.equal(normalized.sourceHash, "sha256:pricing-v1");
+  assert.equal(normalized.sourceUrl, "https://salonflow.studio/pricing");
+  assert.equal(normalized.extractedAt, now);
+  assert.equal(normalized.lastSeenAt, now);
+  assert.equal(normalized.verificationStatus, "VERIFIED");
+});

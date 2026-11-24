@@ -25,6 +25,7 @@ test("extracts plan prices from crawled pricing chunks", () => {
   ]);
   assert.deepEqual(candidates[0]?.value, { plan: "Core", amount: 65, currency: "$", billingPeriod: "month" });
   assert.equal(candidates.every((candidate) => candidate.sourceId === "pricing-source"), true);
+  assert.equal(candidates.every((candidate) => candidate.sourceUrl === "https://salonflow.studio/pricing"), true);
 });
 
 test("does not treat unrelated website numbers as pricing facts", () => {
@@ -34,4 +35,41 @@ test("does not treat unrelated website numbers as pricing facts", () => {
   });
 
   assert.deepEqual(candidates, []);
+});
+
+test("extracts homepage pricing cards when the page is not named pricing", () => {
+  const candidates = extractWebsitePricingCandidates({
+    sources: [{
+      id: "salon-home",
+      url: "https://salonflow.studio/",
+      title: "Salon Management Software for More Bookings | SalonFlow",
+      pageType: "service",
+      contentHash: "homepage-v1",
+    }],
+    chunks: [{
+      sourceId: "salon-home",
+      content: "Plans Core $65/mo Growth $99/mo Complete $129/mo",
+      metadata: { headingPath: ["Plans"] },
+    }],
+  });
+
+  assert.deepEqual(candidates.map((candidate) => [candidate.subject, candidate.valueText, candidate.sourceHash]), [
+    ["Core", "$65/month", "homepage-v1"],
+    ["Growth", "$99/month", "homepage-v1"],
+    ["Complete", "$129/month", "homepage-v1"],
+  ]);
+});
+
+test("promotes an unlabeled homepage starting price without inventing a plan", () => {
+  const candidates = extractWebsitePricingCandidates({
+    sources: [{
+      id: "salon-home",
+      url: "https://salonflow.studio/",
+      title: "Salon Management Software for More Bookings | SalonFlow",
+      pageType: "service",
+    }],
+    chunks: [{ sourceId: "salon-home", content: "Try the demo. From $65/month. Setup included." }],
+  });
+
+  assert.deepEqual(candidates.map((candidate) => [candidate.subject, candidate.valueText]), [["Starting price", "$65/month"]]);
 });

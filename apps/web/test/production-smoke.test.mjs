@@ -146,6 +146,13 @@ test("Actions and Workflows share current relationships and provider readiness",
   assert.match(apiServer, /provider_follow_up/);
 });
 
+test("deleted Actions are archived server-side and hidden from the dashboard", () => {
+  assert.match(apiServer, /archived: true/);
+  assert.match(apiServer, /archived = excluded\.archived/);
+  assert.match(app, /const visibleActionFlows = computed\(\(\) => actionFlows\.value\.filter\(\(action\) => action\.archived !== true\)/);
+  assert.match(app, /v-for="action in visibleActionFlows"/);
+});
+
 test("workflow creation never reuses a zero-step relationship projection", () => {
   assert.match(workflowWorkspace, /function hasWorkflowDefinition\(workflow: WorkflowAction\)/);
   assert.match(workflowWorkspace, /if \(!hasWorkflowDefinition\(workflow\)\)/);

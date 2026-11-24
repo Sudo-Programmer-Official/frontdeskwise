@@ -185,6 +185,20 @@ export const DEFAULT_CONFIG: WidgetConfig = {
 
 const SYMBOL = "<svg class=\"fdw-brand-symbol\" viewBox=\"0 0 64 64\" aria-hidden=\"true\"><path d=\"m32 12 4.8 12.2L49 29l-12.2 4.8L32 46l-4.8-12.2L15 29l12.2-4.8L32 12Z\" fill=\"currentColor\"></path></svg>";
 
+type WidgetCtaIntent = "action" | "handoff" | "retry" | "calendar" | "phone" | "email" | "external";
+
+const CTA_HANDOFF_TERMS = /\b(contact|talk|speak|human|team|staff|person|help)\b/i;
+const CTA_RETRY_TERMS = /\b(try again|retry)\b/i;
+
+const CTA_ICON_SVGS: Record<Exclude<WidgetCtaIntent, "action">, string> = {
+  handoff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-6A3.5 3.5 0 0 0 3 18.5V20"></path><circle cx="9.5" cy="7" r="3.5"></circle><path d="M17 11v6"></path><path d="M14 14h6"></path></svg>',
+  retry: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.8-4L3 9"></path><path d="M3 4v5h5"></path><path d="M4 13a8 8 0 0 0 14.8 4L21 15"></path><path d="M21 20v-5h-5"></path></svg>',
+  calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="2"></rect><path d="M16 2.5v4M8 2.5v4M3 9.5h18"></path><path d="M8 13h.01M12 13h.01M16 13h.01M8 17h.01M12 17h.01"></path></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16.5v2a2 2 0 0 1-2.2 2 17.7 17.7 0 0 1-7.7-2.7 17.4 17.4 0 0 1-5.4-5.4A17.7 17.7 0 0 1 3 4.7 2 2 0 0 1 5 2.5h2a2 2 0 0 1 2 1.7c.1.8.3 1.5.6 2.2a2 2 0 0 1-.5 2.1L8.3 9.8a14.4 14.4 0 0 0 5.9 5.9l1.3-1.3a2 2 0 0 1 2.1-.5c.7.3 1.4.5 2.2.6a2 2 0 0 1 1.2 2Z"></path></svg>',
+  email: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="m4 7 8 6 8-6"></path></svg>',
+  external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"></path><path d="m20 4-9 9"></path><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"></path></svg>',
+};
+
 const CONTEXTUAL_CITATION_TERMS = /\b(price|pricing|cost|rate|fee|plan|subscription|privacy|data|security|terms|policy|policies|legal|service|services|support|hours|location|address|booking|book|appointment)\b/i;
 
 function shouldShowCitation(message: WidgetMessage, config: WidgetConfig): boolean {
@@ -227,6 +241,7 @@ const WIDGET_STYLES = `
   .fdw-panel.fdw-theme-dark { color: #eef5ff; background: #182a43; border-color: #2f4768; }
   .fdw-panel.fdw-theme-dark .fdw-messages, .fdw-panel.fdw-theme-dark .fdw-quick-actions { background: #122238; }
   .fdw-panel.fdw-theme-dark .fdw-quick-actions { border-top-color: #2f4768; }
+  .fdw-panel.fdw-theme-dark .fdw-quick-actions .fdw-cta:not(.fdw-primary-cta):not(.fdw-retry-cta) { border-color: #385578; color: #e4edf9; background: #243b5c; }
   .fdw-panel.fdw-theme-dark .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
   .fdw-panel.fdw-theme-dark .fdw-composer { background: #182a43; border-color: #2f4768; }
   .fdw-panel.fdw-theme-dark .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
@@ -269,17 +284,26 @@ const WIDGET_STYLES = `
   .fdw-message code { padding: 1px 4px; border-radius: 4px; background: #edf4fc; font-size: .92em; }
   .fdw-quick-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; padding: 12px 16px 14px; border-top: 1px solid #e6edf5; background: #f8fafd; }
   .fdw-quick-actions:empty { display: none; }
-  .fdw-quick-actions button { padding: 8px 10px; border: 1px solid #bfd4ed; border-radius: 999px; color: #20558e; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
-  .fdw-quick-actions button:hover, .fdw-quick-actions button:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; }
-  .fdw-quick-actions .fdw-retry-cta { min-height: 40px; padding: 9px 14px; border-color: #1f73d8; border-radius: 10px; color: #fff; background: #1f73d8; box-shadow: 0 4px 10px rgba(31,115,216,.18); }
+  .fdw-cta { display: inline-flex; min-width: 0; min-height: 44px; align-items: center; justify-content: center; gap: 8px; border: 1px solid transparent; border-radius: 12px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 800; line-height: 1.2; text-decoration: none; transition: transform .2s cubic-bezier(.2,.8,.2,1), box-shadow .2s ease, border-color .2s ease, background .2s ease, color .2s ease, filter .2s ease; }
+  .fdw-cta-icon { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; }
+  .fdw-cta-icon svg { display: block; width: 18px; height: 18px; }
+  .fdw-cta-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fdw-cta-arrow { margin-left: auto; font-size: 18px; font-weight: 500; line-height: 1; }
+  .fdw-quick-actions .fdw-cta { flex: 0 1 auto; padding: 10px 13px; border-color: #bfd4ed; color: #20558e; background: #fff; }
+  .fdw-quick-actions .fdw-cta:not(.fdw-primary-cta):not(.fdw-cta-handoff) .fdw-cta-arrow { margin-left: 0; }
+  .fdw-quick-actions .fdw-cta:hover, .fdw-quick-actions .fdw-cta:focus-visible { border-color: var(--fdw-accent, #0d6efd); color: var(--fdw-accent, #0d6efd); outline: none; transform: translateY(-1px); }
+  .fdw-quick-actions .fdw-retry-cta { min-height: 44px; padding: 10px 14px; border-color: #1f73d8; border-radius: 12px; color: #fff; background: #1f73d8; box-shadow: 0 4px 10px rgba(31,115,216,.18); }
   .fdw-quick-actions .fdw-retry-cta:hover, .fdw-quick-actions .fdw-retry-cta:focus-visible { border-color: #185fb5; color: #fff; background: #185fb5; outline: 3px solid rgba(31,115,216,.22); outline-offset: 2px; }
   .fdw-quick-actions .fdw-secondary-cta { border-color: #bfd4ed; color: #20558e; background: #fff; }
-  .fdw-quick-actions .fdw-primary-cta { position: relative; display: inline-flex; flex: 1 0 100%; width: 100%; min-height: 52px; align-items: center; justify-content: center; overflow: hidden; padding: 14px 18px; border: 1px solid rgba(31,115,216,.46); border: 1px solid color-mix(in srgb, var(--fdw-accent, #0d6efd) 76%, #0b2b5d); border-radius: 14px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); box-shadow: 0 9px 22px rgba(31,115,216,.2), inset 0 1px 0 rgba(255,255,255,.22); box-shadow: 0 9px 22px color-mix(in srgb, var(--fdw-accent, #0d6efd) 26%, transparent), inset 0 1px 0 rgba(255,255,255,.22); cursor: pointer; font-size: 14px; font-weight: 800; letter-spacing: -.01em; line-height: 1.2; text-decoration: none; transition: transform .2s cubic-bezier(.2,.8,.2,1), box-shadow .2s ease, filter .2s ease; }
-  .fdw-quick-actions .fdw-primary-cta::before { position: absolute; inset: 0; content: ""; background: linear-gradient(115deg, transparent 18%, rgba(255,255,255,.2) 46%, transparent 72%); pointer-events: none; transform: translateX(-115%); transition: transform .55s cubic-bezier(.2,.8,.2,1); }
-  .fdw-quick-actions .fdw-primary-cta:hover { color: var(--fdw-accent-text, #fff); box-shadow: 0 12px 28px rgba(31,115,216,.26), inset 0 1px 0 rgba(255,255,255,.25); box-shadow: 0 12px 28px color-mix(in srgb, var(--fdw-accent, #0d6efd) 34%, transparent), inset 0 1px 0 rgba(255,255,255,.25); filter: saturate(1.08) brightness(.98); transform: translateY(-2px); }
-  .fdw-quick-actions .fdw-primary-cta:hover::before { transform: translateX(115%); }
-  .fdw-quick-actions .fdw-primary-cta:active { transform: translateY(0) scale(.985); box-shadow: 0 5px 13px color-mix(in srgb, var(--fdw-accent, #0d6efd) 24%, transparent), inset 0 2px 4px rgba(10,35,75,.16); }
-  .fdw-quick-actions .fdw-primary-cta:focus-visible { color: var(--fdw-accent-text, #fff); outline: 3px solid rgba(31,115,216,.34); outline: 3px solid color-mix(in srgb, var(--fdw-accent, #0d6efd) 34%, transparent); outline-offset: 3px; }
+  .fdw-quick-actions .fdw-primary-cta, .fdw-quick-actions .fdw-cta-handoff { position: relative; display: inline-flex; flex: 1 0 100%; width: 100%; min-height: 52px; align-items: center; justify-content: center; overflow: hidden; padding: 14px 18px; border: 1px solid color-mix(in srgb, var(--fdw-accent, #0d6efd) 76%, #0b2b5d); border-radius: 14px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); box-shadow: 0 9px 22px color-mix(in srgb, var(--fdw-accent, #0d6efd) 26%, transparent), inset 0 1px 0 rgba(255,255,255,.22); cursor: pointer; font-size: 14px; font-weight: 800; letter-spacing: -.01em; line-height: 1.2; text-decoration: none; transition: transform .2s cubic-bezier(.2,.8,.2,1), box-shadow .2s ease, filter .2s ease; }
+  .fdw-quick-actions .fdw-cta-handoff.fdw-secondary-cta { border-color: color-mix(in srgb, var(--fdw-accent, #0d6efd) 58%, #bfd4ed); color: var(--fdw-accent, #0d6efd); background: color-mix(in srgb, var(--fdw-accent, #0d6efd) 10%, #fff); box-shadow: none; }
+  .fdw-quick-actions .fdw-primary-cta::before, .fdw-quick-actions .fdw-cta-handoff:not(.fdw-secondary-cta)::before { position: absolute; inset: 0; content: ""; background: linear-gradient(115deg, transparent 18%, rgba(255,255,255,.2) 46%, transparent 72%); pointer-events: none; transform: translateX(-115%); transition: transform .55s cubic-bezier(.2,.8,.2,1); }
+  .fdw-quick-actions .fdw-primary-cta:hover, .fdw-quick-actions .fdw-cta-handoff:not(.fdw-secondary-cta):hover { color: var(--fdw-accent-text, #fff); box-shadow: 0 12px 28px color-mix(in srgb, var(--fdw-accent, #0d6efd) 34%, transparent), inset 0 1px 0 rgba(255,255,255,.25); filter: saturate(1.08) brightness(.98); transform: translateY(-2px); }
+  .fdw-quick-actions .fdw-primary-cta:hover::before, .fdw-quick-actions .fdw-cta-handoff:not(.fdw-secondary-cta):hover::before { transform: translateX(115%); }
+  .fdw-quick-actions .fdw-primary-cta:active, .fdw-quick-actions .fdw-cta-handoff:not(.fdw-secondary-cta):active { transform: translateY(0) scale(.985); box-shadow: 0 5px 13px color-mix(in srgb, var(--fdw-accent, #0d6efd) 24%, transparent), inset 0 2px 4px rgba(10,35,75,.16); }
+  .fdw-quick-actions .fdw-primary-cta:focus-visible, .fdw-quick-actions .fdw-cta-handoff:not(.fdw-secondary-cta):focus-visible { color: var(--fdw-accent-text, #fff); outline: 3px solid color-mix(in srgb, var(--fdw-accent, #0d6efd) 34%, transparent); outline-offset: 3px; }
+  .fdw-action-form .fdw-cta, .fdw-lead .fdw-cta { width: 100%; min-height: 46px; padding: 12px 15px; color: var(--fdw-accent-text, #fff); background: var(--fdw-accent, #0d6efd); box-shadow: 0 7px 16px color-mix(in srgb, var(--fdw-accent, #0d6efd) 20%, transparent); }
+  .fdw-action-form .fdw-cta:hover, .fdw-lead .fdw-cta:hover { filter: saturate(1.08) brightness(.98); transform: translateY(-1px); }
   .fdw-action-form, .fdw-lead { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
   .fdw-action-error { color: #a54b45; font-size: 11px; line-height: 1.4; }
   .fdw-action-contact-hint { color: #687b94; font-size: 10px; line-height: 1.4; }
@@ -350,6 +374,7 @@ const WIDGET_STYLES = `
     .fdw-panel.fdw-theme-auto { color: #eef5ff; background: #182a43; border-color: #2f4768; }
     .fdw-panel.fdw-theme-auto .fdw-messages, .fdw-panel.fdw-theme-auto .fdw-quick-actions { background: #122238; }
     .fdw-panel.fdw-theme-auto .fdw-quick-actions { border-top-color: #2f4768; }
+    .fdw-panel.fdw-theme-auto .fdw-quick-actions .fdw-cta:not(.fdw-primary-cta):not(.fdw-retry-cta) { border-color: #385578; color: #e4edf9; background: #243b5c; }
     .fdw-panel.fdw-theme-auto .fdw-message { color: #e4edf9; background: #243b5c; border-color: #385578; }
     .fdw-panel.fdw-theme-auto .fdw-composer { background: #182a43; border-color: #2f4768; }
     .fdw-panel.fdw-theme-auto .fdw-composer input { color: #eef5ff; background: #243b5c; border-color: #385578; }
@@ -376,8 +401,8 @@ const WIDGET_STYLES = `
     .fdw-preview-root .fdw-messages { padding-top: 16px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .fdw-quick-actions .fdw-primary-cta, .fdw-action-link { transition: none; }
-    .fdw-quick-actions .fdw-primary-cta::before { display: none; }
+    .fdw-cta, .fdw-action-link { transition: none; }
+    .fdw-quick-actions .fdw-primary-cta::before, .fdw-quick-actions .fdw-cta-handoff::before { display: none; }
   }
 `;
 
@@ -395,6 +420,51 @@ function element<T extends HTMLElement>(documentRef: Document, tag: string, clas
   const node = documentRef.createElement(tag) as T;
   if (className) node.className = className;
   return node;
+}
+
+function ctaIntentForText(text: string, external = false): WidgetCtaIntent {
+  const normalized = text.trim();
+  if (CTA_RETRY_TERMS.test(normalized)) return "retry";
+  if (/\b(book|appointment|schedule|tour|visit|reserve|reservation)\b/i.test(normalized)) return "calendar";
+  if (/\b(call|phone|ring)\b/i.test(normalized)) return "phone";
+  if (/\b(email|mail)\b/i.test(normalized)) return "email";
+  if (CTA_HANDOFF_TERMS.test(normalized)) return "handoff";
+  return external ? "external" : "action";
+}
+
+function ctaIntentForPrimaryCta(cta: WidgetPrimaryCta): WidgetCtaIntent {
+  const external = Boolean(cta.url) || ["DIRECT_LINK", "PHONE", "EMAIL"].includes(cta.executionMode);
+  const inferred = ctaIntentForText(`${cta.key} ${cta.label}`, external);
+  if (cta.executionMode === "HANDOFF") return "handoff";
+  return inferred;
+}
+
+function ctaClassName(intent: WidgetCtaIntent, variant: "primary" | "secondary" | "retry"): string {
+  const classes = ["fdw-cta"];
+  if (variant === "primary") classes.push("fdw-primary-cta");
+  if (variant === "secondary") classes.push("fdw-secondary-cta");
+  if (variant === "retry") classes.push("fdw-retry-cta");
+  if (intent === "handoff") classes.push("fdw-cta-handoff");
+  if (intent === "external") classes.push("fdw-cta-external");
+  return classes.join(" ");
+}
+
+function renderCtaContent(documentRef: Document, node: HTMLElement, label: string, intent: WidgetCtaIntent, external = false): void {
+  node.replaceChildren();
+  const iconSvg = intent === "action" ? "" : CTA_ICON_SVGS[intent];
+  if (iconSvg) {
+    const icon = element<HTMLSpanElement>(documentRef, "span", "fdw-cta-icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = iconSvg;
+    node.appendChild(icon);
+  }
+  const text = element<HTMLSpanElement>(documentRef, "span", "fdw-cta-label");
+  text.textContent = label;
+  node.appendChild(text);
+  const arrow = element<HTMLSpanElement>(documentRef, "span", "fdw-cta-arrow");
+  arrow.setAttribute("aria-hidden", "true");
+  arrow.textContent = external || intent === "external" ? "↗" : "→";
+  node.appendChild(arrow);
 }
 
 function renderFormControl(documentRef: Document, field: WidgetFormField, valueOverride?: string): HTMLInputElement | HTMLSelectElement {
@@ -441,6 +511,7 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     ...options.state,
   };
   let destroyed = false;
+  let immersiveVisitMode = false;
 
   const style = element<HTMLStyleElement>(documentRef, "style");
   style.textContent = WIDGET_STYLES;
@@ -501,6 +572,13 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   const leadConsentRow = root.querySelector<HTMLElement>(".fdw-consent-row")!;
   const leadConsentSaved = root.querySelector<HTMLElement>(".fdw-consent-saved")!;
   const privacyLink = root.querySelector<HTMLAnchorElement>(".fdw-privacy-link")!;
+  const expandButton = root.querySelector<HTMLButtonElement>(".fdw-expand")!;
+
+  function enterImmersiveVisitMode(): void {
+    if (!config.widgetAllowExpand || immersiveVisitMode) return;
+    immersiveVisitMode = true;
+    render();
+  }
 
   function renderLogo(): void {
     const logoUrl = config.widgetLogoUrl?.trim();
@@ -585,24 +663,26 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     const failureState = state.healthState === "TEMPORARY_ERROR" || state.healthState === "MESSAGE_FAILED";
     const renderPrimaryCta = (secondary = false): void => {
       if (!primaryCta?.label) return;
-      const className = secondary ? "fdw-secondary-cta" : "fdw-primary-cta";
+      const intent = ctaIntentForPrimaryCta(primaryCta);
+      const variant = secondary ? "secondary" : "primary";
       if (primaryCta.url) {
-        const link = element<HTMLAnchorElement>(documentRef, "a", className);
+        const link = element<HTMLAnchorElement>(documentRef, "a", ctaClassName(intent, variant));
         const safeUrl = safeLinkUrl(primaryCta.url);
         if (safeUrl) {
           link.href = safeUrl;
           link.target = "_blank";
           link.rel = "noopener noreferrer";
-          link.textContent = primaryCta.label;
+          renderCtaContent(documentRef, link, primaryCta.label, intent, true);
           link.setAttribute("aria-label", `${primaryCta.label} (opens in a new tab)`);
           link.addEventListener("click", () => options.onPrimaryCtaClick?.(primaryCta));
           quickActions.appendChild(link);
         }
       } else {
-        const button = element<HTMLButtonElement>(documentRef, "button", className);
+        const button = element<HTMLButtonElement>(documentRef, "button", ctaClassName(intent, variant));
         button.type = "button";
-        button.textContent = primaryCta.label;
+        renderCtaContent(documentRef, button, primaryCta.label, intent);
         button.addEventListener("click", () => {
+          if (intent === "handoff" || primaryCta.executionMode === "FORM_FLOW" || primaryCta.executionMode === "PROVIDER_FLOW") enterImmersiveVisitMode();
           options.onPrimaryCtaClick?.(primaryCta);
           if (primaryCta.question) options.onAsk?.(primaryCta.question);
         });
@@ -612,25 +692,28 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     if (!failureState) renderPrimaryCta();
     for (const action of state.quickActions.slice(0, 4)) {
       if (!action?.label) continue;
-      const normalizedLabel = action.label.trim().toLowerCase();
-      const actionClass = failureState && normalizedLabel === "try again"
-        ? "fdw-retry-cta"
-        : failureState && normalizedLabel === "contact the team"
-          ? "fdw-secondary-cta"
-          : "";
-      const button = element<HTMLButtonElement>(documentRef, "button", actionClass);
+      const intent = ctaIntentForText(`${action.label} ${action.question || ""}`);
+      const variant = failureState && intent === "retry"
+        ? "retry"
+        : failureState && intent === "handoff"
+          ? "secondary"
+          : intent === "handoff"
+            ? "primary"
+            : "secondary";
+      const button = element<HTMLButtonElement>(documentRef, "button", ctaClassName(intent, variant));
       button.type = "button";
-      button.textContent = action.label;
+      renderCtaContent(documentRef, button, action.label, intent);
       button.addEventListener("click", () => {
         if (action.question) {
           composerInput.value = "";
-          if (failureState && normalizedLabel === "try again") {
+          if (failureState && intent === "retry") {
             const message = [...state.messages].reverse().find((candidate) => candidate.role === "user" && candidate.content === action.question);
             if (message) {
               options.onRetryMessage?.(message);
               return;
             }
           }
+          if (intent === "handoff") enterImmersiveVisitMode();
           options.onAsk?.(action.question);
         }
         else composerInput.focus();
@@ -656,9 +739,10 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         const linkLabel = action?.linkLabel || "Continue";
-        link.textContent = linkLabel;
+        const linkIntent = ctaIntentForText(linkLabel, true);
+        renderCtaContent(documentRef, link, linkLabel, linkIntent, true);
         link.setAttribute("aria-label", `${linkLabel} (opens in a new tab)`);
-        link.className = "fdw-action-link";
+        link.className = `fdw-action-link ${ctaClassName(linkIntent, "primary")}`;
         actionForm.appendChild(link);
         actionForm.hidden = false;
       }
@@ -718,7 +802,8 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     const submit = element<HTMLButtonElement>(documentRef, "button");
     submit.type = "submit";
     submit.disabled = Boolean(state.actionSubmitting);
-    submit.textContent = state.actionSubmitting ? "Submitting…" : action.form.submitLabel || "Continue";
+    submit.className = ctaClassName("action", "primary");
+    renderCtaContent(documentRef, submit, state.actionSubmitting ? "Submitting…" : action.form.submitLabel || "Continue", "action");
     actionForm.appendChild(submit);
     actionForm.hidden = false;
   }
@@ -788,12 +873,16 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     root.style.setProperty("--fdw-accent-text", accessibleTextColor(accent));
     launcher.classList.toggle("fdw-position-bottom-left", config.widgetPosition === "bottom-left");
     teaser.classList.toggle("fdw-position-bottom-left", config.widgetPosition === "bottom-left");
-    panel.className = `fdw-panel fdw-theme-${config.widgetTheme || "auto"} fdw-position-${config.widgetPosition || "bottom-right"} fdw-mode-${config.widgetDefaultMode || "compact"}${state.isOpen ? " fdw-open" : ""}`;
+    const effectiveMode = immersiveVisitMode ? "fullscreen" : config.widgetDefaultMode || "compact";
+    panel.className = `fdw-panel fdw-theme-${config.widgetTheme || "auto"} fdw-position-${config.widgetPosition || "bottom-right"} fdw-mode-${effectiveMode}${state.isOpen ? " fdw-open" : ""}`;
     panel.setAttribute("aria-hidden", String(!state.isOpen));
     launcher.hidden = state.isOpen;
     title.textContent = config.assistantName || "AI front desk";
     renderLogo();
-    root.querySelector<HTMLButtonElement>(".fdw-expand")!.hidden = config.widgetAllowExpand === false;
+    expandButton.hidden = config.widgetAllowExpand === false;
+    expandButton.textContent = effectiveMode === "fullscreen" ? "↙" : "↗";
+    expandButton.setAttribute("aria-label", effectiveMode === "fullscreen" ? "Return to compact assistant" : "Expand assistant");
+    expandButton.title = effectiveMode === "fullscreen" ? "Return to compact assistant" : "Expand assistant";
     const consentRemembered = config.requireLeadConsent === true && state.consentGiven === true;
     leadConsentRow.hidden = config.requireLeadConsent !== true || consentRemembered;
     leadConsentSaved.hidden = !consentRemembered;
@@ -827,7 +916,8 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     const submit = lead.querySelector<HTMLButtonElement>("button[type=submit]");
     if (submit) {
       submit.disabled = Boolean(state.leadSubmitting);
-      submit.textContent = state.leadSubmitting ? "Saving…" : handoffContact ? "Save details" : "Continue";
+      submit.className = ctaClassName(handoffContact ? "handoff" : "action", "primary");
+      renderCtaContent(documentRef, submit, state.leadSubmitting ? "Saving…" : handoffContact ? "Save details" : "Continue", handoffContact ? "handoff" : "action");
     }
   }
 
@@ -874,9 +964,11 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
   });
   root.querySelector<HTMLButtonElement>(".fdw-close")!.addEventListener("click", close);
   root.querySelector<HTMLButtonElement>(".fdw-new-conversation")!.addEventListener("click", () => options.onNewConversation?.());
-  root.querySelector<HTMLButtonElement>(".fdw-expand")!.addEventListener("click", () => {
+  expandButton.addEventListener("click", () => {
     if (!config.widgetAllowExpand) return;
-    config = { ...config, widgetDefaultMode: config.widgetDefaultMode === "compact" ? "expanded" : "compact" };
+    const currentMode = immersiveVisitMode ? "fullscreen" : config.widgetDefaultMode || "compact";
+    immersiveVisitMode = false;
+    config = { ...config, widgetDefaultMode: currentMode === "compact" ? "expanded" : "compact" };
     render();
   });
   root.querySelector<HTMLButtonElement>(".fdw-handoff-dismiss")!.addEventListener("click", () => options.onHandoffDismiss?.());

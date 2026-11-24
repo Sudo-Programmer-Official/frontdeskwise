@@ -186,6 +186,8 @@ export type ActionFlow = {
   evidence: ActionEvidence[];
   confidence: number;
   enabled: boolean;
+  /** Soft-deleted by an owner; retained for audit history but hidden from Actions. */
+  archived?: boolean;
   readiness?: ActionReadiness;
   optionalFields?: string[];
   handoffBehavior?: ActionHandoffBehavior;

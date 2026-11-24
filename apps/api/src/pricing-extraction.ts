@@ -5,6 +5,7 @@ export type PricingExtractionSource = {
   url: string;
   title: string;
   pageType: string;
+  contentHash?: string | null;
   lastCrawledAt?: string | null;
 };
 
@@ -21,7 +22,9 @@ export type WebsitePricingCandidate = {
   value: BusinessFactValue;
   valueText: string;
   sourceId: string;
+  sourceUrl: string;
   sourceLabel: string;
+  sourceHash: string | null;
   observedAt: string;
   confidence: number;
 };
@@ -71,6 +74,7 @@ const noiseWords = new Set([
   "pricing",
   "starting",
   "starts",
+  "start",
   "the",
   "tier",
   "tiers",
@@ -78,6 +82,8 @@ const noiseWords = new Set([
   "packages",
   "option",
   "options",
+  "cost",
+  "costs",
 ]);
 
 function normalized(value: string): string {
@@ -133,11 +139,19 @@ function planNameBefore(text: string, price: PriceMatch, chunk: PricingExtractio
   const before = text.slice(Math.max(0, price.index - 180), price.index);
   const segments = before.split(/[.!?;|\n]+/).map((segment) => segment.trim()).filter(Boolean);
   const segment = segments.at(-1) ?? before;
-  const marked = /(?:plan|tier|package|option)\s*(?:is|:|[-–—])?\s*([A-Za-z][A-Za-z0-9&+ -]{1,42})$/i.exec(segment)?.[1];
+  const marked = /(?:plan|tier|package|option)s?\b\s*(?:is|:|[-–—])?\s*([A-Za-z][A-Za-z0-9&+ -]{1,42})$/i.exec(segment)?.[1];
   const capitalizedTail = /\b([A-Z][A-Za-z0-9&+]*(?:\s+[A-Z][A-Za-z0-9&+]*(?:\s+[A-Z][A-Za-z0-9&+]*)?)?)$/.exec(segment)?.[1];
+  const heading = headingCandidate(chunk);
   const direct = cleanPlanName(marked ?? capitalizedTail ?? segment);
-  if (direct) return direct;
-  return headingCandidate(chunk);
+  if (marked && direct) return direct;
+  if (heading) return heading;
+  // Do not turn marketing prose such as “See how it works From $65/month”
+  // into a fake plan name. A price without a recoverable card heading is
+  // still useful evidence, but it is explicitly represented as a starting
+  // price below.
+  if (/\b(?:from|starting|starts|start)\s*(?:at)?\s*$/i.test(segment)) return null;
+  if (direct && /^[A-Z][A-Za-z0-9&+]*(?:\s+[A-Z][A-Za-z0-9&+]*){0,2}$/.test(direct)) return direct;
+  return null;
 }
 
 function valueText(price: PriceMatch): string {
@@ -146,8 +160,19 @@ function valueText(price: PriceMatch): string {
 }
 
 function sourceLooksLikePricing(source: PricingExtractionSource, content: string): boolean {
-  return source.pageType.toLowerCase() === "pricing"
-    || /\b(?:pricing|prices?|cost|rates?|fees?|plans?|tiers?|subscriptions?)\b/i.test(`${source.url} ${source.title} ${content}`);
+  const sourceText = `${source.url} ${source.title} ${content}`;
+  if (source.pageType.toLowerCase() === "pricing"
+    || /\b(?:pricing|prices?|cost|rates?|fees?|plans?|tiers?|subscriptions?)\b/i.test(sourceText)) return true;
+  // A homepage often exposes pricing cards without calling the section
+  // “Pricing”. Require both a currency amount and a deterministic pricing
+  // structure signal before treating it as pricing evidence.
+  return priceMatches(content).length > 0
+    && /\b(?:from|starting|starts|start)\s*(?:at)?\s*[$€£]|\b(?:core|growth|complete|starter|basic|standard|premium|pro|enterprise|solo|team)\b/i.test(sourceText);
+}
+
+function fallbackPlanName(text: string, price: PriceMatch): string | null {
+  const before = text.slice(Math.max(0, price.index - 100), price.index);
+  return /\b(?:from|starting|starts|start)\s*(?:at)?\s*$/i.test(before.trim()) ? "Starting price" : null;
 }
 
 /**
@@ -170,7 +195,7 @@ export function extractWebsitePricingCandidates(input: {
     const content = chunk.content.replace(/\s+/g, " ").trim();
     if (!content || !sourceLooksLikePricing(source, content)) continue;
     for (const price of priceMatches(content)) {
-      const subject = planNameBefore(content, price, chunk);
+      const subject = planNameBefore(content, price, chunk) ?? fallbackPlanName(content, price);
       if (!subject) continue;
       const key = `${chunk.sourceId}|${normalized(subject)}|${valueText(price).toLowerCase()}`;
       if (seen.has(key)) continue;
@@ -187,7 +212,9 @@ export function extractWebsitePricingCandidates(input: {
         },
         valueText: valueText(price),
         sourceId: chunk.sourceId,
+        sourceUrl: source.url,
         sourceLabel: source.title || source.url,
+        sourceHash: source.contentHash ?? null,
         observedAt: input.observedAt ?? source.lastCrawledAt ?? new Date().toISOString(),
         confidence: 0.94,
       });
