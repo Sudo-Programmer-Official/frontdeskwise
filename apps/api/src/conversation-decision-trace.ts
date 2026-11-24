@@ -1,4 +1,5 @@
 import { actionProviderForFlow, type ActionFlow, type ConversationActionState } from "./action-flows.js";
+import { providerOperationHonesty } from "./provider-capabilities.js";
 
 export type ConversationTraceState = {
   actionId: string;
@@ -13,6 +14,24 @@ export type ConversationTraceState = {
   participantCount: number;
   formShown: boolean;
   conversionAvailable: boolean;
+  customerVerification: string;
+  providerOperations: Record<string, {
+    provider: string;
+    capabilityKey: string;
+    type: string;
+    status: string;
+    authorization: string;
+    authorizationReason: string | null;
+    resultStatus: string | null;
+    honesty: {
+      canAnswer: boolean;
+      canLookup: boolean;
+      canPrepare: boolean;
+      canSubmit: boolean;
+      canConfirmSuccess: boolean;
+    };
+    latencyMs: number | null;
+  }>;
   loopGuard: {
     consecutiveUnchangedTurns: number;
     triggered: boolean;
@@ -31,6 +50,26 @@ export type ConversationProviderTrace = {
     stepId: string;
     status: string | null;
     matchCount: number;
+  }>;
+  capabilities: Array<{
+    stepId: string;
+    provider: string;
+    capability: string;
+    type: string;
+    status: string;
+    verificationState: string;
+    authorization: string;
+    authorizationReason: string | null;
+    resultStatus: string | null;
+    fallbackBehavior: string | null;
+    honesty: {
+      canAnswer: boolean;
+      canLookup: boolean;
+      canPrepare: boolean;
+      canSubmit: boolean;
+      canConfirmSuccess: boolean;
+    };
+    latencyMs: number | null;
   }>;
   actionDelivery: { status: string; provider: string | null } | null;
 };
@@ -61,6 +100,18 @@ export function snapshotConversationWorkflowState(state: ConversationActionState
     participantCount: state.participants?.length ?? 0,
     formShown: Boolean(state.formShown),
     conversionAvailable: state.conversionAvailable === true,
+    customerVerification: state.customerVerification?.status ?? "UNKNOWN",
+    providerOperations: Object.fromEntries(Object.entries(state.providerOperations ?? {}).slice(0, 50).map(([stepId, operation]) => [stepId, {
+      provider: operation.provider,
+      capabilityKey: operation.capabilityKey,
+      type: operation.type,
+      status: operation.status,
+      authorization: operation.authorization,
+      authorizationReason: operation.authorizationReason ?? null,
+      resultStatus: operation.resultStatus ?? null,
+      honesty: operation.honesty ?? providerOperationHonesty(operation),
+      latencyMs: operation.latencyMs ?? null,
+    }])),
     loopGuard: state.loopGuard ? {
       consecutiveUnchangedTurns: state.loopGuard.consecutiveUnchangedTurns,
       triggered: state.loopGuard.triggered,
@@ -96,8 +147,22 @@ export function providerTrace(
       matchCount: Array.isArray(record.matches) ? record.matches.length : 0,
     };
   });
+  const capabilities = Object.entries(state?.providerOperations ?? {}).map(([stepId, operation]) => ({
+    stepId,
+    provider: operation.provider,
+    capability: operation.capabilityKey,
+    type: operation.type,
+    status: operation.status,
+    verificationState: operation.verificationState,
+    authorization: operation.authorization,
+    authorizationReason: operation.authorizationReason ?? null,
+    resultStatus: operation.resultStatus ?? null,
+    fallbackBehavior: operation.fallbackBehavior ?? null,
+    honesty: operation.honesty ?? providerOperationHonesty(operation),
+    latencyMs: operation.latencyMs ?? null,
+  }));
   const provider = action ? actionProviderForFlow(action) : null;
-  if (!provider && !lookupSteps.length && !actionDelivery) return null;
+  if (!provider && !lookupSteps.length && !capabilities.length && !actionDelivery) return null;
   const operations = [
     ...(action?.steps ?? []).filter((step) => ["lookup", "recommend", "generate_link", "api_action", "book"].includes(step.type)).map((step) => step.type),
     ...(actionDelivery ? ["action_delivery"] : []),
@@ -106,6 +171,7 @@ export function providerTrace(
     provider: actionDelivery?.provider ?? provider,
     operations: [...new Set(operations)],
     lookupSteps,
+    capabilities,
     actionDelivery: actionDelivery ? { status: actionDelivery.status, provider: actionDelivery.provider ?? null } : null,
   };
 }

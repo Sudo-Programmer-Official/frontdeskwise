@@ -153,6 +153,14 @@ test("deleted Actions are archived server-side and hidden from the dashboard", (
   assert.match(app, /v-for="action in visibleActionFlows"/);
 });
 
+test("deleted Actions can be recreated without a stale key collision", () => {
+  assert.match(apiServer, /const archivedIndex = business\.actions\.findIndex\(\(item\) => item\.archived === true && item\.key === action\.key\)/);
+  assert.match(apiServer, /archived: false/);
+  assert.match(apiServer, /item\.archived !== true && item\.key === action\.key/);
+  assert.match(apiServer, /!template && !optionalString\(body\.key, 80\)/);
+  assert.match(app, /body: JSON\.stringify\(\{ \.\.\.template, templateKey: template\.key \}\)/);
+});
+
 test("workflow creation never reuses a zero-step relationship projection", () => {
   assert.match(workflowWorkspace, /function hasWorkflowDefinition\(workflow: WorkflowAction\)/);
   assert.match(workflowWorkspace, /if \(!hasWorkflowDefinition\(workflow\)\)/);

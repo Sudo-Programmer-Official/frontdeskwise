@@ -1,4 +1,5 @@
 import type { ActionConnectorSettings } from "./action-connectors.js";
+import type { CustomerVerificationState, ProviderOperationRecord } from "./provider-capabilities.js";
 import type { WebsiteActionCandidate, WebsiteActionType } from "./website-actions.js";
 
 export const BUSINESS_ACTION_TYPES = [
@@ -207,10 +208,16 @@ export type ConversationActionState = {
   workflowTrigger?: string;
   completedStepIds?: string[];
   lookupResults?: Record<string, unknown>;
+  /** Explicit provider identity state; it survives interruptions and intent switches. */
+  customerVerification?: CustomerVerificationState;
+  /** Redacted provider operation outcomes used for workflow decisions and traces. */
+  providerOperations?: Record<string, ProviderOperationRecord>;
+  /** Capability keys confirmed by the visitor in this workflow. */
+  confirmedCapabilityKeys?: string[];
   /** Provider-backed lookup could not be completed; collect contact details instead. */
   providerFallback?: {
     provider: string;
-    reason: "unavailable" | "not_found";
+    reason: "unavailable" | "not_found" | "ambiguous";
     /** The visitor must explicitly accept team help before contact capture. */
     helpOffered?: boolean;
     helpConfirmed?: boolean;
@@ -1058,6 +1065,9 @@ export function createActionState(action: ActionFlow, now = new Date().toISOStri
     ...(action.steps?.length ? { workflowVersion: action.version ?? 1 } : {}),
     values: {},
     ...(action.steps?.length ? { currentStepId: action.steps[0].id, completedStepIds: [], interruptionStack: [] } : {}),
+    customerVerification: { status: "UNKNOWN", updatedAt: now },
+    providerOperations: {},
+    confirmedCapabilityKeys: [],
     captureMode,
     conversationalKeys,
     status: "active",

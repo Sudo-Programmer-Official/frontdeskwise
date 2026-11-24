@@ -8,7 +8,7 @@ The current system is a tenant-scoped Fastify API backed by PostgreSQL and pgvec
 
 The remaining intentionally limited areas are:
 
-- Additional CRM OAuth adapters and provider-specific field mapping beyond the current HubSpot and signed-webhook adapters.
+- Additional native adapters and richer provider-specific field mapping beyond the current HubSpot, signed-webhook, and Jackrabbit slices. The provider-neutral Business API connector layer now supports OpenAPI JSON imports and custom REST capability registration.
 - Scheduled recrawls, change detection, and production CDN verification.
 - SMS/Slack notification channels and multi-channel realtime transport; the current handoff path uses in-app notifications, optional SES email, and visitor polling.
 - Provider-specific fact sync jobs and inbound webhooks beyond the current action/provider seams; those should write normalized facts only after the provider confirms the result.
@@ -52,6 +52,7 @@ flowchart LR
 | Public widget | `apps/web/public/widget.js` | Site-key configuration, visitor conversation, citations, fallback lead capture |
 | HTTP API | `apps/api/src/server.ts` | Tenant resolution, demo provisioning, auth boundary, conversations, retrieval, leads, CRM endpoints, widget routes |
 | CRM adapter | `apps/api/src/crm.ts` | AES-GCM credential envelope, signed webhook delivery, timeout and response handling |
+| Provider capability registry | `apps/api/src/provider-capabilities.ts` | OpenAPI-to-capability ingestion, read/write policy defaults, schema-bound execution, timeout/retry/SSRF controls |
 | Website crawler | `apps/api/src/crawler.ts` | URL normalization, robots handling, bounded same-site crawl, extraction, chunking |
 | Embedding client | `apps/api/src/embeddings.ts` | Optional provider calls and vector formatting |
 | Database adapter | `apps/api/src/database.ts` | Database-name guard, SSL normalization, PostgreSQL pool creation |
@@ -71,7 +72,9 @@ Live providers       → business_facts/actions    ↗
 
 `business_facts` stores the canonical structured read model for hours, pricing, locations, contacts, services, policies, schedules, and availability. Each fact carries `source_type`, `source_id`, explicit `authority`, `observed_at`, `freshness_policy`, `confidence`, and an optional expiry. Resolution ranks fresh system-of-record data above owner-verified structured data, documents, website evidence, and inferred information, and records conflicts instead of choosing by vector similarity. The deterministic resolver currently handles structured answers for hours, pricing, locations, contacts, policies, and services before semantic retrieval runs.
 
-The write path remains explicit. External systems are not mutated by retrieval or by free-form model output. A provider command must pass through an allowlisted action connector/outbox with idempotency and retry state; only a successful provider response should update the local normalized model. FrontDeskWise-owned facts use the business-facts CRUD boundary directly. This keeps the model bi-directional without giving the assistant arbitrary write access.
+Live business APIs are represented separately as tenant-owned provider connections and approved capabilities. `business_api_connections` stores the endpoint and encrypted auth material; `business_api_capabilities` stores the operation key, method, typed schemas, read/write classification, PII policy, customer-verification requirement, confirmation requirement, fallback behavior, and lifecycle. Imported operations are disabled until owner approval. Workflows bind to a capability key and explicit input/result mappings, so a model can identify the visitor's intent without selecting an arbitrary endpoint. Jackrabbit and custom REST/OpenAPI providers share this capability boundary.
+
+The write path remains explicit. External systems are not mutated by retrieval or by free-form model output. A provider command must pass the capability authorization gate for tenant ownership, active connection, input schema, verified customer identity, and workflow confirmation. Provider results update durable workflow state, and only a confirmed successful response can produce a success claim or update the local normalized model. FrontDeskWise-owned facts use the business-facts CRUD boundary directly. This keeps the model bi-directional without giving the assistant arbitrary write access.
 
 ### Action registry review boundary
 
@@ -225,6 +228,8 @@ businesses
 ├── crm_integrations
 │   ├── integration_outbox
 │   └── crm_sync_records
+├── business_api_connections
+│   └── business_api_capabilities
 ├── knowledge_gaps
 ├── agent_configs
 ├── embedding_jobs

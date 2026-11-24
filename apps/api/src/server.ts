@@ -211,6 +211,26 @@ import { createMcpClient, toolPermissions, type McpProvider, type McpTool } from
 import { primaryActionForBusiness, primaryCtaForAction, primaryCtaForQuestion, primaryCtaIntroduction, type PrimaryCta } from "./conversion-goals.js";
 import { credentialHint, decryptSecret, encryptSecret } from "./secrets.js";
 import {
+  authorizeProviderCapability,
+  customerVerificationFromResult,
+  executeProviderCapability,
+  ingestOpenApiDocument,
+  isCustomerLookupCapability,
+  manualProviderCapability,
+  nativeProviderCapability,
+  providerOperationHonesty,
+  type CustomerVerificationState,
+  type JsonSchema,
+  type ProviderAuthType,
+  type ProviderCapability,
+  type ProviderCapabilityType,
+  type ProviderConnection,
+  type ProviderCredential,
+  type ProviderHttpMethod,
+  type ProviderOperationRecord,
+  type ProviderPiiClassification,
+} from "./provider-capabilities.js";
+import {
   activePlanAfterStripeSync,
   billingPaymentFailureContext,
   billingPlanChangeType,
@@ -5803,7 +5823,14 @@ function requireWritableBusiness(business: Business): void {
 
 function normalizedAction(input: unknown, existing?: ActionFlow): ActionFlow {
   const body = asRecord(input);
-  const template = typeof body.templateKey === "string" ? actionTemplate(body.templateKey.trim()) : null;
+  const templateKey = optionalString(body.templateKey, 80);
+  const template = templateKey ? actionTemplate(templateKey) : null;
+  // Custom actions carry a client-generated templateKey plus their complete
+  // definition. Only reject an unknown key when there is no definition key to
+  // use for the manual-action fallback below.
+  if (templateKey && !template && !optionalString(body.key, 80)) {
+    throw httpError(400, `Unknown action template: ${templateKey}`);
+  }
   const isNewOpenLinkAction = !existing && template?.key === "open_link";
   const base = existing ?? (template ? {
     ...template,
@@ -7483,6 +7510,138 @@ function integrationPayload(row: Record<string, unknown>) {
   };
 }
 
+function providerConnectionPayload(row: Record<string, unknown>, capabilities: Record<string, unknown>[] = []) {
+  return {
+    id: String(row.id),
+    businessId: String(row.business_id),
+    providerKey: String(row.provider_key),
+    displayName: String(row.display_name),
+    baseUrl: String(row.base_url),
+    sourceType: String(row.source_type),
+    specUrl: typeof row.spec_url === "string" ? row.spec_url : null,
+    authType: String(row.auth_type),
+    credentialHint: typeof row.credential_hint === "string" ? row.credential_hint : null,
+    connectionStatus: String(row.connection_status),
+    lastTestedAt: row.last_tested_at ? toIso(row.last_tested_at) : null,
+    lastError: typeof row.last_error === "string" ? row.last_error : null,
+    capabilities: capabilities.map(providerCapabilityPayload),
+  };
+}
+
+function providerCapabilityPayload(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    connectionId: String(row.connection_id),
+    key: String(row.capability_key),
+    name: String(row.name),
+    description: typeof row.description === "string" ? row.description : null,
+    operationId: typeof row.operation_id === "string" ? row.operation_id : null,
+    type: String(row.capability_type),
+    method: String(row.method),
+    path: String(row.path),
+    authScope: typeof row.auth_scope === "string" ? row.auth_scope : null,
+    allowedMethods: Array.isArray(row.allowed_methods) ? row.allowed_methods : [],
+    inputSchema: asRecord(row.input_schema),
+    outputSchema: asRecord(row.output_schema),
+    rateLimit: asRecord(row.rate_limit),
+    timeoutMs: Number(row.timeout_ms ?? 8_000),
+    retryPolicy: asRecord(row.retry_policy),
+    piiClassification: String(row.pii_classification),
+    requiresVerifiedCustomer: row.requires_verified_customer === true,
+    requiresConfirmation: row.confirmation_required === true,
+    confirmationRequired: row.confirmation_required === true,
+    fallbackBehavior: typeof row.fallback_behavior === "string" ? row.fallback_behavior : "capture_request",
+    lifecycleStatus: String(row.lifecycle_status),
+    enabled: row.enabled === true,
+    metadata: asRecord(row.metadata),
+    updatedAt: row.updated_at ? toIso(row.updated_at) : null,
+  };
+}
+
+type StoredProviderCapability = ProviderCapability & { id: string; connectionId: string; businessId: string };
+
+function providerAuthType(value: unknown): ProviderAuthType {
+  const candidate = optionalString(value, 40);
+  if (candidate === "none" || candidate === "bearer_token" || candidate === "api_key" || candidate === "basic" || candidate === "oauth2") return candidate;
+  throw httpError(400, "auth.type must be one of none, bearer_token, api_key, basic, or oauth2");
+}
+
+function providerCredentialFromBody(auth: Record<string, unknown>): { type: ProviderAuthType; credential: ProviderCredential; secret: Record<string, unknown> } {
+  const type = providerAuthType(auth.type ?? "none");
+  if (type === "bearer_token" || type === "oauth2") {
+    const token = requiredString(auth.token, "auth.token", 4_000);
+    return { type, credential: { type, token }, secret: { type, token } };
+  }
+  if (type === "api_key") {
+    const apiKey = requiredString(auth.apiKey, "auth.apiKey", 4_000);
+    const apiKeyHeader = optionalString(auth.headerName, 120) ?? "x-api-key";
+    return { type, credential: { type, apiKey, apiKeyHeader }, secret: { type, apiKey, apiKeyHeader } };
+  }
+  if (type === "basic") {
+    const username = requiredString(auth.username, "auth.username", 500);
+    const password = requiredString(auth.password, "auth.password", 4_000);
+    return { type, credential: { type, username, password }, secret: { type, username, password } };
+  }
+  return { type, credential: { type }, secret: { type } };
+}
+
+async function fetchProviderOpenApiSpec(specUrl: string): Promise<unknown> {
+  const safeUrl = await assertPublicUrl(specUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(safeUrl, {
+      method: "GET",
+      signal: controller.signal,
+      headers: { accept: "application/json, application/yaml, text/yaml", "user-agent": "FrontDeskWise-ProviderImport/1.0" },
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error(`OpenAPI document request failed (${response.status})`);
+    const contentLength = Number(response.headers.get("content-length") ?? 0);
+    if (contentLength > 2_000_000) throw new Error("OpenAPI document is too large");
+    const text = await response.text();
+    if (text.length > 2_000_000) throw new Error("OpenAPI document is too large");
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new Error("OpenAPI import currently requires a JSON document; convert YAML to JSON before importing");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error("OpenAPI document request timed out");
+    throw error instanceof Error ? error : new Error("OpenAPI document request failed");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function providerCapabilityInsertValues(capability: ProviderCapability, connectionId: string, businessId: string) {
+  return [
+    businessId,
+    connectionId,
+    capability.key,
+    capability.name,
+    capability.description,
+    capability.operationId,
+    capability.type,
+    capability.method,
+    capability.path,
+    capability.authScope,
+    capability.allowedMethods,
+    JSON.stringify(capability.inputSchema),
+    JSON.stringify(capability.outputSchema),
+    JSON.stringify(capability.rateLimit),
+    capability.timeoutMs,
+    JSON.stringify(capability.retryPolicy),
+    capability.piiClassification,
+    capability.requiresVerifiedCustomer,
+    capability.confirmationRequired,
+    capability.fallbackBehavior,
+    capability.lifecycleStatus,
+    capability.enabled,
+    JSON.stringify(capability.metadata),
+  ];
+}
+
 type ResolvedJackrabbitCredentials = {
   apiToken: string;
   source: "database" | "environment";
@@ -8211,6 +8370,20 @@ function inboxConversationPayload(business: Business, conversation: Conversation
       startedAt: actionState.startedAt,
       completedAt: actionState.completedAt ?? null,
       values: Object.fromEntries(Object.entries(actionState.values).filter(([, value]) => typeof value === "string").slice(0, 50)),
+      providerState: {
+        customerVerification: actionState.customerVerification?.status ?? "UNKNOWN",
+        operations: Object.fromEntries(Object.entries(actionState.providerOperations ?? {}).slice(0, 50).map(([stepId, operation]) => [stepId, {
+          provider: operation.provider,
+          capability: operation.capabilityKey,
+          type: operation.type,
+          status: operation.status,
+          authorization: operation.authorization,
+          authorizationReason: operation.authorizationReason ?? null,
+          resultStatus: operation.resultStatus ?? null,
+          honesty: operation.honesty ?? providerOperationHonesty(operation),
+          latencyMs: operation.latencyMs ?? null,
+        }])),
+      },
       handoffRequired: action.completion.requiresStaff,
           handoffState: conversation.status === "CONTACT_REQUIRED" || conversation.status === "WAITING_FOR_STAFF" || conversation.status === "FOLLOW_UP_PENDING" || conversation.status === "HUMAN_ACTIVE" ? conversation.status : null,
       ...(action.steps?.length ? { workflow: workflowSummary(action, actionState) } : {}),
@@ -8320,6 +8493,22 @@ type ActiveWorkflowAnswerContext = {
   state: ConversationActionState;
   step?: ActionStep;
 };
+
+function isHighRiskPolicyQuestion(question: string): boolean {
+  return /\b(make[\s-]?up|absence|absent|cancell?ation|cancel|refund|billing|bill|eligib(?:le|ility)|enrol(?:l|ment)?|restriction|notice\s+period|credit)\b/i.test(question);
+}
+
+function approvedProviderPolicyEvidence(workflow?: ActiveWorkflowAnswerContext): string | null {
+  for (const value of Object.values(workflow?.state.lookupResults ?? {})) {
+    if (!value || typeof value !== "object") continue;
+    const result = value as Record<string, unknown>;
+    const source = result.source && typeof result.source === "object" ? result.source as Record<string, unknown> : {};
+    if (source.type !== "approved_provider" || source.verified !== true || result.policyVerified !== true) continue;
+    const evidence = result.policyEvidence ?? result.policyText;
+    if (typeof evidence === "string" && evidence.trim()) return evidence.trim().slice(0, 2_000);
+  }
+  return null;
+}
 
 function workflowAudienceTerms(workflow?: ActiveWorkflowAnswerContext): { target: RegExp; competing: RegExp } | null {
   if (!workflow || !isPlanSelectionWorkflow(workflow.action)) return null;
@@ -9179,6 +9368,91 @@ async function answerQuestion(
     };
     }
   }
+  // High-risk operational claims (make-up classes, cancellation, refunds,
+  // billing, eligibility, and enrollment restrictions) may only come from a
+  // verified Business Brain fact or an explicitly approved provider result.
+  // Website retrieval and model fluency are not sufficient evidence.
+  if (isHighRiskPolicyQuestion(question)) {
+    const providerPolicy = approvedProviderPolicyEvidence(options.workflow);
+    if (providerPolicy) {
+      const modelUsage: ModelUsage = {
+        route: "tier0",
+        model: null,
+        reason: "approved_provider_policy",
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: 0,
+        latencyMs: 0,
+      };
+      return {
+        answer: providerPolicy,
+        grounded: true,
+        citations: [],
+        knowledgeGap: null,
+        confidenceScore: 0.9,
+        confidenceBand: "high" as const,
+        retrieval: { mode: "approved_provider_policy", intent: initialIntent, candidateCount: 1, topScore: 0.9, ...modelUsage },
+        modelUsage,
+        performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+      };
+    }
+    const verifiedPolicy = structuredFactAnswer(
+      business,
+      question,
+      "policy",
+      verifiedBusinessFactsForAnswer(business).filter((fact) => fact.kind === "policy"),
+    );
+    if (verifiedPolicy) {
+      const modelUsage: ModelUsage = {
+        route: "tier0",
+        model: null,
+        reason: "verified_policy_fact",
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: 0,
+        latencyMs: 0,
+      };
+      return {
+        answer: verifiedPolicy.answer,
+        grounded: true,
+        citations: verifiedPolicy.citations,
+        knowledgeGap: null,
+        confidenceScore: verifiedPolicy.confidenceScore,
+        confidenceBand: verifiedPolicy.confidenceScore >= 0.78 ? "high" as const : "medium" as const,
+        retrieval: {
+          mode: "verified_policy_fact",
+          intent: initialIntent,
+          candidateCount: verifiedPolicy.citations.length,
+          topScore: verifiedPolicy.confidenceScore,
+          factId: verifiedPolicy.fact.id,
+          conflictCount: verifiedPolicy.conflicts,
+          ...modelUsage,
+        },
+        modelUsage,
+        performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+      };
+    }
+    const modelUsage: ModelUsage = {
+      route: "tier0",
+      model: null,
+      reason: "policy_requires_verified_evidence",
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    };
+    return {
+      answer: "I don’t have verified information about that policy yet. I can help you contact the team.",
+      grounded: false,
+      citations: [],
+      knowledgeGap: existingGap ?? null,
+      confidenceScore: 0,
+      confidenceBand: "low" as const,
+      retrieval: { mode: "policy_requires_verified_evidence", intent: initialIntent, candidateCount: 0, topScore: 0, ...modelUsage },
+      modelUsage,
+      performance: { ...performanceTiming, backendTotalMs: performance.now() - answerStartedAt },
+    };
+  }
   const workflowStep = options.workflowStep ?? options.workflow?.step;
   const scopedFacts = workflowScopedFacts(business, options.workflow, workflowStep);
   const primaryCtaForAnswer = options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, initialIntent));
@@ -10032,7 +10306,7 @@ function workflowResumePrompt(
   question = "",
 ): string {
   const step = plan.step;
-  if (providerFallbackOfferPending(action, state, step)) return providerFallbackHelpPrompt();
+  if (providerFallbackOfferPending(action, state, step)) return providerFallbackHelpPrompt(state);
   const context = workflowCapturedContext(action, state);
   if (step?.type === "redirect" && context) {
     if (state.conversionAvailable === true && !asksHowToProceed(question)) return "";
@@ -10100,7 +10374,14 @@ async function providerIntegrationConnected(businessId: string, provider: string
      limit 1`,
     [businessId, provider],
   );
-  return Boolean(result.rowCount);
+  if (result.rowCount) return true;
+  const apiConnection = await pool.query(
+    `select 1 from business_api_connections
+     where business_id = $1 and provider_key = $2 and connection_status = 'active'
+     limit 1`,
+    [businessId, provider],
+  );
+  return Boolean(apiConnection.rowCount);
 }
 
 async function actionReadinessForBusiness(business: Pick<Business, "id">, action: ActionFlow): Promise<ActionReadiness> {
@@ -10132,7 +10413,17 @@ type WorkflowLookupMatch = {
   destination?: { url: string } | null;
 };
 
-type WorkflowLookupResolution = { status?: string; matches: WorkflowLookupMatch[] };
+type WorkflowLookupResolution = {
+  status: "matched" | "ambiguous" | "not_found" | "unavailable";
+  matches: WorkflowLookupMatch[];
+  provider?: string;
+  capabilityKey?: string;
+  customerVerification?: string | null;
+  authorization?: string | null;
+  source?: { type: string; verified: boolean };
+  policyVerified?: boolean;
+  policyEvidence?: string;
+};
 
 function workflowLookupResolutions(state: ConversationActionState): WorkflowLookupResolution[] {
   return Object.values(state.lookupResults ?? {}).filter((value): value is WorkflowLookupResolution => Boolean(
@@ -10157,8 +10448,11 @@ function workflowLookupPrompt(state: ConversationActionState): string | null {
   return `I found ${resolution.matches.length} matching options. Reply with the number you want:\n${options.join("\n")}`;
 }
 
-function providerFallbackHelpPrompt(): string {
-  return "I can’t confirm a live class right now. I can have the team help find the right option. Would you like me to do that?";
+function providerFallbackHelpPrompt(state?: ConversationActionState): string {
+  if (state?.providerFallback?.reason === "ambiguous") {
+    return "I found more than one matching customer record, so I won’t guess which one to use. Can I have the team verify it with you?";
+  }
+  return "I can’t confirm a live option right now. I can have the team help find the right one. Would you like me to do that?";
 }
 
 function providerFallbackAwaitingConfirmation(state: ConversationActionState): boolean {
@@ -10232,12 +10526,408 @@ function workflowCtaForStep(business: Business, action: ActionFlow, step: NonNul
   return customerPrimaryCta(business, cta && buttonLabel ? { ...cta, label: buttonLabel } : cta ?? fallbackCta);
 }
 
+function workflowStateValue(values: Record<string, unknown>, path: string): unknown {
+  return path.split(".").reduce<unknown>((current, key) => {
+    if (current && typeof current === "object" && key in current) return (current as Record<string, unknown>)[key];
+    return undefined;
+  }, values);
+}
+
+function capabilityResultItems(value: unknown, resultPath?: string | null): unknown[] {
+  const atPath = resultPath ? workflowStateValue({ result: value }, `result.${resultPath}`) : value;
+  if (Array.isArray(atPath)) return atPath;
+  const record = asRecord(atPath);
+  for (const key of ["items", "results", "data", "records", "daycares", "classes", "listings"]) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
+    if (record[key] && typeof record[key] === "object") {
+      const nested = capabilityResultItems(record[key], null);
+      if (nested.length) return nested;
+    }
+  }
+  return [];
+}
+
+function capabilityMappedValue(record: Record<string, unknown>, mapping: unknown, fallbacks: string[]): unknown {
+  if (typeof mapping === "string" && mapping.trim()) return workflowStateValue(record, mapping.trim());
+  for (const key of fallbacks) {
+    if (record[key] !== undefined && record[key] !== null) return record[key];
+  }
+  return undefined;
+}
+
+function providerCapabilityFromRow(row: Record<string, unknown>): ProviderCapability {
+  return {
+    key: String(row.capability_key),
+    providerId: String(row.connection_id),
+    name: String(row.name),
+    description: typeof row.description === "string" ? row.description : null,
+    operationId: typeof row.operation_id === "string" ? row.operation_id : null,
+    type: String(row.capability_type) as ProviderCapabilityType,
+    method: String(row.method) as ProviderHttpMethod,
+    path: String(row.path),
+    authScope: typeof row.auth_scope === "string" ? row.auth_scope : null,
+    allowedMethods: Array.isArray(row.allowed_methods) ? row.allowed_methods as ProviderHttpMethod[] : [],
+    inputSchema: asRecord(row.input_schema),
+    outputSchema: asRecord(row.output_schema),
+    rateLimit: asRecord(row.rate_limit),
+    timeoutMs: Number(row.timeout_ms ?? 8_000),
+    retryPolicy: asRecord(row.retry_policy),
+    piiClassification: String(row.pii_classification) as ProviderPiiClassification,
+    requiresVerifiedCustomer: row.requires_verified_customer === true,
+    requiresConfirmation: row.confirmation_required === true,
+    fallbackBehavior: row.fallback_behavior === "retry_identity" || row.fallback_behavior === "handoff" || row.fallback_behavior === "stop"
+      ? row.fallback_behavior
+      : "capture_request",
+    confirmationRequired: row.confirmation_required === true,
+    lifecycleStatus: "approved",
+    enabled: true,
+    metadata: asRecord(row.metadata),
+  };
+}
+
+function recordProviderOperation(state: ConversationActionState, stepId: string, record: ProviderOperationRecord): void {
+  state.providerOperations = {
+    ...(state.providerOperations ?? {}),
+    [stepId]: { ...record, honesty: providerOperationHonesty(record) },
+  };
+}
+
+function providerVerificationState(state: ConversationActionState): CustomerVerificationState {
+  return state.customerVerification ?? { status: "UNKNOWN" };
+}
+
+function providerConfirmationReceived(action: ActionFlow, state: ConversationActionState, step: ActionStep, capabilityKey: string): boolean {
+  if (state.confirmedCapabilityKeys?.includes(capabilityKey)) return true;
+  const explicitStepId = actionConfigString(step.config ?? {}, "confirmationStepId");
+  if (explicitStepId) return state.completedStepIds?.includes(explicitStepId) === true;
+  const currentIndex = action.steps?.findIndex((candidate) => candidate.id === step.id) ?? -1;
+  return (action.steps ?? []).slice(0, currentIndex).some((candidate) => candidate.type === "confirm" && state.completedStepIds?.includes(candidate.id));
+}
+
+function providerOperationFallbackStep(action: ActionFlow, state: ConversationActionState, capability: Pick<ProviderCapability, "providerId" | "fallbackBehavior">): ActionStep | null {
+  if (capability.fallbackBehavior === "stop") return null;
+  if (capability.fallbackBehavior === "handoff") {
+    const handoff = action.steps?.find((step) => step.type === "handoff");
+    if (handoff) {
+      state.currentStepId = handoff.id;
+      return handoff;
+    }
+  }
+  const verification = providerVerificationState(state).status;
+  const reason = capability.fallbackBehavior === "retry_identity"
+    ? verification === "AMBIGUOUS" ? "ambiguous" : "not_found"
+    : "unavailable";
+  return activateProviderFallback(action, state, capability.providerId, reason);
+}
+
+function providerCapabilityBlockMessage(record: ProviderOperationRecord): string {
+  if (record.authorizationReason === "customer_not_verified") return "Before I can make that change, I need to verify the customer account. I can help confirm the details or connect you with the team.";
+  if (record.authorizationReason === "confirmation_required") return "I have the request ready, but I need your confirmation before I submit anything.";
+  if (record.authorizationReason === "missing_fields") return "I’m missing a required detail before I can complete that request.";
+  if (record.authorizationReason === "provider_unavailable") return "I can’t reach the connected business system right now, so I won’t claim that the request was completed.";
+  if (record.authorizationReason === "tenant_mismatch") return "I can’t complete that request because the connected business account does not match this business.";
+  return "I couldn’t complete that request, so I won’t claim it succeeded. I can help you contact the team instead.";
+}
+
+function providerPolicyEvidenceFromPayload(capability: ProviderCapability, payload: unknown): string | null {
+  const metadata = asRecord(capability.metadata);
+  const isPolicyCapability = metadata.policyCapability === true
+    || /(?:^|_)(?:policy|billing|refund|cancellation)(?:_|$)/i.test(capability.key);
+  if (!isPolicyCapability) return null;
+  const record = asRecord(payload);
+  for (const key of ["policyEvidence", "policyText", "answer", "text", "description"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim().slice(0, 2_000);
+  }
+  return null;
+}
+
+function providerOperationNeedsCustomerMessage(step: ActionStep, state: ConversationActionState): string | null {
+  if (step.type !== "api_action" && step.type !== "book") return null;
+  const operation = state.providerOperations?.[step.id];
+  if (!operation || operation.status === "succeeded") return null;
+  return providerCapabilityBlockMessage(operation);
+}
+
+function nativeJackrabbitCapability(key: "search_classes" | "get_availability" | "generate_registration_link"): ProviderCapability {
+  const definitions: Record<typeof key, Parameters<typeof nativeProviderCapability>[1]> = {
+    search_classes: { key, name: "Search classes", method: "GET", path: "/Classes", type: "READ", outputSchema: { type: "array" } },
+    get_availability: { key, name: "Get availability", method: "GET", path: "/ClassListings", type: "READ", outputSchema: { type: "array" } },
+    generate_registration_link: { key, name: "Generate registration link", method: "GET", path: "/registration", type: "READ", outputSchema: { type: "object" } },
+  };
+  return nativeProviderCapability("jackrabbit", definitions[key]);
+}
+
+async function resolveRegisteredProviderCapability(
+  business: Business,
+  step: NonNullable<ReturnType<typeof currentWorkflowStep>>,
+  state: ConversationActionState,
+): Promise<WorkflowLookupResolution> {
+  if (!pool) return { status: "unavailable", matches: [] };
+  const config = step.config ?? {};
+  const capabilityKey = actionConfigString(config, "capabilityKey");
+  if (!capabilityKey) return { status: "unavailable", matches: [] };
+  const connectionId = actionConfigString(config, "providerConnectionId");
+  const result = await pool.query<Record<string, unknown>>(
+    `select c.id as connection_id, c.business_id, c.base_url, c.auth_type, c.connection_status, c.encrypted_credentials,
+            p.capability_key, p.name, p.description, p.operation_id, p.capability_type, p.method, p.path,
+            p.auth_scope, p.allowed_methods, p.input_schema, p.output_schema, p.rate_limit, p.timeout_ms,
+            p.retry_policy, p.pii_classification, p.requires_verified_customer, p.confirmation_required, p.fallback_behavior, p.metadata
+     from business_api_connections c
+     join business_api_capabilities p on p.connection_id = c.id and p.business_id = c.business_id
+     where c.business_id = $1 and p.capability_key = $2
+       and ($3::uuid is null or c.id = $3::uuid)
+       and c.connection_status = 'active' and p.lifecycle_status = 'approved' and p.enabled = true
+     order by c.updated_at desc
+     limit 1`,
+    [business.id, capabilityKey, connectionId],
+  );
+  if (!result.rowCount) return { status: "unavailable", matches: [] };
+  const row = result.rows[0];
+  if (typeof row.encrypted_credentials !== "string" || !row.encrypted_credentials) return { status: "unavailable", matches: [] };
+  let credential: ProviderCredential;
+  try {
+    credential = JSON.parse(decryptSecret(row.encrypted_credentials)) as ProviderCredential;
+  } catch {
+    return { status: "unavailable", matches: [] };
+  }
+  const mappings = asRecord(config.inputMappings);
+  const constants = asRecord(config.inputValues);
+  const input: Record<string, unknown> = {};
+  const properties = asRecord(asRecord(row.input_schema).properties);
+  for (const name of Object.keys(properties)) {
+    const mapped = mappings[name];
+    const value = mapped !== undefined
+      ? typeof mapped === "string" ? workflowStateValue(state.values, mapped) : mapped
+      : constants[name] ?? state.values[name];
+    if (value !== undefined && value !== null && value !== "") input[name] = value;
+  }
+  try {
+    const capability = providerCapabilityFromRow(row);
+    if (capability.type !== "READ") return { status: "unavailable", matches: [], provider: "custom_api", capabilityKey };
+    const authorization = authorizeProviderCapability({
+      capability,
+      providerConnected: row.connection_status === "active",
+      tenantMatch: String(row.business_id ?? business.id) === business.id,
+      input,
+      customerVerification: providerVerificationState(state),
+      confirmationReceived: true,
+    });
+    if (!authorization.allowed) {
+      recordProviderOperation(state, step.id, {
+        provider: "custom_api",
+        capabilityKey,
+        type: capability.type,
+        status: "blocked",
+        verificationState: providerVerificationState(state).status,
+        authorization: "blocked",
+        authorizationReason: authorization.reason,
+        fallbackBehavior: capability.fallbackBehavior as ProviderCapability["fallbackBehavior"],
+        completedAt: new Date().toISOString(),
+      });
+      return { status: "unavailable", matches: [], provider: "custom_api", capabilityKey, authorization: authorization.reason };
+    }
+    const startedAt = performance.now();
+    const payload = await executeProviderCapability(capability, { baseUrl: String(row.base_url), status: "active" }, credential, input);
+    const fieldMapping = asRecord(config.resultMapping);
+    const matches = capabilityResultItems(payload, actionConfigString(config, "resultPath"))
+      .map((value, index) => {
+        const item = asRecord(value);
+        const idValue = capabilityMappedValue(item, fieldMapping.id, ["id", "uuid", "key", "operationId"]) ?? `${capabilityKey}-${index + 1}`;
+        const id = String(idValue);
+        const destinationValue = capabilityMappedValue(item, fieldMapping.destination, ["url", "link", "registrationUrl", "bookingUrl"]);
+        const destination = typeof destinationValue === "string" && validActionDestinationUrl(destinationValue) ? { url: destinationValue } : undefined;
+        return {
+          id,
+          providerObjectId: id,
+          name: String(capabilityMappedValue(item, fieldMapping.name, ["name", "title", "label"]) ?? `Option ${index + 1}`),
+          location: String(capabilityMappedValue(item, fieldMapping.location, ["location", "locationName", "address"]) ?? "") || null,
+          day: String(capabilityMappedValue(item, fieldMapping.day, ["day", "dayOfWeek", "weekday"]) ?? "") || null,
+          startTime: String(capabilityMappedValue(item, fieldMapping.startTime, ["startTime", "start", "time"]) ?? "") || null,
+          price: (capabilityMappedValue(item, fieldMapping.price, ["price", "fee", "tuition"]) as string | number | null | undefined) ?? null,
+          availability: typeof capabilityMappedValue(item, fieldMapping.availability, ["availability", "openings", "availableSpots", "remaining"]) === "number"
+            ? capabilityMappedValue(item, fieldMapping.availability, ["availability", "openings", "availableSpots", "remaining"]) as number
+            : null,
+          ...(destination ? { destination } : {}),
+        };
+      });
+    const baseStatus = matches.length ? "matched" : "not_found";
+    const verification = customerVerificationFromResult(capability, { status: baseStatus, matches });
+    if (verification) state.customerVerification = verification;
+    const status = verification?.status === "AMBIGUOUS" ? "ambiguous" : baseStatus;
+    const policyEvidence = providerPolicyEvidenceFromPayload(capability, payload);
+    recordProviderOperation(state, step.id, {
+      provider: "custom_api",
+      capabilityKey,
+      type: capability.type,
+      status: "succeeded",
+      verificationState: verification?.status ?? providerVerificationState(state).status,
+      authorization: "allowed",
+      resultStatus: status,
+      fallbackBehavior: capability.fallbackBehavior,
+      latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      completedAt: new Date().toISOString(),
+    });
+    return {
+      status,
+      matches,
+      provider: "custom_api",
+      capabilityKey,
+      customerVerification: verification?.status ?? null,
+      source: { type: "approved_provider", verified: true },
+      ...(policyEvidence ? { policyVerified: true, policyEvidence } : {}),
+    };
+  } catch (error) {
+    recordProviderOperation(state, step.id, {
+      provider: "custom_api",
+      capabilityKey,
+      type: "READ",
+      status: "failed",
+      verificationState: providerVerificationState(state).status,
+      authorization: "allowed",
+      resultStatus: "unavailable",
+      fallbackBehavior: "capture_request",
+      completedAt: new Date().toISOString(),
+    });
+    if (isCustomerLookupCapability(providerCapabilityFromRow(row))) {
+      state.customerVerification = {
+        status: "PROVIDER_UNAVAILABLE",
+        provider: "custom_api",
+        capabilityKey,
+        reason: "provider_lookup_unavailable",
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    app.log.warn({ businessId: business.id, capabilityKey, error: error instanceof Error ? error.message : "provider capability failed" }, "Registered provider capability failed");
+    return { status: "unavailable", matches: [], provider: "custom_api", capabilityKey };
+  }
+}
+
+async function executeRegisteredProviderWrite(
+  business: Business,
+  action: ActionFlow,
+  step: NonNullable<ReturnType<typeof currentWorkflowStep>>,
+  state: ConversationActionState,
+): Promise<ProviderOperationRecord> {
+  const config = step.config ?? {};
+  const capabilityKey = actionConfigString(config, "capabilityKey") ?? "";
+  const blocked = (reason: ProviderOperationRecord["authorizationReason"], provider = "custom_api"): ProviderOperationRecord => {
+    const record: ProviderOperationRecord = {
+      provider,
+      capabilityKey,
+      type: "WRITE",
+      status: "blocked",
+      verificationState: providerVerificationState(state).status,
+      authorization: "blocked",
+      authorizationReason: reason,
+      fallbackBehavior: "capture_request",
+      completedAt: new Date().toISOString(),
+    };
+    recordProviderOperation(state, step.id, record);
+    return record;
+  };
+  if (!pool || !capabilityKey) return blocked(!capabilityKey ? "capability_missing" : "provider_unavailable");
+  const connectionId = actionConfigString(config, "providerConnectionId");
+  const result = await pool.query<Record<string, unknown>>(
+    `select c.id as connection_id, c.business_id, c.base_url, c.connection_status, c.encrypted_credentials,
+            p.capability_key, p.name, p.description, p.operation_id, p.capability_type, p.method, p.path,
+            p.auth_scope, p.allowed_methods, p.input_schema, p.output_schema, p.rate_limit, p.timeout_ms,
+            p.retry_policy, p.pii_classification, p.requires_verified_customer, p.confirmation_required, p.fallback_behavior, p.metadata
+     from business_api_connections c
+     join business_api_capabilities p on p.connection_id = c.id and p.business_id = c.business_id
+     where c.business_id = $1 and p.capability_key = $2
+       and ($3::uuid is null or c.id = $3::uuid)
+       and c.connection_status = 'active' and p.lifecycle_status = 'approved' and p.enabled = true
+     order by c.updated_at desc
+     limit 1`,
+    [business.id, capabilityKey, connectionId],
+  );
+  if (!result.rowCount) return blocked("capability_missing");
+  const row = result.rows[0];
+  if (typeof row.encrypted_credentials !== "string" || !row.encrypted_credentials) return blocked("provider_unavailable");
+  let credential: ProviderCredential;
+  try {
+    credential = JSON.parse(decryptSecret(row.encrypted_credentials)) as ProviderCredential;
+  } catch {
+    return blocked("provider_unavailable");
+  }
+  const capability = providerCapabilityFromRow(row);
+  if (capability.type !== "WRITE") return blocked("capability_missing");
+  const mappings = asRecord(config.inputMappings);
+  const constants = asRecord(config.inputValues);
+  const input: Record<string, unknown> = {};
+  for (const name of Object.keys(asRecord(capability.inputSchema.properties))) {
+    const mapped = mappings[name];
+    const value = mapped !== undefined
+      ? typeof mapped === "string" ? workflowStateValue(state.values, mapped) : mapped
+      : constants[name] ?? state.values[name];
+    if (value !== undefined && value !== null && value !== "") input[name] = value;
+  }
+  const authorization = authorizeProviderCapability({
+    capability,
+    providerConnected: row.connection_status === "active",
+    tenantMatch: String(row.business_id) === business.id,
+    input,
+    customerVerification: providerVerificationState(state),
+    confirmationReceived: providerConfirmationReceived(action, state, step, capability.key),
+  });
+  if (!authorization.allowed) {
+    const record: ProviderOperationRecord = {
+      provider: "custom_api",
+      capabilityKey,
+      type: capability.type,
+      status: "blocked",
+      verificationState: providerVerificationState(state).status,
+      authorization: "blocked",
+      authorizationReason: authorization.reason,
+      fallbackBehavior: capability.fallbackBehavior,
+      completedAt: new Date().toISOString(),
+    };
+    recordProviderOperation(state, step.id, record);
+    return record;
+  }
+  const startedAt = performance.now();
+  try {
+    await executeProviderCapability(capability, { baseUrl: String(row.base_url), status: "active" }, credential, input);
+    const record: ProviderOperationRecord = {
+      provider: "custom_api",
+      capabilityKey,
+      type: capability.type,
+      status: "succeeded",
+      verificationState: providerVerificationState(state).status,
+      authorization: "allowed",
+      resultStatus: "succeeded",
+      fallbackBehavior: capability.fallbackBehavior,
+      latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      completedAt: new Date().toISOString(),
+    };
+    recordProviderOperation(state, step.id, record);
+    return record;
+  } catch (error) {
+    const record: ProviderOperationRecord = {
+      provider: "custom_api",
+      capabilityKey,
+      type: capability.type,
+      status: "failed",
+      verificationState: providerVerificationState(state).status,
+      authorization: "allowed",
+      resultStatus: "failed",
+      fallbackBehavior: capability.fallbackBehavior,
+      latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      completedAt: new Date().toISOString(),
+    };
+    recordProviderOperation(state, step.id, record);
+    app.log.warn({ businessId: business.id, actionId: action.id, capabilityKey, error: error instanceof Error ? error.message : "provider write failed" }, "Registered provider write failed");
+    return record;
+  }
+}
+
 async function resolveWorkflowActionResources(
   business: Business,
   action: ActionFlow,
   step: NonNullable<ReturnType<typeof currentWorkflowStep>>,
   state: ConversationActionState,
-): Promise<ReturnType<typeof resolveAction>> {
+): Promise<WorkflowLookupResolution | ReturnType<typeof resolveAction>> {
   const config = step.config ?? {};
   const typeValue = actionConfigString(config, "resourceType") ?? "registration";
   const type = (ACTION_RESOURCE_TYPES as readonly string[]).includes(typeValue) ? typeValue as ActionResourceType : "registration";
@@ -10258,8 +10948,12 @@ async function resolveWorkflowActionResources(
     if (constant ?? fromState) filters[field] = constant ?? fromState;
   }
   const provider = actionConfigString(config, "provider") ?? configuredActionProvider(action);
+  if (actionConfigString(config, "capabilityKey")) {
+    return resolveRegisteredProviderCapability(business, step, state);
+  }
   if (provider === "jackrabbit") {
     const program = typeof filters.program === "string" ? filters.program : "";
+    const capability = nativeJackrabbitCapability("search_classes");
     try {
       const credentials = await resolveJackrabbitCredentials(business.id, actionConfigString(config, "integrationId") ?? undefined);
       const registrationBaseUrl = actionConfigString(config, "registrationBaseUrl");
@@ -10274,12 +10968,35 @@ async function resolveWorkflowActionResources(
         registrationBaseUrl ? { baseUrl: registrationBaseUrl, classIdParam: actionConfigString(config, "classIdParam") ?? "classId", fieldMappings: {} } : undefined,
         state.values,
       );
-      return resolveAction(resources, {
+      const resolved = resolveAction(resources, {
         type,
         filters,
         includeWaitlist: config.includeWaitlist === true,
       });
+      recordProviderOperation(state, step.id, {
+        provider: "jackrabbit",
+        capabilityKey: capability.key,
+        type: capability.type,
+        status: "succeeded",
+        verificationState: providerVerificationState(state).status,
+        authorization: "allowed",
+        resultStatus: resolved.status,
+        fallbackBehavior: capability.fallbackBehavior,
+        completedAt: new Date().toISOString(),
+      });
+      return resolved;
     } catch (error) {
+      recordProviderOperation(state, step.id, {
+        provider: "jackrabbit",
+        capabilityKey: capability.key,
+        type: capability.type,
+        status: "failed",
+        verificationState: providerVerificationState(state).status,
+        authorization: "allowed",
+        resultStatus: "unavailable",
+        fallbackBehavior: capability.fallbackBehavior,
+        completedAt: new Date().toISOString(),
+      });
       app.log.warn({
         businessId: business.id,
         error: error instanceof Error ? error.message : "provider lookup failed",
@@ -10448,6 +11165,31 @@ async function advanceWorkflowAutomation(
     && (step.type !== "recommend" || isPlanSelectionWorkflow(action) || !step.config?.sourceStepId)) {
     if (options.allowStaffSensitiveActions === false && staffSensitiveWorkflowStep(action, step)) break;
     visited.add(step.id);
+    if ((step.type === "api_action" || step.type === "book") && actionConfigString(step.config ?? {}, "capabilityKey")) {
+      const previous = state.providerOperations?.[step.id];
+      if (previous?.status === "succeeded") {
+        const transition = transitionWorkflow(action, state, step.id);
+        step = transition.step;
+        continue;
+      }
+      if (!previous) {
+        const operation = await executeRegisteredProviderWrite(business, action, step, state);
+        if (operation.status === "succeeded") {
+          const transition = transitionWorkflow(action, state, step.id);
+          step = transition.step;
+          continue;
+        }
+        if (operation.authorizationReason !== "confirmation_required") {
+          const fallback = providerOperationFallbackStep(action, state, {
+            providerId: operation.provider,
+            fallbackBehavior: operation.fallbackBehavior ?? "capture_request",
+          });
+          if (fallback) return fallback;
+        }
+        return step;
+      }
+      return step;
+    }
     if (step.type === "lookup" || step.type === "recommend") {
         const cachedResult = state.lookupResults?.[step.id];
         const result = cachedResult !== undefined
@@ -10465,6 +11207,8 @@ async function advanceWorkflowAutomation(
         const resultStatus = (result as Record<string, unknown>).status;
         const fallbackReason = resultStatus === "unavailable"
           ? "unavailable"
+          : resultStatus === "ambiguous"
+            ? "ambiguous"
           : ["not_found", "matched"].includes(String(resultStatus)) && Array.isArray((result as Record<string, unknown>).matches) && !(result as { matches: unknown[] }).matches.length
             ? "not_found"
             : null;
@@ -10710,8 +11454,10 @@ async function continueWorkflowActionConversation(
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
   if (providerFallbackOfferPending(action, state, step)) {
     state.formShown = false;
-    return actionAnswer(action, state, providerFallbackHelpPrompt());
+    return actionAnswer(action, state, providerFallbackHelpPrompt(state));
   }
+  const providerMessage = providerOperationNeedsCustomerMessage(step, state);
+  if (providerMessage) return actionAnswer(action, state, providerMessage);
   if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const initialResumePlan = recomputeWorkflowResume(action, state);
   step = initialResumePlan.step ?? step;
@@ -10818,6 +11564,9 @@ async function continueWorkflowActionConversation(
       }
       transitionWorkflow(action, state, step.id);
     }
+    const confirmedStep = currentWorkflowStep(action, state);
+    const confirmedCapabilityKey = confirmedStep ? actionConfigString(confirmedStep.config ?? {}, "capabilityKey") : null;
+    if (confirmedCapabilityKey) state.confirmedCapabilityKeys = [...new Set([...(state.confirmedCapabilityKeys ?? []), confirmedCapabilityKey])];
   } else {
     const field = workflowField(action, step.fieldKey);
     if (!field && !step.fieldKey) {
@@ -10848,8 +11597,10 @@ async function continueWorkflowActionConversation(
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
   if (providerFallbackOfferPending(action, state, step)) {
     state.formShown = false;
-    return actionAnswer(action, state, providerFallbackHelpPrompt());
+    return actionAnswer(action, state, providerFallbackHelpPrompt(state));
   }
+  const laterProviderMessage = providerOperationNeedsCustomerMessage(step, state);
+  if (laterProviderMessage) return actionAnswer(action, state, laterProviderMessage);
   if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const finalResumePlan = recomputeWorkflowResume(action, state);
   step = finalResumePlan.step ?? step;
@@ -11063,7 +11814,9 @@ async function completeActionConversation(
   if (state.participants?.length) completeActiveWorkflowParticipant(state);
   conversation.actionTaken = action.key;
   let answer = providerFallback
-    ? `I couldn’t check live ${providerFallback.provider} availability right now, so I won’t invent class options. I’ve saved your request and the team can help you find the right lesson.`
+    ? providerFallback.reason === "ambiguous"
+      ? `I found more than one matching record in ${providerFallback.provider}, so I won’t guess or claim an action was completed. I’ve saved your request for the team to verify.`
+      : `I couldn’t check live ${providerFallback.provider} availability right now, so I won’t invent options. I’ve saved your request and the team can help you find the right one.`
     : canonicalizeCustomerCopy(business, action.completion.message);
   if (!providerFallback && action.completion.linkTemplate && action.completion.completionMode !== "native_form" && action.completion.completionMode !== "human_follow_up") {
     try {
@@ -12472,8 +13225,8 @@ function experienceTraceForTurn(
     mode: retrieval.mode ?? null,
   };
   const providerState = provider
-    ? { provider: provider.provider, operations: provider.operations, lookupSteps: provider.lookupSteps, actionDelivery: provider.actionDelivery }
-    : { provider: null, operations: [], lookupSteps: [], actionDelivery: null };
+    ? { provider: provider.provider, operations: provider.operations, lookupSteps: provider.lookupSteps, capabilities: provider.capabilities, actionDelivery: provider.actionDelivery }
+    : { provider: null, operations: [], lookupSteps: [], capabilities: [], actionDelivery: null };
   const trace: Record<string, unknown> = {
     traceVersion: 1,
     conversationId: conversation.id,
@@ -12685,10 +13438,10 @@ async function recordConversationDecisionTrace(
     extracted_fields: workflowFieldChanges(context.stateBefore, stateAfter),
     next_best_action: result.action?.workflow?.nextBestAction ?? context.orchestration.nextBestAction,
     provider_call: provider
-      ? { provider: provider.provider, operations: provider.operations, lookup_steps: provider.lookupSteps.map((lookup) => lookup.stepId), action_delivery_provider: provider.actionDelivery?.provider ?? null }
+      ? { provider: provider.provider, operations: provider.operations, lookup_steps: provider.lookupSteps.map((lookup) => lookup.stepId), capabilities: provider.capabilities, action_delivery_provider: provider.actionDelivery?.provider ?? null }
       : null,
     provider_result: provider
-      ? { lookup_steps: provider.lookupSteps, action_delivery: provider.actionDelivery }
+      ? { lookup_steps: provider.lookupSteps, capabilities: provider.capabilities, action_delivery: provider.actionDelivery }
       : null,
     workflow_state_after: snapshotConversationWorkflowState(stateAfter),
     runtime_state_before: safeConversationRuntimeState(runtimeBefore),
@@ -17459,6 +18212,311 @@ app.get("/api/v1/demo/:slug/integrations", async (request) => {
   return { integrations: result.rows.map(integrationPayload) };
 });
 
+app.get("/api/v1/demo/:slug/provider-connections", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  await requireDemoOwner(business, request);
+  if (!pool) return { connections: [] };
+  const connections = await pool.query<Record<string, unknown>>(
+    `select id, business_id, provider_key, display_name, base_url, source_type, spec_url, auth_type,
+            credential_hint, connection_status, last_tested_at, last_error
+     from business_api_connections
+     where business_id = $1
+     order by created_at desc`,
+    [business.id],
+  );
+  const capabilities = await pool.query<Record<string, unknown>>(
+    `select id, connection_id, capability_key, name, description, operation_id, capability_type,
+            method, path, auth_scope, allowed_methods, input_schema, output_schema, rate_limit,
+            timeout_ms, retry_policy, pii_classification, requires_verified_customer, confirmation_required, fallback_behavior, lifecycle_status,
+            enabled, metadata, updated_at
+     from business_api_capabilities
+     where business_id = $1
+     order by connection_id, name`,
+    [business.id],
+  );
+  const byConnection = new Map<string, Record<string, unknown>[]>();
+  for (const row of capabilities.rows) {
+    const list = byConnection.get(String(row.connection_id)) ?? [];
+    list.push(row);
+    byConnection.set(String(row.connection_id), list);
+  }
+  return { connections: connections.rows.map((row) => providerConnectionPayload(row, byConnection.get(String(row.id)) ?? [])) };
+});
+
+app.post("/api/v1/demo/:slug/provider-connections", async (request, reply) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "Provider connections require PostgreSQL storage");
+  if (!integrationEncryptionConfigured()) throw httpError(503, "Provider connections are not configured on this environment yet");
+
+  const body = asRecord(request.body);
+  const displayName = requiredString(body.displayName, "displayName", 120);
+  const providerKey = optionalString(body.providerKey, 80) ?? "custom_api";
+  if (!/^[a-z][a-z0-9_-]*$/i.test(providerKey)) throw httpError(400, "providerKey may contain only letters, numbers, underscores, and hyphens");
+  const baseUrlInput = requiredString(body.baseUrl, "baseUrl", 2_000);
+  let baseUrl: URL;
+  try {
+    baseUrl = await assertPublicUrl(baseUrlInput);
+  } catch (error) {
+    throw httpError(400, error instanceof Error ? error.message : "baseUrl must point to a public HTTPS API");
+  }
+  const auth = asRecord(body.auth);
+  const authConfig = providerCredentialFromBody(auth);
+  const specUrl = optionalString(body.specUrl, 2_000);
+  let document: unknown = null;
+  if (specUrl) {
+    try {
+      document = await fetchProviderOpenApiSpec(specUrl);
+    } catch (error) {
+      throw httpError(400, error instanceof Error ? error.message : "OpenAPI document could not be imported");
+    }
+  } else if (body.spec !== undefined) {
+    if (typeof body.spec === "string") {
+      try { document = JSON.parse(body.spec) as unknown; } catch { throw httpError(400, "spec must be valid JSON"); }
+    } else {
+      document = body.spec;
+    }
+  }
+
+  let capabilities: ProviderCapability[] = [];
+  let sourceType: "openapi" | "custom_rest" = "custom_rest";
+  const warnings: string[] = [];
+  if (document !== null) {
+    try {
+      const imported = ingestOpenApiDocument("pending", document, baseUrl.toString());
+      capabilities = imported.capabilities;
+      warnings.push(...imported.warnings);
+      sourceType = "openapi";
+    } catch (error) {
+      throw httpError(400, error instanceof Error ? error.message : "OpenAPI document could not be parsed");
+    }
+  }
+  if (Array.isArray(body.capabilities)) {
+    try {
+      const manual = body.capabilities.map((value) => {
+        const item = asRecord(value);
+        return manualProviderCapability("pending", {
+          key: requiredString(item.key, "capability.key", 120),
+          name: optionalString(item.name, 160) ?? undefined,
+          description: optionalString(item.description, 2_000) ?? undefined,
+          type: optionalString(item.type, 20)?.toUpperCase() as ProviderCapabilityType | undefined,
+          method: requiredString(item.method, "capability.method", 10),
+          path: requiredString(item.path, "capability.path", 1_000),
+          authScope: optionalString(item.authScope, 500) ?? undefined,
+          inputSchema: item.inputSchema as JsonSchema | undefined,
+          outputSchema: item.outputSchema as JsonSchema | undefined,
+          rateLimit: asRecord(item.rateLimit),
+          timeoutMs: typeof item.timeoutMs === "number" ? item.timeoutMs : undefined,
+          retryPolicy: asRecord(item.retryPolicy),
+          piiClassification: optionalString(item.piiClassification, 30) as ProviderPiiClassification | undefined,
+          requiresVerifiedCustomer: typeof item.requiresVerifiedCustomer === "boolean" ? item.requiresVerifiedCustomer : undefined,
+          requiresConfirmation: typeof item.requiresConfirmation === "boolean" ? item.requiresConfirmation : undefined,
+          fallbackBehavior: optionalString(item.fallbackBehavior, 30) as ProviderCapability["fallbackBehavior"] | undefined,
+          confirmationRequired: item.confirmationRequired === true,
+          policyCapability: item.policyCapability === true,
+        });
+      });
+      capabilities = [...capabilities, ...manual];
+    } catch (error) {
+      throw httpError(400, error instanceof Error ? error.message : "Manual capability is invalid");
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const connectionResult = await client.query<Record<string, unknown>>(
+      `insert into business_api_connections
+         (business_id, provider_key, display_name, base_url, source_type, spec_url, auth_type,
+          encrypted_credentials, credential_hint, connection_status, config)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10)
+       returning id, business_id, provider_key, display_name, base_url, source_type, spec_url,
+                 auth_type, credential_hint, connection_status, last_tested_at, last_error`,
+      [
+        business.id,
+        providerKey,
+        displayName,
+        baseUrl.toString(),
+        sourceType,
+        specUrl,
+        authConfig.type,
+        authConfig.type === "none" ? null : encryptSecret(JSON.stringify(authConfig.secret)),
+        authConfig.type === "none" ? null : credentialHint(String(authConfig.secret.token ?? authConfig.secret.apiKey ?? authConfig.secret.password ?? "")),
+        JSON.stringify({ importWarnings: warnings, importedAt: new Date().toISOString() }),
+      ],
+    );
+    const connection = connectionResult.rows[0];
+    for (const capability of capabilities) {
+      const normalized = { ...capability, providerId: String(connection.id) };
+      await client.query(
+        `insert into business_api_capabilities
+           (business_id, connection_id, capability_key, name, description, operation_id, capability_type,
+            method, path, auth_scope, allowed_methods, input_schema, output_schema, rate_limit, timeout_ms,
+            retry_policy, pii_classification, requires_verified_customer, confirmation_required, fallback_behavior, lifecycle_status, enabled, metadata)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+        providerCapabilityInsertValues(normalized, String(connection.id), business.id),
+      );
+    }
+    await client.query(
+      `insert into business_api_capability_audit
+         (business_id, connection_id, actor_user_id, actor_type, event_type, new_value, metadata)
+       values ($1, $2, $3, $4, 'connection_created', $5, $6)`,
+      [business.id, connection.id, actor.id === "demo-owner" ? null : actor.id, actor.role === "owner" ? "owner" : "admin", JSON.stringify({ providerKey, displayName, sourceType }), JSON.stringify({ capabilityCount: capabilities.length })],
+    );
+    if (capabilities.length) {
+      await client.query(
+        `insert into business_api_capability_audit
+           (business_id, connection_id, actor_user_id, actor_type, event_type, new_value)
+         values ($1, $2, $3, $4, 'capabilities_imported', $5)`,
+        [business.id, connection.id, actor.id === "demo-owner" ? null : actor.id, actor.role === "owner" ? "owner" : "admin", JSON.stringify({ count: capabilities.length, keys: capabilities.map((capability) => capability.key) })],
+      );
+    }
+    await client.query("commit");
+    const result = await pool.query<Record<string, unknown>>(
+      `select id, business_id, provider_key, display_name, base_url, source_type, spec_url, auth_type,
+              credential_hint, connection_status, last_tested_at, last_error
+       from business_api_connections where id = $1 and business_id = $2`,
+      [connection.id, business.id],
+    );
+    const capabilityResult = await pool.query<Record<string, unknown>>(
+      `select id, connection_id, capability_key, name, description, operation_id, capability_type,
+              method, path, auth_scope, allowed_methods, input_schema, output_schema, rate_limit,
+              timeout_ms, retry_policy, pii_classification, requires_verified_customer, confirmation_required, fallback_behavior, lifecycle_status,
+              enabled, metadata, updated_at
+       from business_api_capabilities where connection_id = $1 order by name`,
+      [connection.id],
+    );
+    return reply.code(201).send({ connection: providerConnectionPayload(result.rows[0], capabilityResult.rows), warnings });
+  } catch (error) {
+    try { await client.query("rollback"); } catch { /* Preserve the original error. */ }
+    if (isUniqueConstraintError(error, "business_api_connections_business_name_idx")) throw httpError(409, "A provider connection with this name already exists");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.patch("/api/v1/demo/:slug/provider-connections/:connectionId/capabilities/:capabilityId", async (request) => {
+  const params = request.params as { slug?: string; connectionId?: string; capabilityId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  requireWritableBusiness(business);
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "Provider capabilities require PostgreSQL storage");
+  const body = asRecord(request.body);
+  const enabled = body.enabled === true;
+  const requestedStatus = optionalString(body.status, 30);
+  const lifecycleStatus = enabled ? "approved" : requestedStatus === "disabled" ? "disabled" : "discovered";
+  const existing = await pool.query<Record<string, unknown>>(
+    `select id, connection_id, capability_key, lifecycle_status, enabled
+     from business_api_capabilities
+     where id = $1 and connection_id = $2 and business_id = $3`,
+    [requiredString(params.capabilityId, "capabilityId", 80), requiredString(params.connectionId, "connectionId", 80), business.id],
+  );
+  if (!existing.rowCount) throw httpError(404, "Provider capability not found");
+  const result = await pool.query<Record<string, unknown>>(
+    `update business_api_capabilities
+     set lifecycle_status = $2, enabled = $3, updated_at = now()
+     where id = $1 and connection_id = $4 and business_id = $5
+     returning id, connection_id, capability_key, name, description, operation_id, capability_type,
+               method, path, auth_scope, allowed_methods, input_schema, output_schema, rate_limit,
+               timeout_ms, retry_policy, pii_classification, requires_verified_customer, confirmation_required, fallback_behavior, lifecycle_status,
+               enabled, metadata, updated_at`,
+    [existing.rows[0].id, lifecycleStatus, enabled, params.connectionId, business.id],
+  );
+  await pool.query(
+    `insert into business_api_capability_audit
+       (business_id, connection_id, capability_id, actor_user_id, actor_type, event_type, previous_value, new_value)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [business.id, params.connectionId, existing.rows[0].id, actor.id === "demo-owner" ? null : actor.id, actor.role === "owner" ? "owner" : "admin", enabled ? "capability_approved" : "capability_disabled", JSON.stringify({ lifecycleStatus: existing.rows[0].lifecycle_status, enabled: existing.rows[0].enabled }), JSON.stringify({ lifecycleStatus, enabled })],
+  );
+  return { capability: providerCapabilityPayload(result.rows[0]) };
+});
+
+app.post("/api/v1/demo/:slug/provider-connections/:connectionId/capabilities/:capabilityId/test", async (request) => {
+  const params = request.params as { slug?: string; connectionId?: string; capabilityId?: string };
+  const business = await getBusiness(params.slug);
+  const actor = await requireBusinessTeamAccess(business, request, "admin");
+  requireVerifiedBusiness(business);
+  if (!pool) throw httpError(503, "Provider capability tests require PostgreSQL storage");
+  const result = await pool.query<Record<string, unknown>>(
+    `select c.id as connection_id, c.business_id, c.base_url, c.auth_type, c.connection_status,
+            c.encrypted_credentials, p.id, p.connection_id, p.capability_key, p.name, p.description,
+            p.operation_id, p.capability_type, p.method, p.path, p.auth_scope, p.allowed_methods,
+            p.input_schema, p.output_schema, p.rate_limit, p.timeout_ms, p.retry_policy,
+            p.pii_classification, p.requires_verified_customer, p.confirmation_required, p.fallback_behavior, p.lifecycle_status, p.enabled, p.metadata
+     from business_api_connections c
+     join business_api_capabilities p on p.connection_id = c.id and p.business_id = c.business_id
+     where c.id = $1 and p.id = $2 and c.business_id = $3`,
+    [requiredString(params.connectionId, "connectionId", 80), requiredString(params.capabilityId, "capabilityId", 80), business.id],
+  );
+  if (!result.rowCount) throw httpError(404, "Provider capability not found");
+  const row = result.rows[0];
+  if (typeof row.encrypted_credentials !== "string" || !row.encrypted_credentials) throw httpError(400, "Provider credentials are not configured");
+  if (row.lifecycle_status !== "approved" || row.enabled !== true) throw httpError(409, "Approve this capability before testing it");
+  let credential: ProviderCredential;
+  try {
+    credential = JSON.parse(decryptSecret(row.encrypted_credentials)) as ProviderCredential;
+  } catch {
+    throw httpError(500, "Provider credentials could not be decrypted");
+  }
+  const capability = providerCapabilityPayload(row);
+  try {
+    const output = await executeProviderCapability(
+      {
+        key: capability.key,
+        providerId: String(row.connection_id),
+        name: capability.name,
+        description: capability.description,
+        operationId: capability.operationId,
+        type: capability.type as ProviderCapabilityType,
+        method: capability.method as ProviderHttpMethod,
+        path: capability.path,
+        authScope: capability.authScope,
+        allowedMethods: capability.allowedMethods as ProviderHttpMethod[],
+        inputSchema: capability.inputSchema,
+        outputSchema: capability.outputSchema,
+        rateLimit: capability.rateLimit,
+        timeoutMs: capability.timeoutMs,
+        retryPolicy: capability.retryPolicy,
+        piiClassification: capability.piiClassification as ProviderPiiClassification,
+        requiresVerifiedCustomer: capability.requiresVerifiedCustomer === true,
+        requiresConfirmation: capability.requiresConfirmation === true,
+        confirmationRequired: capability.confirmationRequired,
+        fallbackBehavior: capability.fallbackBehavior as ProviderCapability["fallbackBehavior"],
+        lifecycleStatus: "approved",
+        enabled: true,
+        metadata: capability.metadata,
+      },
+      { baseUrl: String(row.base_url), status: "active" },
+      credential,
+      asRecord(asRecord(request.body).input),
+    );
+    await pool.query(
+      `update business_api_connections set connection_status = 'active', last_tested_at = now(), last_error = null, updated_at = now() where id = $1 and business_id = $2`,
+      [row.connection_id, business.id],
+    );
+    await pool.query(
+      `insert into business_api_capability_audit
+         (business_id, connection_id, capability_id, actor_user_id, actor_type, event_type, new_value)
+       values ($1, $2, $3, $4, $5, 'capability_tested', $6)`,
+      [business.id, row.connection_id, row.id, actor.id === "demo-owner" ? null : actor.id, actor.role === "owner" ? "owner" : "admin", JSON.stringify({ ok: true })],
+    );
+    return { ok: true, output };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Provider capability test failed";
+    await pool.query(
+      `update business_api_connections set connection_status = 'error', last_tested_at = now(), last_error = $3, updated_at = now() where id = $1 and business_id = $2`,
+      [row.connection_id, business.id, message.slice(0, 1_000)],
+    );
+    throw httpError(502, message);
+  }
+});
+
 app.post("/api/v1/demo/:slug/integrations/hubspot/connect", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -19478,16 +20536,46 @@ app.post("/api/v1/demo/:slug/actions", async (request, reply) => {
     }
   }
   const reusableAction = findCompatibleAction(
-    business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled"),
+    business.actions.filter((item) => item.archived !== true && item.enabled !== false && item.lifecycleStatus !== "disabled"),
     action,
   );
   if (reusableAction) return reply.code(200).send({ action: reusableAction, reused: true });
   const workflowName = workflowNameForAction(action);
-  const activeWorkflows = business.actions.filter((item) => item.enabled !== false && item.lifecycleStatus !== "disabled");
+  const activeWorkflows = business.actions.filter((item) => item.archived !== true && item.enabled !== false && item.lifecycleStatus !== "disabled");
   if (workflowName && findDuplicateWorkflowName(activeWorkflows, workflowName)) {
     throw httpError(409, `A workflow named “${workflowName}” already exists`);
   }
-  if (business.actions.some((item) => item.key === action.key)) throw httpError(409, "An action with this key already exists");
+  const archivedIndex = business.actions.findIndex((item) => item.archived === true && item.key === action.key);
+  if (archivedIndex >= 0) {
+    const archivedAction = business.actions[archivedIndex];
+    const restoredAction: ActionFlow = {
+      ...action,
+      id: archivedAction.id,
+      businessId: archivedAction.businessId ?? business.id,
+      ...(archivedAction.organizationId || action.organizationId
+        ? { organizationId: archivedAction.organizationId ?? action.organizationId }
+        : {}),
+      createdAt: archivedAction.createdAt,
+      version: Math.max(1, (archivedAction.version ?? 1) + 1),
+      archived: false,
+    };
+    business.actions[archivedIndex] = restoredAction;
+    await persistAction(business, restoredAction);
+    await recordActionRegistryAudit({
+      businessId: business.id,
+      actionId: restoredAction.id,
+      actorUserId,
+      actorType: "owner",
+      eventType: "updated",
+      previousValue: { archived: true, enabled: archivedAction.enabled, lifecycleStatus: archivedAction.lifecycleStatus },
+      newValue: { archived: false, enabled: restoredAction.enabled, lifecycleStatus: restoredAction.lifecycleStatus },
+      reason: "owner_override",
+    });
+    return reply.code(201).send({ action: restoredAction, restored: true });
+  }
+  if (business.actions.some((item) => item.archived !== true && item.key === action.key)) {
+    throw httpError(409, "An action with this key already exists");
+  }
   business.actions.push(action);
   await persistAction(business, action);
   await recordActionRegistryAudit({

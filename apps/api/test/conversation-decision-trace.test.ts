@@ -43,6 +43,7 @@ test("provider trace records lookup outcomes and action delivery without raw pay
     provider: "hubspot",
     operations: ["action_delivery"],
     lookupSteps: [{ stepId: "lookup", status: "ok", matchCount: 1 }],
+    capabilities: [],
     actionDelivery: { status: "queued", provider: "hubspot" },
   });
 });

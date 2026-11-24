@@ -151,6 +151,42 @@ interface Integration {
   sync: { total: number; synced: number; pending: number; failed: number };
 }
 
+interface ProviderCapability {
+  id: string;
+  connectionId: string;
+  key: string;
+  name: string;
+  description: string | null;
+  type: "READ" | "WRITE";
+  method: string;
+  path: string;
+  authScope: string | null;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  piiClassification: string;
+  requiresVerifiedCustomer: boolean;
+  requiresConfirmation?: boolean;
+  confirmationRequired: boolean;
+  fallbackBehavior?: "retry_identity" | "capture_request" | "handoff" | "stop";
+  lifecycleStatus: "discovered" | "approved" | "disabled";
+  enabled: boolean;
+}
+
+interface ProviderConnection {
+  id: string;
+  providerKey: string;
+  displayName: string;
+  baseUrl: string;
+  sourceType: "native" | "openapi" | "custom_rest";
+  specUrl: string | null;
+  authType: string;
+  credentialHint: string | null;
+  connectionStatus: "pending" | "active" | "error" | "disabled";
+  lastTestedAt: string | null;
+  lastError: string | null;
+  capabilities: ProviderCapability[];
+}
+
 interface McpToolPermission {
   name: string;
   title?: string;
@@ -1551,6 +1587,25 @@ const documentsMessage = ref("");
 const knowledgeTestContext = ref<"updated" | "answer" | null>(null);
 const resolvedKnowledgeQuestion = ref("");
 const integrations = ref<Integration[]>([]);
+const providerConnections = ref<ProviderConnection[]>([]);
+const providerConnectionDrawerOpen = ref(false);
+const providerConnectionMode = ref<"openapi" | "manual">("openapi");
+const providerConnectionName = ref("");
+const providerConnectionBaseUrl = ref("");
+const providerConnectionSpecUrl = ref("");
+const providerConnectionSpecJson = ref<Record<string, unknown> | null>(null);
+const providerConnectionAuthType = ref<"none" | "bearer_token" | "api_key" | "basic">("bearer_token");
+const providerConnectionSecret = ref("");
+const providerConnectionBasicUsername = ref("");
+const providerConnectionBasicPassword = ref("");
+const providerConnectionApiKeyHeader = ref("x-api-key");
+const providerManualCapabilityKey = ref("");
+const providerManualCapabilityName = ref("");
+const providerManualCapabilityMethod = ref("GET");
+const providerManualCapabilityPath = ref("");
+const providerConnectionLoading = ref(false);
+const providerConnectionError = ref("");
+const providerConnectionMessage = ref("");
 const mcpConnections = ref<McpConnection[]>([]);
 const integrationProvider = ref<"webhook" | "hubspot" | "jackrabbit">("webhook");
 const integrationDisplayName = ref("CRM webhook");
@@ -3651,7 +3706,7 @@ async function loadBusinessWorkspaceInternal(slug: string, publicOnly = false) {
     if (loadGeneration !== workspaceLoadGeneration || demoSlug.value !== slug) return;
     applyWorkspacePayload(payload);
     if (!publicOnly) {
-      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadMcpConnections(), loadActions(), loadDocuments(), loadOwnershipVerification(), loadNotifications()]);
+      await Promise.allSettled([loadLeads(), loadKnowledge(), loadWidgetInstall(), loadIntegrations(), loadProviderConnections(), loadMcpConnections(), loadActions(), loadDocuments(), loadOwnershipVerification(), loadNotifications()]);
     }
   } catch (error) {
     if (loadGeneration !== workspaceLoadGeneration || demoSlug.value !== slug) return;
@@ -5733,6 +5788,19 @@ async function loadIntegrations() {
   }
 }
 
+async function loadProviderConnections() {
+  if (!firebaseToken.value && !demoAccessToken.value) return;
+  providerConnectionError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/provider-connections`), { headers: ownerHeaders() });
+    const payload = await response.json() as { connections?: ProviderConnection[]; error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not load business API connections.");
+    providerConnections.value = payload.connections ?? [];
+  } catch (error) {
+    providerConnectionError.value = error instanceof Error ? error.message : "Could not load business API connections.";
+  }
+}
+
 async function loadMcpConnections() {
   if (!firebaseToken.value && !demoAccessToken.value) return;
   mcpLoading.value = true;
@@ -6331,7 +6399,9 @@ async function addActionTemplate(template: ActionTemplate) {
     const response = await trackedFetch(apiUrl("/api/v1/demo/" + demoSlug.value + "/actions"), {
       method: "POST",
       headers: { "content-type": "application/json", ...ownerHeaders() },
-      body: JSON.stringify({ templateKey: template.key }),
+      // Include the complete template as a compatibility fallback for a
+      // briefly skewed deployment where the API does not yet know this key.
+      body: JSON.stringify({ ...template, templateKey: template.key }),
     });
     const payload = await response.json() as { error?: string; action?: ActionFlow };
     if (!response.ok) throw new Error(payload.error ?? "Could not add this flow.");
@@ -7888,6 +7958,173 @@ async function connectIntegration() {
   }
 }
 
+function openProviderConnectionDrawer(mode: "openapi" | "manual" = "openapi") {
+  providerConnectionMode.value = mode;
+  providerConnectionName.value = "";
+  providerConnectionBaseUrl.value = "";
+  providerConnectionSpecUrl.value = "";
+  providerConnectionSpecJson.value = null;
+  providerConnectionAuthType.value = "bearer_token";
+  providerConnectionSecret.value = "";
+  providerConnectionBasicUsername.value = "";
+  providerConnectionBasicPassword.value = "";
+  providerConnectionApiKeyHeader.value = "x-api-key";
+  providerManualCapabilityKey.value = "";
+  providerManualCapabilityName.value = "";
+  providerManualCapabilityMethod.value = "GET";
+  providerManualCapabilityPath.value = "";
+  providerConnectionError.value = "";
+  providerConnectionMessage.value = "";
+  providerConnectionDrawerOpen.value = true;
+}
+
+function closeProviderConnectionDrawer() {
+  providerConnectionDrawerOpen.value = false;
+  providerConnectionSecret.value = "";
+  providerConnectionBasicUsername.value = "";
+  providerConnectionBasicPassword.value = "";
+  providerConnectionSpecJson.value = null;
+  providerConnectionError.value = "";
+}
+
+async function handleProviderSpecFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  providerConnectionError.value = "";
+  try {
+    const parsed = JSON.parse(await file.text()) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("The selected file is not an OpenAPI JSON document.");
+    providerConnectionSpecJson.value = parsed as Record<string, unknown>;
+    providerConnectionSpecUrl.value = "";
+    providerConnectionMessage.value = `${file.name} ready to import`;
+  } catch (error) {
+    providerConnectionSpecJson.value = null;
+    providerConnectionError.value = error instanceof Error ? error.message : "Could not read that OpenAPI file.";
+  } finally {
+    input.value = "";
+  }
+}
+
+async function connectProviderConnection() {
+  if (providerConnectionLoading.value) return;
+  if (!providerConnectionName.value.trim() || !providerConnectionBaseUrl.value.trim()) {
+    providerConnectionError.value = "Add a connection name and base URL first.";
+    return;
+  }
+  if (providerConnectionMode.value === "openapi" && !providerConnectionSpecUrl.value.trim() && !providerConnectionSpecJson.value) {
+    providerConnectionError.value = "Import an OpenAPI JSON file or paste its public URL.";
+    return;
+  }
+  if (providerConnectionMode.value === "manual" && (!providerManualCapabilityKey.value.trim() || !providerManualCapabilityPath.value.trim())) {
+    providerConnectionError.value = "Add a capability name and API path first.";
+    return;
+  }
+  providerConnectionLoading.value = true;
+  providerConnectionError.value = "";
+  providerConnectionMessage.value = "";
+  const auth = providerConnectionAuthType.value === "none"
+    ? { type: "none" }
+    : providerConnectionAuthType.value === "api_key"
+      ? { type: "api_key", apiKey: providerConnectionSecret.value, headerName: providerConnectionApiKeyHeader.value || "x-api-key" }
+      : providerConnectionAuthType.value === "basic"
+        ? { type: "basic", username: providerConnectionBasicUsername.value, password: providerConnectionBasicPassword.value }
+        : { type: "bearer_token", token: providerConnectionSecret.value };
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/provider-connections`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({
+        providerKey: "custom_api",
+        displayName: providerConnectionName.value.trim(),
+        baseUrl: providerConnectionBaseUrl.value.trim(),
+        auth,
+        ...(providerConnectionSpecUrl.value.trim() ? { specUrl: providerConnectionSpecUrl.value.trim() } : {}),
+        ...(providerConnectionSpecJson.value ? { spec: providerConnectionSpecJson.value } : {}),
+        ...(providerConnectionMode.value === "manual" ? {
+          capabilities: [{
+            key: providerManualCapabilityKey.value.trim(),
+            name: providerManualCapabilityName.value.trim() || providerManualCapabilityKey.value.trim(),
+            method: providerManualCapabilityMethod.value,
+            path: providerManualCapabilityPath.value.trim(),
+          }],
+        } : {}),
+      }),
+    });
+    const payload = await response.json() as { connection?: ProviderConnection; error?: string };
+    if (!response.ok || !payload.connection) throw new Error(payload.error ?? "Could not connect this API.");
+    providerConnectionSecret.value = "";
+    providerConnectionMessage.value = `${payload.connection.displayName} connected · review the discovered capabilities below`;
+    await loadProviderConnections();
+    closeProviderConnectionDrawer();
+  } catch (error) {
+    providerConnectionError.value = error instanceof Error ? error.message : "Could not connect this API.";
+  } finally {
+    providerConnectionLoading.value = false;
+  }
+}
+
+function providerCapabilityRequiredFields(capability: ProviderCapability): string[] {
+  const required = capability.inputSchema.required;
+  return Array.isArray(required) ? required.filter((value): value is string => typeof value === "string") : [];
+}
+
+function providerCapabilityPermissionLabel(capability: ProviderCapability): string {
+  if (capability.type === "WRITE") {
+    return [
+      "WRITE",
+      capability.requiresVerifiedCustomer ? "verified customer" : "no identity gate",
+      capability.requiresConfirmation ? "confirmation" : "no confirmation",
+    ].join(" · ");
+  }
+  return `READ · automatic · fallback ${formatLabel(capability.fallbackBehavior || "capture_request")}`;
+}
+
+async function updateProviderCapability(connection: ProviderConnection, capability: ProviderCapability, enabled: boolean) {
+  if (providerConnectionLoading.value) return;
+  providerConnectionLoading.value = true;
+  providerConnectionError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/provider-connections/${connection.id}/capabilities/${capability.id}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ enabled, status: enabled ? "approved" : "disabled" }),
+    });
+    const payload = await response.json() as { capability?: ProviderCapability; error?: string };
+    if (!response.ok || !payload.capability) throw new Error(payload.error ?? "Could not update this capability.");
+    const index = connection.capabilities.findIndex((item) => item.id === capability.id);
+    if (index >= 0) connection.capabilities.splice(index, 1, payload.capability);
+    providerConnectionMessage.value = enabled ? `${capability.name} is approved for workflows.` : `${capability.name} is disabled.`;
+  } catch (error) {
+    providerConnectionError.value = error instanceof Error ? error.message : "Could not update this capability.";
+  } finally {
+    providerConnectionLoading.value = false;
+  }
+}
+
+async function testProviderCapability(connection: ProviderConnection, capability: ProviderCapability) {
+  if (providerConnectionLoading.value) return;
+  providerConnectionLoading.value = true;
+  providerConnectionError.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/provider-connections/${connection.id}/capabilities/${capability.id}/test`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ input: {} }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "The capability test failed.");
+    connection.connectionStatus = "active";
+    providerConnectionMessage.value = `${capability.name} responded successfully.`;
+    await loadProviderConnections();
+  } catch (error) {
+    providerConnectionError.value = error instanceof Error ? error.message : "The capability test failed.";
+    await loadProviderConnections();
+  } finally {
+    providerConnectionLoading.value = false;
+  }
+}
+
 function openNativeIntegrationForm(provider: "webhook" | "hubspot" | "jackrabbit") {
   integrationProvider.value = provider;
   integrationDisplayName.value = provider === "hubspot" ? "HubSpot" : provider === "jackrabbit" ? "Jackrabbit" : "Automation webhook";
@@ -8486,14 +8723,17 @@ watch(view, (nextView, previousView) => {
     if (previousView !== "actions") selectAction(null);
     void loadActions();
     void loadIntegrations();
+    void loadProviderConnections();
   }
   if (nextView === "workflows") {
     void loadActions();
     void loadIntegrations();
+    void loadProviderConnections();
   }
   if (nextView === "connections") {
     settingsTab.value = "integrations";
     void loadIntegrations();
+    void loadProviderConnections();
     void loadMcpConnections();
   }
   if (nextView === "billing") { settingsTab.value = "billing"; void loadBilling(); }
@@ -9297,7 +9537,7 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'workflows'" class="workflow-workspace-shell">
           <p v-if="workflowContextRefreshMessage" class="form-error workflow-context-refresh-message" role="status">{{ workflowContextRefreshMessage }}</p>
-          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :workflows="workflowRecords" :workflows-loading="workflowsLoading" :workflows-error="workflowsError" :integrations="integrations" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :performance-by-workflow="workflowPerformanceByAction" :initial-workflow-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowId : undefined" :initial-action-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowActionId : undefined" :agent-tone="agentTone" :agent-primary-language="primaryLanguage" :agent-citation-visibility="citationVisibility" :agent-fallback-behavior="fallbackBehavior" :agent-human-handoff-enabled="humanHandoffEnabled" :agent-proactive-enabled="proactiveEnabled" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @open-workflow="openWorkflowFromBuilder" @open-agent-behavior="selectAgentTab('behavior')" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
+          <WorkflowWorkspace :key="`${activeOrganization?.id ?? workflowContext?.organizationId ?? 'organization'}:${workflowContext?.businessId ?? demoSlug}:${workflowContext?.contextVersion ?? 0}`" :actions="actionFlows" :workflows="workflowRecords" :workflows-loading="workflowsLoading" :workflows-error="workflowsError" :integrations="integrations" :provider-connections="providerConnections" :demo-slug="demoSlug" :selected-business-id="workflowSelectedBusinessId" :workspace-business-id="workspaceBusinessId" :workspace-organization-id="workspaceOrganizationId" :organization-id="activeOrganization?.id ?? workflowContext?.organizationId ?? null" :api-url="apiUrl" :owner-headers="ownerHeaders" :business-name="businessName" :business-context="workflowContext" :performance-by-workflow="workflowPerformanceByAction" :initial-workflow-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowId : undefined" :initial-action-id="route.kind === 'workspace' || route.kind === 'demo' ? route.workflowActionId : undefined" :agent-tone="agentTone" :agent-primary-language="primaryLanguage" :agent-citation-visibility="citationVisibility" :agent-fallback-behavior="fallbackBehavior" :agent-human-handoff-enabled="humanHandoffEnabled" :agent-proactive-enabled="proactiveEnabled" :publishing-status="agentPublishing.status" :publish-error="agentPublishingError" @refresh="loadActions" @refresh-workspace="refreshWorkflowWorkspace" @open-action="openWorkflowAction" @open-workflow="openWorkflowFromBuilder" @open-agent-behavior="selectAgentTab('behavior')" @test-workflow="testWorkflowFromBuilder" @publish-workflow="publishWorkflowFromBuilder" />
         </div>
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
@@ -9412,7 +9652,7 @@ function startMarketingDemo() {
         <div v-else-if="view === 'connections'" class="view-content">
           <div class="section-toolbar">
             <div><p class="eyebrow">Settings · integrations</p><h2>Integrations</h2><p>Connect the tools your business already uses.</p></div>
-            <div class="toolbar-actions"><span v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</span><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="integrationLoading || mcpLoading" @click="loadIntegrations(); loadMcpConnections()">{{ integrationLoading || mcpLoading ? 'Working…' : 'Refresh' }}</button><button class="text-button" type="button" @click="openSupportReport('integration', hubspotIntegration?.provider ?? '', hubspotIntegration?.id ?? '')">Get help</button></div>
+            <div class="toolbar-actions"><span v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</span><span v-if="mcpMessage" class="saved-message">✓ {{ mcpMessage }}</span><button class="outline-button small" type="button" :disabled="integrationLoading || mcpLoading || providerConnectionLoading" @click="loadIntegrations(); loadProviderConnections(); loadMcpConnections()">{{ integrationLoading || mcpLoading || providerConnectionLoading ? 'Working…' : 'Refresh' }}</button><button class="text-button" type="button" @click="openSupportReport('integration', hubspotIntegration?.provider ?? '', hubspotIntegration?.id ?? '')">Get help</button></div>
           </div>
           <p v-if="integrationError || mcpError" class="form-error">{{ integrationError || mcpError }}</p>
 
@@ -9448,6 +9688,22 @@ function startMarketingDemo() {
                 <div class="integration-card-actions"><button class="primary-button small" type="button" @click="openNativeIntegrationForm('jackrabbit')">{{ jackrabbitIntegration ? 'Manage' : 'Connect' }}</button></div>
               </article>
             </div>
+            <section class="provider-capability-section">
+              <div class="integration-section-heading"><div><p class="eyebrow">Business API connectors</p><h2>Connect your API</h2><p>Bring live business data into workflows without giving the model arbitrary API access.</p></div><div class="toolbar-actions"><button class="outline-button small" type="button" @click="openProviderConnectionDrawer('manual')">Add endpoint manually</button><button class="primary-button small" type="button" @click="openProviderConnectionDrawer('openapi')">Import OpenAPI</button></div></div>
+              <div class="provider-capability-flow"><span>Connect API</span><b>→</b><span>Discover capabilities</span><b>→</b><span>Review permissions</span><b>→</b><span>Use in workflows</span></div>
+              <p v-if="providerConnectionError" class="form-error">{{ providerConnectionError }}</p>
+              <p v-if="providerConnectionMessage" class="saved-message">✓ {{ providerConnectionMessage }}</p>
+              <div v-if="!providerConnections.length" class="panel provider-connector-empty"><div><strong>No business API connectors yet</strong><span>Connect a daycare, booking, CRM, or custom business API. Imported operations start disabled until you approve them.</span></div><button class="primary-button small" type="button" @click="openProviderConnectionDrawer('openapi')">Connect an API →</button></div>
+              <div v-else class="provider-connector-list">
+                <article v-for="connection in providerConnections" :key="connection.id" class="panel provider-connector-card">
+                  <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><Cable :size="20" :stroke-width="1.8" /></span><div><h3>{{ connection.displayName }}</h3><small>{{ connection.baseUrl }} · {{ connection.sourceType === 'openapi' ? 'OpenAPI import' : 'Custom REST' }}</small></div></div><span :class="['status-pill', connection.connectionStatus === 'active' ? 'booked' : connection.connectionStatus === 'error' ? 'new' : 'qualified']">{{ formatLabel(connection.connectionStatus) }}</span></div>
+                  <div class="provider-connector-meta"><span><strong>{{ connection.capabilities.length }}</strong> discovered capabilities</span><span v-if="connection.credentialHint">Credential {{ connection.credentialHint }}</span><span v-if="connection.lastTestedAt">Tested {{ new Date(connection.lastTestedAt).toLocaleString() }}</span></div>
+                  <p v-if="connection.lastError" class="form-error">{{ connection.lastError }}</p>
+                  <div v-if="connection.capabilities.length" class="provider-capability-list"><div v-for="capability in connection.capabilities" :key="capability.id" class="provider-capability-row"><div class="provider-capability-copy"><div><strong>{{ capability.name }}</strong><span :class="['provider-capability-risk', capability.type === 'WRITE' ? 'write' : 'read']">{{ providerCapabilityPermissionLabel(capability) }}</span><span v-if="capability.lifecycleStatus === 'approved'" class="capability-check">✓ Approved</span><span v-else class="capability-pending">Needs review</span></div><small><code>{{ capability.key }}</code> · {{ capability.method }} {{ capability.path }}</small><small v-if="providerCapabilityRequiredFields(capability).length">Inputs: {{ providerCapabilityRequiredFields(capability).join(', ') }}</small></div><div class="provider-capability-actions"><button class="outline-button small" type="button" :disabled="providerConnectionLoading" @click="updateProviderCapability(connection, capability, !(capability.enabled && capability.lifecycleStatus === 'approved'))">{{ capability.enabled && capability.lifecycleStatus === 'approved' ? 'Disable' : 'Approve capability' }}</button><button v-if="capability.enabled && capability.lifecycleStatus === 'approved' && !providerCapabilityRequiredFields(capability).length" class="text-button" type="button" :disabled="providerConnectionLoading" @click="testProviderCapability(connection, capability)">Test</button></div></div></div>
+                  <div v-else class="provider-capability-empty">Add an endpoint or import an OpenAPI document to discover capabilities.</div>
+                </article>
+              </div>
+            </section>
             <div class="integration-card-grid integration-detailed-grid">
               <article class="panel business-integration-card">
                 <div class="integration-card-header"><div class="integration-provider"><span class="integration-provider-logo booking-logo"><Waves :size="20" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>Jackrabbit</h3><small>Class management · read-only availability</small></div></div><span :class="['status-pill', jackrabbitIntegration?.connectionStatus === 'active' ? 'booked' : jackrabbitIntegration?.connectionStatus === 'error' ? 'new' : jackrabbitIntegration ? 'qualified' : 'qualified']">{{ jackrabbitIntegration?.connectionStatus === 'active' ? 'Connected ✓' : jackrabbitIntegration?.connectionStatus === 'error' ? 'Needs attention' : jackrabbitIntegration ? formatLabel(jackrabbitIntegration.connectionStatus) : 'Not connected' }}</span></div>
@@ -9480,6 +9736,21 @@ function startMarketingDemo() {
             </div>
 
             <div v-if="nativeIntegrationFormOpen" class="panel integration-connect-panel"><div class="integration-connect-heading"><div><p class="eyebrow">Secure connection</p><h3>{{ integrationProvider === 'jackrabbit' ? 'Connect Jackrabbit' : 'Connect a business integration' }}</h3><p>FrontDeskWise keeps credentials server-side, encrypted at rest, and out of the browser.</p></div><button class="text-button" type="button" @click="closeNativeIntegrationForm">Close</button></div><div class="integration-connect-grid"><label>Provider<select v-model="integrationProvider"><option value="jackrabbit">Jackrabbit</option><option value="hubspot">HubSpot CRM</option><option value="webhook">Zapier / Make / custom webhook</option></select></label><label>Connection name <span class="optional">optional</span><input v-model="integrationDisplayName" type="text" maxlength="120" :placeholder="integrationProvider === 'hubspot' ? 'HubSpot' : integrationProvider === 'jackrabbit' ? 'Jackrabbit' : 'Automation webhook'" /></label><label v-if="integrationProvider === 'jackrabbit'" class="integration-connect-wide">Customer API token <span class="optional">encrypted · never shown again</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste your Jackrabbit Customer API token" /><small>FrontDeskWise detects the Jackrabbit account automatically after validation. Enrollment, payment, waivers, and registration remain in Jackrabbit.</small></label><div v-if="integrationProvider === 'hubspot' && !integrationManualMode" class="integration-connect-wide integration-oauth-callout"><strong>Connect with HubSpot OAuth</strong><p>Authorize FrontDeskWise to create or update contacts in the selected HubSpot account. You will return here after authorization.</p><button class="primary-button small" type="button" :disabled="integrationLoading" @click="connectIntegration">{{ integrationLoading ? 'Opening HubSpot…' : 'Connect HubSpot' }}</button><button class="text-button" type="button" @click="integrationManualMode = true">Advanced / Manual connection</button></div><label v-if="integrationProvider === 'hubspot' && integrationManualMode" class="integration-connect-wide">Private app or service key <span class="optional">encrypted · advanced</span><input v-model="integrationAccessToken" type="password" autocomplete="new-password" placeholder="Paste the provider token" /><small>Use this only for an account-local manual connection. Customer installs should use OAuth.</small></label><template v-else-if="integrationProvider === 'webhook'"><label class="integration-connect-wide">Webhook URL<input v-model="integrationWebhookUrl" type="url" inputmode="url" placeholder="https://hooks.zapier.com/…" /></label><label class="integration-connect-wide">Signing secret <span class="optional">optional · encrypted</span><input v-model="integrationSigningSecret" type="password" autocomplete="new-password" placeholder="Used to sign outbound events" /></label></template></div><p v-if="integrationError" class="form-error">{{ integrationError }}</p><p v-if="integrationMessage" class="saved-message">✓ {{ integrationMessage }}</p><div class="integration-connect-actions"><button class="outline-button small" type="button" @click="closeNativeIntegrationForm">Cancel</button><button v-if="integrationProvider === 'webhook' || integrationProvider === 'jackrabbit' || integrationManualMode" class="primary-button small" type="button" :disabled="integrationLoading || (integrationProvider === 'hubspot' ? !integrationAccessToken.trim() : integrationProvider === 'jackrabbit' ? !integrationAccessToken.trim() : !integrationWebhookUrl.trim())" @click="connectIntegration">{{ integrationLoading ? 'Testing connection…' : integrationProvider === 'jackrabbit' ? 'Connect Jackrabbit' : 'Test & connect securely →' }}</button></div></div>
+            <div v-if="providerConnectionDrawerOpen" class="integration-drawer-backdrop" role="presentation" @click.self="closeProviderConnectionDrawer">
+              <aside class="integration-drawer provider-connection-drawer" role="dialog" aria-modal="true" aria-labelledby="connect-provider-api-title">
+                <div class="integration-drawer-header"><div><p class="eyebrow">Business API connector</p><h2 id="connect-provider-api-title">{{ providerConnectionMode === 'openapi' ? 'Import an API' : 'Add an endpoint' }}</h2><p>Credentials stay encrypted server-side. Capabilities are discovered into a review queue before workflows can use them.</p></div><button class="auth-close" type="button" aria-label="Close" @click="closeProviderConnectionDrawer">×</button></div>
+                <div class="provider-connection-steps"><span class="active">1 · Connect</span><span>2 · Review</span><span>3 · Test</span></div>
+                <label>Connection name<input v-model="providerConnectionName" type="text" maxlength="120" placeholder="DaycareSpots API" /></label>
+                <label>Base URL<input v-model="providerConnectionBaseUrl" type="url" inputmode="url" placeholder="https://api.example.com" /><small>Use the API host, not a browser page. HTTPS is required.</small></label>
+                <label>Authentication<select v-model="providerConnectionAuthType"><option value="bearer_token">Bearer token</option><option value="api_key">API key</option><option value="basic">Basic authentication</option><option value="none">No authentication</option></select></label>
+                <label v-if="providerConnectionAuthType === 'api_key'">API key header<input v-model="providerConnectionApiKeyHeader" type="text" maxlength="120" placeholder="x-api-key" /></label>
+                <template v-if="providerConnectionAuthType === 'basic'"><label>Username<input v-model="providerConnectionBasicUsername" type="text" autocomplete="username" placeholder="API username" /></label><label>Password<input v-model="providerConnectionBasicPassword" type="password" autocomplete="new-password" placeholder="Stored securely · never shown again" /></label></template><label v-else-if="providerConnectionAuthType !== 'none'">{{ providerConnectionAuthType === 'api_key' ? 'API key' : 'Bearer token' }}<input v-model="providerConnectionSecret" type="password" autocomplete="new-password" placeholder="Stored securely · never shown again" /></label>
+                <template v-if="providerConnectionMode === 'openapi'"><div class="provider-import-choice"><label>OpenAPI / Swagger URL <span class="optional">JSON</span><input v-model="providerConnectionSpecUrl" type="url" inputmode="url" placeholder="https://…/openapi.json" @input="providerConnectionSpecJson = null" /></label><span>or</span><label class="outline-button small document-upload-button">Choose JSON file<input type="file" accept="application/json,.json" @change="handleProviderSpecFile" /></label></div><small class="form-help">FrontDeskWise will classify operations, generate input/output schemas, and keep every imported capability disabled until you approve it.</small></template>
+                <template v-else><div class="provider-manual-heading"><strong>Endpoint details</strong><span>One capability to start</span></div><label>Capability key<input v-model="providerManualCapabilityKey" type="text" maxlength="120" placeholder="search_daycares" /></label><label>Display name <span class="optional">optional</span><input v-model="providerManualCapabilityName" type="text" maxlength="160" placeholder="Search daycares" /></label><div class="provider-manual-grid"><label>Method<select v-model="providerManualCapabilityMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label><label>Path<input v-model="providerManualCapabilityPath" type="text" maxlength="1000" placeholder="/daycares/search" /></label></div><small class="form-help">Field mapping and typed schemas can be reviewed after the endpoint is registered.</small></template>
+                <p v-if="providerConnectionError" class="form-error">{{ providerConnectionError }}</p><p v-if="providerConnectionMessage" class="saved-message">✓ {{ providerConnectionMessage }}</p>
+                <div class="integration-drawer-actions"><button class="outline-button small" type="button" @click="closeProviderConnectionDrawer">Cancel</button><button class="primary-button small" type="button" :disabled="providerConnectionLoading" @click="connectProviderConnection">{{ providerConnectionLoading ? 'Discovering…' : providerConnectionMode === 'openapi' ? 'Discover capabilities' : 'Add endpoint' }}</button></div>
+              </aside>
+            </div>
           </section>
 
           <section class="integration-section advanced-ai-section">

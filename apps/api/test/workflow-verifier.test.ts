@@ -58,6 +58,20 @@ test("provider lookups require an explicit fallback path", () => {
   assert.ok(result.issues.some((issue) => issue.code === "provider_fallback_missing" && issue.stepId === "registration-options"));
 });
 
+test("provider writes require an earlier confirmation step before publication", () => {
+  const broken: ActionFlow = {
+    ...swim,
+    id: "missing-provider-confirmation",
+    steps: [
+      { id: "write", type: "api_action", config: { capabilityKey: "join_waitlist" }, nextStepId: "done" },
+      { id: "done", type: "complete" },
+    ],
+  };
+  const result = verifyWorkflowDefinition(broken);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "provider_confirmation_missing" && issue.stepId === "write"));
+});
+
 test("disabled steps do not satisfy required-field verification", () => {
   const draft: ActionFlow = {
     ...swim,

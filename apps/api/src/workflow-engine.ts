@@ -72,6 +72,14 @@ function valueForPath(values: Record<string, unknown>, path: string): unknown {
   }, values);
 }
 
+function conditionValues(state: ConversationActionState): Record<string, unknown> {
+  return {
+    ...state.values,
+    customerVerification: state.customerVerification?.status,
+    customer_verification: state.customerVerification?.status,
+  };
+}
+
 export function workflowField(action: ActionFlow, fieldKey: string | undefined): ActionField | null {
   if (!fieldKey) return null;
   return action.fields.find((field) => field.key === fieldKey || field.id === fieldKey) ?? null;
@@ -160,7 +168,7 @@ export function activateProviderFallback(
   action: ActionFlow,
   state: ConversationActionState,
   provider: string,
-  reason: "unavailable" | "not_found",
+  reason: "unavailable" | "not_found" | "ambiguous",
 ): ActionStep | null {
   const fallback = providerFallbackStep(action);
   if (!fallback) return null;
@@ -184,8 +192,8 @@ function nextSequentialStep(action: ActionFlow, step: ActionStep): ActionStep | 
   return action.steps[index + 1] ?? null;
 }
 
-function nextBranchStep(action: ActionFlow, step: ActionStep, values: Record<string, unknown>): ActionStep | null {
-  const branch = step.branches?.find((candidate) => conditionMatches(candidate.when, values));
+function nextBranchStep(action: ActionFlow, step: ActionStep, state: ConversationActionState): ActionStep | null {
+  const branch = step.branches?.find((candidate) => conditionMatches(candidate.when, conditionValues(state)));
   return branch ? workflowStep(action, branch.nextStepId) : nextSequentialStep(action, step);
 }
 
@@ -204,19 +212,19 @@ export function currentWorkflowStep(action: ActionFlow, state: ConversationActio
     // explicit complete step. Once its cursor is exhausted, do not fall back
     // to the first step and loop forever.
     if (state.completedStepIds?.includes(step.id)) {
-      step = nextBranchStep(action, step, state.values);
+      step = nextBranchStep(action, step, state);
       continue;
     }
     if (!workflowStepIsAvailable(step, state)) {
       step = nextSequentialStep(action, step);
       continue;
     }
-    if (step.condition && !conditionMatches(step.condition, state.values)) {
+    if (step.condition && !conditionMatches(step.condition, conditionValues(state))) {
       step = nextSequentialStep(action, step);
       continue;
     }
     if (step.type === "condition" || step.type === "decision") {
-      step = nextBranchStep(action, step, state.values);
+      step = nextBranchStep(action, step, state);
       continue;
     }
     return step;
@@ -232,7 +240,7 @@ export function workflowFormFields(action: ActionFlow, state: ConversationAction
   return action.fields.filter((field) => {
     if (keys && !keys.has(field.key) && !keys.has(field.id)) return false;
     if (field.visibility === "hidden" || state.skipped?.includes(field.key)) return false;
-    if (field.condition && !conditionMatches(field.condition, state.values)) return false;
+    if (field.condition && !conditionMatches(field.condition, conditionValues(state))) return false;
     return !state.values[field.key]?.trim();
   });
 }
@@ -281,7 +289,7 @@ export function workflowSummary(action: ActionFlow, state: ConversationActionSta
   const currentState = current?.id ?? (state.status === "completed" ? "completed" : null);
   const missing = action.fields
     .filter((field) => field.required && field.visibility !== "hidden" && !state.skipped?.includes(field.key) && !state.values[field.key]?.trim())
-    .filter((field) => !field.condition || conditionMatches(field.condition, state.values))
+    .filter((field) => !field.condition || conditionMatches(field.condition, conditionValues(state)))
     .map((field) => field.key);
   return {
     key: action.key,
@@ -644,7 +652,7 @@ export function transitionWorkflow(action: ActionFlow, state: ConversationAction
   if (current && !state.completedStepIds?.includes(current.id)) {
     state.completedStepIds = [...(state.completedStepIds ?? []), current.id];
   }
-  const next = current ? nextBranchStep(action, current, state.values) : action.steps[0];
+  const next = current ? nextBranchStep(action, current, state) : action.steps[0];
   state.currentStepId = next?.id;
   const resolved = currentWorkflowStep(action, state);
   state.currentStepId = resolved?.id;

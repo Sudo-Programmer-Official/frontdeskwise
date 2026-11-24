@@ -13,6 +13,7 @@ export type WorkflowVerificationIssue = {
   | "provider_missing"
   | "provider_fallback_missing"
   | "provider_dependency_missing"
+  | "provider_confirmation_missing"
   | "unverified_link_source"
   | "placeholder_step"
   | "unsupported_step_type"
@@ -159,6 +160,13 @@ export function verifyWorkflowDefinition(action: ActionFlow): WorkflowVerificati
       if (!hasFallback) issues.push(issue("provider_fallback_missing", `Provider step ${step.id} has no explicit fallback behavior`, step.id));
       if (typeof config.fallbackStepId === "string" && config.fallbackStepId && !byId.has(config.fallbackStepId)) {
         issues.push(issue("provider_fallback_missing", `Provider step ${step.id} points to an unknown fallback step`, step.id));
+      }
+    }
+    if ((step.type === "api_action" || step.type === "book") && typeof config.capabilityKey === "string" && config.capabilityKey.trim()) {
+      const currentIndex = steps.findIndex((candidate) => candidate.id === step.id);
+      const hasConfirmation = steps.slice(0, currentIndex).some((candidate) => candidate.type === "confirm");
+      if (!hasConfirmation) {
+        issues.push(issue("provider_confirmation_missing", `Provider write step ${step.id} needs an earlier confirmation step`, step.id));
       }
     }
     if (config.requiresProviderResult === true) {

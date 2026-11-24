@@ -18,6 +18,7 @@ Every record is tenant-scoped through `business_id`.
 | CRM delivery | `crm_integrations`, `integration_outbox`, `crm_sync_records` | Encrypted connection material, queued events, attempts, remote IDs, and delivery status |
 | Action delivery and telemetry | `action_outbox`, `conversion_events` | Completion connector jobs, retries, funnel events, field drop-offs, and device/source context |
 | MCP assistant connections | `mcp_connections` | Encrypted server credentials, discovered tools, read-only defaults, explicit allowlists, and connection health |
+| Business API capabilities | `business_api_connections`, `business_api_capabilities`, `business_api_capability_audit` | Tenant-owned API endpoints, imported/hand-authored capabilities, approval state, schemas, execution policy, and audit history |
 
 ## Fact provenance and conflict resolution
 
@@ -116,3 +117,11 @@ Action flows can set `completion.connector` to `generic_webhook`, `email`, or `h
 MCP is an additional agent-tool channel, not a replacement for deterministic completion connectors. Owners use the dedicated Connections screen to choose a provider, paste the provider-issued server URL and bearer token, test the connection, and review the discovered tools. Tokens are encrypted with the same `FRONTDESKWISE_CREDENTIAL_KEY` boundary and are never returned to the browser.
 
 The API classifies discovered tools using MCP annotations and conservative name-based fallbacks. Read-only tools such as search, lookup, list, and get are enabled by default. Write and destructive tools remain disabled until an owner explicitly enables them. The current policy layer does not allow the model to execute every discovered tool automatically; completion actions continue through `ActionConnector` and `action_outbox` for deterministic idempotency and retry behavior.
+
+## Business API capabilities
+
+The Business API connector layer is the provider-neutral path for live business data and actions. Owners connect a base URL, choose authentication, import an OpenAPI/Swagger JSON document or add an endpoint, review the discovered operations, and approve the capabilities that may enter workflows. The dashboard owns the configuration experience; the owner does not need to author capability JSON.
+
+Each capability records its tenant and connection ownership, HTTP method/path, input and output schemas, read/write classification, allowed methods, auth scope, rate limit metadata, timeout, retry policy, PII classification, customer-verification requirement, confirmation requirement, and fallback behavior. Reads default to automatic execution when approved. Writes default to verified-customer plus explicit-confirmation gates and remain disabled until approval.
+
+The workflow engine references an approved `capabilityKey` plus explicit input and result mappings. It never accepts an arbitrary URL from model output. `executeProviderCapability` validates the destination as public immediately before the request, rejects redirects, limits the request to declared fields, validates the response against the registered output schema, and fails closed on missing approval or unsafe provider state. Provider operations also persist explicit customer verification and `can_answer` / `can_lookup` / `can_prepare` / `can_submit` / `can_confirm_success` trace flags. See [provider-capability-connectors.md](provider-capability-connectors.md).

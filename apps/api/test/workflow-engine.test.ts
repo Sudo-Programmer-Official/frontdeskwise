@@ -53,6 +53,27 @@ test("workflow steps capture values and resolve a decision branch", () => {
   assert.equal(first.transition.state.status, "active");
 });
 
+test("provider verification state is available to deterministic workflow branches", () => {
+  const verificationFlow: ActionFlow = {
+    ...flow,
+    id: "provider-verification-branch",
+    steps: [
+      { id: "verification", type: "decision", branches: [
+        { when: { field: "customerVerification", equals: "VERIFIED" }, nextStepId: "write" },
+        { when: { field: "customerVerification", equals: "AMBIGUOUS" }, nextStepId: "handoff" },
+      ] },
+      { id: "write", type: "api_action", config: { capabilityKey: "schedule_tour" } },
+      { id: "handoff", type: "handoff" },
+    ],
+  };
+  const state = createActionState(verificationFlow);
+  state.customerVerification = { status: "VERIFIED" };
+  assert.equal(currentWorkflowStep(verificationFlow, state)?.id, "write");
+  state.currentStepId = "verification";
+  state.customerVerification = { status: "AMBIGUOUS" };
+  assert.equal(currentWorkflowStep(verificationFlow, state)?.id, "handoff");
+});
+
 test("workflow skips unverified pricing and keeps guided demo as a conditional branch", () => {
   const salonWorkflow: ActionFlow = {
     ...flow,

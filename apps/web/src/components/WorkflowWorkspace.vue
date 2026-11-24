@@ -77,12 +77,36 @@ interface IntegrationLike {
   connectionStatus?: string;
 }
 
+interface ProviderCapabilityLike {
+  id: string;
+  connectionId?: string;
+  key: string;
+  name: string;
+  type: "READ" | "WRITE";
+  method: string;
+  path: string;
+  inputSchema?: Record<string, unknown>;
+  requiresVerifiedCustomer?: boolean;
+  requiresConfirmation?: boolean;
+  fallbackBehavior?: string;
+  enabled?: boolean;
+  lifecycleStatus?: string;
+}
+
+interface ProviderConnectionLike {
+  id: string;
+  displayName: string;
+  connectionStatus?: string;
+  capabilities?: ProviderCapabilityLike[];
+}
+
 const props = defineProps<{
   actions: unknown[];
   workflows: unknown[];
   workflowsLoading?: boolean;
   workflowsError?: string;
   integrations: unknown[];
+  providerConnections?: unknown[];
   demoSlug: string;
   selectedBusinessId?: string | null;
   workspaceBusinessId?: string | null;
@@ -326,6 +350,13 @@ const duplicateCreateWorkflow = computed(() => {
   return workflowActions.value.find((action) => normalizeWorkflowName(workflowDisplayName(action)) === candidate) ?? null;
 });
 const currentBusinessScopeId = computed(() => props.selectedBusinessId ?? props.workspaceBusinessId ?? props.businessContext?.businessId ?? null);
+const approvedProviderCapabilities = computed(() => props.providerConnections
+  ?.flatMap((value) => {
+    const connection = value as ProviderConnectionLike;
+    return connection.connectionStatus === "active"
+      ? (connection.capabilities ?? []).filter((capability) => capability.enabled === true && capability.lifecycleStatus === "approved").map((capability) => ({ ...capability, connectionId: capability.connectionId || connection.id, connectionName: connection.displayName }))
+      : [];
+  }) ?? []);
 const workflowCompatibleExecutionModes = new Set(["DIRECT_LINK", "FORM_FLOW", "PROVIDER_FLOW", "PHONE", "EMAIL", "HANDOFF", "API_ACTION"]);
 function actionCanStartWorkflow(action: WorkflowAction): boolean {
   const businessId = currentBusinessScopeId.value;
@@ -342,6 +373,7 @@ function actionProvider(action: WorkflowAction | null): string | null {
 function actionProviderConnected(action: WorkflowAction | null): boolean {
   const provider = actionProvider(action);
   if (!provider) return true;
+  if (provider === "custom_api") return approvedProviderCapabilities.value.length > 0;
   return props.integrations.some((value) => {
     const integration = value as IntegrationLike;
     return integration.provider?.toLowerCase() === provider && integration.connectionStatus === "active";
@@ -457,6 +489,7 @@ const workflowProvider = computed(() => {
 });
 const providerConnected = computed(() => {
   if (!workflowProvider.value) return true;
+  if (workflowProvider.value === "custom_api") return approvedProviderCapabilities.value.length > 0;
   return props.integrations.some((value) => {
     const integration = value as IntegrationLike;
     return integration.provider?.toLowerCase() === workflowProvider.value && integration.connectionStatus === "active";
@@ -1321,6 +1354,56 @@ function setStepConfigFromEvent(step: WorkflowStep, key: string, event: Event) {
   setStepConfig(step, key, value);
 }
 
+function setProviderCapabilityFromEvent(step: WorkflowStep, event: Event) {
+  const capabilityId = (event.target as HTMLSelectElement).value;
+  const capability = approvedProviderCapabilities.value.find((candidate) => candidate.id === capabilityId);
+  if (!capability) {
+    setStepConfig(step, "capabilityKey", "");
+    setStepConfig(step, "providerConnectionId", "");
+    return;
+  }
+  const config = ensureStepConfig(step);
+  config.provider = "custom_api";
+  config.capabilityKey = capability.key;
+  config.providerConnectionId = capability.connectionId;
+  config.operation = capability.key;
+  markDirty();
+}
+
+function selectedProviderCapability(step: WorkflowStep): ProviderCapabilityLike | null {
+  const capabilityKey = stepConfigValue(step, "capabilityKey");
+  return approvedProviderCapabilities.value.find((candidate) => candidate.key === capabilityKey) ?? null;
+}
+
+function providerCapabilityInputFields(step: WorkflowStep): Array<{ name: string; required: boolean }> {
+  const capability = selectedProviderCapability(step);
+  const properties = capability?.inputSchema && typeof capability.inputSchema.properties === "object" && !Array.isArray(capability.inputSchema.properties)
+    ? capability.inputSchema.properties as Record<string, unknown>
+    : {};
+  const required = new Set(Array.isArray(capability?.inputSchema?.required) ? capability.inputSchema.required.filter((value): value is string => typeof value === "string") : []);
+  return Object.keys(properties).map((name) => ({ name, required: required.has(name) }));
+}
+
+function providerInputMapping(step: WorkflowStep, name: string): string {
+  const mappings = ensureStepConfig(step).inputMappings;
+  if (!mappings || typeof mappings !== "object" || Array.isArray(mappings)) return "";
+  const value = (mappings as Record<string, unknown>)[name];
+  return typeof value === "string" ? value : "";
+}
+
+function setProviderInputMappingFromEvent(step: WorkflowStep, name: string, event: Event): void {
+  const value = (event.target as HTMLSelectElement).value;
+  const config = ensureStepConfig(step);
+  const mappings = config.inputMappings && typeof config.inputMappings === "object" && !Array.isArray(config.inputMappings)
+    ? config.inputMappings as Record<string, unknown>
+    : {};
+  if (value) mappings[name] = value;
+  else delete mappings[name];
+  if (Object.keys(mappings).length) config.inputMappings = mappings;
+  else delete config.inputMappings;
+  markDirty();
+}
+
 function defaultKnowledgeConfig(): Record<string, unknown> {
   return {
     interruptionPolicy: "answer_and_resume",
@@ -1992,7 +2075,7 @@ onMounted(() => {
                 <div v-if="step.type === 'knowledge'" class="workflow-knowledge-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Knowledge</p><strong>Answer from verified business knowledge</strong><small>Keep facts in Business Brain. This step stores only the topic and response policy.</small></div><span class="status-pill booked">Verified source</span></div><div class="workflow-step-grid"><label>Trigger / topic<input :value="stepConfigValue(step, 'topic')" type="text" placeholder="Pricing" @input="setStepConfigFromEvent(step, 'topic', $event)" /></label><label>Knowledge source<select :value="stepConfigValue(step, 'knowledgeSource')" @change="setStepConfigFromEvent(step, 'knowledgeSource', $event)"><option value="verified_business_knowledge">Verified business knowledge</option></select></label><label>Allowed facts<select :value="stepConfigValue(step, 'allowedFacts')" @change="setStepConfigFromEvent(step, 'allowedFacts', $event)"><option value="pricing">Pricing only</option><option value="policies">Policy facts</option><option value="services">Services and capabilities</option><option value="locations">Locations and hours</option><option value="all">All verified business knowledge</option></select></label><label>If verified<select :value="stepConfigValue(step, 'verifiedBehavior')" @change="setStepConfigFromEvent(step, 'verifiedBehavior', $event)"><option value="answer_naturally">Answer naturally</option></select></label><label>If unavailable<select :value="stepConfigValue(step, 'unavailableBehavior')" @change="setStepConfigFromEvent(step, 'unavailableBehavior', $event)"><option value="say_not_verified">Say information is not verified</option></select></label><label>After answering<select :value="stepConfigValue(step, 'resumeBehavior')" @change="setStepConfigFromEvent(step, 'resumeBehavior', $event)"><option value="return_to_previous_step">Resume previous workflow state</option></select></label><label>CTA behavior<select :value="stepConfigValue(step, 'ctaBehavior')" @change="setStepConfigFromEvent(step, 'ctaBehavior', $event)"><option value="keep_current_if_available">Keep current CTA if already available</option></select></label></div><div class="workflow-knowledge-preview"><div class="workflow-knowledge-preview-heading"><div><p class="eyebrow">Preview / test</p><strong>Try a visitor question</strong><small>This simulates routing and response policy. It does not generate or store a business fact.</small></div><span class="workflow-preview-badge">Simulation</span></div><div class="workflow-knowledge-preview-input"><input v-model="knowledgePreviewQuestion" type="text" placeholder="How much does it cost?" @keydown.enter.prevent="runKnowledgePreview(step)" /><button class="outline-button small" type="button" :disabled="!knowledgePreviewQuestion.trim()" @click="runKnowledgePreview(step)">Run preview</button></div><div class="workflow-knowledge-examples"><span>Examples</span><button v-for="example in knowledgePreviewExamples(step)" :key="example" type="button" @click="runKnowledgePreview(step, example)">{{ example }}</button></div><dl v-if="knowledgePreviewStepId === step.id && knowledgePreviewResult" class="workflow-knowledge-preview-result"><div><dt>Matched topic</dt><dd>{{ knowledgePreviewResult.matchedTopic }}</dd></div><div><dt>Evidence</dt><dd>{{ knowledgePreviewResult.evidence }}</dd></div><div><dt>Response behavior</dt><dd>{{ knowledgePreviewResult.responseBehavior }}</dd></div><div><dt>Resume</dt><dd>{{ knowledgePreviewResult.resumeBehavior }}</dd></div><div><dt>CTA retained</dt><dd>{{ knowledgePreviewResult.ctaRetained }}</dd></div></dl></div></div>
                 <label v-if="step.type === 'select' || step.type === 'recommend'">Options <span class="optional">comma separated</span><input :value="stepOptionsText(step)" type="text" placeholder="Option one, Option two" @input="setStepOptions(step, $event)" /></label>
                 <div v-if="step.type === 'condition'" class="workflow-condition-box"><span class="workflow-condition-icon"><GitBranch :size="15" :stroke-width="1.8" aria-hidden="true" /></span><label>Condition in plain English<textarea :value="stepConditionText(step)" rows="2" placeholder="If the visitor is ready to register, continue to the provider lookup." @input="updateStepCondition(step, $event)"></textarea></label></div>
-                <div v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-provider-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Provider</p><strong>{{ step.type === 'lookup' ? 'Find availability' : 'Complete with provider' }}</strong></div><span :class="['status-pill', providerConnected ? 'booked' : 'new']">{{ providerConnected ? 'Connected' : 'Needs connection' }}</span></div><div class="workflow-step-grid"><label>Provider<select :value="stepConfigValue(step, 'provider')" @change="setStepConfigFromEvent(step, 'provider', $event)"><option value="">Select provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking provider</option><option value="crm">CRM / automation</option></select></label><label v-if="step.type === 'lookup'">Operation<select :value="stepConfigValue(step, 'operation')" @change="setStepConfigFromEvent(step, 'operation', $event)"><option value="find_locations">Find locations</option><option value="find_classes">Find classes</option><option value="get_availability">Get availability</option><option value="get_class_price">Get class price</option></select></label><label v-if="step.type === 'lookup'">Search fields<input :value="stepConfigValue(step, 'searchFields')" type="text" placeholder="location, schedule, age" @input="setStepConfigFromEvent(step, 'searchFields', $event)" /></label></div><small class="form-help">We’ll use the provider for this step and explain what happens if it is unavailable.</small></div>
+                <div v-if="step.type === 'lookup' || step.type === 'generate_link'" class="workflow-provider-box"><div class="workflow-provider-heading"><div><p class="eyebrow">Provider</p><strong>{{ step.type === 'lookup' ? 'Find availability' : 'Complete with provider' }}</strong></div><span :class="['status-pill', providerConnected ? 'booked' : 'new']">{{ providerConnected ? 'Connected' : 'Needs connection' }}</span></div><div class="workflow-step-grid"><label>Provider<select :value="stepConfigValue(step, 'provider')" @change="setStepConfigFromEvent(step, 'provider', $event)"><option value="">Select provider…</option><option value="jackrabbit">Jackrabbit</option><option value="booking">Booking provider</option><option value="crm">CRM / automation</option><option v-if="approvedProviderCapabilities.length" value="custom_api">Connected business API</option></select></label><label v-if="approvedProviderCapabilities.length">Business API capability<select :value="approvedProviderCapabilities.find((candidate) => candidate.key === stepConfigValue(step, 'capabilityKey'))?.id || ''" @change="setProviderCapabilityFromEvent(step, $event)"><option value="">Select an approved capability…</option><option v-for="capability in approvedProviderCapabilities" :key="capability.id" :value="capability.id">{{ capability.name }} · {{ capability.method }} {{ capability.path }}</option></select><small>Only capabilities approved in Settings can be used here.</small></label><label v-if="step.type === 'lookup'">Operation<select :value="stepConfigValue(step, 'operation')" @change="setStepConfigFromEvent(step, 'operation', $event)"><option value="find_locations">Find locations</option><option value="find_classes">Find classes</option><option value="get_availability">Get availability</option><option value="get_class_price">Get class price</option></select></label><label v-if="step.type === 'lookup'">Search fields<input :value="stepConfigValue(step, 'searchFields')" type="text" placeholder="location, schedule, age" @input="setStepConfigFromEvent(step, 'searchFields', $event)" /></label></div><div v-if="stepConfigValue(step, 'capabilityKey') && providerCapabilityInputFields(step).length" class="provider-capability-mapping"><div><p class="eyebrow">Map fields</p><strong>Connect workflow answers to API inputs</strong><small>Leave a field on Auto-match when the API input name matches a captured workflow field.</small></div><div class="provider-capability-mapping-grid"><label v-for="field in providerCapabilityInputFields(step)" :key="field.name">{{ field.name }} <span v-if="field.required" class="optional">Required</span><select :value="providerInputMapping(step, field.name)" @change="setProviderInputMappingFromEvent(step, field.name, $event)"><option value="">Auto-match {{ field.name }}</option><option v-for="workflowField in workflowDraft.fields ?? []" :key="workflowField.key" :value="workflowField.key">{{ workflowField.label || workflowField.key }}</option></select></label></div></div><small class="form-help">We’ll use the provider for this step and explain what happens if it is unavailable.</small></div>
                 <details class="workflow-advanced-settings" :open="stepAdvancedOpen"><summary @click.prevent="stepAdvancedOpen = !stepAdvancedOpen">Advanced <span>{{ stepAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div class="workflow-step-footer"><label>If this step fails<select :value="stepConfigValue(step, 'failureBehavior') || 'agent_default'" @change="setStepConfigFromEvent(step, 'failureBehavior', $event)"><option value="agent_default">Use Agent default</option><option value="handoff">Hand off to staff</option><option value="capture_lead">Save details and follow up</option><option value="retry">Retry automatically</option><option value="stop">Stop and explain</option></select></label><label>Next step<select v-model="step.nextStepId" @change="markDirty"><option value="">Continue in order</option><option v-for="nextStep in draftSteps.filter((candidate) => candidate.id !== step.id)" :key="nextStep.id" :value="nextStep.id">{{ nextStep.label || nextStep.id }}</option></select></label></div><div class="workflow-step-management"><button type="button" :disabled="workflowStepIndex(step) === 0" @click.stop="moveWorkflowStep(workflowStepIndex(step), -1)">Move up</button><button type="button" :disabled="workflowStepIndex(step) === draftSteps.length - 1" @click.stop="moveWorkflowStep(workflowStepIndex(step), 1)">Move down</button><button class="danger-text" type="button" @click.stop="requestDeleteWorkflowStep(workflowStepIndex(step))">Delete step</button></div><details class="workflow-technical-details"><summary>Technical details <span>Show</span></summary><div><code>{{ step.id || 'generated-step' }}</code><code>type: {{ step.type }}</code><pre>{{ JSON.stringify(step.config || {}, null, 2) }}</pre></div></details></details>
               </div>
             </div>
@@ -2203,6 +2286,12 @@ onMounted(() => {
 .workflow-condition-box label { flex: 1; }
 .workflow-provider-heading { align-items: center; margin-bottom: 9px; }
 .workflow-provider-heading strong { display: block; margin-top: 2px; }
+.provider-capability-mapping { display: grid; gap: 10px; padding: 10px 0 2px; margin-top: 10px; border-top: 1px solid #e4ebf3; }
+.provider-capability-mapping > div:first-child { display: grid; gap: 2px; }
+.provider-capability-mapping strong { color: #2e415d; font-size: 12px; }
+.provider-capability-mapping-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.provider-capability-mapping-grid label { display: grid; gap: 5px; color: #64758a; font-size: 11px; font-weight: 650; }
+.provider-capability-mapping-grid .optional { margin-left: 3px; color: #a06b32; font-weight: 600; }
 .workflow-step-footer { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 11px; margin-top: 11px; border-top: 1px solid #edf1f5; }
 .workflow-technical-details { margin-top: 10px; color: #65758a; font-size: 11px; }
 .workflow-technical-details summary { cursor: pointer; list-style: none; }
@@ -2715,6 +2804,7 @@ onMounted(() => {
   .workflow-knowledge-preview-input { align-items: stretch; flex-direction: column; }
   .workflow-knowledge-preview-input .outline-button { align-self: flex-start; }
   .workflow-knowledge-preview-result { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-capability-mapping-grid { grid-template-columns: 1fr; }
   .workflow-step-menu-popover { right: -2px; }
   .workflow-dependent-list div { align-items: flex-start; flex-direction: column; gap: 2px; }
   .workflow-dependent-list span { text-align: left; }
