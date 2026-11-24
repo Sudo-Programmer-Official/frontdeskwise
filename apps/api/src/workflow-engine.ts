@@ -427,7 +427,7 @@ export function replayWorkflowTurn(action: ActionFlow, inputState: ConversationA
   };
 }
 
-function optionForField(field: ActionField, input: string): string | null {
+function ruleOptionForField(field: ActionField, input: string): string | null {
   const value = normalizedPhrase(input);
   const exact = field.options?.find((option) => normalizedPhrase(option) === value);
   if (exact) return exact;
@@ -446,9 +446,13 @@ function optionForField(field: ActionField, input: string): string | null {
     if (describesChild && (lessonSearch || givesChildAge)) return "New student";
   }
   if (field.key === "ability") {
-    if (/\b(beginner|can t(?:\s+\w+){0,2}\s+swim|cannot(?:\s+\w+){0,2}\s+swim|can not(?:\s+\w+){0,2}\s+swim|doesn t(?:\s+\w+){0,2}\s+swim|not comfortable|not really|just starting|new to swimming)\b/.test(value)) return "Beginner";
-    if (/\b(independent|independently|confident|swims well|strong swimmer)\b/.test(value)) return "Can swim independently";
-    if (/\b(help|assistance|with an adult|with support)\b/.test(value)) return "Can swim with help";
+    const rawValue = input.toLowerCase();
+    const notIndependent = /\b(?:isn['’]?t|is not|not|can['’]?t|cannot|can not|never|doesn['’]?t|does not)\b.{0,40}\b(?:on (?:his|her|their|my) own|independent(?:ly)?|swimm?ing)\b/.test(rawValue);
+    const supported = /\b(float(?:s|ing)?|help|assistance|with an adult|with support|supervision|hold(?:ing)?)\b/.test(rawValue);
+    if (supported && notIndependent) return "Can swim with help";
+    if (/\b(independent|independently|on (?:his|her|their|my) own|without help|confident|swims well|strong swimmer)\b/.test(rawValue) && !notIndependent) return "Can swim independently";
+    if (/\b(beginner|can t(?:\s+\w+){0,2}\s+swim|cannot(?:\s+\w+){0,2}\s+swim|can not(?:\s+\w+){0,2}\s+swim|doesn t(?:\s+\w+){0,2}\s+swim|not comfortable|just starting|getting started|new to swimming)\b/.test(value)) return "Beginner";
+    if (/\b(help|assistance|with an adult|with support|float(?:s|ing)?)\b/.test(rawValue)) return "Can swim with help";
   }
   if (field.key === "goal") {
     if (/\b(learn|learning|teach|start|begin)\b/.test(value)) return "Learn to swim";
@@ -570,6 +574,182 @@ export function normalizeWorkflowFieldValue(field: ActionField, rawValue: string
   return value || rawValue.trim();
 }
 
+export type WorkflowValueResolutionStatus = "MATCHED" | "AMBIGUOUS" | "NO_MATCH";
+export type WorkflowValueResolutionMethod = "exact" | "alias" | "rule" | "semantic";
+
+export type WorkflowValueResolution = {
+  status: WorkflowValueResolutionStatus;
+  canonicalValue: string | null;
+  confidence: number;
+  method: WorkflowValueResolutionMethod | null;
+};
+
+function workflowResolution(
+  status: WorkflowValueResolutionStatus,
+  canonicalValue: string | null = null,
+  confidence = 0,
+  method: WorkflowValueResolutionMethod | null = null,
+): WorkflowValueResolution {
+  return { status, canonicalValue, confidence, method };
+}
+
+function optionMatching(field: ActionField, pattern: RegExp): string[] {
+  return (field.options ?? []).filter((option) => pattern.test(option));
+}
+
+function workflowAliasCandidates(field: ActionField, input: string): string[] {
+  const value = input.toLowerCase();
+  const candidates = new Set<string>();
+  const add = (cue: RegExp, optionPattern: RegExp) => {
+    if (!cue.test(value)) return;
+    for (const option of optionMatching(field, optionPattern)) candidates.add(option);
+  };
+
+  // These are domain-neutral language families. They deliberately resolve to
+  // options that are actually present in the workflow, so a tenant cannot be
+  // affected by a hard-coded value that is not part of its published schema.
+  const abilityLike = fieldLooksLike(field, "ability", "skill", "experience", "comfortable", "water", "swim");
+  add(/\b(?:just )?(?:getting started|starting|novice|beginner)\b/i, /beginner|starter|starting|novice|learn/i);
+  if (abilityLike) {
+    add(/\b(?:new to|not comfortable|can't swim|cannot swim|not swimming)\b/i, /beginner|not comfortable|can't swim|cannot swim|not swimming|new/i);
+  }
+  const notIndependent = /\b(?:isn['’]?t|is not|not|can['’]?t|cannot|can not|never|doesn['’]?t|does not)\b.{0,40}\b(?:on (?:his|her|their|my) own|independent(?:ly)?|swimm?ing)\b/i.test(value);
+  if (!notIndependent) {
+    add(/\b(?:independent(?:ly)?|on (?:his|her|their|my) own|without help|unassisted|confident|strong swimmer|swims well)\b/i, /independent|on (?:his|her|their|my) own|without help|unassisted|confident|strong swimmer|advanced/i);
+  }
+  add(/\b(?:with help|assistance|assisted|support|supported|with an adult|supervision|float(?:s|ing)?|holding on)\b/i, /help|assistance|assist|support|adult|supervis|float|partial/i);
+  add(/\b(?:just for me|only me|by myself|individual|solo|personal use|one person|single user)\b/i, /solo|individual|personal|one person|single/i);
+  add(/\b(?:team|teams|coworkers?|colleagues?|multiple users?|small group|use it together|shared)\b/i, /team|group|multiple|shared|collaborat/i);
+  add(/\b(?:every day|each day|daily|day to day|all the time|frequently)\b/i, /every day|daily|heavy|frequent/i);
+  add(/\b(?:regularly|regular|most days|several times|often)\b/i, /regular|often|most days/i);
+  add(/\b(?:occasionally|occasional|sometimes|once in a while|rarely)\b/i, /occasional|sometimes|rare/i);
+  add(/\b(?:plan|planning|organize|organise|priorit\w*)\b/i, /plan|organ|priorit/i);
+  add(/\b(?:reminder|reminders|nudge|recap|alert|notification)\b/i, /reminder|nudge|recap|alert|notification/i);
+  add(/\b(?:safety|safe|survival)\b/i, /safety|safe|survival/i);
+  add(/\b(?:technique|stroke|improve|competitive)\b/i, /technique|stroke|improv|competitive/i);
+  add(/\b(?:fun|confidence|activity)\b/i, /fun|confidence|activity/i);
+  add(/\b(?:salon)\b/i, /salon/i);
+  add(/\b(?:barber(?:shop)?)\b/i, /barber/i);
+  add(/\b(?:spa)\b/i, /spa/i);
+
+  return [...candidates];
+}
+
+function semanticOptionScore(input: string, option: string): number {
+  const inputTokens = new Set(normalizedPhrase(input).split(" ").filter((token) => token.length > 2));
+  const optionTokens = normalizedPhrase(option).split(" ").filter((token) => token.length > 2);
+  if (!inputTokens.size || !optionTokens.length) return 0;
+  const overlap = optionTokens.filter((token) => inputTokens.has(token)).length;
+  if (!overlap) return 0;
+  const coverage = overlap / optionTokens.length;
+  const directPhrase = normalizedPhrase(input).includes(normalizedPhrase(option));
+  return Math.min(0.9, 0.54 + coverage * 0.34 + (directPhrase ? 0.08 : 0));
+}
+
+function isQuestionShapedWorkflowInput(input: string): boolean {
+  return /^(?:how|what(?:'s|s)?|when|where|why|who|is|are|can|could|does|do|tell me|explain)\b/i.test(input.trim());
+}
+
+/**
+ * Resolve one pending workflow field without invoking a model or a general
+ * knowledge router. Canonical options always win, followed by deterministic
+ * aliases/rules, then a conservative token-based semantic match.
+ */
+export function resolveWorkflowValue(field: ActionField, input: string): WorkflowValueResolution {
+  const raw = input.trim();
+  if (!raw) return workflowResolution("NO_MATCH");
+  const normalizedInput = normalizedPhrase(raw);
+  const options = field.options ?? [];
+
+  const exact = !(field.type === "multi_select" && /[,;]|\s+and\s+/i.test(raw))
+    ? options.find((option) => normalizedPhrase(option) === normalizedInput)
+    : undefined;
+  if (exact) return workflowResolution("MATCHED", exact, 1, "exact");
+
+  // An exact canonical option may itself begin with "Can", but an otherwise
+  // question-shaped sentence such as "Can he float?" is not an answer to the
+  // pending enum. Let the explicit knowledge/interruption routing handle it.
+  if (options.length && isQuestionShapedWorkflowInput(raw)) return workflowResolution("NO_MATCH");
+
+  if (field.type === "multi_select" && options.length) {
+    const multi = multiSelectForField(field, raw);
+    if (multi) {
+      const exactParts = raw.split(/[,;]|\s+and\s+/i).map((part) => normalizedPhrase(part)).filter(Boolean);
+      const method = exactParts.length > 0 && exactParts.every((part) => options.some((option) => normalizedPhrase(option) === part))
+        ? "exact"
+        : "alias";
+      return workflowResolution("MATCHED", multi, method === "exact" ? 1 : 0.94, method);
+    }
+  }
+
+  if (options.length) {
+    const candidates = new Map<string, WorkflowValueResolutionMethod>();
+    const addCandidate = (candidate: string | null | undefined, method: WorkflowValueResolutionMethod) => {
+      if (!candidate) return;
+      const canonical = options.find((option) => normalizedPhrase(option) === normalizedPhrase(candidate));
+      if (canonical) candidates.set(canonical, method);
+    };
+
+    // An option phrase embedded in a sentence is an alias, unless the input
+    // explicitly compares it with another option.
+    for (const option of options) {
+      const phrase = normalizedPhrase(option);
+      if (phrase.length >= 4 && normalizedInput.includes(phrase)) addCandidate(option, "alias");
+    }
+    for (const option of workflowAliasCandidates(field, raw)) addCandidate(option, "alias");
+
+    const ambiguityCue = /\b(?:between|either|or|not sure|unclear|maybe|somewhere between|both)\b/i.test(raw);
+    const rule = ruleOptionForField(field, raw);
+    if (rule && !ambiguityCue) {
+      // Existing deterministic rules can recognize a composite option (for
+      // example, "planning and reminders") more precisely than individual
+      // alias words. Let that rule collapse overlapping candidates.
+      candidates.clear();
+      addCandidate(rule, "rule");
+    } else {
+      addCandidate(rule, "rule");
+    }
+    if (candidates.size > 1) {
+      return workflowResolution("AMBIGUOUS", null, 0.55, ambiguityCue ? "alias" : "semantic");
+    }
+    if (candidates.size === 1) {
+      const [canonical, method] = [...candidates.entries()][0];
+      return workflowResolution("MATCHED", canonical, method === "rule" ? 0.93 : 0.95, method);
+    }
+
+    const scored = options
+      .map((option) => ({ option, score: semanticOptionScore(raw, option) }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score);
+    const best = scored[0];
+    const second = scored[1];
+    if (best && best.score >= 0.76) {
+      if (second && second.score >= 0.7 && best.score - second.score < 0.14) {
+        return workflowResolution("AMBIGUOUS", null, best.score, "semantic");
+      }
+      return workflowResolution("MATCHED", best.option, best.score, "semantic");
+    }
+    return workflowResolution("NO_MATCH");
+  }
+
+  // Typed and free-text fields are still resolved here so the pending-step
+  // router has one contract for every workflow field type. Question-shaped
+  // prose without a typed value remains eligible for knowledge routing.
+  if (field.type === "text" && isQuestionShapedWorkflowInput(raw)) return workflowResolution("NO_MATCH");
+  let typedInput = raw;
+  if (field.type === "number") typedInput = raw.match(/\b\d+(?:\.\d+)?\b/)?.[0] ?? raw;
+  if (field.type === "email") typedInput = raw.match(/\b[^\s@]+@[^\s@]+\.[^\s@]+\b/)?.[0] ?? raw;
+  if (field.type === "phone") typedInput = raw.match(/(?:\+?\d[\d\s().-]{5,}\d)/)?.[0]?.trim() ?? raw;
+  const validated = validateFieldValue(field, normalizeWorkflowFieldValue(field, typedInput));
+  if (!validated.value) return workflowResolution("NO_MATCH");
+  return workflowResolution("MATCHED", validated.value, field.type === "text" ? 0.82 : 0.98, "rule");
+}
+
+function optionForField(field: ActionField, input: string): string | null {
+  const resolution = resolveWorkflowValue(field, input);
+  return resolution.status === "MATCHED" ? resolution.canonicalValue : null;
+}
+
 /**
  * Extracts safe, typed values without giving the language model authority over
  * workflow transitions. This intentionally returns only fields defined by the
@@ -608,11 +788,12 @@ export function extractWorkflowValues(action: ActionFlow, input: string): Record
     else if (field.key === "name" || field.key === "parent_name" || fieldLooksLike(field, "guardian")) {
       if (name) extracted[field.key] = name;
     }
-    const option = field.type === "select"
-      ? optionForField(field, value)
-      : field.type === "multi_select"
-        ? multiSelectForField(field, value)
-        : null;
+    const option = field.type === "select" || field.type === "multi_select"
+      ? (() => {
+        const resolution = resolveWorkflowValue(field, value);
+        return resolution.status === "MATCHED" ? resolution.canonicalValue : null;
+      })()
+      : null;
     if (option) extracted[field.key] = option;
     if (field.key === "program") {
       const namedProgram = program ?? value.match(/\b(?:turtle|level|program)\s*[-#]?\s*[a-z0-9]+\b/i)?.[0];
@@ -631,7 +812,10 @@ export function applyWorkflowValues(
   for (const field of action.fields) {
     const raw = values[field.key];
     if (raw === undefined) continue;
-    const validation = validateFieldValue(field, normalizeWorkflowFieldValue(field, raw));
+    const resolution = resolveWorkflowValue(field, raw);
+    const validation = resolution.status === "MATCHED"
+      ? { value: resolution.canonicalValue }
+      : { value: null };
     if (!validation.value) continue;
     if (state.values[field.key] !== validation.value) {
       state.values[field.key] = validation.value;
@@ -671,8 +855,17 @@ export function applyWorkflowInput(
   const step = currentWorkflowStep(action, state);
   if (!step) return { ok: false, error: "This workflow is already complete.", transition: { step: null, state } };
   const field = workflowField(action, step.fieldKey);
+  const resolution = field ? resolveWorkflowValue(field, rawValue) : null;
   const validation = field
-    ? validateFieldValue(field, normalizeWorkflowFieldValue(field, rawValue))
+    ? resolution?.status === "MATCHED"
+      ? { value: resolution.canonicalValue }
+      : {
+        value: null,
+        error: resolution?.status === "AMBIGUOUS"
+          ? `Please choose one of: ${(field.options ?? []).join(", ")}.`
+          : validateFieldValue(field, normalizeWorkflowFieldValue(field, rawValue)).error
+            ?? `Please share your ${field.label.toLowerCase()}.`,
+      }
     : { value: rawValue.trim() };
   if (!validation.value) return { ok: false, error: validation.error, transition: { step, state } };
   if (field) state.values[field.key] = validation.value;

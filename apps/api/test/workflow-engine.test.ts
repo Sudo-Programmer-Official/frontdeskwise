@@ -8,6 +8,7 @@ import {
   extractWorkflowValues,
   knownSoftwareProvider,
   normalizeWorkflowFieldValue,
+  resolveWorkflowValue,
   invalidateWorkflowLookups,
   pushWorkflowInterruption,
   resumeWorkflowInterruption,
@@ -201,6 +202,52 @@ test("workflow extraction accepts corrections and future answers without moving 
   assert.equal(applied.transition.step?.id, "ability");
   assert.equal(state.values.schedule_preference, "weekends");
   assert.equal(extractWorkflowValues(enrollment, "Yes, but she can't really swim yet.").ability, "Beginner");
+});
+
+test("pending enum values resolve canonically, semantically, and ambiguously", () => {
+  const abilityField = {
+    id: "ability",
+    key: "ability",
+    label: "Swimming ability",
+    type: "select",
+    required: true,
+    question: "How comfortable is your child in the water?",
+    options: ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"],
+  } as const;
+
+  const exact = resolveWorkflowValue(abilityField, "Can swim with help");
+  assert.deepEqual(exact, {
+    status: "MATCHED",
+    canonicalValue: "Can swim with help",
+    confidence: 1,
+    method: "exact",
+  });
+  assert.equal(resolveWorkflowValue(abilityField, "He can float a little, but he isn’t really swimming on his own yet.").canonicalValue, "Can swim with help");
+  assert.equal(resolveWorkflowValue(abilityField, "He’s just getting started.").canonicalValue, "Beginner");
+  const ambiguous = resolveWorkflowValue(abilityField, "He’s somewhere between beginner and swimming with help.");
+  assert.equal(ambiguous.status, "AMBIGUOUS");
+  assert.equal(ambiguous.canonicalValue, null);
+});
+
+test("a valid pending enum answer advances the workflow without general routing", () => {
+  const swimWorkflow: ActionFlow = {
+    ...flow,
+    id: "swim-enrollment",
+    key: "enroll_child",
+    fields: [
+      { id: "ability", key: "ability", label: "Swimming ability", type: "select", required: true, question: "How comfortable?", options: ["Beginner", "Can swim with help", "Can swim independently"] },
+      { id: "goal", key: "goal", label: "Goal", type: "text", required: true, question: "What is the goal?" },
+    ],
+    steps: [
+      { id: "student-ability", type: "capture", fieldKey: "ability" },
+      { id: "student-goal", type: "capture", fieldKey: "goal" },
+    ],
+  };
+  const state = createActionState(swimWorkflow);
+  const applied = applyWorkflowValues(swimWorkflow, state, extractWorkflowValues(swimWorkflow, "Can swim with help"));
+  assert.deepEqual(applied.updated, ["ability"]);
+  assert.equal(state.values.ability, "Can swim with help");
+  assert.equal(currentWorkflowStep(swimWorkflow, state)?.id, "student-goal");
 });
 
 test("plan selection extracts natural solo, paired-goal, daily, and correction language", () => {

@@ -78,6 +78,58 @@ test("side questions interrupt without losing the active workflow cursor", () =>
   assert.equal(decision.nextBestAction, "ASK_FIELD");
 });
 
+test("pending workflow resolution outranks question-shaped knowledge routing", () => {
+  const abilityAction: ActionFlow = {
+    ...action,
+    id: "swim-ability",
+    key: "enroll_child",
+    fields: [
+      { id: "ability", key: "ability", label: "Swimming ability", type: "select", required: true, question: "How comfortable?", options: ["Not comfortable in water", "Beginner", "Can swim with help", "Can swim independently"] },
+      { id: "goal", key: "goal", label: "Goal", type: "text", required: true, question: "What is the goal?" },
+    ],
+    steps: [
+      { id: "student-ability", type: "capture", fieldKey: "ability" },
+      { id: "student-goal", type: "capture", fieldKey: "goal" },
+    ],
+  };
+  const state = createActionState(abilityAction);
+
+  const exact = decideConversationRoute({ message: "Can swim with help", activeAction: abilityAction, actionState: state });
+  assert.equal(exact.route, "WORKFLOW_CONTINUATION");
+  assert.equal(exact.reason, "pending_workflow_value_matched");
+  assert.equal(exact.resolver?.status, "MATCHED");
+  assert.equal(exact.resolver?.method, "exact");
+  assert.equal(exact.generalRouterBypassed, true);
+  assert.equal(exact.pendingStepId, "student-ability");
+
+  const semantic = decideConversationRoute({ message: "He can float a little, but he isn’t really swimming on his own yet.", activeAction: abilityAction, actionState: state });
+  assert.equal(semantic.route, "WORKFLOW_CONTINUATION");
+  assert.equal(semantic.resolver?.canonicalValue, "Can swim with help");
+  assert.equal(semantic.generalRouterBypassed, true);
+
+  const ambiguous = decideConversationRoute({ message: "He’s somewhere between beginner and swimming with help.", activeAction: abilityAction, actionState: state });
+  assert.equal(ambiguous.route, "WORKFLOW_CONTINUATION");
+  assert.equal(ambiguous.reason, "pending_workflow_value_ambiguous");
+  assert.equal(ambiguous.resolver?.status, "AMBIGUOUS");
+  assert.equal(ambiguous.interruptionIntent, null);
+  assert.equal(ambiguous.generalRouterBypassed, true);
+
+  const knowledge = decideConversationRoute({ message: "How much do lessons cost?", activeAction: abilityAction, actionState: state });
+  assert.equal(knowledge.route, "INTERRUPTION");
+  assert.equal(knowledge.generalRouterBypassed, false);
+
+  const unrelated = decideConversationRoute({ message: "Can he float?", activeAction: abilityAction, actionState: state });
+  assert.equal(unrelated.route, "INTERRUPTION");
+
+  const intentSwitch = decideConversationRoute({ message: "I want to book an appointment.", activeAction: abilityAction, actionState: state });
+  assert.equal(intentSwitch.route, "EXPLICIT_ACTION");
+  assert.equal(intentSwitch.resolver, null);
+
+  const handoff = decideConversationRoute({ message: "I want to talk to someone.", activeAction: abilityAction, actionState: state });
+  assert.equal(handoff.route, "HUMAN_HANDOFF");
+  assert.equal(handoff.resolver, null);
+});
+
 test("exit rescue detects natural pause language but ignores low-intent gratitude", () => {
   assert.equal(isExitRescueIntent("I'll check later"), true);
   assert.equal(isExitRescueIntent("Maybe next time"), true);

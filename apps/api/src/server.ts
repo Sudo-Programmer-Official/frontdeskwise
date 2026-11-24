@@ -10225,6 +10225,16 @@ function workflowPrompt(action: ActionFlow, state: ConversationActionState, step
   return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
 }
 
+function workflowAmbiguityPrompt(action: ActionFlow, step: ReturnType<typeof currentWorkflowStep>, business?: Business): string {
+  const field = step?.fieldKey ? workflowField(action, step.fieldKey) : null;
+  const label = field?.label?.toLowerCase() ?? step?.label?.toLowerCase() ?? "that answer";
+  const options = field?.options?.length ? field.options.join(", ") : null;
+  const prompt = options
+    ? `I’m not sure which ${label} you mean. Which is closer: ${options}?`
+    : `Could you clarify your ${label} so I can continue?`;
+  return business ? canonicalizeCustomerCopy(business, prompt) : prompt;
+}
+
 function gentleNumericFieldPrompt(field: ActionField): string {
   const prompt = fieldPrompt(field).trim();
   if (!prompt) return "Sure — could you share that?";
@@ -11316,6 +11326,8 @@ async function continueWorkflowActionConversation(
   // team plan cost?") without being an answer to the paused field.
   const initialOrchestration = decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
   const currentStepBeforeConversion = currentWorkflowStep(action, state);
+  const pendingResolver = initialOrchestration.resolver;
+  const pendingResolverAmbiguous = pendingResolver?.status === "AMBIGUOUS";
   const guidedDemo = explicitGuidedDemoRequest(question);
   const normalConversion = initialOrchestration.requestMode === "transactional"
     && /\b(try|start|see|view|explore|open|go ahead|ready)\b/i.test(question)
@@ -11374,11 +11386,19 @@ async function continueWorkflowActionConversation(
       conversationId: conversation.id,
       flowId: action.id,
       fieldId: fieldKey,
-      metadata: { extracted: true },
+      metadata: {
+        extracted: true,
+        pendingStepId: initialOrchestration.pendingStepId,
+        resolverStatus: pendingResolver?.status ?? null,
+        resolverMethod: pendingResolver?.method ?? null,
+        resolverCanonicalValue: pendingResolver?.canonicalValue ?? null,
+        resolverConfidence: pendingResolver?.confidence ?? null,
+        generalRouterBypassed: initialOrchestration.generalRouterBypassed,
+      },
     });
   }
   const currentAfterExtraction = currentWorkflowStep(action, state);
-  const orchestration = preserveWorkflowState
+  const orchestration = preserveWorkflowState || initialOrchestration.generalRouterBypassed
     ? initialOrchestration
     : decideConversationRoute({ message: question, activeAction: action, actionState: state, handoffState: runtimeHandoffState(conversation.status) });
   if (state.exitRescue?.status === "offered" && isExitRescueDecline(question) && declineExitRescueState(state)) {
@@ -11389,6 +11409,9 @@ async function continueWorkflowActionConversation(
       metadata: { returnStepId: state.exitRescue.returnStepId },
     });
     return actionAnswer(action, state, "No problem — I’ll leave your progress here. You can continue whenever you’re ready.");
+  }
+  if (pendingResolverAmbiguous) {
+    return actionAnswer(action, state, workflowAmbiguityPrompt(action, currentStepBeforeConversion, business));
   }
   if (isExitRescueIntent(question) && initialOrchestration.route !== "HUMAN_HANDOFF") {
     if (hasRecoverableContact(state)) {
@@ -11588,6 +11611,14 @@ async function continueWorkflowActionConversation(
           conversationId: conversation.id,
           flowId: action.id,
           fieldId: field?.key ?? step.fieldKey ?? step.id,
+        metadata: {
+          pendingStepId: initialOrchestration.pendingStepId,
+          resolverStatus: pendingResolver?.status ?? null,
+          resolverMethod: pendingResolver?.method ?? null,
+          resolverCanonicalValue: pendingResolver?.canonicalValue ?? input.value ?? null,
+          resolverConfidence: pendingResolver?.confidence ?? null,
+          generalRouterBypassed: initialOrchestration.generalRouterBypassed,
+        },
         });
       }
     }
@@ -13431,6 +13462,22 @@ async function recordConversationDecisionTrace(
     action_intent: context.orchestration.actionIntent,
     request_mode: context.orchestration.requestMode,
     reason: context.orchestration.reason,
+    pending_step_id: context.orchestration.pendingStepId,
+    resolver_status: context.orchestration.resolver?.status ?? null,
+    resolver_method: context.orchestration.resolver?.method ?? null,
+    resolver_canonical_value: context.orchestration.resolver?.canonicalValue ?? null,
+    resolver_confidence: context.orchestration.resolver?.confidence ?? null,
+    general_router_bypassed: context.orchestration.generalRouterBypassed,
+    workflow_resolver: context.orchestration.resolver
+      ? {
+        pending_step_id: context.orchestration.pendingStepId,
+        status: context.orchestration.resolver.status,
+        method: context.orchestration.resolver.method,
+        canonical_value: context.orchestration.resolver.canonicalValue,
+        confidence: context.orchestration.resolver.confidence,
+        general_router_bypassed: context.orchestration.generalRouterBypassed,
+      }
+      : null,
     business_context_version: business.businessContextSnapshot?.version ?? null,
     workflow_action_before: context.actionBefore ? { id: context.actionBefore.id, key: context.actionBefore.key, version: context.actionBefore.version ?? 1 } : null,
     workflow_action_after: actionAfter ? { id: actionAfter.id, key: actionAfter.key, version: actionAfter.version ?? 1 } : null,

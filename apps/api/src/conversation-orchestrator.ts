@@ -1,7 +1,7 @@
 import { classifyVisitorRequest, isPlanSelectionWorkflow, type ActionFlow, type ConversationActionState } from "./action-flows.js";
 import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { classifyQuestionIntent, type RetrievalIntent } from "./retrieval.js";
-import { currentWorkflowStep, workflowNextBestAction, type WorkflowNextBestAction } from "./workflow-engine.js";
+import { currentWorkflowStep, resolveWorkflowValue, workflowNextBestAction, type WorkflowNextBestAction, type WorkflowValueResolution } from "./workflow-engine.js";
 import { handoffSuppressesAi, type RuntimeHandoffState } from "./conversation-runtime.js";
 import { isAcknowledgement } from "./conversation-state.js";
 
@@ -30,6 +30,9 @@ export type ConversationOrchestrationDecision = {
   nextBestAction: WorkflowNextBestAction | null;
   interruptionIntent: RetrievalIntent | null;
   handoffState: RuntimeHandoffState;
+  pendingStepId: string | null;
+  resolver: WorkflowValueResolution | null;
+  generalRouterBypassed: boolean;
 };
 
 const interruptionIntents = new Set<RetrievalIntent>([
@@ -64,6 +67,18 @@ function standaloneKnowledgeQuestion(message: string, intent: RetrievalIntent): 
 
 function hasActiveWorkflow(action?: ActionFlow | null, state?: ConversationActionState | null): boolean {
   return Boolean(action?.steps?.length && state && state.status === "active");
+}
+
+function pendingWorkflowResolution(
+  action: ActionFlow | null | undefined,
+  state: ConversationActionState | null | undefined,
+  message: string,
+): { stepId: string | null; resolution: WorkflowValueResolution | null } {
+  if (!action || !state || state.status !== "active" || !action.steps?.length) return { stepId: null, resolution: null };
+  const step = currentWorkflowStep(action, state);
+  if (!step?.fieldKey) return { stepId: step?.id ?? null, resolution: null };
+  const field = action.fields.find((candidate) => candidate.key === step.fieldKey || candidate.id === step.fieldKey);
+  return { stepId: step.id, resolution: field ? resolveWorkflowValue(field, message) : null };
 }
 
 /**
@@ -137,6 +152,17 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
   const currentStepId = currentStep?.id ?? input.actionState?.currentStepId ?? null;
   const nextBestAction = currentStep && input.activeAction ? workflowNextBestAction(input.activeAction, currentStep) : null;
   const handoffState = input.handoffState ?? "AI_ACTIVE";
+  const isCorrection = active && isWorkflowCorrection(message);
+  const explicitExit = active && isExitRescueIntent(message);
+  const explicitIntentSwitch = active
+    && !isCorrection
+    && request.mode === "transactional"
+    && request.actionIntent !== "general"
+    && !workflowMatchesActionIntent(input.activeAction!, request.actionIntent, message);
+  const pending = explicitHumanRequest || input.providerResult || handoffSuppressesAi(handoffState) || explicitExit || explicitIntentSwitch
+    ? { stepId: currentStepId, resolution: null }
+    : pendingWorkflowResolution(input.activeAction, input.actionState, message);
+  const workflowMeta = { pendingStepId: pending.stepId, resolver: pending.resolution };
 
   // A waiting notification is not a reply lock. Only an active staff-owned
   // conversation prevents customer-facing AI routing.
@@ -154,6 +180,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: null,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
     };
   }
 
@@ -171,6 +199,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: null,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
     };
   }
 
@@ -188,6 +218,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: null,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
     };
   }
 
@@ -205,6 +237,69 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: null,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
+    };
+  }
+
+  // A pending field owns a valid or ambiguous answer, even when the sentence
+  // starts with a question word such as "Can". The general router must not
+  // turn either case into retrieval or support fallback.
+  if (active && pending.resolution?.status === "MATCHED") {
+    return {
+      route: "WORKFLOW_CONTINUATION",
+      conversationalIntent,
+      actionIntent: request.actionIntent,
+      requestMode: request.mode,
+      confidence: pending.resolution.confidence,
+      reason: questionLike(message) ? "pending_workflow_value_matched" : "active_workflow_has_priority",
+      preserveWorkflowState: true,
+      activeWorkflowId,
+      currentStepId,
+      nextBestAction,
+      interruptionIntent: null,
+      handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: true,
+    };
+  }
+  if (active && pending.resolution?.status === "AMBIGUOUS") {
+    return {
+      route: "WORKFLOW_CONTINUATION",
+      conversationalIntent,
+      actionIntent: request.actionIntent,
+      requestMode: request.mode,
+      confidence: pending.resolution.confidence,
+      reason: "pending_workflow_value_ambiguous",
+      preserveWorkflowState: true,
+      activeWorkflowId,
+      currentStepId,
+      nextBestAction,
+      interruptionIntent: null,
+      handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: true,
+    };
+  }
+
+  // Exit language is an explicit workflow interrupt. Keep the cursor intact
+  // and let the existing exit-rescue flow decide whether to save progress.
+  if (explicitExit) {
+    return {
+      route: "WORKFLOW_CONTINUATION",
+      conversationalIntent,
+      actionIntent: request.actionIntent,
+      requestMode: request.mode,
+      confidence: 0.98,
+      reason: "explicit_workflow_exit",
+      preserveWorkflowState: true,
+      activeWorkflowId,
+      currentStepId,
+      nextBestAction,
+      interruptionIntent: null,
+      handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: true,
     };
   }
 
@@ -212,7 +307,6 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
   // example, "I mainly need planning and reminders"). Only route a turn to
   // knowledge when it is shaped like a question or a standalone side-topic;
   // otherwise extraction must get the first chance to advance the workflow.
-  const isCorrection = active && isWorkflowCorrection(message);
   const isKnowledgeQuestion = !isCorrection && (questionLike(message) || standaloneKnowledgeQuestion(message, conversationalIntent));
   const isInterruption = active && isKnowledgeQuestion && (interruptionIntents.has(conversationalIntent) || request.mode === "informational");
   if (isInterruption) {
@@ -229,6 +323,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: conversationalIntent,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
     };
   }
 
@@ -252,6 +348,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: null,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
     };
   }
 
@@ -269,6 +367,8 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       nextBestAction,
       interruptionIntent: null,
       handoffState,
+      ...workflowMeta,
+      generalRouterBypassed: false,
     };
   }
 
@@ -285,5 +385,7 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
     nextBestAction,
     interruptionIntent: null,
     handoffState,
+    ...workflowMeta,
+    generalRouterBypassed: false,
   };
 }
