@@ -3,6 +3,9 @@ import { isExplicitHumanRequest } from "./handoff-policy.js";
 import { classifyQuestionIntent, type RetrievalIntent } from "./retrieval.js";
 import { currentWorkflowStep, workflowNextBestAction, type WorkflowNextBestAction } from "./workflow-engine.js";
 import { handoffSuppressesAi, type RuntimeHandoffState } from "./conversation-runtime.js";
+import { isAcknowledgement } from "./conversation-state.js";
+
+export { isAcknowledgement } from "./conversation-state.js";
 
 export type ConversationRoute = "GENERAL_QUESTION" | "WORKFLOW_CONTINUATION" | "INTERRUPTION" | "EXPLICIT_ACTION" | "HUMAN_HANDOFF" | "PROVIDER_RESULT";
 
@@ -176,6 +179,23 @@ export function decideConversationRoute(input: ConversationOrchestrationInput): 
       requestMode: request.mode,
       confidence: 0.99,
       reason: "explicit_human_request",
+      preserveWorkflowState: active,
+      activeWorkflowId,
+      currentStepId,
+      nextBestAction,
+      interruptionIntent: null,
+      handoffState,
+    };
+  }
+
+  if (isAcknowledgement(message)) {
+    return {
+      route: active ? "WORKFLOW_CONTINUATION" : "GENERAL_QUESTION",
+      conversationalIntent,
+      actionIntent: request.actionIntent,
+      requestMode: request.mode,
+      confidence: 1,
+      reason: "acknowledgement",
       preserveWorkflowState: active,
       activeWorkflowId,
       currentStepId,

@@ -1,6 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { answerConversationStateQuestion, classifyConversationStateQuestion } from "../src/conversation-state.js";
+import {
+  answerConversationAcknowledgement,
+  answerConversationStateQuestion,
+  classifyConversationStateQuestion,
+  isAcknowledgement,
+} from "../src/conversation-state.js";
+
+test("acknowledgements are recognized without treating them as knowledge questions", () => {
+  for (const phrase of ["okay", "sounds good", "great", "perfect", "awesome", "got it", "thanks", "thank you", "cool", "works for me"]) {
+    assert.equal(isAcknowledgement(phrase), true, phrase);
+  }
+  assert.equal(isAcknowledgement("What are your hours?"), false);
+});
+
+test("acknowledgement responses follow saved, waiting, workflow, and neutral state", () => {
+  assert.equal(
+    answerConversationAcknowledgement("sounds good", { requestSaved: true, waitingForStaff: true }),
+    "Perfect — the team has your request. I’m still here if you need anything else.",
+  );
+  assert.equal(
+    answerConversationAcknowledgement("thanks", { requestSaved: true }),
+    "Perfect — your request is saved. Let me know if you need anything else.",
+  );
+  assert.equal(
+    answerConversationAcknowledgement("great", { workflowPrompt: "Which days work best?" }),
+    "Got it — which days work best?",
+  );
+  assert.equal(
+    answerConversationAcknowledgement("cool"),
+    "Sounds good — let me know if you need anything else.",
+  );
+});
 
 test("contact-state questions are classified before knowledge retrieval", () => {
   assert.equal(classifyConversationStateQuestion("do you have my details"), "details");

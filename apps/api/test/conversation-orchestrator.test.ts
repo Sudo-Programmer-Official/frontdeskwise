@@ -3,6 +3,7 @@ import test from "node:test";
 import { createActionState, type ActionFlow } from "../src/action-flows.js";
 import {
   decideConversationRoute,
+  isAcknowledgement,
   isExitRescueDecline,
   isExitRescueIntent,
   isWorkflowCorrection,
@@ -57,6 +58,13 @@ const planAction = {
     { id: "recommend-plan", type: "recommend", config: { recommendationType: "plan" } },
   ],
 } as ActionFlow;
+
+test("acknowledgements stay out of knowledge-question routing", () => {
+  assert.equal(isAcknowledgement("sounds good"), true);
+  const decision = decideConversationRoute({ message: "sounds good" });
+  assert.equal(decision.route, "GENERAL_QUESTION");
+  assert.equal(decision.reason, "acknowledgement");
+});
 
 test("side questions interrupt without losing the active workflow cursor", () => {
   const state = createActionState(action);

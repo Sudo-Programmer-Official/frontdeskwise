@@ -245,7 +245,7 @@ import { validateWorkflowTenantIsolation, workflowIsolationMessage, type Workflo
 import { buildCanonicalBusinessModel, createBusinessContextSnapshot, type BusinessContextSnapshot } from "./business-context.js";
 import { preserveWorkflowGoal } from "./workflow-goal.js";
 import { extractWebsitePricingCandidates } from "./pricing-extraction.js";
-import { answerConversationStateQuestion, type ConversationStateSnapshot } from "./conversation-state.js";
+import { answerConversationAcknowledgement, answerConversationStateQuestion, type ConversationStateSnapshot } from "./conversation-state.js";
 import { buildExecutiveAnalytics } from "./executive-analytics.js";
 import {
   customerSafeFallbacks,
@@ -12683,6 +12683,21 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
       handoff: { status: conversation.status, reason: "Human takeover is active" },
     };
     return persistTurn(result);
+  }
+  const acknowledgementAnswer = answerConversationAcknowledgement(question, {
+    requestSaved: conversation.leadCaptured || Boolean(conversation.actionState?.leadId),
+    waitingForStaff: waitingForStaff(conversation),
+    workflowPrompt: activeWorkflow
+      ? (() => {
+        const step = currentWorkflowStep(activeWorkflow.action, activeWorkflow.state);
+        return step ? workflowPrompt(activeWorkflow.action, activeWorkflow.state, step, business) : null;
+      })()
+      : null,
+  });
+  if (acknowledgementAnswer) {
+    const acknowledgementResult = conversationStateAnswer(acknowledgementAnswer, "acknowledgement");
+    if (activeWorkflow) acknowledgementResult.action = actionStatePayload(activeWorkflow.action, activeWorkflow.state);
+    return persistTurn(acknowledgementResult);
   }
   // Session/lead state outranks workflow, provider, retrieval, and generation.
   // Questions about the visitor's own details must never be answered from

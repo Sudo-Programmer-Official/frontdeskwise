@@ -19,12 +19,40 @@ export type ConversationStateAnswer = {
   answer: string;
 };
 
+export type ConversationAcknowledgementContext = {
+  requestSaved?: boolean;
+  waitingForStaff?: boolean;
+  workflowPrompt?: string | null;
+};
+
 function normalized(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function present(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function isAcknowledgement(question: string): boolean {
+  const value = normalized(question).replace(/[.!?]+$/, "");
+  return /^(?:okay|ok|sounds good|great|perfect|awesome|got it|thanks?|thank you(?: so much)?|cool|works for me|that works)$/i.test(value);
+}
+
+export function answerConversationAcknowledgement(
+  question: string,
+  context: ConversationAcknowledgementContext = {},
+): string | null {
+  if (!isAcknowledgement(question)) return null;
+  const workflowPrompt = context.workflowPrompt?.trim();
+  if (workflowPrompt) {
+    return `Got it — ${workflowPrompt.charAt(0).toLowerCase()}${workflowPrompt.slice(1)}`;
+  }
+  if (context.requestSaved && context.waitingForStaff) {
+    return "Perfect — the team has your request. I’m still here if you need anything else.";
+  }
+  if (context.requestSaved) return "Perfect — your request is saved. Let me know if you need anything else.";
+  if (context.waitingForStaff) return "Thanks — I’m still here while we wait for the team.";
+  return "Sounds good — let me know if you need anything else.";
 }
 
 export function classifyConversationStateQuestion(question: string): ConversationStateQuestion | null {
