@@ -209,6 +209,9 @@ export type ConversationActionState = {
   providerFallback?: {
     provider: string;
     reason: "unavailable" | "not_found";
+    /** The visitor must explicitly accept team help before contact capture. */
+    helpOffered?: boolean;
+    helpConfirmed?: boolean;
   };
   /** Lead captured at the workflow conversion boundary, before external handoff. */
   leadId?: string | null;

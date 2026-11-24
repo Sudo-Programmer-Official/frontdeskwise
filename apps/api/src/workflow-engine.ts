@@ -164,10 +164,17 @@ export function activateProviderFallback(
 ): ActionStep | null {
   const fallback = providerFallbackStep(action);
   if (!fallback) return null;
-  state.providerFallback = { provider, reason };
+  state.providerFallback = { provider, reason, helpOffered: true, helpConfirmed: false };
   state.currentStepId = fallback.id;
-  state.formShown = true;
+  // Keep the fallback form hidden until the visitor accepts team help. The
+  // form step is still the cursor so the next affirmative turn can reveal it.
+  state.formShown = false;
   return fallback;
+}
+
+export function isAffirmativeProviderFallback(input: string): boolean {
+  const normalized = input.trim().toLowerCase().replace(/[.!?]+$/, "");
+  return /^(?:yes|yeah|yep|yup|sure|okay|ok|please|go ahead|that works|sounds good|do that|help me)(?:\s*,?\s+(?:that would work|that will work|that works))?$/i.test(normalized);
 }
 
 function nextSequentialStep(action: ActionFlow, step: ActionStep): ActionStep | null {

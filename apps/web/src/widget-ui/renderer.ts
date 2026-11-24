@@ -78,6 +78,10 @@ export interface WidgetAction {
   form?: {
     submitLabel: string;
     fields: WidgetFormField[];
+    contactRequirement?: {
+      fieldKeys: string[];
+      message: string;
+    };
   };
 }
 
@@ -278,6 +282,7 @@ const WIDGET_STYLES = `
   .fdw-quick-actions .fdw-primary-cta:focus-visible { color: var(--fdw-accent-text, #fff); outline: 3px solid rgba(31,115,216,.34); outline: 3px solid color-mix(in srgb, var(--fdw-accent, #0d6efd) 34%, transparent); outline-offset: 3px; }
   .fdw-action-form, .fdw-lead { display: grid; gap: 11px; margin: 0 15px 13px; padding: 15px; border: 1px solid #dbe7f8; border-radius: 13px; background: #f7faff; }
   .fdw-action-error { color: #a54b45; font-size: 11px; line-height: 1.4; }
+  .fdw-action-contact-hint { color: #687b94; font-size: 10px; line-height: 1.4; }
   .fdw-action-form:empty, .fdw-lead[hidden] { display: none; }
   .fdw-action-form label, .fdw-lead label:not(.fdw-consent-row) { display: grid; gap: 5px; color: #52657e; font-size: 11px; font-weight: 750; }
   .fdw-action-form label > span:first-child, .fdw-lead label:not(.fdw-consent-row) > span { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; }
@@ -682,6 +687,11 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
       label.appendChild(control);
       actionForm.appendChild(label);
     }
+    if (action.form.contactRequirement?.message) {
+      const hint = element<HTMLElement>(documentRef, "small", "fdw-action-contact-hint");
+      hint.textContent = action.form.contactRequirement.message;
+      actionForm.appendChild(hint);
+    }
     if (config.requireLeadConsent) {
       if (state.consentGiven) {
         const saved = element<HTMLDivElement>(documentRef, "div", "fdw-consent-saved");
@@ -884,6 +894,12 @@ export function createWidgetRenderer(mount: HTMLElement, options: WidgetRenderer
     if (!state.action) return;
     rememberActionValues();
     const values = collectActionValues();
+    const contactRequirement = state.action.form?.contactRequirement;
+    if (contactRequirement && !contactRequirement.fieldKeys.some((key) => values[key]?.trim())) {
+      state = { ...state, actionError: contactRequirement.message };
+      renderActionForm();
+      return;
+    }
     options.onActionSubmit?.(values, state.action);
   });
   actionForm.addEventListener("input", rememberActionValues);

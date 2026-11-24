@@ -386,6 +386,16 @@ test("embedded widget keeps knowledge gaps optional and exposes contact action",
   assert.match(widgetRenderer, /typingMessage = state\.typingMessage \|\| "Thinking…"/);
 });
 
+test("provider fallback waits for help confirmation and requires reachable contact", () => {
+  assert.match(apiServer, /providerFallbackHelpPrompt/);
+  assert.match(apiServer, /isAffirmativeProviderFallback/);
+  assert.match(apiServer, /Send request to the team/);
+  assert.match(apiServer, /contactRequirement/);
+  assert.match(widgetRenderer, /action\.form\.contactRequirement/);
+  assert.match(widgetRenderer, /contactRequirement\.fieldKeys\.some/);
+  assert.match(agent, /contactRequirement/);
+});
+
 test("embedded widget handoff notice is temporary, dismissible, and session-scoped", () => {
   assert.match(widgetRenderer, /fdw-handoff-dismiss/);
   assert.match(widgetEmbed, /HANDOFF_NOTICE_TIMEOUT_MS = 6000/);

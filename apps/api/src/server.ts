@@ -81,6 +81,7 @@ import {
   workflowNextBestAction,
   workflowSummary,
   providerFallbackStep,
+  isAffirmativeProviderFallback,
   isSoftwareContextField,
   knownSoftwareProvider,
 } from "./workflow-engine.js";
@@ -9357,6 +9358,10 @@ type AnswerResult = Omit<Awaited<ReturnType<typeof answerQuestion>>, "performanc
 type ActionFormSchema = {
   submitLabel: string;
   fields: Array<ActionFlow["fields"][number] & { value?: string }>;
+  contactRequirement?: {
+    fieldKeys: string[];
+    message: string;
+  };
 };
 
 type ConversationAnswerResult = Omit<AnswerResult, "failure" | "action"> & {
@@ -9583,10 +9588,21 @@ function exitRescueContactFields(action: ActionFlow, state: ConversationActionSt
 
 function actionFormSchema(action: ActionFlow, state: ConversationActionState): ActionFormSchema {
   const rescue = state.exitRescue?.status === "offered";
+  const providerFallbackForm = state.providerFallback?.helpConfirmed === true;
   return {
-    submitLabel: rescue ? "Save my progress" : action.completion.submitLabel ?? action.completion.linkLabel ?? "Submit request",
+    submitLabel: rescue
+      ? "Save my progress"
+      : providerFallbackForm
+        ? "Send request to the team"
+        : action.completion.submitLabel ?? action.completion.linkLabel ?? "Submit request",
     fields: (rescue ? exitRescueContactFields(action, state) : action.steps?.length ? workflowFormFields(action, state) : formFields(action, state))
       .map((field) => ({ ...field, value: state.values[field.key] ?? "" })),
+    ...(providerFallbackForm ? {
+      contactRequirement: {
+        fieldKeys: ["email", "phone"],
+        message: "Please add an email or phone number so the team can reach you.",
+      },
+    } : {}),
   };
 }
 
@@ -9599,6 +9615,7 @@ function actionStatePayload(action: ActionFlow, state: ConversationActionState):
   const showForm = state.status === "active"
     && state.exitRescue?.status !== "saved"
     && state.exitRescue?.status !== "declined"
+    && !providerFallbackAwaitingConfirmation(state)
     && (Boolean(state.formShown) || state.captureMode === "form" || workflow?.type === "form");
   const completionUrl = state.completionUrl ?? action.completion.linkUrl;
   const lookup = Object.fromEntries(Object.entries(state.lookupResults ?? {}).flatMap(([key, value]) => {
@@ -9814,6 +9831,7 @@ function workflowResumePrompt(
   question = "",
 ): string {
   const step = plan.step;
+  if (providerFallbackOfferPending(action, state, step)) return providerFallbackHelpPrompt();
   const context = workflowCapturedContext(action, state);
   if (step?.type === "redirect" && context) {
     if (state.conversionAvailable === true && !asksHowToProceed(question)) return "";
@@ -9936,6 +9954,18 @@ function workflowLookupPrompt(state: ConversationActionState): string | null {
     return `${index + 1}. ${match.name}${schedule ? ` — ${schedule}` : ""}${availability}`;
   });
   return `I found ${resolution.matches.length} matching options. Reply with the number you want:\n${options.join("\n")}`;
+}
+
+function providerFallbackHelpPrompt(): string {
+  return "I can’t confirm a live class right now. I can have the team help find the right option. Would you like me to do that?";
+}
+
+function providerFallbackAwaitingConfirmation(state: ConversationActionState): boolean {
+  return Boolean(state.providerFallback && state.providerFallback.helpConfirmed !== true);
+}
+
+function providerFallbackOfferPending(action: ActionFlow, state: ConversationActionState, step: ReturnType<typeof currentWorkflowStep>): boolean {
+  return Boolean(step && providerFallbackAwaitingConfirmation(state) && providerFallbackStep(action)?.id === step.id);
 }
 
 function verifiedPlanFactsForWorkflow(business: Business) {
@@ -10186,10 +10216,22 @@ async function offerExitRescue(
 async function refreshWorkflowLeadMetadata(business: Business, lead: Lead, metadata: Record<string, unknown>): Promise<void> {
   lead.metadata = { ...lead.metadata, ...metadata };
   if (!pool) return;
-  await pool.query(
-    `update leads set metadata = $3, updated_at = now() where business_id = $1 and id = $2`,
-    [business.id, lead.id, JSON.stringify(lead.metadata)],
-  );
+  try {
+    await pool.query(
+      `update leads set metadata = $3, updated_at = now() where business_id = $1 and id = $2`,
+      [business.id, lead.id, JSON.stringify(lead.metadata)],
+    );
+  } catch (error) {
+    // `updated_at` was added to the lead runtime after the original leads
+    // table shipped. Keep action submissions successful while an older
+    // production database is being migrated; metadata is still durable.
+    if (!isMissingDatabaseColumn(error)) throw error;
+    await pool.query(
+      `update leads set metadata = $3 where business_id = $1 and id = $2`,
+      [business.id, lead.id, JSON.stringify(lead.metadata)],
+    );
+    app.log.warn({ businessId: business.id, leadId: lead.id }, "Lead metadata updated without updated_at until migration completes");
+  }
 }
 
 async function advanceWorkflowAutomation(
@@ -10334,6 +10376,17 @@ async function continueWorkflowActionConversation(
     && !guidedDemo;
   const affirmativeConversion = affirmativeConversionRequest(question, currentStepBeforeConversion);
   const explicitConversionRequest = guidedDemo || normalConversion || affirmativeConversion;
+  const affirmativeProviderFallback = providerFallbackAwaitingConfirmation(state) && isAffirmativeProviderFallback(question);
+  if (affirmativeProviderFallback) {
+    state.providerFallback = {
+      ...state.providerFallback!,
+      helpOffered: true,
+      helpConfirmed: true,
+    };
+    state.formShown = true;
+    await recordConversionEvent(business, { event: "FORM_DISPLAYED", conversationId: conversation.id, flowId: action.id });
+    return actionAnswer(action, state, "Great — what’s the best way to reach you?");
+  }
   if (guidedDemo && action.steps?.some((step) => step.config?.trigger === "explicit_guided_demo_request")) {
     state.workflowTrigger = "explicit_guided_demo_request";
     state.currentStepId = action.steps.find((step) => step.config?.trigger === "explicit_guided_demo_request")?.id ?? state.currentStepId;
@@ -10453,6 +10506,10 @@ async function continueWorkflowActionConversation(
 
   let step = await advanceWorkflowAutomation(business, action, state, automationOptions, conversation);
   if (!step || (state.status as ConversationActionState["status"]) === "completed") return completeActionConversation(business, conversation, action, state);
+  if (providerFallbackOfferPending(action, state, step)) {
+    state.formShown = false;
+    return actionAnswer(action, state, providerFallbackHelpPrompt());
+  }
   if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const initialResumePlan = recomputeWorkflowResume(action, state);
   step = initialResumePlan.step ?? step;
@@ -10584,6 +10641,10 @@ async function continueWorkflowActionConversation(
 
   step = await advanceWorkflowAutomation(business, action, state, automationOptions, conversation);
   if (!step || state.status === "completed") return completeActionConversation(business, conversation, action, state);
+  if (providerFallbackOfferPending(action, state, step)) {
+    state.formShown = false;
+    return actionAnswer(action, state, providerFallbackHelpPrompt());
+  }
   if (waitingForStaff(conversation) && staffSensitiveWorkflowStep(action, step)) return actionAnswer(action, state, waitingActionHoldAnswer(action, state));
   const finalResumePlan = recomputeWorkflowResume(action, state);
   step = finalResumePlan.step ?? step;
@@ -10798,7 +10859,7 @@ async function completeActionConversation(
   let answer = providerFallback
     ? `I couldn’t check live ${providerFallback.provider} availability right now, so I won’t invent class options. I’ve saved your request and the team can help you find the right lesson.`
     : canonicalizeCustomerCopy(business, action.completion.message);
-  if (action.completion.linkTemplate && action.completion.completionMode !== "native_form" && action.completion.completionMode !== "human_follow_up") {
+  if (!providerFallback && action.completion.linkTemplate && action.completion.completionMode !== "native_form" && action.completion.completionMode !== "human_follow_up") {
     try {
       const generated = generateCompletionLink(action.completion.linkTemplate, state.values);
       state.completionUrl = generated.url;
@@ -10814,15 +10875,18 @@ async function completeActionConversation(
   if (action.completion.createLead) persistedLead = await persistWorkflowLead(business, conversation, action, state, structuredWorkflowMetadata);
   if (persistedLead) await refreshWorkflowLeadMetadata(business, persistedLead, workflowLeadMetadata(action, state));
   const completionUrl = state.completionUrl ?? action.completion.linkUrl;
-  if (completionUrl) {
+  if (completionUrl && !providerFallback) {
     answer += "\n\n" + (action.completion.linkLabel ?? "Continue") + ": " + completionUrl;
   }
-  if (action.completion.notifyStaff || action.completion.requiresStaff) {
+  const requiresStaffFollowUp = action.completion.requiresStaff === true || Boolean(providerFallback);
+  if (action.completion.notifyStaff || requiresStaffFollowUp) {
     let staffNotificationFailed = false;
     const now = new Date().toISOString();
-    if (action.completion.requiresStaff) {
+    if (requiresStaffFollowUp) {
       conversation.status = "WAITING_FOR_STAFF";
-      conversation.handoffReason = `Action requires staff: ${action.name}`;
+      conversation.handoffReason = providerFallback
+        ? "Provider unavailable; visitor requested team help"
+        : `Action requires staff: ${action.name}`;
       conversation.handoffRequestedAt = now;
       conversation.lastActivityAt = now;
       await recordConversionEvent(business, {
@@ -10835,9 +10899,11 @@ async function completeActionConversation(
     }
     try {
       const notificationStatus = await notifyStaff(business, conversation, {
-        type: action.completion.requiresStaff ? "action_staff_required" : "lead_created",
-        title: action.completion.requiresStaff ? `${action.name} needs staff` : `New ${action.name} request`,
-        body: `${business.name} received a completed ${action.name.toLowerCase()} flow.`,
+        type: requiresStaffFollowUp ? "action_staff_required" : "lead_created",
+        title: requiresStaffFollowUp ? `${action.name} needs staff` : `New ${action.name} request`,
+        body: providerFallback
+          ? `${business.name} received a request for team help after live provider availability could not be confirmed.`
+          : `${business.name} received a completed ${action.name.toLowerCase()} flow.`,
         leadId: business.leads.find((lead) => lead.conversationId === conversation.id)?.id ?? null,
         channels: action.completion.notifyChannels,
         targets: action.completion.notifyTargets,
@@ -10866,7 +10932,7 @@ async function completeActionConversation(
       metadata: { returnStepId: state.exitRescue?.returnStepId ?? null, leadId: persistedLead?.id ?? state.leadId ?? null },
     });
   }
-  if (action.completion.connector) {
+  if (!providerFallback && action.completion.connector) {
     await recordConversionEvent(business, {
       event: "ACTION_STARTED",
       conversationId: conversation.id,
@@ -11015,6 +11081,12 @@ async function submitActionForm(
       metadata: { leadId: lead?.id ?? null, returnStepId },
     });
     return actionAnswer(action, state, "Got it — I saved your request and what we discussed. The team can follow up, and you won’t have to repeat everything.");
+  }
+  if (state.providerFallback?.helpConfirmed === true) {
+    // A provider fallback is a team-help branch, not registration. Complete
+    // it directly after contact validation so the normal registration steps
+    // cannot run or expose registration-specific copy.
+    return completeActionConversation(business, conversation, action, state);
   }
   if (action.steps?.length) {
     state.formShown = false;

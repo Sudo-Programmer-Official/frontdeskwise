@@ -125,7 +125,11 @@ interface TestAction {
   nextField?: string;
   linkUrl?: string;
   linkLabel?: string;
-  form?: { submitLabel: string; fields: TestActionField[] };
+  form?: {
+    submitLabel: string;
+    fields: TestActionField[];
+    contactRequirement?: { fieldKeys: string[]; message: string };
+  };
 }
 
 interface TestMessage {
@@ -299,6 +303,7 @@ const testWidgetState = computed<Partial<WidgetState>>(() => {
     linkLabel: action.linkLabel,
     form: action.form ? {
       submitLabel: action.form.submitLabel,
+      contactRequirement: action.form.contactRequirement,
       fields: action.form.fields.map((field) => ({ id: field.id, key: field.key, label: field.label, type: field.type, required: field.required, options: field.options, value: latestAssistant.formValues[field.key] ?? "" })),
     } : undefined,
   } : null;

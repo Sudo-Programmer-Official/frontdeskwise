@@ -26,6 +26,7 @@ import {
   workflowNextBestAction,
   workflowSummary,
   providerFallbackStep,
+  isAffirmativeProviderFallback,
 } from "../src/workflow-engine.js";
 
 const ids = (key: string) => `${key}-certification-id`;
@@ -75,11 +76,25 @@ test("provider fallback reuses the enrollment contact form and never fabricates 
 
   assert.equal(providerFallbackStep(enrollment)?.id, "parent-contact");
   assert.equal(fallback?.id, "parent-contact");
-  assert.deepEqual(state.providerFallback, { provider: "jackrabbit", reason: "unavailable" });
+  assert.deepEqual(state.providerFallback, { provider: "jackrabbit", reason: "unavailable", helpOffered: true, helpConfirmed: false });
   assert.equal(state.currentStepId, "parent-contact");
-  assert.equal(state.formShown, true);
+  assert.equal(state.formShown, false);
   assert.equal(currentWorkflowStep(enrollment, state)?.id, "parent-contact");
   assert.equal(state.lookupResults, undefined);
+});
+
+test("provider fallback treats an affirmative help reply as workflow continuation", () => {
+  const state = createActionState(enrollment);
+  activateProviderFallback(enrollment, state, "jackrabbit", "unavailable");
+
+  assert.equal(isAffirmativeProviderFallback("yes that would work"), true);
+  assert.equal(isAffirmativeProviderFallback("maybe later"), false);
+  assert.equal(state.providerFallback?.helpConfirmed, false);
+
+  state.providerFallback = { ...state.providerFallback!, helpConfirmed: true };
+  state.formShown = true;
+  assert.equal(currentWorkflowStep(enrollment, state)?.id, "parent-contact");
+  assert.equal(state.providerFallback?.helpConfirmed, true);
 });
 
 test("provider result and selection steps stay unavailable until their prerequisites exist", () => {
