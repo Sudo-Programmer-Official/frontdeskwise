@@ -24,6 +24,24 @@ export type ExperienceSignalLayer =
   | "widget"
   | "ux";
 
+export type ExperienceLikelyCause =
+  | "repeated_questions"
+  | "incorrect_answer"
+  | "workflow_friction"
+  | "action_failure"
+  | "provider_unavailable"
+  | "abandonment"
+  | "abusive_language"
+  | "general_frustration";
+
+export type ExperienceRecoveryStrategy =
+  | "none"
+  | "simplify"
+  | "acknowledge_and_recover"
+  | "offer_human"
+  | "calm_boundary"
+  | "politely_end";
+
 export type ExperienceSignalInput = {
   message: string;
   previousUserMessages?: string[];
@@ -64,11 +82,16 @@ export type ExperienceSignal = {
 export type ExperienceSignalAssessment = {
   signals: ExperienceSignal[];
   frustrationScore: number;
+  likelyCause: ExperienceLikelyCause | null;
+  abusive: boolean;
+  repeatedAbuse: boolean;
   runtimeAdaptation: {
     acknowledge: boolean;
     simplify: boolean;
     offerHumanHelp: boolean;
     suppressCtas: boolean;
+    strategy: ExperienceRecoveryStrategy;
+    preserveContext: boolean;
   };
 };
 
@@ -85,6 +108,13 @@ const explicitFrustrationPatterns: Array<{ pattern: RegExp; weight: number; mild
   { pattern: /\bforget it\b/i, weight: 2, mild: true },
   { pattern: /\bthis is frustrating\b|\bso frustrating\b/i, weight: 3 },
 ];
+const nonThreateningAbusePatterns = [
+  /\bf+u+c+k(?:ing|ed|s)?\b/i,
+  /\b(?:shut up|screw you|piss off|go away|leave me alone)\b/i,
+  /\b(?:asshole|bastard|idiot|moron|bullshit)\b/i,
+];
+const threatPattern = /\b(?:kill|hurt|attack|shoot|stab|bomb|burn|destroy)\b/i;
+const serviceIntentPattern = /\?|\b(?:help|fix|solve|answer|book|schedule|price|cost|hours|class|lesson|appointment|account|order|cancel|change|where|when|how|can you|i need|my)\b/i;
 
 function tokens(value: string): Set<string> {
   return new Set(value.toLowerCase().match(/[a-z0-9]+/g) ?? []);
@@ -106,6 +136,14 @@ function repeatedQuestion(message: string, previous: string[]): boolean {
     const other = normalizeImprovementQuestion(candidate);
     return other === normalized || similarity(normalized, other) >= 0.62;
   });
+}
+
+function isNonThreateningAbuse(message: string): boolean {
+  return !threatPattern.test(message) && nonThreateningAbusePatterns.some((pattern) => pattern.test(message));
+}
+
+function abusiveMessageCount(messages: string[]): number {
+  return messages.filter((message) => isNonThreateningAbuse(message)).length;
 }
 
 function addSignal(
@@ -150,6 +188,9 @@ export function assessExperienceSignals(input: ExperienceSignalInput): Experienc
   const signals: ExperienceSignal[] = [];
   const frustrationMatches = explicitFrustrationPatterns.filter(({ pattern }) => pattern.test(message));
   const explicitFrustrationScore = frustrationMatches.reduce((total, match) => total + match.weight, 0);
+  const abusive = isNonThreateningAbuse(message);
+  const hasServiceIntent = serviceIntentPattern.test(message);
+  const repeatedAbuse = abusive && abusiveMessageCount(previous) > 0 && !hasServiceIntent;
   const isRepeated = repeatedQuestion(message, previous);
   const isCorrection = correctionPattern.test(message);
   const requestedHandoff = Boolean(input.result?.handoff) || isExplicitHumanRequest(message);
@@ -168,6 +209,7 @@ export function assessExperienceSignals(input: ExperienceSignalInput): Experienc
   const abandoned = input.behavior?.abandonedAfterError === true;
 
   const frustrationScore = Math.min(10, explicitFrustrationScore
+    + (abusive ? 3 : 0)
     + (isRepeated ? 2 : 0)
     + (isCorrection ? 1 : 0)
     + (hasWorkflowFailure ? 2 : 0)
@@ -176,7 +218,27 @@ export function assessExperienceSignals(input: ExperienceSignalInput): Experienc
     + (requestedHandoff ? 1 : 0));
   const severity = severityFor(frustrationScore, input);
 
-  if (explicitFrustrationScore > 0 || isRepeated || isCorrection || hasWorkflowFailure || abandoned) {
+  const likelyCause: ExperienceLikelyCause | null = repeatedAbuse
+    ? "abusive_language"
+    : abusive
+      ? "abusive_language"
+      : failedAction
+        ? "action_failure"
+        : providerError
+          ? "provider_unavailable"
+          : hasWorkflowFailure
+            ? "workflow_friction"
+            : isRepeated
+              ? "repeated_questions"
+              : wrongAnswer || isCorrection
+                ? "incorrect_answer"
+                : abandoned
+                  ? "abandonment"
+                  : explicitFrustrationScore > 0
+                    ? "general_frustration"
+                    : null;
+
+  if (explicitFrustrationScore > 0 || abusive || isRepeated || isCorrection || hasWorkflowFailure || abandoned) {
     const mild = frustrationMatches.length > 0 && frustrationMatches.every((match) => match.mild);
     addSignal(
       signals,
@@ -185,7 +247,7 @@ export function assessExperienceSignals(input: ExperienceSignalInput): Experienc
       mild && frustrationScore < 3 ? "low" : severity,
       Math.min(0.98, 0.52 + frustrationScore * 0.05),
       hasWorkflowFailure ? "workflow" : "ux",
-      explicitFrustrationScore > 0 ? "frustrated_language" : abandoned ? "abandoned_after_friction" : "behavioral_friction",
+      abusive ? "non_threatening_abuse" : explicitFrustrationScore > 0 ? "frustrated_language" : abandoned ? "abandoned_after_friction" : "behavioral_friction",
     );
   }
   if (isRepeated) addSignal(signals, input, "repeated_question", severity === "low" ? "medium" : severity, 0.78, "workflow", "visitor_rephrased_a_recent_question");
@@ -198,14 +260,30 @@ export function assessExperienceSignals(input: ExperienceSignalInput): Experienc
   if (abandoned) addSignal(signals, input, "abandonment", severity, 0.86, "ux", "visitor_abandoned_after_an_error_or_friction");
 
   const shouldAdapt = frustrationScore >= 2 || requestedHandoff || hasWorkflowFailure || failedAction;
+  const strategy: ExperienceRecoveryStrategy = repeatedAbuse
+    ? "politely_end"
+    : abusive && !hasServiceIntent
+      ? "calm_boundary"
+      : severity === "critical" || severity === "high" || requestedHandoff
+        ? "offer_human"
+        : severity === "medium"
+          ? "acknowledge_and_recover"
+          : shouldAdapt
+            ? "simplify"
+            : "none";
   return {
     signals,
     frustrationScore,
+    likelyCause,
+    abusive,
+    repeatedAbuse,
     runtimeAdaptation: {
       acknowledge: shouldAdapt,
       simplify: shouldAdapt,
-      offerHumanHelp: frustrationScore >= 3 || requestedHandoff || hasWorkflowFailure || failedAction,
-      suppressCtas: frustrationScore >= 3 || hasWorkflowFailure || failedAction,
+      offerHumanHelp: strategy === "offer_human" || strategy === "calm_boundary" || frustrationScore >= 3 || requestedHandoff || hasWorkflowFailure || failedAction,
+      suppressCtas: strategy === "acknowledge_and_recover" || strategy === "offer_human" || strategy === "calm_boundary" || strategy === "politely_end" || hasWorkflowFailure || failedAction,
+      strategy,
+      preserveContext: strategy === "acknowledge_and_recover" || strategy === "offer_human",
     },
   };
 }

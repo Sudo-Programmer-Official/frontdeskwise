@@ -13216,11 +13216,52 @@ function applyExperienceRuntimeAdaptation(
   assessment: ExperienceSignalAssessment,
 ): ConversationAnswerResult {
   if (!assessment.signals.length || result.silent || result.handoff) return result;
+  if (assessment.runtimeAdaptation.strategy === "politely_end") {
+    return {
+      ...result,
+      answer: "I’ll step back here. If you need help later, send a specific question or ask to speak with the team.",
+      grounded: false,
+      citations: [],
+      knowledgeGap: null,
+      confidenceScore: 1,
+      confidenceBand: "high",
+      failure: undefined,
+      quickActions: undefined,
+      primaryCta: undefined,
+    };
+  }
+  if (assessment.runtimeAdaptation.strategy === "calm_boundary") {
+    return {
+      ...result,
+      answer: "I understand you’re frustrated. I’m here to help if you want to continue. Tell me what went wrong, or ask for a team member.",
+      grounded: false,
+      citations: [],
+      knowledgeGap: null,
+      confidenceScore: 1,
+      confidenceBand: "high",
+      failure: undefined,
+      quickActions: [
+        { label: "Fix the issue", question: "Please help me fix the issue." },
+        { label: "Talk to someone", question: "Can I talk to someone?" },
+      ],
+      primaryCta: undefined,
+    };
+  }
   let adapted = result;
   if (assessment.runtimeAdaptation.acknowledge && adapted.answer.trim()) {
-    const prefix = assessment.runtimeAdaptation.offerHumanHelp
-      ? "I can see this isn’t getting you where you need to go. "
-      : "Let me simplify this. ";
+    const prefix = assessment.runtimeAdaptation.strategy === "offer_human"
+      ? assessment.likelyCause === "repeated_questions"
+        ? "I may have made you repeat yourself. I’ll keep the details you’ve already shared. "
+        : assessment.likelyCause === "incorrect_answer"
+          ? "Thanks for correcting me. I’ll use the information you already gave me. "
+          : assessment.likelyCause === "workflow_friction"
+            ? "I’ve lost the thread. I’ll keep the details you already shared and get you unstuck. "
+            : assessment.likelyCause === "action_failure" || assessment.likelyCause === "provider_unavailable"
+              ? "That didn’t complete as expected. I’ll keep your details and help with the next step. "
+              : "I can see this isn’t getting you where you need to go. "
+      : assessment.runtimeAdaptation.strategy === "acknowledge_and_recover"
+        ? "I understand this has been frustrating. "
+        : "Let me simplify this. ";
     if (!adapted.answer.startsWith(prefix.trim())) adapted = { ...adapted, answer: `${prefix}${adapted.answer}` };
   }
   if (assessment.runtimeAdaptation.suppressCtas) {
@@ -13228,12 +13269,35 @@ function applyExperienceRuntimeAdaptation(
     adapted = {
       ...withoutCta,
       quickActions: [
-        { label: "Simplify this", question: "Please simplify that." },
+        assessment.runtimeAdaptation.strategy === "acknowledge_and_recover"
+          ? { label: "Fix the issue", question: "Please help me fix the issue." }
+          : { label: "Simplify this", question: "Please simplify that." },
         ...(assessment.runtimeAdaptation.offerHumanHelp ? [{ label: "Talk to someone", question: "Can I talk to someone?" }] : []),
       ],
     };
   }
   return adapted;
+}
+
+function experienceRecoveryAnswer(
+  assessment: ExperienceSignalAssessment,
+  workflow?: ActiveWorkflowAnswerContext,
+): ConversationAnswerResult {
+  const answer = assessment.runtimeAdaptation.strategy === "politely_end"
+    ? "I’ll step back here. If you need help later, send a specific question or ask to speak with the team."
+    : "I understand you’re frustrated. I’m here to help if you want to continue. Tell me what went wrong, or ask for a team member.";
+  const result = conversationStateAnswer(answer, "experience_recovery");
+  const reason = `experience_recovery_${assessment.runtimeAdaptation.strategy}`;
+  result.modelUsage = { ...result.modelUsage, reason };
+  result.retrieval = { ...result.retrieval, reason };
+  if (assessment.runtimeAdaptation.strategy === "calm_boundary") {
+    result.quickActions = [
+      { label: "Fix the issue", question: "Please help me fix the issue." },
+      { label: "Talk to someone", question: "Can I talk to someone?" },
+    ];
+  }
+  if (workflow) result.action = actionStatePayload(workflow.action, workflow.state);
+  return result;
 }
 
 function experienceTraceForTurn(
@@ -13308,6 +13372,16 @@ async function persistExperienceSignals(
     correlationId: context?.turnId ?? null,
   });
   for (const signal of assessment.signals) {
+    const sessionTrace = {
+      ...traceData.trace,
+      experience_recovery: {
+        likely_cause: assessment.likelyCause,
+        strategy: assessment.runtimeAdaptation.strategy,
+        abusive: assessment.abusive,
+        repeated_abuse: assessment.repeatedAbuse,
+        preserve_context: assessment.runtimeAdaptation.preserveContext,
+      },
+    };
     const stored: StoredExperienceSignal = {
       ...signal,
       id: randomUUID(),
@@ -13318,7 +13392,7 @@ async function persistExperienceSignals(
       modelRole: traceData.modelRole,
       providerState: traceData.providerState,
       validationResult: traceData.validationResult,
-      sessionTrace: traceData.trace,
+      sessionTrace,
       status: "open",
       occurredAt: now,
     };
@@ -13528,7 +13602,7 @@ async function persistConversationExchange(
     correlationId: traceContext?.turnId ?? null,
   });
   recordAnswer(result.modelUsage.latencyMs);
-  if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer") recordLowConfidenceFallback();
+  if (!result.grounded && result.retrieval.mode !== "tier0_greeting" && result.retrieval.mode !== "approved_answer" && result.retrieval.mode !== "conversation_state") recordLowConfidenceFallback();
   const now = new Date().toISOString();
   const userMessage: Message = { id: clientMessageId ?? randomUUID(), role: "user", content: userContent, createdAt: now };
   const assistantMessage: Message | null = result.silent ? null : {
@@ -13716,6 +13790,30 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
     const stateResult = conversationStateAnswer(stateAnswer.answer, stateAnswer.kind);
     if (activeWorkflow) stateResult.action = actionStatePayload(activeWorkflow.action, activeWorkflow.state);
     return persistTurn(stateResult);
+  }
+  const recoveryAssessment = assessExperienceSignals({
+    message: question,
+    previousUserMessages: conversation.messages.filter((message) => message.role === "user").map((message) => message.content),
+    workflow: {
+      stepId: conversation.actionState?.currentStepId ?? null,
+      sameStepAttempts: conversation.actionState?.currentStepId
+        ? business.conversationEvents
+          .filter((event) => event.conversationId === conversation.id && event.eventType === "CONVERSATION_DECISION_TRACE")
+          .filter((event) => asRecord(asRecord(event.metadata).workflow_state_after).currentStepId === conversation.actionState?.currentStepId)
+          .length
+        : 0,
+      unchangedTurns: conversation.actionState?.loopGuard?.consecutiveUnchangedTurns ?? 0,
+      loopGuardTriggered: conversation.actionState?.loopGuard?.triggered === true,
+    },
+    behavior: recentExperienceBehavior(business, conversation.id),
+  });
+  // A standalone abusive turn is a recovery interaction, not a knowledge
+  // query. Keep workflow state intact, but do not spend a retrieval/model
+  // turn generating an answer that will be discarded by the recovery layer.
+  if ((recoveryAssessment.runtimeAdaptation.strategy === "calm_boundary" || recoveryAssessment.runtimeAdaptation.strategy === "politely_end")
+    && orchestration.route !== "HUMAN_HANDOFF"
+    && orchestration.reason !== "explicit_workflow_exit") {
+    return persistTurn(experienceRecoveryAnswer(recoveryAssessment, activeWorkflow));
   }
   // WAITING_FOR_STAFF is a notification state, not a reply lock. The visitor
   // can continue verified questions and low-risk workflow work while waiting.

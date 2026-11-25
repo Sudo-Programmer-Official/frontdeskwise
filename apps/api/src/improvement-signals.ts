@@ -38,7 +38,7 @@ export function deriveImprovementSignals(input: ImprovementSignalInput): Improve
   const add = (type: ImprovementSignalType, reason: string): void => {
     signals.push({ type, reason, normalizedQuestion });
   };
-  if (input.grounded === false && !["tier0_greeting", "approved_answer", "handoff"].includes(input.retrievalMode ?? "")) add("low_confidence_answer", "answer_not_grounded_or_fell_back");
+  if (input.grounded === false && !["tier0_greeting", "approved_answer", "conversation_state", "handoff"].includes(input.retrievalMode ?? "")) add("low_confidence_answer", "answer_not_grounded_or_fell_back");
   if (input.handoff) add("human_handoff", "conversation_entered_handoff");
   if (/\b(actually|no,|not what i meant|that is not|that's not|i meant|correction)\b/i.test(input.question)) add("visitor_correction", "visitor_corrected_or_rephrased_request");
   if (input.providerFailure) add("provider_failure", "provider_or_connector_failed");
