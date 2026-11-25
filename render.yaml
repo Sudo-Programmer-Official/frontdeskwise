@@ -49,6 +49,10 @@ services:
         value: https://www.frontdeskwise.com/widget.js
       - key: FRONTDESKWISE_WIDGET_SHELL_URL
         value: https://www.frontdeskwise.com/widget-shell.js
+      - key: FRONTDESKWISE_CRAWL_MAX_PAGES
+        value: "20"
+      - key: FRONTDESKWISE_CRAWL_MAX_DEPTH
+        value: "2"
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: OPENAI_API_KEY

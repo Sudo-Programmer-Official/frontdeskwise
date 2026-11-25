@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
-import { assertPublicUrl, CrawlError, crawlWebsite, detectSpaIndicators, extractBrandColors, inspectWebsiteEmbedPolicy, normalisePublicUrl, summarizeCrawlCoverage, websiteIdentityKey } from "../src/crawler.ts";
+import { assertPublicUrl, CrawlError, crawlRunDiagnostics, crawlWebsite, detectSpaIndicators, extractBrandColors, inspectWebsiteEmbedPolicy, normalisePublicUrl, summarizeCrawlCoverage, websiteIdentityKey } from "../src/crawler.ts";
 import { PAGE_TYPES } from "../src/page-classification.ts";
 
 test("normalisePublicUrl adds https to a bare domain", () => {
@@ -102,8 +102,18 @@ test("DaycareSpots-style multi-page fixture follows public internal links", asyn
     assert.ok(result.pages.some((page) => page.url.endsWith("/registration")), "public registration content should not be classified as an account route");
     assert.ok(!result.pages.some((page) => page.url.endsWith("/login")), "authenticated account routes should stay out of knowledge");
     assert.equal(coverage.discoveredUrls, 9);
+    assert.equal(coverage.eligibleUrls, 7);
     assert.equal(coverage.successfulPages, 7);
     assert.equal(coverage.skippedUrls, 2);
+    assert.ok(coverage.successfulPages <= coverage.attemptedUrls);
+    assert.ok(coverage.attemptedUrls <= coverage.eligibleUrls);
+    assert.equal(result.audit.legacyCodePathUsed, false);
+    assert.equal(result.audit.backgroundWorkerUsed, false);
+    const diagnostics = crawlRunDiagnostics(result.audit, coverage);
+    assert.equal(diagnostics.crawlRunId, result.audit.crawlRunId);
+    assert.ok(diagnostics.routes.length >= result.audit.routes.length);
+    assert.ok(diagnostics.routes.some((route) => route.url.endsWith("/ourprocess/daycare")));
+    assert.equal(diagnostics.routes.find((route) => route.url.endsWith("/login"))?.failureReason, "excluded_route");
     assert.equal(result.audit.failureCode, null);
 
     const seedOnly = await crawlWebsite("https://example.com", {
@@ -113,7 +123,9 @@ test("DaycareSpots-style multi-page fixture follows public internal links", asyn
     });
     const seedOnlyCoverage = summarizeCrawlCoverage(seedOnly.audit);
     assert.equal(seedOnlyCoverage.successfulPages, 1);
-    assert.equal(seedOnlyCoverage.unprocessedUrls, 7);
+    assert.ok(seedOnlyCoverage.successfulPages <= seedOnlyCoverage.attemptedUrls);
+    assert.ok(seedOnlyCoverage.attemptedUrls <= seedOnlyCoverage.eligibleUrls);
+    assert.equal(seedOnlyCoverage.unprocessedUrls, 6);
     assert.equal(seedOnly.audit.failureCode, "CRAWL_PARTIAL");
   } finally {
     globalThis.fetch = originalFetch;

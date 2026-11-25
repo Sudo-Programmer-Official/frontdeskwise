@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessOnboardingKnowledge, validationFromFailure } from "../src/onboarding-validation.ts";
+import { assessOnboardingKnowledge, knowledgeReadinessSnapshot, validationFromFailure } from "../src/onboarding-validation.ts";
 
 test("marks a reachable site with useful business content as valid", () => {
   const result = assessOnboardingKnowledge({
@@ -51,6 +51,7 @@ test("multi-page coverage prevents a seed-only crawl from becoming knowledge rea
     pages: [usefulPage],
     crawlCoverage: {
       discoveredUrls: 38,
+      eligibleUrls: 17,
       attemptedUrls: 12,
       successfulPages: 1,
       skippedUrls: 21,
@@ -74,6 +75,7 @@ test("a single-page site remains valid when the crawler found no additional page
     pages: [usefulPage],
     crawlCoverage: {
       discoveredUrls: 1,
+      eligibleUrls: 1,
       attemptedUrls: 1,
       successfulPages: 1,
       skippedUrls: 0,
@@ -88,4 +90,27 @@ test("a single-page site remains valid when the crawler found no additional page
   assert.equal(validation.status, "valid");
   assert.equal(validation.knowledgeReady, true);
   assert.equal(validation.code, null);
+});
+
+test("authoritative readiness cannot report full readiness for incomplete crawl coverage", () => {
+  const snapshot = knowledgeReadinessSnapshot({
+    sourceCount: 1,
+    chunkCount: 14,
+    meaningfulChunkCount: 14,
+    semanticHealthy: true,
+    gapCount: 0,
+    pendingSourceCount: 0,
+    failedSourceCount: 0,
+    contentQualityIssue: false,
+    onboarding: {
+      status: "needs_attention",
+      knowledgeReady: false,
+      readinessScore: 3,
+    },
+  });
+
+  assert.equal(snapshot.indexed, true);
+  assert.equal(snapshot.score, 3);
+  assert.equal(snapshot.status, "review_recommended");
+  assert.equal(snapshot.onboardingNeedsAttention, true);
 });

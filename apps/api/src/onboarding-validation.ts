@@ -1,4 +1,4 @@
-import type { CrawlCoverage } from "./crawler.js";
+import type { CrawlCoverage, CrawlRunDiagnostics } from "./crawler.js";
 
 export const ONBOARDING_FAILURE_CODES = [
   "DOMAIN_NOT_FOUND",
@@ -31,6 +31,7 @@ export type OnboardingValidation = {
   suggestedAction: string;
   signals: string[];
   crawlCoverage?: CrawlCoverage;
+  crawlRun?: CrawlRunDiagnostics;
   checkedAt: string;
 };
 
@@ -89,6 +90,7 @@ export function validationFromFailure(input: {
   expectedBusinessName?: string | null;
   signals?: string[];
   crawlCoverage?: CrawlCoverage;
+  crawlRun?: CrawlRunDiagnostics;
   checkedAt?: string;
 }): OnboardingValidation {
   const copy = failureCopy(input.code);
@@ -104,6 +106,7 @@ export function validationFromFailure(input: {
     suggestedAction: copy.suggestedAction,
     signals: [...new Set((input.signals ?? []).filter(Boolean))].slice(0, 12),
     ...(input.crawlCoverage ? { crawlCoverage: input.crawlCoverage } : {}),
+    ...(input.crawlRun ? { crawlRun: input.crawlRun } : {}),
     checkedAt: input.checkedAt ?? new Date().toISOString(),
   };
 }
@@ -113,6 +116,7 @@ export function assessOnboardingKnowledge(input: {
   expectedBusinessName?: string | null;
   crawlPartial?: boolean;
   crawlCoverage?: CrawlCoverage;
+  crawlRun?: CrawlRunDiagnostics;
   checkedAt?: string;
 }): OnboardingValidation {
   const pages = input.pages ?? [];
@@ -154,7 +158,7 @@ export function assessOnboardingKnowledge(input: {
   ));
   const score = coveragePartial && coverage ? Math.min(baseScore, Math.round(baseScore * coverage.coveragePercent / 100)) : baseScore;
   if (code && needsAttention) {
-    const failure = validationFromFailure({ code, reachable: pages.length > 0, expectedBusinessName, crawlCoverage: coverage, checkedAt: input.checkedAt });
+    const failure = validationFromFailure({ code, reachable: pages.length > 0, expectedBusinessName, crawlCoverage: coverage, crawlRun: input.crawlRun, checkedAt: input.checkedAt });
     return {
       ...failure,
       knowledgeReady: false,
@@ -197,8 +201,59 @@ export function assessOnboardingKnowledge(input: {
       ...(expectedTokens.length ? [`business_name_tokens_matched:${matchedExpectedTokens.length}/${expectedTokens.length}`] : []),
     ],
     ...(coverage ? { crawlCoverage: coverage } : {}),
+    ...(input.crawlRun ? { crawlRun: input.crawlRun } : {}),
     checkedAt: input.checkedAt ?? new Date().toISOString(),
   };
+}
+
+export type KnowledgeReadinessInput = {
+  sourceCount: number;
+  chunkCount: number;
+  meaningfulChunkCount: number;
+  semanticHealthy: boolean;
+  gapCount: number;
+  pendingSourceCount: number;
+  failedSourceCount: number;
+  contentQualityIssue: boolean;
+  onboarding: Pick<OnboardingValidation, "status" | "knowledgeReady" | "readinessScore">;
+};
+
+export type KnowledgeReadinessSnapshot = {
+  calculatedScore: number;
+  score: number;
+  onboardingNeedsAttention: boolean;
+  indexed: boolean;
+  status: "needs_website" | "indexing" | "review_recommended" | "ready";
+};
+
+/**
+ * The single server-side readiness decision used by owner and team payloads.
+ * Coverage/onboarding is authoritative: searchable chunks alone cannot make
+ * a materially incomplete multi-page crawl look fully ready.
+ */
+export function knowledgeReadinessSnapshot(input: KnowledgeReadinessInput): KnowledgeReadinessSnapshot {
+  const calculatedScore = input.sourceCount === 0
+    ? 0
+    : Math.max(0, Math.min(100,
+      40
+      + (input.meaningfulChunkCount > 0 ? 30 : 0)
+      + (input.semanticHealthy && !input.contentQualityIssue ? 20 : 0)
+      + Math.max(0, 10 - input.gapCount * 2),
+    ));
+  const onboardingNeedsAttention = input.onboarding.status !== "valid" || !input.onboarding.knowledgeReady;
+  const score = Math.min(
+    calculatedScore,
+    onboardingNeedsAttention ? Math.max(0, Math.min(100, input.onboarding.readinessScore)) : calculatedScore,
+  );
+  const indexed = input.sourceCount > 0 && input.meaningfulChunkCount > 0;
+  const status = input.sourceCount === 0
+    ? "needs_website"
+    : input.chunkCount === 0 || input.pendingSourceCount > 0
+      ? "indexing"
+      : input.contentQualityIssue || input.gapCount > 0 || input.failedSourceCount > 0 || onboardingNeedsAttention
+        ? "review_recommended"
+        : "ready";
+  return { calculatedScore, score, onboardingNeedsAttention, indexed, status };
 }
 
 export function onboardingFailureCopy(code: OnboardingFailureCode | null): Pick<OnboardingValidation, "message" | "suggestedAction"> {

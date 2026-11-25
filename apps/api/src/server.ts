@@ -9,8 +9,8 @@ import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import * as webpush from "web-push";
 import { createPoolFromEnv } from "./database.js";
-import { assertPublicUrl, CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, summarizeCrawlCoverage, websiteIdentityKey, type CrawledPage } from "./crawler.js";
-import { assessOnboardingKnowledge, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
+import { assertPublicUrl, CrawlError, crawlRunDiagnostics, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, summarizeCrawlCoverage, websiteIdentityKey, type CrawledPage } from "./crawler.js";
+import { assessOnboardingKnowledge, knowledgeReadinessSnapshot, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
 import { createRenderedPageAdapter } from "./rendered-crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
@@ -368,8 +368,35 @@ const maxWidgetLogoDataUrlLength = 700_000;
 const widgetLogoDataUrlPattern = /^data:image\/(?:png|jpe?g|svg\+xml);base64,[a-z\d+/]+={0,2}$/i;
 const renderedPageAdapter = createRenderedPageAdapter();
 
-function crawlConfiguredWebsite(websiteUrl: string) {
-  return crawlWebsite(websiteUrl, { renderPage: renderedPageAdapter });
+function boundedCrawlConfig(name: string, fallback: number, maximum: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.max(1, Math.min(maximum, Math.floor(value))) : fallback;
+}
+
+async function crawlConfiguredWebsite(websiteUrl: string) {
+  const maxPages = boundedCrawlConfig("FRONTDESKWISE_CRAWL_MAX_PAGES", 20, 100);
+  const maxDepth = boundedCrawlConfig("FRONTDESKWISE_CRAWL_MAX_DEPTH", 2, 8);
+  const result = await crawlWebsite(websiteUrl, { renderPage: renderedPageAdapter, maxPages, maxDepth });
+  const coverage = summarizeCrawlCoverage(result.audit);
+  app.log.info({
+    crawlRunId: result.audit.crawlRunId,
+    seedUrl: result.audit.initialUrl,
+    discoveredUrls: coverage.discoveredUrls,
+    eligibleUrls: coverage.eligibleUrls,
+    attemptedUrls: coverage.attemptedUrls,
+    successfulPages: coverage.successfulPages,
+    failedUrls: coverage.failedUrls,
+    skippedUrls: coverage.skippedUrls,
+    unprocessedUrls: coverage.unprocessedUrls,
+    coveragePercent: coverage.coveragePercent,
+    maxPages,
+    maxDepth,
+    legacyCodePathUsed: result.audit.legacyCodePathUsed,
+    backgroundWorkerUsed: result.audit.backgroundWorkerUsed,
+    workerJobId: result.audit.workerJobId,
+    rejectionReasons: coverage.rejectionReasons,
+  }, "Website crawl completed");
+  return result;
 }
 
 type WebsitePreviewProbe = {
@@ -473,16 +500,25 @@ function websiteValidationForCrawl(
   expectedBusinessName?: string | null,
 ): OnboardingValidation {
   const crawlCoverage = summarizeCrawlCoverage(crawled.audit);
-  return assessOnboardingKnowledge({
+  const validation = assessOnboardingKnowledge({
     pages: crawled.pages,
     expectedBusinessName,
     crawlPartial: crawled.audit.failureCode === "CRAWL_PARTIAL",
     crawlCoverage,
   });
+  return {
+    ...validation,
+    crawlRun: crawlRunDiagnostics(crawled.audit, crawlCoverage, {
+      status: validation.status,
+      knowledgeReady: validation.knowledgeReady,
+      readinessScore: validation.readinessScore,
+      code: validation.code,
+    }),
+  };
 }
 
 function websiteValidationFromCrawlError(error: CrawlError, expectedBusinessName?: string | null): OnboardingValidation {
-  return validationFromFailure({
+  const validation = validationFromFailure({
     code: error.code,
     expectedBusinessName,
     reachable: ["NO_USEFUL_CONTENT", "ROBOTS_BLOCKED", "AUTH_REQUIRED", "SPA_RENDER_FAILURE"].includes(error.code),
@@ -495,6 +531,17 @@ function websiteValidationFromCrawlError(error: CrawlError, expectedBusinessName
       : [],
     crawlCoverage: error.audit ? summarizeCrawlCoverage(error.audit) : undefined,
   });
+  return error.audit
+    ? {
+        ...validation,
+        crawlRun: crawlRunDiagnostics(error.audit, validation.crawlCoverage, {
+          status: validation.status,
+          knowledgeReady: validation.knowledgeReady,
+          readinessScore: validation.readinessScore,
+          code: validation.code,
+        }),
+      }
+    : validation;
 }
 
 function businessNameFromWebsite(websiteUrl: string): string {
@@ -4270,6 +4317,9 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         crawlCoverage: value.crawlCoverage && typeof value.crawlCoverage === "object"
           ? value.crawlCoverage as OnboardingValidation["crawlCoverage"]
           : undefined,
+        crawlRun: value.crawlRun && typeof value.crawlRun === "object"
+          ? value.crawlRun as OnboardingValidation["crawlRun"]
+          : undefined,
         checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : toIso(row.created_at),
       } satisfies OnboardingValidation;
     })(),
@@ -4458,6 +4508,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
   const legacyCoverage = !loaded.onboardingValidation.crawlCoverage && legacyDiscoveredUrls
     ? {
         discoveredUrls: legacyDiscoveredUrls,
+        eligibleUrls: legacyDiscoveredUrls,
         attemptedUrls: readyWebsiteCount,
         successfulPages: readyWebsiteCount,
         skippedUrls: 0,
@@ -4468,12 +4519,48 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         rejectionReasons: { legacy_discovery_only: 1 },
       }
     : undefined;
+  const legacyCrawlRun = legacyCoverage
+    ? {
+        crawlRunId: `legacy-discovery-${businessId}`,
+        seedUrl: loaded.websiteUrl,
+        startedAt: loaded.onboardingValidation.checkedAt,
+        completedAt: loaded.onboardingValidation.checkedAt,
+        discoveredUrls: legacyCoverage.discoveredUrls,
+        eligibleUrls: legacyCoverage.eligibleUrls,
+        attemptedUrls: legacyCoverage.attemptedUrls,
+        successfulPages: legacyCoverage.successfulPages,
+        failedUrls: legacyCoverage.failedUrls,
+        skippedUrls: legacyCoverage.skippedUrls,
+        unprocessedUrls: legacyCoverage.unprocessedUrls,
+        coveragePercent: legacyCoverage.coveragePercent,
+        rejectionReasons: legacyCoverage.rejectionReasons,
+        routes: [],
+        legacyCodePathUsed: true,
+        backgroundWorkerUsed: false,
+        workerJobId: null,
+        maxPages: 1,
+        maxDepth: 0,
+        finalReadiness: null,
+      } satisfies NonNullable<OnboardingValidation["crawlRun"]>
+    : undefined;
   if (!row.onboarding_validation || !["valid", "needs_attention"].includes(String(asRecord(row.onboarding_validation).status)) || legacyCoverage) {
     loaded.onboardingValidation = assessOnboardingKnowledge({
       expectedBusinessName: loaded.name,
       pages: websitePages,
       crawlCoverage: legacyCoverage,
+      crawlRun: legacyCrawlRun,
     });
+    if (legacyCrawlRun) {
+      loaded.onboardingValidation.crawlRun = {
+        ...legacyCrawlRun,
+        finalReadiness: {
+          status: loaded.onboardingValidation.status,
+          knowledgeReady: loaded.onboardingValidation.knowledgeReady,
+          readinessScore: loaded.onboardingValidation.readinessScore,
+          code: loaded.onboardingValidation.code,
+        },
+      };
+    }
   }
   // Businesses published by the previous timestamp-only implementation keep
   // their live state until the first explicit publish writes a snapshot.
@@ -8012,12 +8099,17 @@ function ownerExperienceInsightPayload(
   return { totalSignals, affectedSessions, topFriction, topSteps, headline, suggestedImprovement };
 }
 
-async function workspacePayload(business: Business) {
-  const workspaceOrganizationId = business.organizationId ?? await businessOrganizationId(business);
-  const conversations = [...business.conversations.values()];
-  const leadCount = business.leads.length;
-  const gapList = [...business.knowledgeGaps.values()];
-  const gapCount = gapList.filter((gap) => gap.status === "open").length;
+async function knowledgeReadinessForBusiness(business: Business): Promise<{
+  readySources: Source[];
+  sourceCount: number;
+  chunkCount: number;
+  meaningfulChunkCount: number;
+  contentQualityIssue: boolean;
+  pendingSourceCount: number;
+  failedSourceCount: number;
+  semantic: Awaited<ReturnType<typeof embeddingReadinessForBusiness>>;
+  readiness: ReturnType<typeof knowledgeReadinessSnapshot>;
+}> {
   const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
   const readySourceIds = new Set(readySources.map((source) => source.id));
   const sourceCount = readySources.length;
@@ -8025,24 +8117,34 @@ async function workspacePayload(business: Business) {
   const failedSourceCount = business.sources.filter((source) => source.crawlStatus === "failed").length;
   const chunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId)).length;
   const meaningfulChunkCount = business.chunks.filter((chunk) => readySourceIds.has(chunk.sourceId) && !isLowQualityWebChunk(business, chunk)).length;
-  const factConflicts = resolveBusinessFacts(business.facts, {}).conflicts;
   const contentQualityIssue = chunkCount > 0 && meaningfulChunkCount === 0;
   const semantic = await embeddingReadinessForBusiness(business);
-  const calculatedReadinessScore = sourceCount === 0
-    ? 0
-    : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (meaningfulChunkCount > 0 ? 30 : 0) + (semantic.status === "SEMANTIC_SEARCH_HEALTHY" && !contentQualityIssue ? 20 : 0) + Math.max(0, 10 - gapCount * 2)));
-  const readinessScore = Math.min(
-    calculatedReadinessScore,
-    business.onboardingValidation.knowledgeReady ? calculatedReadinessScore : Math.max(0, Math.min(100, business.onboardingValidation.readinessScore)),
-  );
-  const readinessStatus = sourceCount === 0
-    ? "needs_website"
-    : chunkCount === 0 || pendingSourceCount > 0
-      ? "indexing"
-      : contentQualityIssue || gapCount > 0 || failedSourceCount > 0
-        ? "review_recommended"
-        : "ready";
-  const onboardingNeedsAttention = business.onboardingValidation.status !== "valid" || !business.onboardingValidation.knowledgeReady;
+  const readiness = knowledgeReadinessSnapshot({
+    sourceCount,
+    chunkCount,
+    meaningfulChunkCount,
+    semanticHealthy: semantic.status === "SEMANTIC_SEARCH_HEALTHY",
+    gapCount: [...business.knowledgeGaps.values()].filter((gap) => gap.status === "open").length,
+    pendingSourceCount,
+    failedSourceCount,
+    contentQualityIssue,
+    onboarding: business.onboardingValidation,
+  });
+  return { readySources, sourceCount, chunkCount, meaningfulChunkCount, contentQualityIssue, pendingSourceCount, failedSourceCount, semantic, readiness };
+}
+
+async function workspacePayload(business: Business) {
+  const workspaceOrganizationId = business.organizationId ?? await businessOrganizationId(business);
+  const conversations = [...business.conversations.values()];
+  const leadCount = business.leads.length;
+  const gapList = [...business.knowledgeGaps.values()];
+  const gapCount = gapList.filter((gap) => gap.status === "open").length;
+  const readinessData = await knowledgeReadinessForBusiness(business);
+  const { readySources, sourceCount, chunkCount, meaningfulChunkCount, contentQualityIssue, pendingSourceCount, failedSourceCount, semantic, readiness } = readinessData;
+  const factConflicts = resolveBusinessFacts(business.facts, {}).conflicts;
+  const readinessScore = readiness.score;
+  const readinessStatus = readiness.status;
+  const onboardingNeedsAttention = readiness.onboardingNeedsAttention;
   const knowledgeStatus = sourceCount === 0 || chunkCount === 0 || pendingSourceCount > 0
     ? readinessStatus
     : contentQualityIssue || onboardingNeedsAttention
@@ -8180,7 +8282,7 @@ async function workspacePayload(business: Business) {
       verifiedQnaCount: business.qnas.filter((qna) => qna.status === "VERIFIED").length,
       conflictedQnaCount: business.qnas.filter((qna) => qna.status === "CONFLICTED").length,
       status: knowledgeStatus,
-      indexed: sourceCount > 0 && meaningfulChunkCount > 0,
+      indexed: readiness.indexed,
       semantic,
       sources: business.sources.map((source) => ({
         id: source.id,
@@ -8275,9 +8377,8 @@ async function teamWorkspacePayload(
     const conversation = lead.conversationId ? business.conversations.get(lead.conversationId) : null;
     return conversation?.assignedUserId === access.id;
   });
-  const readySources = business.sources.filter((source) => source.crawlStatus === "ready");
-  const pendingSources = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling");
-  const failedSources = business.sources.filter((source) => source.crawlStatus === "failed");
+  const readinessData = await knowledgeReadinessForBusiness(business);
+  const { readySources, chunkCount, meaningfulChunkCount, contentQualityIssue, pendingSourceCount, failedSourceCount, semantic, readiness } = readinessData;
   const today = new Date();
   const trend = Array.from({ length: 30 }, (_, index) => {
     const date = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (29 - index)));
@@ -8308,14 +8409,18 @@ async function teamWorkspacePayload(
     },
     branding: { colors: websiteBrandColors(business), source: "website" },
     suggestedQuestions: [],
+    onboarding: business.onboardingValidation,
     knowledge: {
       sourceCount: readySources.length,
-      chunkCount: business.chunks.length,
+      chunkCount,
+      meaningfulChunkCount,
+      contentQualityIssue,
       openGaps: 0,
-      pendingSources: pendingSources.length,
-      failedSources: failedSources.length,
-      status: failedSources.length ? "review_recommended" : pendingSources.length ? "indexing" : "ready",
-      indexed: readySources.length > 0 && business.chunks.length > 0,
+      pendingSources: pendingSourceCount,
+      failedSources: failedSourceCount,
+      status: readiness.status,
+      indexed: readiness.indexed,
+      semantic,
       sources: business.sources.map((source) => ({
         id: source.id,
         title: source.title,
@@ -8326,12 +8431,13 @@ async function teamWorkspacePayload(
         lastCrawledAt: source.lastCrawledAt,
       })),
       readiness: {
-        score: readySources.length > 0 && business.chunks.length > 0 ? 100 : 0,
+        score: readiness.score,
         sources: readySources.length,
-        chunks: business.chunks.length,
+        chunks: chunkCount,
+        meaningfulChunks: meaningfulChunkCount,
         openGaps: 0,
-        pendingSources: pendingSources.length,
-        failedSources: failedSources.length,
+        pendingSources: pendingSourceCount,
+        failedSources: failedSourceCount,
       },
     },
     stats: {
@@ -18033,6 +18139,26 @@ app.get("/api/v1/demo/:slug", async (request) => {
   return workspacePayload(business);
 });
 
+app.get("/api/v1/demo/:slug/knowledge/sources", async (request) => {
+  const params = request.params as { slug?: string };
+  const business = await getBusiness(params.slug);
+  const access = await requireBusinessTeamAccess(business, request, "viewer");
+  const payload = access.role === "staff" || access.role === "viewer"
+    ? await teamWorkspacePayload(business, access)
+    : await workspacePayload(business);
+  return {
+    sources: payload.knowledge.sources,
+    counts: {
+      websitePages: payload.knowledge.sources.filter((source) => source.contentType === "web_page").length,
+      readySources: payload.knowledge.sourceCount,
+      chunks: payload.knowledge.chunkCount,
+    },
+    coverage: payload.onboarding?.crawlCoverage ?? null,
+    crawlRun: payload.onboarding?.crawlRun ?? null,
+    readiness: payload.knowledge.readiness,
+  };
+});
+
 app.get("/api/v1/demo/:slug/website-preview", async (request) => {
   const params = request.params as { slug?: string };
   const business = await getBusiness(params.slug);
@@ -18081,6 +18207,8 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
   const source = business.sources.find((item) => item.id === sourceId);
   if (!source) throw httpError(404, "Knowledge source not found");
   if (source.contentType !== "web_page") throw httpError(400, "Uploaded documents cannot be re-crawled from their source URL");
+  const refreshStartedAt = new Date().toISOString();
+  app.log.info({ businessId: business.id, sourceId, seedUrl: business.websiteUrl, refreshStartedAt }, "Website knowledge refresh started");
   source.crawlStatus = "crawling";
   await persistBusiness(business);
   try {
@@ -18088,9 +18216,36 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
     await replaceWebsiteSources(business, crawled.pages);
     business.onboardingValidation = websiteValidationForCrawl(crawled, business.onboardingValidation.expectedBusinessName ?? business.name);
     await enqueueAndRunEmbeddingJob(business);
+    const finalReadiness = await knowledgeReadinessForBusiness(business);
+    business.onboardingValidation.readinessScore = finalReadiness.readiness.score;
+    if (business.onboardingValidation.crawlRun) {
+      business.onboardingValidation.crawlRun = {
+        ...business.onboardingValidation.crawlRun,
+        finalReadiness: {
+          status: business.onboardingValidation.status,
+          knowledgeReady: business.onboardingValidation.knowledgeReady,
+          readinessScore: finalReadiness.readiness.score,
+          code: business.onboardingValidation.code,
+        },
+      };
+    }
     await persistBusiness(business);
+    app.log.info({
+      businessId: business.id,
+      sourceId,
+      refreshStartedAt,
+      crawlRun: business.onboardingValidation.crawlRun ?? null,
+      finalReadiness: {
+        status: business.onboardingValidation.status,
+        knowledgeReady: business.onboardingValidation.knowledgeReady,
+        readinessScore: business.onboardingValidation.readinessScore,
+        code: business.onboardingValidation.code,
+      },
+      sourceCount: business.sources.filter((item) => item.contentType === "web_page").length,
+    }, "Website knowledge refresh persisted");
     return { status: business.onboardingValidation.status, validation: business.onboardingValidation, sourceCount: business.sources.filter((item) => item.contentType === "web_page").length };
   } catch (error) {
+    app.log.error({ businessId: business.id, sourceId, refreshStartedAt, error }, "Website knowledge refresh failed");
     const current = business.sources.find((item) => item.id === sourceId);
     if (current) {
       current.crawlStatus = "failed";
@@ -18279,6 +18434,7 @@ function supportCasePayload(row: Record<string, unknown>, events: Array<Record<s
 function supportDiagnosticsForBusiness(business: Business, sourcePage: string | null = null): Record<string, unknown> {
   const failedSources = business.sources.filter((source) => source.crawlStatus === "failed");
   const pendingSources = business.sources.filter((source) => source.crawlStatus === "queued" || source.crawlStatus === "crawling");
+  const crawlNeedsAttention = business.onboardingValidation.status !== "valid" || !business.onboardingValidation.knowledgeReady;
   const lastRefresh = business.sources
     .map((source) => Date.parse(source.lastCrawledAt))
     .filter((value) => Number.isFinite(value))
@@ -18289,7 +18445,9 @@ function supportDiagnosticsForBusiness(business: Business, sourcePage: string | 
     page: sourcePage ?? "Support",
     source: business.websiteUrl,
     lastRefresh: lastRefresh ? new Date(lastRefresh).toISOString() : null,
-    crawlerStatus: failedSources.length ? "render_failed" : pendingSources.length ? "refreshing" : "ready",
+    crawlerStatus: failedSources.length ? "render_failed" : pendingSources.length ? "refreshing" : crawlNeedsAttention ? "needs_attention" : "ready",
+    crawlCoverage: business.onboardingValidation.crawlCoverage ?? null,
+    crawlRun: business.onboardingValidation.crawlRun ?? null,
     failedSources: failedSources.slice(0, 5).map((source) => ({ url: source.url, error: source.errorMessage ?? null })),
     pendingSourceCount: pendingSources.length,
     integrationErrors: [],
@@ -18348,7 +18506,7 @@ app.get("/api/v1/demo/:slug/support", async (request) => {
       diagnostics: supportDiagnosticsForBusiness(business, sourcePage),
       systemStatus: {
         api: "operational",
-        knowledge: business.sources.some((source) => source.crawlStatus === "failed") ? "needs_attention" : "healthy",
+        knowledge: business.onboardingValidation.status !== "valid" || !business.onboardingValidation.knowledgeReady ? "needs_attention" : "healthy",
         widget: business.widget.loadCount > 0 ? "detected" : "not_detected",
         integrations: "available_on_request",
       },

@@ -9,7 +9,7 @@
     "dev": "npm --prefix apps/web run dev",
     "build": "npm --prefix apps/web run build",
     "api:dev": "npm --prefix apps/api run dev",
-    "release:gate": "npm test --prefix apps/api && npm run certification:pyramid --prefix apps/api && npm run build --prefix apps/api && npm run build"
+    "release:gate": "npm test --prefix apps/api && npm run crawler:certify --prefix apps/api && npm run certification:pyramid --prefix apps/api && npm run build --prefix apps/api && npm run build"
   }
 }
 

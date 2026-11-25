@@ -759,6 +759,7 @@ interface OnboardingValidation {
   signals: string[];
   crawlCoverage?: {
     discoveredUrls: number;
+    eligibleUrls: number;
     attemptedUrls: number;
     successfulPages: number;
     skippedUrls: number;
@@ -767,6 +768,28 @@ interface OnboardingValidation {
     coveragePercent: number;
     additionalPagesDetected: boolean;
     rejectionReasons: Record<string, number>;
+  };
+  crawlRun?: {
+    crawlRunId: string;
+    seedUrl: string;
+    startedAt: string;
+    completedAt: string | null;
+    discoveredUrls: number;
+    eligibleUrls: number;
+    attemptedUrls: number;
+    successfulPages: number;
+    failedUrls: number;
+    skippedUrls: number;
+    unprocessedUrls: number;
+    coveragePercent: number;
+    rejectionReasons: Record<string, number>;
+    routes: Array<{ url: string; finalUrl: string | null; status: number | null; fetchStrategy: string; accepted: boolean; failureReason: string | null }>;
+    legacyCodePathUsed: boolean;
+    backgroundWorkerUsed: boolean;
+    workerJobId: string | null;
+    maxPages: number;
+    maxDepth: number;
+    finalReadiness?: { status: string; knowledgeReady: boolean; readinessScore: number; code: string | null } | null;
   };
   checkedAt: string;
 }
@@ -782,7 +805,7 @@ interface WorkspacePayload {
   onboarding?: OnboardingValidation;
   publishing?: AgentPublishing;
   publishedAt?: string | null;
-  knowledge?: { sourceCount: number; chunkCount: number; openGaps: number; qnaCount?: number; verifiedQnaCount?: number; conflictedQnaCount?: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
+  knowledge?: { sourceCount: number; chunkCount: number; meaningfulChunkCount?: number; openGaps: number; qnaCount?: number; verifiedQnaCount?: number; conflictedQnaCount?: number; pendingSources?: number; failedSources?: number; status?: string; indexed?: boolean; semantic?: { status: string; retrievalMode: string; model: string; dimensions: number; totalChunks: number; embeddedChunks: number; pendingChunks: number; coveragePercent: number; providerStatus: string; providerReason: string | null }; sources?: WorkspaceSource[]; readiness?: { score: number; sources: number; chunks: number; meaningfulChunks?: number; embeddedChunks?: number; embeddingCoveragePercent?: number; semanticSearchStatus?: string; openGaps: number; pendingSources?: number; failedSources?: number } };
   workflowContext?: WorkflowBusinessContext;
   stats?: WorkspaceStats;
 }
@@ -2180,7 +2203,12 @@ const inboxAiCount = computed(() => inboxSummary.value.ai);
 const inboxResolvedCount = computed(() => inboxSummary.value.resolved);
 const inboxRangeStart = computed(() => inboxTotal.value ? ((inboxPage.value - 1) * inboxPageSize) + 1 : 0);
 const inboxRangeEnd = computed(() => Math.min(inboxTotal.value, inboxPage.value * inboxPageSize));
-const readinessScore = computed(() => workspaceReadiness.value);
+const readinessScore = computed(() => {
+  const score = workspaceReadiness.value;
+  const validation = workspaceOnboarding.value;
+  if (!validation || validation.knowledgeReady) return score;
+  return Math.min(score, Math.max(0, Math.min(100, validation.readinessScore)));
+});
 const semanticSearchHealthy = computed(() => workspaceKnowledge.value?.semantic?.status === "SEMANTIC_SEARCH_HEALTHY");
 const semanticSearchLabel = computed(() => semanticSearchHealthy.value ? "Semantic search ready" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_CONFIGURATION_ERROR" ? "Embedding configuration needs attention" : workspaceKnowledge.value?.semantic?.status === "EMBEDDING_BACKLOG" ? "Embeddings processing" : "Full-text fallback active");
 const knowledgeSourcesNeedAttention = computed(() => Boolean((workspaceKnowledge.value?.pendingSources ?? 0) + (workspaceKnowledge.value?.failedSources ?? 0)));
@@ -2279,6 +2307,7 @@ const knowledgeHealthLabel = computed(() => {
   if (!workspaceKnowledge.value || !knowledgeSourceRows.value.length) return "Add a website or document";
   if (knowledgeSourcesNeedAttention.value) return "Needs attention";
   if (knowledgeCoverageNeedsAttention.value) return "Partial knowledge";
+  if (onboardingNeedsAttention.value) return "Needs attention";
   if (workspaceKnowledge.value.status === "indexing") return "Updating knowledge";
   if (workspaceKnowledge.value.status === "review_recommended") return "Review recommended";
   return "Healthy";
@@ -3732,7 +3761,7 @@ function applyWorkspacePayload(payload: WorkspacePayload) {
   workspaceOnboarding.value = payload.onboarding ?? null;
   workflowContext.value = payload.workflowContext ?? null;
   workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
-  if (payload.business?.id && (payload.knowledge?.indexed === true || ((payload.knowledge?.sourceCount ?? 0) > 0 && (payload.knowledge?.pendingSources ?? 0) === 0))) {
+  if (payload.business?.id && payload.onboarding?.knowledgeReady === true && (payload.knowledge?.indexed === true || ((payload.knowledge?.sourceCount ?? 0) > 0 && (payload.knowledge?.pendingSources ?? 0) === 0))) {
     trackProductEventOnce(`business-brain-ready:${payload.business.id}`, MIXPANEL_EVENTS.BUSINESS_BRAIN_READY, {
       business_id: payload.business.id,
       readiness_score: payload.knowledge?.readiness?.score,
@@ -3799,6 +3828,7 @@ async function refreshWorkspaceSummary(globalLoading = true) {
     workspaceOrganizationId.value = payload.business?.organizationId ?? workspaceOrganizationId.value;
     workspaceStats.value = payload.stats ?? null;
     workspaceKnowledge.value = payload.knowledge ?? null;
+    workspaceOnboarding.value = payload.onboarding ?? workspaceOnboarding.value;
     workflowContext.value = payload.workflowContext ?? null;
     workspaceReadiness.value = payload.knowledge?.readiness?.score ?? 0;
   } catch {
@@ -6862,7 +6892,7 @@ function formatLabel(value: string): string {
 }
 
 function crawlReasonEntries(validation?: OnboardingValidation): Array<[string, number]> {
-  return Object.entries(validation?.crawlCoverage?.rejectionReasons ?? {})
+  return Object.entries(validation?.crawlRun?.rejectionReasons ?? validation?.crawlCoverage?.rejectionReasons ?? {})
     .filter(([, count]) => Number(count) > 0)
     .sort((left, right) => Number(right[1]) - Number(left[1]));
 }
@@ -9607,7 +9637,7 @@ function startMarketingDemo() {
 
             <section v-else class="knowledge-tab-content" aria-labelledby="knowledge-quality-heading">
               <div class="knowledge-section-heading"><div><p class="eyebrow">Answer quality</p><h2 id="knowledge-quality-heading">Recent answer checks</h2><p>Only real knowledge interactions appear here. Greetings, handoff events, and waiting-for-staff messages stay out.</p></div><span class="knowledge-count-note">{{ knowledgeQualityTotal }} checks · {{ knowledgeQualityRangeLabel }}</span></div>
-              <div v-if="knowledgeCoverage" class="knowledge-crawl-diagnostics"><div><p class="eyebrow">Website crawl coverage</p><strong>{{ knowledgeCoverage.successfulPages }} captured of {{ knowledgeCoverage.discoveredUrls }} discovered</strong><small>{{ knowledgeCoverage.attemptedUrls }} attempted · {{ knowledgeCoverage.skippedUrls }} skipped · {{ knowledgeCoverage.failedUrls }} failed · {{ knowledgeCoverage.coveragePercent }}% eligible coverage</small></div><div v-if="crawlReasonEntries(workspaceOnboarding ?? undefined).length" class="crawl-reason-list"><span v-for="([reason, count]) in crawlReasonEntries(workspaceOnboarding ?? undefined)" :key="reason">{{ formatLabel(reason) }} <strong>{{ count }}</strong></span></div></div>
+              <div v-if="knowledgeCoverage" class="knowledge-crawl-diagnostics"><div><p class="eyebrow">Website crawl coverage</p><strong>{{ knowledgeCoverage.successfulPages }} captured of {{ knowledgeCoverage.discoveredUrls }} discovered</strong><small>{{ knowledgeCoverage.attemptedUrls }} attempted · {{ knowledgeCoverage.skippedUrls }} skipped · {{ knowledgeCoverage.failedUrls }} failed · {{ knowledgeCoverage.coveragePercent }}% eligible coverage</small><small v-if="workspaceOnboarding?.crawlRun">Run {{ workspaceOnboarding.crawlRun.crawlRunId }} · {{ workspaceOnboarding.crawlRun.legacyCodePathUsed ? 'legacy discovery path' : workspaceOnboarding.crawlRun.backgroundWorkerUsed ? `worker ${workspaceOnboarding.crawlRun.workerJobId || 'used'}` : 'synchronous API crawl' }} · limit {{ workspaceOnboarding.crawlRun.maxPages }} pages / depth {{ workspaceOnboarding.crawlRun.maxDepth }}</small></div><div v-if="crawlReasonEntries(workspaceOnboarding ?? undefined).length" class="crawl-reason-list"><span v-for="([reason, count]) in crawlReasonEntries(workspaceOnboarding ?? undefined)" :key="reason">{{ formatLabel(reason) }} <strong>{{ count }}</strong></span></div></div>
               <div v-if="knowledgeQnaAttention.length" class="knowledge-warning-row knowledge-qna-warning-list"><span class="knowledge-warning-icon">!</span><span><strong>{{ knowledgeQnaAttention.length }} Q&amp;A item{{ knowledgeQnaAttention.length === 1 ? '' : 's' }} need review</strong><small>Conflicted or stale answers are excluded from trusted runtime matching.</small></span><button class="text-button" type="button" @click="knowledgeTab = 'qna'">Review Q&amp;A →</button></div>
               <div class="knowledge-quality-toolbar"><label>Search<input v-model="knowledgeQualitySearch" type="search" placeholder="Question or answer…" @input="queueKnowledgeQualitySearch" /></label><label>Date range<select v-model="knowledgeQualityRange" @change="applyKnowledgeQualityFilters"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All time</option></select></label><div class="knowledge-filter-group knowledge-quality-filters" role="group" aria-label="Answer quality filters"><button type="button" :class="{ active: knowledgeQualityFilter === 'all' }" @click="knowledgeQualityFilter = 'all'; applyKnowledgeQualityFilters()">All</button><button type="button" :class="{ active: knowledgeQualityFilter === 'grounded' }" @click="knowledgeQualityFilter = 'grounded'; applyKnowledgeQualityFilters()">Grounded</button><button type="button" :class="{ active: knowledgeQualityFilter === 'fallback' }" @click="knowledgeQualityFilter = 'fallback'; applyKnowledgeQualityFilters()">Fallback</button><button type="button" :class="{ active: knowledgeQualityFilter === 'needsReview' }" @click="knowledgeQualityFilter = 'needsReview'; applyKnowledgeQualityFilters()">Needs review</button></div></div>
               <div class="knowledge-quality-table" role="table" aria-label="Recent answer checks"><div class="knowledge-quality-table-head" role="row"><span>Question</span><span>Confidence</span><span>Outcome</span><span>Sources</span><span>Time</span></div><div v-if="knowledgeQualityLoading" class="knowledge-empty-row">Loading answer checks…</div><div v-else-if="!visibleRetrievalDiagnostics.length" class="knowledge-empty-row">No answer checks match this filter.</div><div v-for="diagnostic in visibleRetrievalDiagnostics" :key="`${diagnostic.conversationId}-${diagnostic.createdAt}`" class="knowledge-quality-table-row" role="row"><div><strong>{{ diagnostic.question }}</strong><small>{{ diagnostic.answer }}</small></div><span :class="['status-pill', diagnostic.confidenceBand === 'high' ? 'booked' : diagnostic.confidenceBand === 'medium' ? 'qualified' : 'new']">{{ Math.round(diagnostic.confidenceScore * 100) }}%</span><span :class="['status-pill', diagnostic.grounded ? 'booked' : 'new']">{{ diagnostic.grounded ? 'Grounded' : 'Fallback' }}</span><span class="knowledge-source-meta">{{ diagnostic.citations?.length ?? 0 }} source{{ (diagnostic.citations?.length ?? 0) === 1 ? '' : 's' }}</span><span class="knowledge-source-meta">{{ formatKnowledgeRelativeTime(diagnostic.createdAt) }}</span></div><div v-if="knowledgeQualityTotal" class="collection-pagination"><span>Showing {{ knowledgeQualityRangeStart }}–{{ knowledgeQualityRangeEnd }} of {{ knowledgeQualityTotal }}</span><div><button class="outline-button small" type="button" :disabled="knowledgeQualityLoading || !knowledgeQualityHasPrevious" @click="changeKnowledgeQualityPage(knowledgeQualityPage - 1)">Previous</button><button class="outline-button small" type="button" :disabled="knowledgeQualityLoading || !knowledgeQualityHasNext" @click="changeKnowledgeQualityPage(knowledgeQualityPage + 1)">Next</button></div></div></div>
@@ -9968,7 +9998,7 @@ function startMarketingDemo() {
             <div class="health-list"><div><span>Failure classification</span><strong>{{ adminBusinessDetail.business.onboardingFailureCode || 'Not recorded' }}</strong></div><div><span>Readiness</span><strong>{{ adminBusinessDetail.business.onboardingValidation?.knowledgeReady ? 'Ready' : 'Needs attention' }}</strong></div><div><span>Last checked</span><strong>{{ adminBusinessDetail.business.onboardingValidatedAt ? new Date(adminBusinessDetail.business.onboardingValidatedAt).toLocaleString() : 'Not recorded' }}</strong></div></div>
             <div v-if="adminBusinessDetail.business.onboardingValidation?.crawlCoverage" class="detail-subsection admin-crawl-diagnostics">
               <p class="eyebrow">Crawl diagnostics</p>
-              <div class="health-list"><div><span>Discovered URLs</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.discoveredUrls }}</strong></div><div><span>Attempted</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.attemptedUrls }}</strong></div><div><span>Successful pages</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.successfulPages }}</strong></div><div><span>Coverage</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.coveragePercent }}%</strong></div><div><span>Skipped</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.skippedUrls }}</strong></div><div><span>Failed</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.failedUrls }}</strong></div></div>
+              <div class="health-list"><div><span>Discovered URLs</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.discoveredUrls }}</strong></div><div><span>Eligible URLs</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.eligibleUrls }}</strong></div><div><span>Attempted</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.attemptedUrls }}</strong></div><div><span>Successful pages</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.successfulPages }}</strong></div><div><span>Coverage</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.coveragePercent }}%</strong></div><div><span>Skipped</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.skippedUrls }}</strong></div><div><span>Failed</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlCoverage.failedUrls }}</strong></div><div v-if="adminBusinessDetail.business.onboardingValidation.crawlRun"><span>Run / path</span><strong>{{ adminBusinessDetail.business.onboardingValidation.crawlRun.crawlRunId }} · {{ adminBusinessDetail.business.onboardingValidation.crawlRun.legacyCodePathUsed ? 'legacy' : 'current' }}</strong></div></div>
               <div v-if="crawlReasonEntries(adminBusinessDetail.business.onboardingValidation).length" class="crawl-reason-list"><span v-for="([reason, count]) in crawlReasonEntries(adminBusinessDetail.business.onboardingValidation)" :key="reason">{{ formatLabel(reason) }} <strong>{{ count }}</strong></span></div>
               <p v-if="adminBusinessDetail.business.onboardingValidation.crawlCoverage.additionalPagesDetected && (adminBusinessDetail.business.onboardingValidation.crawlCoverage.unprocessedUrls > 0 || adminBusinessDetail.business.onboardingValidation.crawlCoverage.failedUrls > 0)" class="form-help">Additional public pages were detected but are not all indexed yet.</p>
             </div>

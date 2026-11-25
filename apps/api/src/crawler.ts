@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { classifyPage, crawlPriority, type PageType } from "./page-classification.js";
@@ -91,7 +91,17 @@ export type CrawlRejection = {
   contentType?: string | null;
 };
 
+export type CrawlFetchStrategy = "static" | "rendered" | "static_then_rendered";
+
 export type CrawlAudit = {
+  crawlRunId: string;
+  startedAt: string;
+  completedAt: string | null;
+  maxPages: number;
+  maxDepth: number;
+  legacyCodePathUsed: boolean;
+  backgroundWorkerUsed: boolean;
+  workerJobId: string | null;
   initialUrl: string;
   finalCanonicalUrl: string | null;
   responseStatus: number | null;
@@ -130,6 +140,7 @@ export type CrawlAudit = {
     status: number;
     contentType: string;
     crawlMode: "static" | "rendered";
+    fetchStrategy: CrawlFetchStrategy;
     renderAttempted: boolean;
     renderSuccess: boolean;
     renderDurationMs: number | null;
@@ -156,6 +167,7 @@ export type CrawlAudit = {
 
 export type CrawlCoverage = {
   discoveredUrls: number;
+  eligibleUrls: number;
   attemptedUrls: number;
   successfulPages: number;
   skippedUrls: number;
@@ -164,6 +176,41 @@ export type CrawlCoverage = {
   coveragePercent: number;
   additionalPagesDetected: boolean;
   rejectionReasons: Record<string, number>;
+};
+
+export type CrawlRunDiagnostics = {
+  crawlRunId: string;
+  seedUrl: string;
+  startedAt: string;
+  completedAt: string | null;
+  discoveredUrls: number;
+  eligibleUrls: number;
+  attemptedUrls: number;
+  successfulPages: number;
+  failedUrls: number;
+  skippedUrls: number;
+  unprocessedUrls: number;
+  coveragePercent: number;
+  rejectionReasons: Record<string, number>;
+  routes: Array<{
+    url: string;
+    finalUrl: string | null;
+    status: number | null;
+    fetchStrategy: CrawlFetchStrategy | null;
+    accepted: boolean;
+    failureReason: string | null;
+  }>;
+  legacyCodePathUsed: boolean;
+  backgroundWorkerUsed: boolean;
+  workerJobId: string | null;
+  maxPages: number;
+  maxDepth: number;
+  finalReadiness?: {
+    status: "valid" | "needs_attention";
+    knowledgeReady: boolean;
+    readinessScore: number;
+    code: OnboardingFailureCode | null;
+  } | null;
 };
 
 export type RenderDiagnostics = {
@@ -349,6 +396,7 @@ function normalizeCrawlUrl(value: string, base?: string): string {
 
 function crawlExclusionReason(candidate: URL): string | null {
   const path = candidate.pathname.toLowerCase();
+  if (/(^|\/)(login|logout|signin|sign-in|account|admin)(\/|$)/.test(path)) return "excluded_route";
   if (/(^|\/)(search|results|directory|listings?)(\/|$)/.test(path)) return "dynamic_listing";
   const dynamicQuery = [...candidate.searchParams.keys()].some((key) => /^(page|page_num|offset|limit|sort|filter|query|q|location|lat|lng)$/i.test(key));
   return dynamicQuery ? "dynamic_listing" : null;
@@ -667,6 +715,7 @@ function isFailedCrawlReason(reason: string): boolean {
 function isIntentionalSkipReason(reason: string): boolean {
   return reason === "duplicate_canonical"
     || reason === "duplicate_content"
+    || reason === "excluded_route"
     || reason === "low_value_page_type"
     || reason === "dynamic_listing";
 }
@@ -683,15 +732,23 @@ export function summarizeCrawlCoverage(audit: CrawlAudit): CrawlCoverage {
     reasons.add(rejection.reason);
     rejected.set(rejection.url, reasons);
   }
+  const skippedUrlSet = new Set([...rejected.entries()]
+    .filter(([, reasons]) => [...reasons].every(isIntentionalSkipReason))
+    .map(([url]) => url));
   const failedUrls = [...rejected.values()].filter((reasons) => [...reasons].some(isFailedCrawlReason)).length;
-  const skippedUrls = [...rejected.values()].filter((reasons) => [...reasons].every(isIntentionalSkipReason)).length;
+  const skippedUrls = skippedUrlSet.size;
   const discoveredUrls = discovered.size;
   const successfulPages = audit.pages.length;
-  const attemptedUrls = attempted.size;
+  // Coverage counts attempts against eligible URLs. URLs intentionally
+  // excluded by policy may still appear in the raw audit if the exclusion was
+  // discovered after a fetch (for example, a duplicate canonical page), but
+  // they must not inflate the eligible-attempt denominator.
+  const attemptedUrls = [...attempted].filter((url) => !skippedUrlSet.has(url)).length;
   const unprocessedUrls = Math.max(0, discoveredUrls - attemptedUrls - skippedUrls);
   const eligibleUrls = Math.max(1, discoveredUrls - skippedUrls);
   return {
     discoveredUrls,
+    eligibleUrls,
     attemptedUrls,
     successfulPages,
     skippedUrls,
@@ -700,6 +757,56 @@ export function summarizeCrawlCoverage(audit: CrawlAudit): CrawlCoverage {
     coveragePercent: Math.round((successfulPages / eligibleUrls) * 100),
     additionalPagesDetected: discoveredUrls > 1,
     rejectionReasons: { ...audit.rejectionReasons },
+  };
+}
+
+export function crawlRunDiagnostics(
+  audit: CrawlAudit,
+  coverage: CrawlCoverage = summarizeCrawlCoverage(audit),
+  finalReadiness?: CrawlRunDiagnostics["finalReadiness"],
+): CrawlRunDiagnostics {
+  const routeDiagnostics: CrawlRunDiagnostics["routes"] = audit.routes.map((route) => ({
+    url: route.requestedUrl,
+    finalUrl: route.finalUrl || null,
+    status: Number.isFinite(route.status) ? route.status : null,
+    fetchStrategy: route.fetchStrategy ?? null,
+    accepted: route.accepted,
+    failureReason: route.rejectionReason,
+  }));
+  const knownRouteUrls = new Set(routeDiagnostics.map((route) => route.url));
+  for (const rejection of audit.rejectedInternalLinks) {
+    if (knownRouteUrls.has(rejection.url)) continue;
+    knownRouteUrls.add(rejection.url);
+    routeDiagnostics.push({
+      url: rejection.url,
+      finalUrl: null,
+      status: rejection.status ?? null,
+      fetchStrategy: null,
+      accepted: false,
+      failureReason: rejection.reason,
+    });
+  }
+  return {
+    crawlRunId: audit.crawlRunId,
+    seedUrl: audit.initialUrl,
+    startedAt: audit.startedAt,
+    completedAt: audit.completedAt,
+    discoveredUrls: coverage.discoveredUrls,
+    eligibleUrls: coverage.eligibleUrls,
+    attemptedUrls: coverage.attemptedUrls,
+    successfulPages: coverage.successfulPages,
+    failedUrls: coverage.failedUrls,
+    skippedUrls: coverage.skippedUrls,
+    unprocessedUrls: coverage.unprocessedUrls,
+    coveragePercent: coverage.coveragePercent,
+    rejectionReasons: { ...coverage.rejectionReasons },
+    routes: routeDiagnostics,
+    legacyCodePathUsed: audit.legacyCodePathUsed,
+    backgroundWorkerUsed: audit.backgroundWorkerUsed,
+    workerJobId: audit.workerJobId,
+    maxPages: audit.maxPages,
+    maxDepth: audit.maxDepth,
+    ...(finalReadiness ? { finalReadiness } : {}),
   };
 }
 
@@ -719,6 +826,14 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
   let robotsText = "";
   let rootFailureCode: OnboardingFailureCode | null = null;
   const audit: CrawlAudit = {
+    crawlRunId: randomUUID(),
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    maxPages,
+    maxDepth,
+    legacyCodePathUsed: false,
+    backgroundWorkerUsed: false,
+    workerJobId: null,
     initialUrl,
     finalCanonicalUrl: null,
     responseStatus: null,
@@ -883,6 +998,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     let renderedPageUsed = false;
     let renderAttempted = false;
     let renderSuccess = false;
+    let fetchStrategy: CrawlFetchStrategy = "static";
     let renderDurationMs: number | null = null;
     let renderDiagnostics: RenderDiagnostics | null = null;
     if (next.depth === 0) {
@@ -891,6 +1007,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     }
 
     if (isClientRenderedShell(shellIndicators) && options.renderPage) {
+      fetchStrategy = "static_then_rendered";
       audit.renderedCrawl.attempted = true;
       renderAttempted = true;
       const renderStartedAt = Date.now();
@@ -949,6 +1066,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
       status,
       contentType,
       crawlMode: renderedPageUsed ? "rendered" as const : "static" as const,
+      fetchStrategy,
       renderAttempted,
       renderSuccess,
       renderDurationMs,
@@ -1035,6 +1153,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     }
   }
 
+  audit.completedAt = new Date().toISOString();
   if (!pages.length) {
     const renderFailure = audit.renderedCrawl.reason;
     const code = failureCodeForAudit(audit, rootFailureCode);
