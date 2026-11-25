@@ -71,8 +71,8 @@ test("DaycareSpots-style multi-page fixture follows public internal links", asyn
   const originalFetch = globalThis.fetch;
   const pages: Record<string, string> = {
     "/": `<html><head><title>DaycareSpots</title></head><body><header><nav>
-      <a href="/ourprocess/daycare">Our Process</a><a href="/registration">Registration</a><a href="/contact">Contact</a>
-      <a href="/blogs">Blogs</a><a href="/terms">Terms</a><a href="/parent">Parents</a><a href="/login">Login</a><a href="/search?page=2">Search results</a>
+      <a href="/ourprocess/daycare">Our Process</a><a href="example.com/ourprocess/daycare">Our Process (host-like href)</a><a href="/registration">Registration</a><a href="/contact">Contact</a>
+      <a href="/blogs">Blogs</a><a href="/terms">Terms</a><a href="/parent">Parents</a><a href="/login">Login</a><a href="/register?para=login">Login query</a><a href="/search?page=2">Search results</a>
     </nav></header><main><h1>Find your next daycare spot with DaycareSpots</h1><p>DaycareSpots helps parents find quality childcare and helps providers connect with families. Contact our team to learn more.</p></main></body></html>`,
     "/ourprocess/daycare": `<html><head><title>Daycare provider process | DaycareSpots</title></head><body><main><h1>Daycare provider process</h1><p>Providers can claim their daycare, build visibility, connect with families, and grow their childcare business with DaycareSpots.</p></main></body></html>`,
     "/registration": `<html><head><title>Registration | DaycareSpots</title></head><body><main><h1>Registration</h1><p>Parents can register for a daycare tour and share their care needs with a provider through our public registration process.</p></main></body></html>`,
@@ -101,10 +101,14 @@ test("DaycareSpots-style multi-page fixture follows public internal links", asyn
     assert.ok(result.pages.some((page) => page.url.endsWith("/ourprocess/daycare")));
     assert.ok(result.pages.some((page) => page.url.endsWith("/registration")), "public registration content should not be classified as an account route");
     assert.ok(!result.pages.some((page) => page.url.endsWith("/login")), "authenticated account routes should stay out of knowledge");
-    assert.equal(coverage.discoveredUrls, 9);
+    assert.ok(
+      result.audit.rejectedInternalLinks.some((rejection) => rejection.url.includes("/register?para=login") && rejection.reason === "excluded_route"),
+      "login intent in a registration route query must stay out of knowledge",
+    );
+    assert.equal(coverage.discoveredUrls, 10);
     assert.equal(coverage.eligibleUrls, 7);
     assert.equal(coverage.successfulPages, 7);
-    assert.equal(coverage.skippedUrls, 2);
+    assert.equal(coverage.skippedUrls, 3);
     assert.ok(coverage.successfulPages <= coverage.attemptedUrls);
     assert.ok(coverage.attemptedUrls <= coverage.eligibleUrls);
     assert.equal(result.audit.legacyCodePathUsed, false);
@@ -127,6 +131,32 @@ test("DaycareSpots-style multi-page fixture follows public internal links", asyn
     assert.ok(seedOnlyCoverage.attemptedUrls <= seedOnlyCoverage.eligibleUrls);
     assert.equal(seedOnlyCoverage.unprocessedUrls, 6);
     assert.equal(seedOnly.audit.failureCode, "CRAWL_PARTIAL");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("crawler rejects soft-404 documents served with HTTP 200", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/") {
+      return new Response('<html><head><title>Example</title></head><body><a href="/missing">Missing page</a><h1>Example</h1><p>Useful public business information and contact details.</p></body></html>', { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    return new Response('<html><head><title>404-Page Not Found</title></head><body><h1>Page Not Found</h1><p>The requested page was not found.</p></body></html>', { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+  }) as typeof fetch;
+  try {
+    const result = await crawlWebsite("https://example.com", {
+      maxPages: 5,
+      maxDepth: 1,
+      validateUrl: async (value) => new URL(value),
+    });
+    const coverage = summarizeCrawlCoverage(result.audit);
+    assert.equal(result.pages.length, 1);
+    assert.equal(result.audit.routes.find((route) => route.requestedUrl.endsWith("/missing"))?.rejectionReason, "not_found_page");
+    assert.equal(coverage.failedUrls, 1);
+    assert.equal(coverage.coveragePercent, 50);
+    assert.equal(result.audit.failureCode, "CRAWL_PARTIAL");
   } finally {
     globalThis.fetch = originalFetch;
   }

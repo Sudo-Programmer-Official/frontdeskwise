@@ -384,7 +384,11 @@ export function websiteIdentityKey(value: unknown): string {
 
 function normalizeCrawlUrl(value: string, base?: string): string {
   const url = new URL(value, base);
-  url.hostname = url.hostname.replace(/^www\./i, "");
+  // Preserve the site's preferred host for the actual fetch. Some legacy
+  // sites serve valid routes on www but redirect the bare host into a broken
+  // path such as /example.com/about. Same-domain comparisons still treat
+  // www and the bare host as equivalent.
+  url.hostname = url.hostname.toLowerCase();
   url.hash = "";
   for (const key of [...url.searchParams.keys()]) {
     if (/^(utm_|fbclid$|gclid$|gbraid$|wbraid$|dclid$|msclkid$|mc_cid$|mc_eid$)/i.test(key)) url.searchParams.delete(key);
@@ -394,9 +398,32 @@ function normalizeCrawlUrl(value: string, base?: string): string {
   return url.toString();
 }
 
+function resolveCrawlLink(value: string, baseUrl: string): URL {
+  const raw = value.trim();
+  // A surprising number of older sites emit `example.com/path` as a
+  // protocol-relative-looking relative href. URL() otherwise turns that into
+  // `/example.com/path`, which can create a crawl of a site's own soft-404
+  // pages. Treat an obvious host-like value as an absolute HTTPS URL.
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(raw) && /^(?:\/\/)?(?:www\.)?[a-z\d](?:[a-z\d.-]*[a-z\d])?\.[a-z]{2,}(?=\/|$)/i.test(raw)) {
+    return new URL(`https://${raw.replace(/^\/\//, "")}`);
+  }
+  return new URL(raw, baseUrl);
+}
+
+function routeLooksLikeNotFound(title: string, text: string): boolean {
+  const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalizedText = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return /^(?:404|404 page|page not found|not found)(?: page)?$/.test(normalizedTitle)
+    || /\b(?:404 page not found|page not found)\b/.test(normalizedText.slice(0, 600));
+}
+
 function crawlExclusionReason(candidate: URL): string | null {
   const path = candidate.pathname.toLowerCase();
   if (/(^|\/)(login|logout|signin|sign-in|account|admin)(\/|$)/.test(path)) return "excluded_route";
+  const authQuery = [...candidate.searchParams.entries()].some(([key, value]) =>
+    /^(action|is_login|mode|para|view)$/i.test(key) && /^(1|true|yes|login|logout|signin|sign-in)$/i.test(value),
+  );
+  if (authQuery) return "excluded_route";
   if (/(^|\/)(search|results|directory|listings?)(\/|$)/.test(path)) return "dynamic_listing";
   const dynamicQuery = [...candidate.searchParams.keys()].some((key) => /^(page|page_num|offset|limit|sort|filter|query|q|location|lat|lng)$/i.test(key));
   return dynamicQuery ? "dynamic_listing" : null;
@@ -707,6 +734,7 @@ function isFailedCrawlReason(reason: string): boolean {
     || reason === "client_rendered_shell"
     || reason === "redirected_cross_origin"
     || reason === "invalid_final_url"
+    || reason === "not_found_page"
     || reason === "insufficient_visible_text"
     || reason === "non_html_content_type"
     || /^http_\d+$/.test(reason);
@@ -870,7 +898,9 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
   const addInternalUrl = (value: string, depth: number, discoveryParentUrl: string | null = null): void => {
     let normalized: string;
     try {
-      normalized = normalizeCrawlUrl(value);
+      const candidateUrl = resolveCrawlLink(value, root.toString());
+      if (sameSite(candidateUrl, root)) candidateUrl.hostname = root.hostname;
+      normalized = normalizeCrawlUrl(candidateUrl.toString());
     } catch {
       return;
     }
@@ -1053,7 +1083,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     const readable = extracted.visibleText.trim();
     const discoveredLinks = [...new Set(extracted.links.flatMap((href) => {
       try {
-        const candidate = new URL(href, responseUrl);
+        const candidate = resolveCrawlLink(href, responseUrl);
         return sameSite(candidate, root) ? [normalizeCrawlUrl(candidate.toString())] : [];
       } catch {
         return [];
@@ -1088,6 +1118,8 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
       rejectRoute("render_failed");
     } else if (isClientRenderedShell(shellIndicators)) {
       rejectRoute("rendered_content_empty");
+    } else if (routeLooksLikeNotFound(extracted.title, readable)) {
+      rejectRoute("not_found_page");
     } else if (readable.length < 40) {
       rejectRoute("insufficient_visible_text");
     } else {
@@ -1143,8 +1175,9 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     if (next.depth < maxDepth) {
       for (const href of extracted.links) {
         try {
-          const candidate = new URL(href, responseUrl);
+          const candidate = resolveCrawlLink(href, responseUrl);
           if (!sameSite(candidate, root)) continue;
+          if (sameSite(candidate, root)) candidate.hostname = root.hostname;
           addInternalUrl(candidate.toString(), next.depth + 1, responseUrl);
         } catch {
           // Ignore malformed or non-URL links.

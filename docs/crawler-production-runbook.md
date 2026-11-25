@@ -20,6 +20,15 @@ POST /api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl
   -> workspace and Sources responses
 ```
 
+The current production failure mode is not a seed-only fetch loop. A legacy
+site can expose many links whose shared navigation contains words like
+"create account". The page classifier must not use that body copy to classify
+the whole page as `account`, or the crawler will mark useful pages as
+`low_value_page_type` and report them as intentional skips. The crawler also
+preserves the site's preferred `www` host, repairs obvious host-like relative
+links, rejects HTTP-200 soft-404 documents, and excludes login intent encoded
+in query parameters.
+
 The crawl is currently synchronous in the API process. Render has one API web
 service and there is no separate website-crawl queue or worker. Crawl
 diagnostics therefore record `backgroundWorkerUsed: false` and
@@ -69,3 +78,24 @@ synchronous; a separate worker or queue cannot explain a missing crawl result.
 For the DaycareSpots fixture, a seed-only result must remain `Partial knowledge`
 or `Needs attention`; it must never be `Healthy / 100% ready` while additional
 eligible public pages remain unprocessed.
+
+## DaycareSpots production evidence
+
+Before the classifier/link fixes, the live site reproduced this audit:
+
+```text
+discovered 93 · eligible 1 · attempted 1 · successful 1 · skipped 92
+rejection reasons: excluded_route 32 · low_value_page_type 91
+```
+
+With the corrected crawler against the live `www.daycarespots.com` origin, the
+same site produced:
+
+```text
+discovered 63 · eligible 26 · attempted 21 · successful 20
+failed 1 · unprocessed 5 · coverage 77%
+```
+
+That is intentionally `Partial knowledge`/`Needs attention` at the current
+20-page, depth-2 production bound. It is not `Healthy / 100% ready`, and it
+does not require a crawl worker or queue.

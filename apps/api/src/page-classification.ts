@@ -24,28 +24,47 @@ function normalized(value: string): string {
 /** Classifies a page from stable URL/title/content signals. This is a prior for
  * crawl ordering and source weighting, not an answerability decision. */
 export function classifyPage(url: string, title = "", text = ""): PageType {
-  const value = normalized(`${url} ${title} ${text.slice(0, 4_000)}`);
+  const contentValue = normalized(text.slice(0, 4_000));
+  const titleValue = normalized(title);
   const pathname = (() => {
     try { return new URL(url).pathname.toLowerCase(); } catch { return url.toLowerCase(); }
   })();
 
-  if (/cart|basket|shopping-cart|(?:^|\/)shop(?:\/|$)|(?:^|\/)store(?:\/|$)/.test(pathname) || /\b(cart|shopping cart|basket)\b/.test(value)) return "cart";
-  if (/checkout|payment|order-confirmation/.test(pathname) || /\b(checkout|payment details|order confirmation)\b/.test(value)) return "checkout";
+  // Low-value routes must be identified from the route/title, not arbitrary
+  // body text. Shared headers and footers commonly contain words such as
+  // "create account", "cart", or "checkout" on otherwise useful pages.
+  if (/cart|basket|shopping-cart|(?:^|\/)shop(?:\/|$)|(?:^|\/)store(?:\/|$)/.test(pathname) || /\b(cart|shopping cart|basket)\b/.test(titleValue)) return "cart";
+  if (/checkout|payment|order-confirmation/.test(pathname) || /\b(checkout|payment details|order confirmation)\b/.test(titleValue)) return "checkout";
   // Registration/enrollment pages usually explain the business process and
   // belong in knowledge. Keep only authenticated account surfaces out of the
   // crawl so a public /register page is not silently discarded.
-  if (/account|login|signin|sign-in|my-account|parent-portal/.test(pathname) || /\b(log in|login|sign in|create account|parent portal|my account)\b/.test(value)) return "account";
-  if (/emergency|urgent|24[- ]?7/.test(value) || /emergency|urgent/.test(pathname)) return "emergency";
-  if (/demo|request-a-demo|book-a-demo/.test(pathname) || /\b(request|book|schedule)\s+(a\s+)?demo\b/.test(value)) return "demo";
+  if (/account|login|signin|sign-in|my-account|parent-portal/.test(pathname) || /\b(log in|login|sign in|parent portal|my account)\b/.test(titleValue)) return "account";
+  // Prefer route and title identity over body copy. Headers, footers, and
+  // shared calls to action otherwise make an About, Contact, or policy page
+  // look like a booking/account page.
+  if (/emergency|urgent|24[- ]?7/.test(pathname) || /\b(emergency|urgent|24 7)\b/.test(titleValue)) return "emergency";
+  if (/demo|request-a-demo|book-a-demo/.test(pathname) || /\b(request|book|schedule)\s+(a\s+)?demo\b/.test(titleValue)) return "demo";
   if (/book|booking|appointment|schedule|reservation|reserve|enroll|enrollment|register|tour|waitlist|wait-list/.test(pathname)
-    || /\b(schedule|book|reserve|enroll|register|join the waitlist|schedule a tour)\b/.test(value)) return "booking";
-  if (/price|pricing|cost|rates?|fees?|plans?/.test(pathname) || /\b(price|pricing|cost|rates?|fees?|plans?)\b/.test(value)) return "pricing";
-  if (/faq|frequently-asked|questions/.test(pathname) || /\bfrequently asked questions?\b|\bfaq\b/.test(value)) return "faq";
-  if (/privacy|terms|policy|legal|cookie|cancellation|refund/.test(pathname) || /\b(privacy|terms of service|legal|cookie policy|cancellation policy)\b/.test(value)) return "policy";
-  if (/contact|locations?|hours|directions|about|visit/.test(pathname) || /\b(contact us|locations?|office hours|opening hours|directions|visit us)\b/.test(value)) return "contact";
-  if (/blog|news|article|insight|post\//.test(pathname) || /\b(blog|news|article|insight)\b/.test(value)) return "blog";
-  if (/service|solution|product|feature|program|class|treatment|repair|installation|maintenance|play|membership/.test(pathname)
-    || /\b(services?|solutions?|products?|features?|programs?|classes?|treatments?|repairs?|maintenance)\b/.test(value)) return "service";
+    || /\b(schedule|book|reserve|enroll|register|join the waitlist|schedule a tour)\b/.test(titleValue)) return "booking";
+  if (/price|pricing|cost|rates?|fees?|plans?/.test(pathname) || /\b(price|pricing|cost|rates?|fees?|plans?)\b/.test(titleValue)) return "pricing";
+  if (/faq|frequently-asked|questions/.test(pathname) || /\bfrequently asked questions?\b|\bfaq\b/.test(titleValue)) return "faq";
+  if (/privacy|terms|policy|legal|cookie|cancellation|refund/.test(pathname) || /\b(privacy|terms of service|legal|cookie policy|cancellation policy)\b/.test(titleValue)) return "policy";
+  if (/contact|locations?|hours|directions|about|visit/.test(pathname) || /\b(contact us|locations?|office hours|opening hours|directions|visit us)\b/.test(titleValue)) return "contact";
+  if (/blog|news|article|insight|post\//.test(pathname) || /\b(blog|news|article|insight)\b/.test(titleValue)) return "blog";
+  if (/process|how-it-works|journey|service|solution|product|feature|program|class|treatment|repair|installation|maintenance|play|membership/.test(pathname)
+    || /\b(services?|solutions?|products?|features?|programs?|classes?|treatments?|repairs?|maintenance)\b/.test(titleValue)) return "service";
+
+  // Body signals remain useful for neutral routes, but only after explicit
+  // URL/title signals have had a chance to classify the page.
+  if (/\b(emergency|urgent|24 7)\b/.test(contentValue)) return "emergency";
+  if (/\b(request|book|schedule)\s+(a\s+)?demo\b/.test(contentValue)) return "demo";
+  if (/\b(schedule|book|reserve|enroll|register|join the waitlist|schedule a tour)\b/.test(contentValue)) return "booking";
+  if (/\b(price|pricing|cost|rates?|fees?|plans?)\b/.test(contentValue)) return "pricing";
+  if (/\bfrequently asked questions?\b|\bfaq\b/.test(contentValue)) return "faq";
+  if (/\b(privacy|terms of service|legal|cookie policy|cancellation policy)\b/.test(contentValue)) return "policy";
+  if (/\b(contact us|locations?|office hours|opening hours|directions|visit us)\b/.test(contentValue)) return "contact";
+  if (/\b(blog|news|article|insight)\b/.test(contentValue)) return "blog";
+  if (/\b(services?|solutions?|products?|features?|programs?|classes?|treatments?|repairs?|maintenance)\b/.test(contentValue)) return "service";
   return "other";
 }
 

@@ -11,6 +11,18 @@ test("page classification prioritizes conversion routes over blogs and carts", (
   assert.equal(classifyPage("https://example.test/emergency-ac-repair", "Emergency repair"), "emergency");
   assert.equal(classifyPage("https://example.test/blog/news", "News"), "blog");
   assert.equal(classifyPage("https://example.test/cart", "Cart"), "cart");
+  assert.equal(
+    classifyPage(
+      "https://example.test/about",
+      "About Example",
+      "About Example. Create account. Log in. Cart. Checkout. Contact our team for help.",
+    ),
+    "contact",
+    "shared navigation copy must not turn a useful page into an account page",
+  );
+  assert.equal(classifyPage("https://example.test/login", "Login", "Create account"), "account");
+  assert.equal(classifyPage("https://example.test/ourprocess/daycare", "Our Process - Daycare", "Plans, registration, and provider support."), "service");
+  assert.equal(classifyPage("https://example.test/privacypolicy", "Privacy Policy", "Register, login, and contact details."), "policy");
   assert.ok(crawlPriority("https://example.test/emergency-ac-repair") > crawlPriority("https://example.test/blog/news"));
 });
 
