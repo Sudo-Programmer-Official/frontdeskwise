@@ -31,7 +31,10 @@ export function classifyPage(url: string, title = "", text = ""): PageType {
 
   if (/cart|basket|shopping-cart|(?:^|\/)shop(?:\/|$)|(?:^|\/)store(?:\/|$)/.test(pathname) || /\b(cart|shopping cart|basket)\b/.test(value)) return "cart";
   if (/checkout|payment|order-confirmation/.test(pathname) || /\b(checkout|payment details|order confirmation)\b/.test(value)) return "checkout";
-  if (/account|login|register|sign[-_ ]?up|my-account|parent-portal/.test(pathname) || /\b(log in|login|create account|parent portal|my account)\b/.test(value)) return "account";
+  // Registration/enrollment pages usually explain the business process and
+  // belong in knowledge. Keep only authenticated account surfaces out of the
+  // crawl so a public /register page is not silently discarded.
+  if (/account|login|signin|sign-in|my-account|parent-portal/.test(pathname) || /\b(log in|login|sign in|create account|parent portal|my account)\b/.test(value)) return "account";
   if (/emergency|urgent|24[- ]?7/.test(value) || /emergency|urgent/.test(pathname)) return "emergency";
   if (/demo|request-a-demo|book-a-demo/.test(pathname) || /\b(request|book|schedule)\s+(a\s+)?demo\b/.test(value)) return "demo";
   if (/book|booking|appointment|schedule|reservation|reserve|enroll|enrollment|register|tour|waitlist|wait-list/.test(pathname)

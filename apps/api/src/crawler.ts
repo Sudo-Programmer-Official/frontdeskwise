@@ -100,6 +100,7 @@ export type CrawlAudit = {
   extractedVisibleTextSize: number;
   discoveredInternalLinks: string[];
   acceptedInternalLinks: string[];
+  attemptedUrls: string[];
   rejectedInternalLinks: CrawlRejection[];
   rejectionReasons: Record<string, number>;
   spaIndicators: string[];
@@ -153,6 +154,18 @@ export type CrawlAudit = {
   failureCode?: OnboardingFailureCode | null;
 };
 
+export type CrawlCoverage = {
+  discoveredUrls: number;
+  attemptedUrls: number;
+  successfulPages: number;
+  skippedUrls: number;
+  failedUrls: number;
+  unprocessedUrls: number;
+  coveragePercent: number;
+  additionalPagesDetected: boolean;
+  rejectionReasons: Record<string, number>;
+};
+
 export type RenderDiagnostics = {
   attempted: true;
   success: boolean;
@@ -179,6 +192,11 @@ export type RenderedPage = {
 export type CrawlOptions = {
   /** Optional browser-backed renderer supplied by a deployment that has one. */
   renderPage?: (url: string) => Promise<RenderedPage | null>;
+  /** Bounds are explicit so certification fixtures can prove the crawl is not seed-only. */
+  maxPages?: number;
+  maxDepth?: number;
+  /** Injectable URL guard for deterministic crawler certification fixtures. */
+  validateUrl?: (url: string) => Promise<URL>;
 };
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -327,6 +345,13 @@ function normalizeCrawlUrl(value: string, base?: string): string {
   url.searchParams.sort();
   if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
   return url.toString();
+}
+
+function crawlExclusionReason(candidate: URL): string | null {
+  const path = candidate.pathname.toLowerCase();
+  if (/(^|\/)(search|results|directory|listings?)(\/|$)/.test(path)) return "dynamic_listing";
+  const dynamicQuery = [...candidate.searchParams.keys()].some((key) => /^(page|page_num|offset|limit|sort|filter|query|q|location|lat|lng)$/i.test(key));
+  return dynamicQuery ? "dynamic_listing" : null;
 }
 
 function decodeEntities(value: string): string {
@@ -523,14 +548,14 @@ async function readResponseText(response: Response): Promise<{ text: string; byt
   return { text, bytes: total };
 }
 
-async function fetchText(url: string, accept: string): Promise<{ response: Response; text: string; bytes: number; finalUrl: string }> {
+async function fetchText(url: string, accept: string, validateUrl: (url: string) => Promise<URL> = assertPublicUrl): Promise<{ response: Response; text: string; bytes: number; finalUrl: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CRAWL_TIMEOUT_MS);
   try {
     let currentUrl = url;
     let response: Response;
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-      await assertPublicUrl(currentUrl);
+      await validateUrl(currentUrl);
       response = await fetch(currentUrl, {
         signal: controller.signal,
         headers: { "user-agent": "FrontDeskWise-DemoCrawler/0.2", accept },
@@ -627,7 +652,61 @@ function sameSite(candidate: URL, root: URL): boolean {
   return candidateHost === rootHost && ["http:", "https:"].includes(candidate.protocol);
 }
 
+function isFailedCrawlReason(reason: string): boolean {
+  return reason === "fetch_error"
+    || reason === "render_failed"
+    || reason === "rendered_content_empty"
+    || reason === "client_rendered_shell"
+    || reason === "redirected_cross_origin"
+    || reason === "invalid_final_url"
+    || reason === "insufficient_visible_text"
+    || reason === "non_html_content_type"
+    || /^http_\d+$/.test(reason);
+}
+
+function isIntentionalSkipReason(reason: string): boolean {
+  return reason === "duplicate_canonical"
+    || reason === "duplicate_content"
+    || reason === "low_value_page_type"
+    || reason === "dynamic_listing";
+}
+
+export function summarizeCrawlCoverage(audit: CrawlAudit): CrawlCoverage {
+  const discovered = new Set([audit.initialUrl, ...audit.discoveredInternalLinks, ...audit.routeUrls]);
+  const attempted = new Set([
+    ...(audit.attemptedUrls ?? []),
+    ...audit.routes.map((route) => route.requestedUrl),
+  ]);
+  const rejected = new Map<string, Set<string>>();
+  for (const rejection of audit.rejectedInternalLinks) {
+    const reasons = rejected.get(rejection.url) ?? new Set<string>();
+    reasons.add(rejection.reason);
+    rejected.set(rejection.url, reasons);
+  }
+  const failedUrls = [...rejected.values()].filter((reasons) => [...reasons].some(isFailedCrawlReason)).length;
+  const skippedUrls = [...rejected.values()].filter((reasons) => [...reasons].every(isIntentionalSkipReason)).length;
+  const discoveredUrls = discovered.size;
+  const successfulPages = audit.pages.length;
+  const attemptedUrls = attempted.size;
+  const unprocessedUrls = Math.max(0, discoveredUrls - attemptedUrls - skippedUrls);
+  const eligibleUrls = Math.max(1, discoveredUrls - skippedUrls);
+  return {
+    discoveredUrls,
+    attemptedUrls,
+    successfulPages,
+    skippedUrls,
+    failedUrls,
+    unprocessedUrls,
+    coveragePercent: Math.round((successfulPages / eligibleUrls) * 100),
+    additionalPagesDetected: discoveredUrls > 1,
+    rejectionReasons: { ...audit.rejectionReasons },
+  };
+}
+
 export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {}): Promise<{ pages: CrawledPage[]; audit: CrawlAudit }> {
+  const maxPages = Math.max(1, Math.floor(options.maxPages ?? MAX_PAGES));
+  const maxDepth = Math.max(0, Math.floor(options.maxDepth ?? MAX_DEPTH));
+  const validateUrl = options.validateUrl ?? assertPublicUrl;
   const initialUrl = normalizeCrawlUrl(normalisePublicUrl(websiteUrl));
   const root = new URL(initialUrl);
   const queue: Array<{ url: string; depth: number; discoveryParentUrl: string | null; priority: number }> = [{ url: initialUrl, depth: 0, discoveryParentUrl: null, priority: Number.MAX_SAFE_INTEGER }];
@@ -648,6 +727,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     extractedVisibleTextSize: 0,
     discoveredInternalLinks: [],
     acceptedInternalLinks: [initialUrl],
+    attemptedUrls: [],
     rejectedInternalLinks: [],
     rejectionReasons: {},
     spaIndicators: [],
@@ -683,11 +763,16 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     if (!sameSite(candidate, root)) return;
     if (!audit.discoveredInternalLinks.includes(normalized)) audit.discoveredInternalLinks.push(normalized);
     if (!audit.routeUrls.includes(normalized)) audit.routeUrls.push(normalized);
+    const exclusionReason = crawlExclusionReason(candidate);
+    if (exclusionReason) {
+      reject(normalized, exclusionReason, { depth });
+      return;
+    }
     if (robotsDisallows(robotsText, candidate)) {
       reject(normalized, "robots_disallow", { depth });
       return;
     }
-    if (depth > MAX_DEPTH) {
+    if (depth > maxDepth) {
       reject(normalized, "max_depth", { depth });
       return;
     }
@@ -700,7 +785,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
 
   try {
     const robotsUrl = normalizeCrawlUrl(new URL("/robots.txt", root).toString());
-    const robots = await fetchText(robotsUrl, "text/plain");
+    const robots = await fetchText(robotsUrl, "text/plain", validateUrl);
     audit.robots.status = robots.response.status;
     if (robots.response.ok) {
       robotsText = robots.text;
@@ -721,7 +806,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     if (!sitemapUrl || visitedSitemaps.has(sitemapUrl)) continue;
     visitedSitemaps.add(sitemapUrl);
     try {
-      const sitemap = await fetchText(sitemapUrl, "application/xml,text/xml,text/plain");
+      const sitemap = await fetchText(sitemapUrl, "application/xml,text/xml,text/plain", validateUrl);
       if (!sitemap.response.ok) continue;
       const locations = sitemapLocations(sitemap.text, sitemapUrl, root);
       if (!locations.length) continue;
@@ -739,10 +824,11 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     }
   }
 
-  while (queue.length && pages.length < MAX_PAGES) {
+  while (queue.length && pages.length < maxPages) {
     const next = queue.shift();
     if (!next || visited.has(next.url)) continue;
     visited.add(next.url);
+    audit.attemptedUrls.push(next.url);
     const pageUrl = new URL(next.url);
     if (!sameSite(pageUrl, root)) {
       reject(next.url, "cross_origin", { depth: next.depth });
@@ -755,7 +841,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
 
     let fetched: { response: Response; text: string; bytes: number; finalUrl: string };
     try {
-      fetched = await fetchText(next.url, "text/html,application/xhtml+xml");
+      fetched = await fetchText(next.url, "text/html,application/xhtml+xml", validateUrl);
     } catch (error) {
       if (next.depth === 0) rootFailureCode = networkFailureCode(error);
       reject(next.url, "fetch_error", { depth: next.depth });
@@ -936,7 +1022,7 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
       }
     }
 
-    if (next.depth < MAX_DEPTH) {
+    if (next.depth < maxDepth) {
       for (const href of extracted.links) {
         try {
           const candidate = new URL(href, responseUrl);
@@ -966,6 +1052,9 @@ export async function crawlWebsite(websiteUrl: string, options: CrawlOptions = {
     error.audit = audit;
     throw error;
   }
-  if (audit.rejectedInternalLinks.length > 0) audit.failureCode = "CRAWL_PARTIAL";
+  const coverage = summarizeCrawlCoverage(audit);
+  if (coverage.failedUrls > 0 || coverage.unprocessedUrls > 0) {
+    audit.failureCode = "CRAWL_PARTIAL";
+  }
   return { pages, audit };
 }

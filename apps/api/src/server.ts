@@ -9,7 +9,7 @@ import type { PoolClient } from "pg";
 import Stripe from "stripe";
 import * as webpush from "web-push";
 import { createPoolFromEnv } from "./database.js";
-import { assertPublicUrl, CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, websiteIdentityKey, type CrawledPage } from "./crawler.js";
+import { assertPublicUrl, CrawlError, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, summarizeCrawlCoverage, websiteIdentityKey, type CrawledPage } from "./crawler.js";
 import { assessOnboardingKnowledge, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
 import { createRenderedPageAdapter } from "./rendered-crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
@@ -469,13 +469,15 @@ function firstCrawledPageOrError(crawled: { pages: CrawledPage[] }): CrawledPage
 }
 
 function websiteValidationForCrawl(
-  crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } },
+  crawled: { pages: CrawledPage[]; audit: Parameters<typeof summarizeCrawlCoverage>[0] },
   expectedBusinessName?: string | null,
 ): OnboardingValidation {
+  const crawlCoverage = summarizeCrawlCoverage(crawled.audit);
   return assessOnboardingKnowledge({
     pages: crawled.pages,
     expectedBusinessName,
-    crawlPartial: crawled.audit.failureCode === "CRAWL_PARTIAL" || Boolean(crawled.audit.rejectedInternalLinks?.length),
+    crawlPartial: crawled.audit.failureCode === "CRAWL_PARTIAL",
+    crawlCoverage,
   });
 }
 
@@ -491,6 +493,7 @@ function websiteValidationFromCrawlError(error: CrawlError, expectedBusinessName
           ...Object.entries(error.audit.rejectionReasons).slice(0, 8).map(([reason, count]) => `${reason}:${count}`),
         ]
       : [],
+    crawlCoverage: error.audit ? summarizeCrawlCoverage(error.audit) : undefined,
   });
 }
 
@@ -2177,7 +2180,7 @@ async function createPartnerClient(input: {
 }): Promise<Record<string, unknown>> {
   if (!pool) throw httpError(503, "Client provisioning requires PostgreSQL storage");
   const expectedBusinessName = input.businessName?.trim() || null;
-  let crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } };
+  let crawled: Awaited<ReturnType<typeof crawlWebsite>>;
   let onboardingValidation: OnboardingValidation;
   let crawlFailure: CrawlError | null = null;
   try {
@@ -2187,7 +2190,7 @@ async function createPartnerClient(input: {
     if (!canProvisionAttentionBusiness(error)) throw error;
     crawlFailure = error;
     onboardingValidation = websiteValidationFromCrawlError(error, expectedBusinessName);
-    crawled = { pages: [], audit: error.audit ?? { failureCode: error.code, rejectedInternalLinks: [] } };
+    crawled = { pages: [], audit: error.audit ?? ({ failureCode: error.code, rejectedInternalLinks: [] } as unknown as Awaited<ReturnType<typeof crawlWebsite>>["audit"]) };
   }
   const firstPage = crawled.pages[0];
   const name = expectedBusinessName ?? (firstPage ? businessNameFromTitle(firstPage.title, input.websiteUrl) : businessNameFromWebsite(input.websiteUrl));
@@ -4264,6 +4267,9 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         message: typeof value.message === "string" ? value.message : "We couldn't validate this website yet.",
         suggestedAction: typeof value.suggestedAction === "string" ? value.suggestedAction : "Check the URL and try again.",
         signals: Array.isArray(value.signals) ? value.signals.filter((item): item is string => typeof item === "string").slice(0, 12) : [],
+        crawlCoverage: value.crawlCoverage && typeof value.crawlCoverage === "object"
+          ? value.crawlCoverage as OnboardingValidation["crawlCoverage"]
+          : undefined,
         checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : toIso(row.created_at),
       } satisfies OnboardingValidation;
     })(),
@@ -4438,15 +4444,35 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
     },
     createdAt: toIso(row.created_at),
   };
-  if (!row.onboarding_validation || !["valid", "needs_attention"].includes(String(asRecord(row.onboarding_validation).status))) {
-    const websiteSourceIds = new Set(loaded.sources.filter((source) => source.contentType === "web_page" && source.crawlStatus === "ready").map((source) => source.id));
+  const websiteSourceIds = new Set(loaded.sources.filter((source) => source.contentType === "web_page" && source.crawlStatus === "ready").map((source) => source.id));
+  const websitePages = loaded.sources.filter((source) => websiteSourceIds.has(source.id)).map((source) => ({
+    title: source.title,
+    extractedCharacterCount: source.extractedCharacterCount,
+    content: loaded.chunks.filter((chunk) => chunk.sourceId === source.id).map((chunk) => chunk.content).join(" "),
+  }));
+  const rootSource = loaded.sources.find((source) => source.contentType === "web_page" && source.crawlDepth === 0) ?? loaded.sources.find((source) => source.contentType === "web_page");
+  const readyWebsiteCount = websiteSourceIds.size;
+  const legacyDiscoveredUrls = rootSource?.discoveredLinkCount && rootSource.discoveredLinkCount > readyWebsiteCount
+    ? rootSource.discoveredLinkCount + 1
+    : null;
+  const legacyCoverage = !loaded.onboardingValidation.crawlCoverage && legacyDiscoveredUrls
+    ? {
+        discoveredUrls: legacyDiscoveredUrls,
+        attemptedUrls: readyWebsiteCount,
+        successfulPages: readyWebsiteCount,
+        skippedUrls: 0,
+        failedUrls: 0,
+        unprocessedUrls: Math.max(0, legacyDiscoveredUrls - readyWebsiteCount),
+        coveragePercent: Math.round((readyWebsiteCount / legacyDiscoveredUrls) * 100),
+        additionalPagesDetected: true,
+        rejectionReasons: { legacy_discovery_only: 1 },
+      }
+    : undefined;
+  if (!row.onboarding_validation || !["valid", "needs_attention"].includes(String(asRecord(row.onboarding_validation).status)) || legacyCoverage) {
     loaded.onboardingValidation = assessOnboardingKnowledge({
       expectedBusinessName: loaded.name,
-      pages: loaded.sources.filter((source) => websiteSourceIds.has(source.id)).map((source) => ({
-        title: source.title,
-        extractedCharacterCount: source.extractedCharacterCount,
-        content: loaded.chunks.filter((chunk) => chunk.sourceId === source.id).map((chunk) => chunk.content).join(" "),
-      })),
+      pages: websitePages,
+      crawlCoverage: legacyCoverage,
     });
   }
   // Businesses published by the previous timestamp-only implementation keep
@@ -8002,9 +8028,13 @@ async function workspacePayload(business: Business) {
   const factConflicts = resolveBusinessFacts(business.facts, {}).conflicts;
   const contentQualityIssue = chunkCount > 0 && meaningfulChunkCount === 0;
   const semantic = await embeddingReadinessForBusiness(business);
-  const readinessScore = sourceCount === 0
+  const calculatedReadinessScore = sourceCount === 0
     ? 0
     : Math.max(0, Math.min(100, (sourceCount > 0 ? 40 : 0) + (meaningfulChunkCount > 0 ? 30 : 0) + (semantic.status === "SEMANTIC_SEARCH_HEALTHY" && !contentQualityIssue ? 20 : 0) + Math.max(0, 10 - gapCount * 2)));
+  const readinessScore = Math.min(
+    calculatedReadinessScore,
+    business.onboardingValidation.knowledgeReady ? calculatedReadinessScore : Math.max(0, Math.min(100, business.onboardingValidation.readinessScore)),
+  );
   const readinessStatus = sourceCount === 0
     ? "needs_website"
     : chunkCount === 0 || pendingSourceCount > 0
@@ -8012,9 +8042,10 @@ async function workspacePayload(business: Business) {
       : contentQualityIssue || gapCount > 0 || failedSourceCount > 0
         ? "review_recommended"
         : "ready";
+  const onboardingNeedsAttention = business.onboardingValidation.status !== "valid" || !business.onboardingValidation.knowledgeReady;
   const knowledgeStatus = sourceCount === 0 || chunkCount === 0 || pendingSourceCount > 0
     ? readinessStatus
-    : contentQualityIssue
+    : contentQualityIssue || onboardingNeedsAttention
       ? "review_recommended"
       : semantic.status;
   const businessContextInput = {
@@ -8048,7 +8079,7 @@ async function workspacePayload(business: Business) {
   };
   const setupSteps = [
     { id: "domain_verified", label: "Verify website", complete: business.ownershipStatus === "verified" },
-    { id: "knowledge_ready", label: "Review knowledge", complete: sourceCount > 0 && meaningfulChunkCount > 0 && pendingSourceCount === 0 && failedSourceCount === 0 },
+    { id: "knowledge_ready", label: "Review knowledge", complete: sourceCount > 0 && meaningfulChunkCount > 0 && pendingSourceCount === 0 && failedSourceCount === 0 && !onboardingNeedsAttention },
     { id: "agent_tested", label: "Test assistant", complete: [...business.conversations.values()].some((conversation) => conversation.sessionId.startsWith("dashboard-") && conversation.messages.some((message) => message.role === "user" && message.content.trim())) },
     { id: "widget_installed", label: "Install widget", complete: business.widget.loadCount > 0 },
     { id: "agent_published", label: "Publish", complete: Boolean(business.agentPublishedAt || business.publishedAgentConfig) },
@@ -17805,7 +17836,7 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
   }
 
   const expectedBusinessName = optionalString(body.businessName, 160);
-  let crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } };
+  let crawled: Awaited<ReturnType<typeof crawlWebsite>>;
   let onboardingValidation: OnboardingValidation;
   let crawlFailure: CrawlError | null = null;
   try {
@@ -17815,7 +17846,7 @@ app.post("/api/v1/auth/businesses", async (request, reply) => {
     if (!canProvisionAttentionBusiness(error)) throw error;
     crawlFailure = error;
     onboardingValidation = websiteValidationFromCrawlError(error, expectedBusinessName);
-    crawled = { pages: [], audit: error.audit ?? { failureCode: error.code, rejectedInternalLinks: [] } };
+    crawled = { pages: [], audit: error.audit ?? ({ failureCode: error.code, rejectedInternalLinks: [] } as unknown as Awaited<ReturnType<typeof crawlWebsite>>["audit"]) };
   }
   const firstPage = crawled.pages[0];
   const name = expectedBusinessName ?? (firstPage ? businessNameFromTitle(firstPage.title, websiteUrl) : businessNameFromWebsite(websiteUrl));
@@ -17886,7 +17917,7 @@ async function generateDemoFromRequest(request: FastifyRequest, overrides: Recor
 
   try {
     const expectedBusinessName = optionalString(body.businessName, 160);
-    let crawled: { pages: CrawledPage[]; audit: { failureCode?: OnboardingFailureCode | null; rejectedInternalLinks?: unknown[] } };
+    let crawled: Awaited<ReturnType<typeof crawlWebsite>>;
     let onboardingValidation: OnboardingValidation;
     let crawlFailure: CrawlError | null = null;
     try {
@@ -17896,7 +17927,7 @@ async function generateDemoFromRequest(request: FastifyRequest, overrides: Recor
       if (!canProvisionAttentionBusiness(error)) throw error;
       crawlFailure = error;
       onboardingValidation = websiteValidationFromCrawlError(error, expectedBusinessName);
-      crawled = { pages: [], audit: error.audit ?? { failureCode: error.code, rejectedInternalLinks: [] } };
+      crawled = { pages: [], audit: error.audit ?? ({ failureCode: error.code, rejectedInternalLinks: [] } as unknown as Awaited<ReturnType<typeof crawlWebsite>>["audit"]) };
     }
     const firstPage = crawled.pages[0];
     const name = expectedBusinessName ?? (firstPage ? businessNameFromTitle(firstPage.title, websiteUrl) : businessNameFromWebsite(websiteUrl));

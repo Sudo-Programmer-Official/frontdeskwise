@@ -1,3 +1,5 @@
+import type { CrawlCoverage } from "./crawler.js";
+
 export const ONBOARDING_FAILURE_CODES = [
   "DOMAIN_NOT_FOUND",
   "DNS_FAILURE",
@@ -28,6 +30,7 @@ export type OnboardingValidation = {
   message: string;
   suggestedAction: string;
   signals: string[];
+  crawlCoverage?: CrawlCoverage;
   checkedAt: string;
 };
 
@@ -85,6 +88,7 @@ export function validationFromFailure(input: {
   reachable?: boolean;
   expectedBusinessName?: string | null;
   signals?: string[];
+  crawlCoverage?: CrawlCoverage;
   checkedAt?: string;
 }): OnboardingValidation {
   const copy = failureCopy(input.code);
@@ -99,6 +103,7 @@ export function validationFromFailure(input: {
     message: copy.message,
     suggestedAction: copy.suggestedAction,
     signals: [...new Set((input.signals ?? []).filter(Boolean))].slice(0, 12),
+    ...(input.crawlCoverage ? { crawlCoverage: input.crawlCoverage } : {}),
     checkedAt: input.checkedAt ?? new Date().toISOString(),
   };
 }
@@ -107,6 +112,7 @@ export function assessOnboardingKnowledge(input: {
   pages: ValidationPage[];
   expectedBusinessName?: string | null;
   crawlPartial?: boolean;
+  crawlCoverage?: CrawlCoverage;
   checkedAt?: string;
 }): OnboardingValidation {
   const pages = input.pages ?? [];
@@ -122,6 +128,12 @@ export function assessOnboardingKnowledge(input: {
     /\b(faq|frequently asked|question|contact|call|email|schedule|appointment|book)\b/.test(content),
   ].filter(Boolean).length;
   const usefulContent = pages.length > 0 && visibleCharacters >= 180 && (usefulSignals > 0 || visibleCharacters >= 420);
+  const coverage = input.crawlCoverage;
+  const coveragePartial = Boolean(
+    coverage
+      && coverage.additionalPagesDetected
+      && (coverage.unprocessedUrls > 0 || coverage.failedUrls > 0),
+  );
   const expectedTokens = meaningfulTokens(expectedBusinessName);
   const contentTokens = new Set(meaningfulTokens(`${pages.slice(0, 3).map((page) => page.title ?? "").join(" ")} ${text.slice(0, 5_000)}`));
   const matchedExpectedTokens = expectedTokens.filter((token) => contentTokens.has(token));
@@ -130,18 +142,19 @@ export function assessOnboardingKnowledge(input: {
     ? "WRONG_BUSINESS_DETECTED"
     : !usefulContent
       ? "NO_USEFUL_CONTENT"
-      : input.crawlPartial
+      : input.crawlPartial || coveragePartial
         ? "CRAWL_PARTIAL"
         : null;
-  const needsAttention = code === "WRONG_BUSINESS_DETECTED" || code === "NO_USEFUL_CONTENT";
-  const score = Math.max(0, Math.min(100,
+  const needsAttention = code === "WRONG_BUSINESS_DETECTED" || code === "NO_USEFUL_CONTENT" || code === "CRAWL_PARTIAL";
+  const baseScore = Math.max(0, Math.min(100,
     (pages.length > 0 ? 25 : 0)
     + Math.min(35, Math.round(visibleCharacters / 35))
     + usefulSignals * 8
     + (mismatch ? 0 : expectedTokens.length === 0 || matchedExpectedTokens.length > 0 ? 16 : 5),
   ));
+  const score = coveragePartial && coverage ? Math.min(baseScore, Math.round(baseScore * coverage.coveragePercent / 100)) : baseScore;
   if (code && needsAttention) {
-    const failure = validationFromFailure({ code, reachable: pages.length > 0, expectedBusinessName, checkedAt: input.checkedAt });
+    const failure = validationFromFailure({ code, reachable: pages.length > 0, expectedBusinessName, crawlCoverage: coverage, checkedAt: input.checkedAt });
     return {
       ...failure,
       knowledgeReady: false,
@@ -151,6 +164,12 @@ export function assessOnboardingKnowledge(input: {
         `pages:${pages.length}`,
         `visible_characters:${visibleCharacters}`,
         `business_signals:${usefulSignals}`,
+        ...(coverage ? [
+          `discovered_urls:${coverage.discoveredUrls}`,
+          `attempted_urls:${coverage.attemptedUrls}`,
+          `successful_pages:${coverage.successfulPages}`,
+          `coverage_percent:${coverage.coveragePercent}`,
+        ] : []),
         ...(expectedTokens.length ? [`business_name_tokens_matched:${matchedExpectedTokens.length}/${expectedTokens.length}`] : []),
       ],
     };
@@ -169,8 +188,15 @@ export function assessOnboardingKnowledge(input: {
       `pages:${pages.length}`,
       `visible_characters:${visibleCharacters}`,
       `business_signals:${usefulSignals}`,
+      ...(coverage ? [
+        `discovered_urls:${coverage.discoveredUrls}`,
+        `attempted_urls:${coverage.attemptedUrls}`,
+        `successful_pages:${coverage.successfulPages}`,
+        `coverage_percent:${coverage.coveragePercent}`,
+      ] : []),
       ...(expectedTokens.length ? [`business_name_tokens_matched:${matchedExpectedTokens.length}/${expectedTokens.length}`] : []),
     ],
+    ...(coverage ? { crawlCoverage: coverage } : {}),
     checkedAt: input.checkedAt ?? new Date().toISOString(),
   };
 }
