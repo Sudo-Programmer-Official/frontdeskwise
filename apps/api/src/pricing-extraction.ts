@@ -197,7 +197,11 @@ export function extractWebsitePricingCandidates(input: {
     for (const price of priceMatches(content)) {
       const subject = planNameBefore(content, price, chunk) ?? fallbackPlanName(content, price);
       if (!subject) continue;
-      const key = `${chunk.sourceId}|${normalized(subject)}|${valueText(price).toLowerCase()}`;
+      // business_facts permits one active website fact per source/kind/subject/
+      // predicate. Keep extraction aligned with that invariant when a page
+      // repeats a plan heading around multiple price tokens (for example a
+      // responsive pricing card rendered twice in the HTML).
+      const key = `${chunk.sourceId}|${normalized(subject)}|plan price`;
       if (seen.has(key)) continue;
       seen.add(key);
       candidates.push({

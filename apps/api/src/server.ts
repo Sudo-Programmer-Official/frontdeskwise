@@ -367,6 +367,7 @@ const defaultTrialDays = Math.max(1, Number(process.env.FRONTDESKWISE_DEFAULT_TR
 const maxWidgetLogoDataUrlLength = 700_000;
 const widgetLogoDataUrlPattern = /^data:image\/(?:png|jpe?g|svg\+xml);base64,[a-z\d+/]+={0,2}$/i;
 const renderedPageAdapter = createRenderedPageAdapter();
+const websitePricingSyncLocks = new Map<string, Promise<void>>();
 
 function boundedCrawlConfig(name: string, fallback: number, maximum: number): number {
   const value = Number(process.env[name] ?? fallback);
@@ -3122,6 +3123,21 @@ function websitePricingFactsForBusiness(
  * to promote those facts to owner_verified for critical pricing answers.
  */
 async function syncWebsitePricingFacts(business: Business): Promise<void> {
+  const previous = websitePricingSyncLocks.get(business.id) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous.then(() => current);
+  websitePricingSyncLocks.set(business.id, queued);
+  await previous;
+  try {
+    await syncWebsitePricingFactsUnlocked(business);
+  } finally {
+    release();
+    if (websitePricingSyncLocks.get(business.id) === queued) websitePricingSyncLocks.delete(business.id);
+  }
+}
+
+async function syncWebsitePricingFactsUnlocked(business: Business): Promise<void> {
   const existing = business.facts.filter((fact) => fact.sourceType === "website" && fact.kind === "pricing");
   const next = websitePricingFactsForBusiness(business);
   const sourceKey = (fact: BusinessFact): string => [
@@ -6572,12 +6588,33 @@ async function persistActionResource(business: Business, resource: ActionResourc
 
 async function persistBusinessFact(business: Business, fact: BusinessFact): Promise<void> {
   if (!pool) return;
-  await pool.query(
-    `insert into business_facts
-       (id, business_id, kind, subject, predicate, value, value_text, source_type, authority, source_id, source_url, source_label,
-        source_hash, extracted_at, last_seen_at, verification_status, confidence, freshness_policy, observed_at, expires_at, active, version, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
-     on conflict (id) do update set
+  const values = [
+    fact.id,
+    business.id,
+    fact.kind,
+    fact.subject,
+    fact.predicate,
+    JSON.stringify(fact.value),
+    fact.valueText,
+    fact.sourceType,
+    fact.authority,
+    fact.sourceId,
+    fact.sourceUrl,
+    fact.sourceLabel,
+    fact.sourceHash,
+    fact.extractedAt,
+    fact.lastSeenAt,
+    fact.verificationStatus,
+    fact.confidence,
+    fact.freshnessPolicy,
+    fact.observedAt,
+    fact.expiresAt,
+    fact.active,
+    fact.version,
+    fact.createdAt,
+    fact.updatedAt,
+  ];
+  const updateColumns = `
        kind = excluded.kind,
        subject = excluded.subject,
        predicate = excluded.predicate,
@@ -6598,34 +6635,26 @@ async function persistBusinessFact(business: Business, fact: BusinessFact): Prom
        expires_at = excluded.expires_at,
        active = excluded.active,
        version = excluded.version,
-       updated_at = excluded.updated_at`,
-    [
-      fact.id,
-      business.id,
-      fact.kind,
-      fact.subject,
-      fact.predicate,
-      JSON.stringify(fact.value),
-      fact.valueText,
-      fact.sourceType,
-      fact.authority,
-      fact.sourceId,
-      fact.sourceUrl,
-      fact.sourceLabel,
-      fact.sourceHash,
-      fact.extractedAt,
-      fact.lastSeenAt,
-      fact.verificationStatus,
-      fact.confidence,
-      fact.freshnessPolicy,
-      fact.observedAt,
-      fact.expiresAt,
-      fact.active,
-      fact.version,
-      fact.createdAt,
-      fact.updatedAt,
-    ],
+       updated_at = excluded.updated_at`;
+  const result = await pool.query<{ id: string }>(
+    fact.active
+      ? `insert into business_facts
+           (id, business_id, kind, subject, predicate, value, value_text, source_type, authority, source_id, source_url, source_label,
+            source_hash, extracted_at, last_seen_at, verification_status, confidence, freshness_policy, observed_at, expires_at, active, version, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+         on conflict (business_id, kind, subject, predicate, source_type, (coalesce(source_id, ''))) where active
+         do update set${updateColumns}
+         returning id`
+      : `insert into business_facts
+           (id, business_id, kind, subject, predicate, value, value_text, source_type, authority, source_id, source_url, source_label,
+            source_hash, extracted_at, last_seen_at, verification_status, confidence, freshness_policy, observed_at, expires_at, active, version, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+         on conflict (id) do update set${updateColumns}
+         returning id`,
+    values,
   );
+  const persistedId = result.rows[0]?.id;
+  if (persistedId && persistedId !== fact.id) fact.id = persistedId;
 }
 
 async function persistBusinessContextSnapshot(business: Business, snapshot: BusinessContextSnapshot, model: ReturnType<typeof buildCanonicalBusinessModel>): Promise<void> {
@@ -18274,8 +18303,12 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
   app.log.info({ businessId: business.id, sourceId, seedUrl: business.websiteUrl, refreshStartedAt }, "Website knowledge refresh started");
   source.crawlStatus = "crawling";
   await persistBusiness(business);
+  let refreshCrawlCoverage: ReturnType<typeof summarizeCrawlCoverage> | null = null;
+  let refreshCrawlRun: ReturnType<typeof crawlRunDiagnostics> | null = null;
   try {
     const crawled = await crawlConfiguredWebsite(normalisePublicUrl(business.websiteUrl));
+    refreshCrawlCoverage = summarizeCrawlCoverage(crawled.audit);
+    refreshCrawlRun = crawlRunDiagnostics(crawled.audit, refreshCrawlCoverage);
     await replaceWebsiteSources(business, crawled.pages);
     business.onboardingValidation = websiteValidationForCrawl(crawled, business.onboardingValidation.expectedBusinessName ?? business.name);
     await enqueueAndRunEmbeddingJob(business);
@@ -18308,7 +18341,15 @@ app.post("/api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl", async (reques
     }, "Website knowledge refresh persisted");
     return { status: business.onboardingValidation.status, validation: business.onboardingValidation, sourceCount: business.sources.filter((item) => item.contentType === "web_page").length };
   } catch (error) {
-    app.log.error({ businessId: business.id, sourceId, refreshStartedAt, error }, "Website knowledge refresh failed");
+    app.log.error({
+      businessId: business.id,
+      sourceId,
+      seedUrl: business.websiteUrl,
+      refreshStartedAt,
+      crawlCoverage: refreshCrawlCoverage,
+      crawlRun: refreshCrawlRun,
+      error,
+    }, "Website knowledge refresh failed");
     const current = business.sources.find((item) => item.id === sourceId);
     if (current) {
       current.crawlStatus = "failed";

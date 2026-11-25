@@ -15,6 +15,7 @@ POST /api/v1/demo/:slug/knowledge/sources/:sourceId/recrawl
   -> websiteSourcesFromPages()
   -> replaceWebsiteSources()
   -> persistBusiness()
+  -> website pricing fact extraction/upsert (natural-key safe and serialized per business)
   -> embedding/index refresh
   -> coverage/readiness snapshot in onboarding_validation
   -> workspace and Sources responses
@@ -34,6 +35,12 @@ service and there is no separate website-crawl queue or worker. Crawl
 diagnostics therefore record `backgroundWorkerUsed: false` and
 `workerJobId: null` unless that architecture changes.
 
+The refresh also rebuilds structured website pricing facts. Those writes must
+use the same active natural key as `business_facts_active_source_key_idx`; an
+upsert by fact UUID alone is unsafe because repeated pricing markup or
+concurrent workspace reads can otherwise raise PostgreSQL `23505` and make the
+refresh, workspace, Sources, Q&A, and gap endpoints fail together.
+
 ## Production deployment
 
 The crawler code and the web readiness display both require deployment:
@@ -52,6 +59,10 @@ The crawler code and the web readiness display both require deployment:
   deploy. The refresh rebuilds the website page sources and chunks and stores
   the crawl snapshot. No manual database migration is needed for the JSON
   snapshot.
+- Pricing-fact repair: included in the API deploy. No new migration or queue
+  configuration is required because the existing active natural-key index is
+  reused. A successful refresh will reconcile the affected business's active
+  pricing facts; no manual row deletion should be performed.
 
 On the first read after the API deploy, older snapshots are also normalized in
 memory: if their counters show more eligible pages than were attempted, the
@@ -73,7 +84,9 @@ synchronous; a separate worker or queue cannot explain a missing crawl result.
 4. Confirm `GET /api/v1/demo/:slug/knowledge/sources` exposes the same persisted
    page records and crawl snapshot as the workspace response.
 5. Inspect API logs for the `crawlRunId`, `seedUrl`, limits, rejection reasons,
-   fetch strategies, final readiness, and the absence of the legacy path.
+   fetch strategies, final readiness, and the absence of the legacy path. A
+   successful run must not emit `23505` for
+   `business_facts_active_source_key_idx`.
 
 For the DaycareSpots fixture, a seed-only result must remain `Partial knowledge`
 or `Needs attention`; it must never be `Healthy / 100% ready` while additional

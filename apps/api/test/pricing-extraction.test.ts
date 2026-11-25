@@ -73,3 +73,17 @@ test("promotes an unlabeled homepage starting price without inventing a plan", (
 
   assert.deepEqual(candidates.map((candidate) => [candidate.subject, candidate.valueText]), [["Starting price", "$65/month"]]);
 });
+
+test("keeps repeated pricing markup within one active source key", () => {
+  const candidates = extractWebsitePricingCandidates({
+    sources: [{ id: "banner", url: "https://example.com/pricing", title: "Business Your Banner", pageType: "pricing" }],
+    chunks: [{
+      sourceId: "banner",
+      content: "Business Your Banner $65/month Business Your Banner $95/month",
+    }],
+  });
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.subject, "Business Your Banner");
+  assert.equal(candidates[0]?.valueText, "$65/month");
+});
