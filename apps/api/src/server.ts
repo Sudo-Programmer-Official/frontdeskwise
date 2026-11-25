@@ -10,7 +10,7 @@ import Stripe from "stripe";
 import * as webpush from "web-push";
 import { createPoolFromEnv } from "./database.js";
 import { assertPublicUrl, CrawlError, crawlRunDiagnostics, crawlWebsite, inspectWebsiteEmbedPolicy, normalisePublicUrl, summarizeCrawlCoverage, websiteIdentityKey, type CrawledPage } from "./crawler.js";
-import { assessOnboardingKnowledge, knowledgeReadinessSnapshot, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
+import { assessOnboardingKnowledge, crawlCoverageNeedsAttention, knowledgeReadinessSnapshot, onboardingFailureCopy, ONBOARDING_FAILURE_CODES, validationFromFailure, type OnboardingFailureCode, type OnboardingValidation } from "./onboarding-validation.js";
 import { createRenderedPageAdapter } from "./rendered-crawler.js";
 import { chunkDocumentText, extractDocumentText } from "./document-ingestion.js";
 import { embedTexts, embeddingDimensions, embeddingModel, embeddingProviderHealth, embeddingsConfigured, probeEmbeddingProvider, vectorLiteral } from "./embeddings.js";
@@ -4176,6 +4176,40 @@ async function loadBusinessContextSnapshot(businessId: string): Promise<Business
   }
 }
 
+function normalizedPersistedCrawlCoverage(value: unknown): NonNullable<OnboardingValidation["crawlCoverage"]> | undefined {
+  const raw = asRecord(value);
+  if (!Object.keys(raw).length) return undefined;
+  const integer = (candidate: unknown, fallback: number): number => {
+    const parsed = Number(candidate);
+    return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : fallback;
+  };
+  const discoveredUrls = integer(raw.discoveredUrls, 0);
+  const skippedUrls = Math.min(discoveredUrls, integer(raw.skippedUrls, 0));
+  const defaultEligibleUrls = Math.max(1, discoveredUrls - skippedUrls);
+  const eligibleUrls = Math.max(1, Math.min(Math.max(1, discoveredUrls), integer(raw.eligibleUrls, defaultEligibleUrls)));
+  const successfulPages = Math.min(eligibleUrls, integer(raw.successfulPages, 0));
+  const attemptedUrls = Math.min(eligibleUrls, Math.max(successfulPages, integer(raw.attemptedUrls, successfulPages)));
+  const failedUrls = Math.min(eligibleUrls, integer(raw.failedUrls, 0));
+  const unprocessedUrls = Math.max(0, eligibleUrls - attemptedUrls);
+  const rejectionReasons: Record<string, number> = {};
+  for (const [reason, count] of Object.entries(asRecord(raw.rejectionReasons))) {
+    const normalizedCount = integer(count, 0);
+    if (normalizedCount > 0) rejectionReasons[reason] = normalizedCount;
+  }
+  return {
+    discoveredUrls,
+    eligibleUrls,
+    attemptedUrls,
+    successfulPages,
+    skippedUrls,
+    failedUrls,
+    unprocessedUrls,
+    coveragePercent: Math.round((successfulPages / eligibleUrls) * 100),
+    additionalPagesDetected: discoveredUrls > 1 || raw.additionalPagesDetected === true,
+    rejectionReasons,
+  };
+}
+
 async function loadBusinessFromDatabase(slug: string): Promise<Business | null> {
   if (!pool) return null;
   const businessResult = await pool.query<Record<string, unknown>>(
@@ -4314,9 +4348,7 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         message: typeof value.message === "string" ? value.message : "We couldn't validate this website yet.",
         suggestedAction: typeof value.suggestedAction === "string" ? value.suggestedAction : "Check the URL and try again.",
         signals: Array.isArray(value.signals) ? value.signals.filter((item): item is string => typeof item === "string").slice(0, 12) : [],
-        crawlCoverage: value.crawlCoverage && typeof value.crawlCoverage === "object"
-          ? value.crawlCoverage as OnboardingValidation["crawlCoverage"]
-          : undefined,
+        crawlCoverage: normalizedPersistedCrawlCoverage(value.crawlCoverage),
         crawlRun: value.crawlRun && typeof value.crawlRun === "object"
           ? value.crawlRun as OnboardingValidation["crawlRun"]
           : undefined,
@@ -4543,16 +4575,46 @@ async function loadBusinessFromDatabase(slug: string): Promise<Business | null> 
         finalReadiness: null,
       } satisfies NonNullable<OnboardingValidation["crawlRun"]>
     : undefined;
-  if (!row.onboarding_validation || !["valid", "needs_attention"].includes(String(asRecord(row.onboarding_validation).status)) || legacyCoverage) {
+  const persistedCoverage = loaded.onboardingValidation.crawlCoverage;
+  const coverageForRepair = persistedCoverage ?? legacyCoverage;
+  const compatibilityCrawlRun = coverageForRepair && !loaded.onboardingValidation.crawlRun && !legacyCrawlRun
+    ? {
+        crawlRunId: `legacy-discovery-${businessId}`,
+        seedUrl: loaded.websiteUrl,
+        startedAt: loaded.onboardingValidation.checkedAt,
+        completedAt: loaded.onboardingValidation.checkedAt,
+        discoveredUrls: coverageForRepair.discoveredUrls,
+        eligibleUrls: coverageForRepair.eligibleUrls,
+        attemptedUrls: coverageForRepair.attemptedUrls,
+        successfulPages: coverageForRepair.successfulPages,
+        failedUrls: coverageForRepair.failedUrls,
+        skippedUrls: coverageForRepair.skippedUrls,
+        unprocessedUrls: coverageForRepair.unprocessedUrls,
+        coveragePercent: coverageForRepair.coveragePercent,
+        rejectionReasons: coverageForRepair.rejectionReasons,
+        routes: [],
+        legacyCodePathUsed: true,
+        backgroundWorkerUsed: false,
+        workerJobId: null,
+        maxPages: Math.max(1, coverageForRepair.attemptedUrls),
+        maxDepth: 0,
+        finalReadiness: null,
+      } satisfies NonNullable<OnboardingValidation["crawlRun"]>
+    : undefined;
+  const crawlRunForRepair = loaded.onboardingValidation.crawlRun ?? legacyCrawlRun ?? compatibilityCrawlRun;
+  if (!row.onboarding_validation
+    || !["valid", "needs_attention"].includes(String(asRecord(row.onboarding_validation).status))
+    || legacyCoverage
+    || crawlCoverageNeedsAttention(coverageForRepair)) {
     loaded.onboardingValidation = assessOnboardingKnowledge({
       expectedBusinessName: loaded.name,
       pages: websitePages,
-      crawlCoverage: legacyCoverage,
-      crawlRun: legacyCrawlRun,
+      crawlCoverage: coverageForRepair,
+      crawlRun: crawlRunForRepair,
     });
-    if (legacyCrawlRun) {
+    if (crawlRunForRepair) {
       loaded.onboardingValidation.crawlRun = {
-        ...legacyCrawlRun,
+        ...crawlRunForRepair,
         finalReadiness: {
           status: loaded.onboardingValidation.status,
           knowledgeReady: loaded.onboardingValidation.knowledgeReady,
@@ -8128,6 +8190,7 @@ async function knowledgeReadinessForBusiness(business: Business): Promise<{
     pendingSourceCount,
     failedSourceCount,
     contentQualityIssue,
+    crawlCoverage: business.onboardingValidation.crawlCoverage,
     onboarding: business.onboardingValidation,
   });
   return { readySources, sourceCount, chunkCount, meaningfulChunkCount, contentQualityIssue, pendingSourceCount, failedSourceCount, semantic, readiness };

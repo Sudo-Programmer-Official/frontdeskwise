@@ -92,6 +92,28 @@ test("a single-page site remains valid when the crawler found no additional page
   assert.equal(validation.code, null);
 });
 
+test("legacy coverage counters stay partial even when newer fields are absent", () => {
+  const validation = assessOnboardingKnowledge({
+    pages: [usefulPage],
+    crawlCoverage: {
+      discoveredUrls: 93,
+      attemptedUrls: 1,
+      successfulPages: 1,
+      skippedUrls: 0,
+      failedUrls: 0,
+      unprocessedUrls: 0,
+      coveragePercent: 100,
+      additionalPagesDetected: false,
+      rejectionReasons: {},
+    } as unknown as NonNullable<Parameters<typeof assessOnboardingKnowledge>[0]["crawlCoverage"]>,
+  });
+
+  assert.equal(validation.status, "needs_attention");
+  assert.equal(validation.code, "CRAWL_PARTIAL");
+  assert.equal(validation.knowledgeReady, false);
+  assert.ok(validation.readinessScore < 100);
+});
+
 test("authoritative readiness cannot report full readiness for incomplete crawl coverage", () => {
   const snapshot = knowledgeReadinessSnapshot({
     sourceCount: 1,
@@ -113,4 +135,38 @@ test("authoritative readiness cannot report full readiness for incomplete crawl 
   assert.equal(snapshot.score, 3);
   assert.equal(snapshot.status, "review_recommended");
   assert.equal(snapshot.onboardingNeedsAttention, true);
+});
+
+test("authoritative readiness derives partial status from persisted coverage counters", () => {
+  const snapshot = knowledgeReadinessSnapshot({
+    sourceCount: 1,
+    chunkCount: 14,
+    meaningfulChunkCount: 14,
+    semanticHealthy: true,
+    gapCount: 0,
+    pendingSourceCount: 0,
+    failedSourceCount: 0,
+    contentQualityIssue: false,
+    crawlCoverage: {
+      discoveredUrls: 93,
+      eligibleUrls: 93,
+      attemptedUrls: 1,
+      successfulPages: 1,
+      skippedUrls: 0,
+      failedUrls: 0,
+      unprocessedUrls: 0,
+      coveragePercent: 100,
+      additionalPagesDetected: false,
+      rejectionReasons: {},
+    },
+    onboarding: {
+      status: "valid",
+      knowledgeReady: true,
+      readinessScore: 100,
+    },
+  });
+
+  assert.equal(snapshot.onboardingNeedsAttention, true);
+  assert.equal(snapshot.status, "review_recommended");
+  assert.equal(snapshot.score, 1);
 });

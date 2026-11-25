@@ -44,6 +44,16 @@ The crawler code and the web readiness display both require deployment:
   the crawl snapshot. No manual database migration is needed for the JSON
   snapshot.
 
+On the first read after the API deploy, older snapshots are also normalized in
+memory: if their counters show more eligible pages than were attempted, the
+authoritative readiness result is downgraded and the diagnostic path is marked
+as legacy until a successful refresh replaces the snapshot.
+
+If production still reports `Legacy Discovery Only`, `1 captured`, or a seed-
+only source after the API deploy, inspect the Render API service revision and
+the `Website knowledge refresh persisted` log entry. The current path is
+synchronous; a separate worker or queue cannot explain a missing crawl result.
+
 ## Verification after deploy
 
 1. Deploy API and web.

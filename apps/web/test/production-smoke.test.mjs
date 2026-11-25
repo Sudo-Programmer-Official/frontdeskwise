@@ -88,6 +88,14 @@ test("owner production controls remain present", () => {
   assert.doesNotMatch(app, /id: "billing", label: "Billing", icon:/);
 });
 
+test("incomplete legacy crawl coverage cannot render as healthy knowledge", () => {
+  assert.match(app, /Older API snapshots may omit eligibleUrls/);
+  assert.match(app, /successfulPages \+ skippedUrls < discoveredUrls/);
+  assert.match(app, /Partial knowledge —/);
+  assert.match(apiServer, /normalizedPersistedCrawlCoverage/);
+  assert.match(apiServer, /crawlCoverageNeedsAttention\(coverageForRepair\)/);
+});
+
 test("workflow builder exposes a grouped verified-knowledge step", () => {
   assert.match(workflowWorkspace, /label: "KNOWLEDGE"/);
   assert.match(workflowWorkspace, /label: "Answer from knowledge"/);

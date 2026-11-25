@@ -2215,19 +2215,36 @@ const knowledgeSourcesNeedAttention = computed(() => Boolean((workspaceKnowledge
 const onboardingNeedsAttention = computed(() => workspaceOnboarding.value?.status === "needs_attention");
 const onboardingReasonLabel = computed(() => workspaceOnboarding.value?.code ? formatLabel(workspaceOnboarding.value.code) : "Website validation");
 const knowledgeCoverage = computed(() => workspaceOnboarding.value?.crawlCoverage ?? null);
-const knowledgeCoverageNeedsAttention = computed(() => Boolean(
-  knowledgeCoverage.value?.additionalPagesDetected
-    && (knowledgeCoverage.value.unprocessedUrls > 0 || knowledgeCoverage.value.failedUrls > 0),
-));
+const knowledgeCoverageNeedsAttention = computed(() => {
+  const coverage = knowledgeCoverage.value;
+  if (!coverage) return false;
+  // Older API snapshots may omit eligibleUrls, unprocessedUrls, or
+  // additionalPagesDetected. The counters still make an incomplete crawl
+  // unambiguous, so never let a legacy payload render as fully ready.
+  const discoveredUrls = Math.max(0, Number(coverage.discoveredUrls ?? 0));
+  const skippedUrls = Math.max(0, Number(coverage.skippedUrls ?? 0));
+  const eligibleUrls = Math.max(1, Number(coverage.eligibleUrls ?? Math.max(1, discoveredUrls - skippedUrls)));
+  const attemptedUrls = Math.max(0, Number(coverage.attemptedUrls ?? 0));
+  const successfulPages = Math.max(0, Number(coverage.successfulPages ?? 0));
+  const unprocessedUrls = Math.max(0, Number(coverage.unprocessedUrls ?? Math.max(0, eligibleUrls - attemptedUrls)));
+  const failedUrls = Math.max(0, Number(coverage.failedUrls ?? 0));
+  return failedUrls > 0
+    || unprocessedUrls > 0
+    || (eligibleUrls > 1 && (attemptedUrls < eligibleUrls || successfulPages < eligibleUrls))
+    || (discoveredUrls > 1 && successfulPages + skippedUrls < discoveredUrls);
+});
 const knowledgeWebsiteSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "web_page"));
 const knowledgeReadyWebsiteSources = computed(() => knowledgeWebsiteSources.value.filter((source) => source.crawlStatus === "ready"));
 const knowledgeManualAnswerSources = computed(() => (workspaceKnowledge.value?.sources ?? []).filter((source) => source.contentType === "faq"));
 const knowledgeWebsiteCoverage = computed(() => {
   const total = knowledgeWebsiteSources.value.length;
   if (!total) return { value: "—", detail: "No website pages yet" };
+  const discovered = knowledgeCoverage.value?.discoveredUrls ?? total;
   return {
     value: `${Math.round((knowledgeReadyWebsiteSources.value.length / total) * 100)}%`,
-    detail: `${knowledgeReadyWebsiteSources.value.length} of ${total} pages ready`,
+    detail: discovered > total
+      ? `${knowledgeReadyWebsiteSources.value.length} captured · ${discovered} discovered`
+      : `${knowledgeReadyWebsiteSources.value.length} of ${total} pages ready`,
   };
 });
 const knowledgeSourceRows = computed<KnowledgeSourceRow[]>(() => [

@@ -84,6 +84,27 @@ function failureCopy(code: OnboardingFailureCode): Pick<OnboardingValidation, "m
   }
 }
 
+/**
+ * Coverage is authoritative for multi-page website readiness. Keep this
+ * check tolerant of older JSON snapshots that did not persist eligibleUrls or
+ * additionalPagesDetected; the persisted counters still prove whether the
+ * crawl is incomplete.
+ */
+export function crawlCoverageNeedsAttention(coverage?: CrawlCoverage | null): boolean {
+  if (!coverage) return false;
+  const discoveredUrls = Math.max(0, Number(coverage.discoveredUrls ?? 0));
+  const skippedUrls = Math.max(0, Number(coverage.skippedUrls ?? 0));
+  const eligibleUrls = Math.max(1, Number(coverage.eligibleUrls ?? Math.max(1, discoveredUrls - skippedUrls)));
+  const attemptedUrls = Math.max(0, Number(coverage.attemptedUrls ?? 0));
+  const successfulPages = Math.max(0, Number(coverage.successfulPages ?? 0));
+  const unprocessedUrls = Math.max(0, Number(coverage.unprocessedUrls ?? 0));
+  const failedUrls = Math.max(0, Number(coverage.failedUrls ?? 0));
+  return unprocessedUrls > 0
+    || failedUrls > 0
+    || (eligibleUrls > 1 && (attemptedUrls < eligibleUrls || successfulPages < eligibleUrls))
+    || (discoveredUrls > 1 && successfulPages + skippedUrls < discoveredUrls);
+}
+
 export function validationFromFailure(input: {
   code: OnboardingFailureCode;
   reachable?: boolean;
@@ -133,11 +154,7 @@ export function assessOnboardingKnowledge(input: {
   ].filter(Boolean).length;
   const usefulContent = pages.length > 0 && visibleCharacters >= 180 && (usefulSignals > 0 || visibleCharacters >= 420);
   const coverage = input.crawlCoverage;
-  const coveragePartial = Boolean(
-    coverage
-      && coverage.additionalPagesDetected
-      && (coverage.unprocessedUrls > 0 || coverage.failedUrls > 0),
-  );
+  const coveragePartial = crawlCoverageNeedsAttention(coverage);
   const expectedTokens = meaningfulTokens(expectedBusinessName);
   const contentTokens = new Set(meaningfulTokens(`${pages.slice(0, 3).map((page) => page.title ?? "").join(" ")} ${text.slice(0, 5_000)}`));
   const matchedExpectedTokens = expectedTokens.filter((token) => contentTokens.has(token));
@@ -156,7 +173,14 @@ export function assessOnboardingKnowledge(input: {
     + usefulSignals * 8
     + (mismatch ? 0 : expectedTokens.length === 0 || matchedExpectedTokens.length > 0 ? 16 : 5),
   ));
-  const score = coveragePartial && coverage ? Math.min(baseScore, Math.round(baseScore * coverage.coveragePercent / 100)) : baseScore;
+  const coveragePercent = coverage
+    ? Math.round(
+        Math.max(0, Math.min(100, Number(coverage.successfulPages ?? 0)))
+        / Math.max(1, Number(coverage.eligibleUrls ?? coverage.discoveredUrls ?? 1))
+        * 100,
+      )
+    : 100;
+  const score = coveragePartial && coverage ? Math.min(baseScore, Math.round(baseScore * coveragePercent / 100)) : baseScore;
   if (code && needsAttention) {
     const failure = validationFromFailure({ code, reachable: pages.length > 0, expectedBusinessName, crawlCoverage: coverage, crawlRun: input.crawlRun, checkedAt: input.checkedAt });
     return {
@@ -215,6 +239,7 @@ export type KnowledgeReadinessInput = {
   pendingSourceCount: number;
   failedSourceCount: number;
   contentQualityIssue: boolean;
+  crawlCoverage?: CrawlCoverage | null;
   onboarding: Pick<OnboardingValidation, "status" | "knowledgeReady" | "readinessScore">;
 };
 
@@ -240,10 +265,19 @@ export function knowledgeReadinessSnapshot(input: KnowledgeReadinessInput): Know
       + (input.semanticHealthy && !input.contentQualityIssue ? 20 : 0)
       + Math.max(0, 10 - input.gapCount * 2),
     ));
-  const onboardingNeedsAttention = input.onboarding.status !== "valid" || !input.onboarding.knowledgeReady;
+  const coverageNeedsAttention = crawlCoverageNeedsAttention(input.crawlCoverage);
+  const onboardingNeedsAttention = input.onboarding.status !== "valid" || !input.onboarding.knowledgeReady || coverageNeedsAttention;
+  const coverageScore = coverageNeedsAttention && input.crawlCoverage
+    ? Math.round(
+        Math.max(0, Math.min(100, Number(input.crawlCoverage.successfulPages ?? 0)))
+        / Math.max(1, Number(input.crawlCoverage.eligibleUrls ?? input.crawlCoverage.discoveredUrls ?? 1))
+        * 100,
+      )
+    : calculatedScore;
   const score = Math.min(
     calculatedScore,
     onboardingNeedsAttention ? Math.max(0, Math.min(100, input.onboarding.readinessScore)) : calculatedScore,
+    coverageScore < calculatedScore ? Math.round(calculatedScore * coverageScore / 100) : calculatedScore,
   );
   const indexed = input.sourceCount > 0 && input.meaningfulChunkCount > 0;
   const status = input.sourceCount === 0
