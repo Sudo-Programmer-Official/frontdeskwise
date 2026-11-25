@@ -8,6 +8,19 @@ export type RequestTrafficClass =
   | "internal"
   | "other";
 
+export type RequestFailureClass =
+  | "success"
+  | "expected_lifecycle"
+  | "client_misuse"
+  | "auth"
+  | "rate_limit"
+  | "not_found"
+  | "conflict"
+  | "timeout"
+  | "dependency"
+  | "internal_server"
+  | "client_error";
+
 export type RequestTelemetrySample = {
   route: string;
   method: string;
@@ -33,6 +46,7 @@ export type RequestTelemetryRow = {
   durationLe2000: number;
   durationLe5000: number;
   durationGt5000: number;
+  statusCounts: Record<string, number>;
   lastSeenAt: Date;
 };
 
@@ -110,8 +124,23 @@ function emptyRow(input: RequestTelemetrySample, occurredAt: Date): RequestTelem
     durationLe2000: 0,
     durationLe5000: 0,
     durationGt5000: 0,
+    statusCounts: {},
     lastSeenAt: occurredAt,
   };
+}
+
+export function requestFailureClass(statusCode: number, trafficClass?: RequestTrafficClass): RequestFailureClass {
+  if (statusCode < 400) return "success";
+  if (trafficClass === "polling" && (statusCode === 404 || statusCode === 410)) return "expected_lifecycle";
+  if (statusCode === 400 || statusCode === 422) return "client_misuse";
+  if (statusCode === 401 || statusCode === 403) return "auth";
+  if (statusCode === 404 || statusCode === 410) return "not_found";
+  if (statusCode === 408 || statusCode === 504) return "timeout";
+  if (statusCode === 409) return "conflict";
+  if (statusCode === 429) return "rate_limit";
+  if (statusCode === 502 || statusCode === 503) return "dependency";
+  if (statusCode >= 500) return "internal_server";
+  return "client_error";
 }
 
 function rowKey(row: Pick<RequestTelemetryRow, "bucketStart" | "route" | "method" | "trafficClass">): string {
@@ -143,6 +172,9 @@ function mergeRows(target: RequestTelemetryRow, source: RequestTelemetryRow): vo
   target.durationLe2000 += source.durationLe2000;
   target.durationLe5000 += source.durationLe5000;
   target.durationGt5000 += source.durationGt5000;
+  for (const [statusCode, count] of Object.entries(source.statusCounts)) {
+    target.statusCounts[statusCode] = (target.statusCounts[statusCode] ?? 0) + count;
+  }
   if (source.lastSeenAt > target.lastSeenAt) target.lastSeenAt = source.lastSeenAt;
 }
 
@@ -161,13 +193,15 @@ export class RequestTelemetryBuffer {
     const target = existing ?? row;
     target.requestCount += 1;
     if (input.statusCode >= 500) target.errorCount += 1;
+    const statusCode = String(Math.max(100, Math.min(599, Math.round(input.statusCode))));
+    target.statusCounts[statusCode] = (target.statusCounts[statusCode] ?? 0) + 1;
     addDuration(target, input.durationMs);
     if (occurredAt > target.lastSeenAt) target.lastSeenAt = occurredAt;
     this.rows.set(key, target);
   }
 
   snapshot(): RequestTelemetryRow[] {
-    return [...this.rows.values()].map((row) => ({ ...row }));
+    return [...this.rows.values()].map((row) => ({ ...row, statusCounts: { ...row.statusCounts } }));
   }
 
   drain(): RequestTelemetryRow[] {
@@ -230,5 +264,22 @@ export async function persistRequestTelemetry(pool: Pool, rows: RequestTelemetry
         row.lastSeenAt,
       ],
     );
+    for (const [statusCode, requestCount] of Object.entries(row.statusCounts)) {
+      try {
+        await pool.query(
+          `insert into api_request_metrics_status_hourly
+             (bucket_start, route, method, traffic_class, status_code, request_count)
+           values ($1, $2, $3, $4, $5, $6)
+           on conflict (bucket_start, route, method, traffic_class, status_code) do update set
+             request_count = api_request_metrics_status_hourly.request_count + excluded.request_count`,
+          [row.bucketStart, row.route, row.method, row.trafficClass, Number(statusCode), requestCount],
+        );
+      } catch (error) {
+        // Keep the main request ledger usable during a rolling deploy before
+        // the optional status-dimension migration has reached this instance.
+        if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "42P01") break;
+        throw error;
+      }
+    }
   }
 }

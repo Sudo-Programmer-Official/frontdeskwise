@@ -294,6 +294,7 @@ import {
 import {
   classifyRequestTraffic,
   persistRequestTelemetry,
+  requestFailureClass,
   RequestTelemetryBuffer,
 } from "./request-telemetry.js";
 
@@ -13183,6 +13184,9 @@ async function purgeExpiredCustomerData(): Promise<void> {
     await pool.query("delete from api_request_metrics_hourly where bucket_start < now() - interval '400 days'").catch((error) => {
       if (!isMissingDatabaseTable(error)) throw error;
     });
+    await pool.query("delete from api_request_metrics_status_hourly where bucket_start < now() - interval '400 days'").catch((error) => {
+      if (!isMissingDatabaseTable(error)) throw error;
+    });
   }
 }
 
@@ -14480,12 +14484,7 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
   const trafficClass = optionalString(query.trafficClass, 40);
   const filter = trafficClass ? "and traffic_class = $2" : "";
   const values = trafficClass ? [hours, trafficClass] : [hours];
-  const routeMetricSql = `
-    select route, method, traffic_class,
-           sum(request_count)::integer as request_count,
-           sum(error_count)::integer as error_count,
-           sum(total_duration_ms)::bigint as total_duration_ms,
-           case
+  const p50Sql = `case
              when sum(duration_le_50) >= ceil(sum(request_count) * 0.50) then 50
              when sum(duration_le_50 + duration_le_100) >= ceil(sum(request_count) * 0.50) then 100
              when sum(duration_le_50 + duration_le_100 + duration_le_250) >= ceil(sum(request_count) * 0.50) then 250
@@ -14494,8 +14493,8 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
              when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000) >= ceil(sum(request_count) * 0.50) then 2000
              when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000 + duration_le_5000) >= ceil(sum(request_count) * 0.50) then 5000
              else 5001
-           end::integer as p50_approx_ms,
-           case
+           end::integer`;
+  const p95Sql = `case
              when sum(duration_le_50) >= ceil(sum(request_count) * 0.95) then 50
              when sum(duration_le_50 + duration_le_100) >= ceil(sum(request_count) * 0.95) then 100
              when sum(duration_le_50 + duration_le_100 + duration_le_250) >= ceil(sum(request_count) * 0.95) then 250
@@ -14504,7 +14503,25 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
              when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000) >= ceil(sum(request_count) * 0.95) then 2000
              when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000 + duration_le_5000) >= ceil(sum(request_count) * 0.95) then 5000
              else 5001
-           end::integer as p95_approx_ms,
+           end::integer`;
+  const p99Sql = `case
+             when sum(duration_le_50) >= ceil(sum(request_count) * 0.99) then 50
+             when sum(duration_le_50 + duration_le_100) >= ceil(sum(request_count) * 0.99) then 100
+             when sum(duration_le_50 + duration_le_100 + duration_le_250) >= ceil(sum(request_count) * 0.99) then 250
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500) >= ceil(sum(request_count) * 0.99) then 500
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000) >= ceil(sum(request_count) * 0.99) then 1000
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000) >= ceil(sum(request_count) * 0.99) then 2000
+             when sum(duration_le_50 + duration_le_100 + duration_le_250 + duration_le_500 + duration_le_1000 + duration_le_2000 + duration_le_5000) >= ceil(sum(request_count) * 0.99) then 5000
+             else 5001
+           end::integer`;
+  const routeMetricSql = `
+    select route, method, traffic_class,
+           sum(request_count)::integer as request_count,
+           sum(error_count)::integer as error_count,
+           sum(total_duration_ms)::bigint as total_duration_ms,
+           ${p50Sql} as p50_approx_ms,
+           ${p95Sql} as p95_approx_ms,
+           ${p99Sql} as p99_approx_ms,
            max(last_seen_at) as last_seen_at
       from api_request_metrics_hourly
      where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
@@ -14514,7 +14531,10 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
     select traffic_class,
            sum(request_count)::integer as request_count,
            sum(error_count)::integer as error_count,
-           sum(total_duration_ms)::bigint as total_duration_ms
+           sum(total_duration_ms)::bigint as total_duration_ms,
+           ${p50Sql} as p50_approx_ms,
+           ${p95Sql} as p95_approx_ms,
+           ${p99Sql} as p99_approx_ms
       from api_request_metrics_hourly
      where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
      group by traffic_class
@@ -14522,18 +14542,120 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
   const totalMetricSql = `
     select coalesce(sum(request_count), 0)::integer as request_count,
            coalesce(sum(error_count), 0)::integer as error_count,
-           coalesce(sum(total_duration_ms), 0)::bigint as total_duration_ms
+           coalesce(sum(total_duration_ms), 0)::bigint as total_duration_ms,
+           ${p50Sql} as p50_approx_ms,
+           ${p95Sql} as p95_approx_ms,
+           ${p99Sql} as p99_approx_ms
       from api_request_metrics_hourly
      where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}`;
+  const statusRouteSql = `
+    select route, method, traffic_class, status_code, sum(request_count)::integer as request_count
+      from api_request_metrics_status_hourly
+     where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
+     group by route, method, traffic_class, status_code`;
+  const statusClassSql = `
+    select traffic_class, status_code, sum(request_count)::integer as request_count
+      from api_request_metrics_status_hourly
+     where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
+     group by traffic_class, status_code`;
+  const statusTotalSql = `
+    select status_code, sum(request_count)::integer as request_count
+      from api_request_metrics_status_hourly
+     where bucket_start >= now() - ($1::integer * interval '1 hour') ${filter}
+     group by status_code
+     order by status_code`;
   try {
     const [routes, classes, totals] = await Promise.all([
       pool.query<Record<string, unknown>>(routeMetricSql, values),
       pool.query<Record<string, unknown>>(classMetricSql, values),
       pool.query<Record<string, unknown>>(totalMetricSql, values),
     ]);
+    let statusRoutes: Array<Record<string, unknown>> = [];
+    let statusClasses: Array<Record<string, unknown>> = [];
+    let statusTotals: Array<Record<string, unknown>> = [];
+    try {
+      const [routeStatus, classStatus, totalStatus] = await Promise.all([
+        pool.query<Record<string, unknown>>(statusRouteSql, values),
+        pool.query<Record<string, unknown>>(statusClassSql, values),
+        pool.query<Record<string, unknown>>(statusTotalSql, values),
+      ]);
+      statusRoutes = routeStatus.rows;
+      statusClasses = classStatus.rows;
+      statusTotals = totalStatus.rows;
+    } catch (error) {
+      if (!isMissingDatabaseTable(error)) throw error;
+    }
+    const statusEntry = (row: Record<string, unknown>, classOverride?: string) => {
+      const statusCode = Number(row.status_code ?? 0);
+      return {
+        statusCode,
+        requests: Number(row.request_count ?? 0),
+        failureClass: requestFailureClass(statusCode, (classOverride ?? row.traffic_class) as Parameters<typeof requestFailureClass>[1]),
+      };
+    };
+    const routeStatusMap = new Map<string, ReturnType<typeof statusEntry>[]>();
+    for (const row of statusRoutes) {
+      const key = `${String(row.method)}|${String(row.route)}|${String(row.traffic_class)}`;
+      const entries = routeStatusMap.get(key) ?? [];
+      entries.push(statusEntry(row));
+      routeStatusMap.set(key, entries);
+    }
+    const classStatusMap = new Map<string, ReturnType<typeof statusEntry>[]>();
+    for (const row of statusClasses) {
+      const key = String(row.traffic_class);
+      const entries = classStatusMap.get(key) ?? [];
+      entries.push(statusEntry(row, key));
+      classStatusMap.set(key, entries);
+    }
+    const totalStatusBreakdown = statusTotals.map((row) => statusEntry(row, trafficClass ?? undefined));
+    const statusBreakdownFor = (entries: ReturnType<typeof statusEntry>[]) => [...entries].sort((left, right) => left.statusCode - right.statusCode);
+    const errorClassMap = new Map<string, number>();
+    for (const entry of totalStatusBreakdown.filter((item) => item.statusCode >= 400)) {
+      errorClassMap.set(entry.failureClass, (errorClassMap.get(entry.failureClass) ?? 0) + entry.requests);
+    }
+    const responseStages = await (async () => {
+      try {
+        const result = await pool.query<Record<string, unknown>>(
+          `with samples as (
+             select metrics, duration_ms
+               from widget_performance_events
+              where event_type = 'message_backend'
+                and occurred_at >= now() - ($1::integer * interval '1 hour')
+           )
+           select stage,
+                  count(value)::integer as samples,
+                  round(avg(value))::integer as average_duration_ms,
+                  percentile_cont(0.50) within group (order by value)::integer as p50_duration_ms,
+                  percentile_cont(0.95) within group (order by value)::integer as p95_duration_ms
+             from samples
+             cross join lateral (values
+               ('retrieval', case when jsonb_typeof(metrics->'retrieval_ms') = 'number' then (metrics->>'retrieval_ms')::double precision end),
+               ('validation', case when jsonb_typeof(metrics->'validation_latency_ms') = 'number' then (metrics->>'validation_latency_ms')::double precision end),
+               ('model', case when jsonb_typeof(metrics->'llm_total_ms') = 'number' then (metrics->>'llm_total_ms')::double precision end),
+               ('total', case when jsonb_typeof(metrics->'backend_total_ms') = 'number' then (metrics->>'backend_total_ms')::double precision when duration_ms is not null then duration_ms::double precision end)
+             ) as stage_values(stage, value)
+            where value is not null
+            group by stage
+            order by case stage when 'retrieval' then 1 when 'validation' then 2 when 'model' then 3 else 4 end`,
+          [hours],
+        );
+        return result.rows.map((row) => ({
+          stage: String(row.stage),
+          samples: Number(row.samples ?? 0),
+          averageDurationMs: row.average_duration_ms === null ? null : Number(row.average_duration_ms),
+          p50DurationMs: row.p50_duration_ms === null ? null : Number(row.p50_duration_ms),
+          p95DurationMs: row.p95_duration_ms === null ? null : Number(row.p95_duration_ms),
+        }));
+      } catch (error) {
+        if (isMissingDatabaseTable(error)) return [];
+        throw error;
+      }
+    })();
     const mapMetric = (row: Record<string, unknown>) => {
       const requests = Number(row.request_count ?? 0);
       const errors = Number(row.error_count ?? 0);
+      const routeKey = row.route && row.method ? `${String(row.method)}|${String(row.route)}|${String(row.traffic_class)}` : null;
+      const statusBreakdown = routeKey ? routeStatusMap.get(routeKey) ?? [] : row.traffic_class ? classStatusMap.get(String(row.traffic_class)) ?? [] : [];
       return {
         ...(row.route ? { route: String(row.route) } : {}),
         ...(row.method ? { method: String(row.method) } : {}),
@@ -14542,8 +14664,10 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
         errors,
         errorRate: requests ? errors / requests : 0,
         averageDurationMs: requests ? Math.round(Number(row.total_duration_ms ?? 0) / requests) : 0,
+        statusBreakdown: statusBreakdownFor(statusBreakdown),
         ...(row.p50_approx_ms !== undefined ? { p50ApproxMs: row.p50_approx_ms === null ? null : Number(row.p50_approx_ms) } : {}),
         ...(row.p95_approx_ms !== undefined ? { p95ApproxMs: row.p95_approx_ms === null ? null : Number(row.p95_approx_ms) } : {}),
+        ...(row.p99_approx_ms !== undefined ? { p99ApproxMs: row.p99_approx_ms === null ? null : Number(row.p99_approx_ms) } : {}),
         ...(row.last_seen_at !== undefined ? { lastSeenAt: nullableIso(row.last_seen_at) } : {}),
       };
     };
@@ -14556,8 +14680,13 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
       errors: row.errorCount,
       errorRate: row.requestCount ? row.errorCount / row.requestCount : 0,
       averageDurationMs: row.requestCount ? Math.round(row.totalDurationMs / row.requestCount) : 0,
+      statusBreakdown: statusBreakdownFor(Object.entries(row.statusCounts).map(([statusCode, requests]) => {
+        const numericStatus = Number(statusCode);
+        return { statusCode: numericStatus, requests, failureClass: requestFailureClass(numericStatus, row.trafficClass) };
+      })),
       lastSeenAt: row.lastSeenAt.toISOString(),
     }));
+    const totalRequests = Number(total.request_count ?? 0);
     return {
       generatedAt: new Date().toISOString(),
       windowHours: hours,
@@ -14567,20 +14696,28 @@ app.get("/api/v1/admin/request-metrics", async (request) => {
         errorRate: Number(total.request_count ?? 0) ? Number(total.error_count ?? 0) / Number(total.request_count ?? 0) : 0,
         averageDurationMs: Number(total.request_count ?? 0) ? Math.round(Number(total.total_duration_ms ?? 0) / Number(total.request_count ?? 0)) : 0,
         averageRequestsPerMinute: Number(total.request_count ?? 0) / (hours * 60),
+        p50ApproxMs: total.p50_approx_ms === null || total.p50_approx_ms === undefined ? null : Number(total.p50_approx_ms),
+        p95ApproxMs: total.p95_approx_ms === null || total.p95_approx_ms === undefined ? null : Number(total.p95_approx_ms),
+        p99ApproxMs: total.p99_approx_ms === null || total.p99_approx_ms === undefined ? null : Number(total.p99_approx_ms),
+        statusBreakdown: statusBreakdownFor(totalStatusBreakdown),
       },
       routes: routes.rows.map(mapMetric),
       trafficClasses: classes.rows.map(mapMetric),
       live,
+      errorClasses: [...errorClassMap.entries()].map(([failureClass, requests]) => ({ failureClass, requests, errorRate: totalRequests ? requests / totalRequests : 0 })).sort((left, right) => right.requests - left.requests),
+      responseStages,
     };
   } catch (error) {
     if (isMissingDatabaseTable(error)) {
       return {
         generatedAt: new Date().toISOString(),
         windowHours: hours,
-        totals: { requests: 0, errors: 0, errorRate: 0, averageDurationMs: 0, averageRequestsPerMinute: 0 },
+        totals: { requests: 0, errors: 0, errorRate: 0, averageDurationMs: 0, averageRequestsPerMinute: 0, p50ApproxMs: null, p95ApproxMs: null, p99ApproxMs: null, statusBreakdown: [] },
         routes: [],
         trafficClasses: [],
         live: requestTelemetry.snapshot(),
+        errorClasses: [],
+        responseStages: [],
         unavailable: true,
       };
     }

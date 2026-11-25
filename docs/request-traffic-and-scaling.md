@@ -7,13 +7,15 @@ FrontDeskWise now records a bounded, aggregated HTTP request ledger so capacity 
 `GET /api/v1/admin/request-metrics?hours=24` is restricted to super-admins and returns:
 
 - total requests, 5xx errors, error rate, average latency, and average requests per minute;
-- route-level volume and approximate p50/p95 latency buckets;
+- route- and traffic-purpose-level volume with approximate p50/p95/p99 latency buckets;
+- response status-code counts and derived failure classes (`expected_lifecycle`, `auth`, `rate_limit`, `dependency`, `internal_server`, and others);
+- message-backend stage latency for retrieval, validation, model time, and total response time when widget performance samples are available;
 - traffic-purpose totals for `customer_value`, `polling`, `background`, `health_check`, `internal`, and `other`;
 - current-process samples that have not reached the next hourly database flush yet.
 
-The API stores one aggregate row per route, method, traffic class, and UTC hour in `api_request_metrics_hourly`. It stores counts and latency buckets, never request bodies, visitor messages, IP addresses, or user agents.
+The API stores one aggregate row per route, method, traffic class, and UTC hour in `api_request_metrics_hourly`, plus a separate status-code aggregate in `api_request_metrics_status_hourly`. It stores counts and latency buckets, never request bodies, visitor messages, IP addresses, or user agents.
 
-The System health admin view exposes the same breakdown under “Where API traffic is coming from”.
+The System health admin view exposes the same breakdown under “Where API traffic is coming from”. Customer-value traffic leads the headline cards, while `/ready` and other infrastructure traffic remain available below it. Polling `404`/`410` responses are labeled as expected lifecycle events so they do not look like server failures; the route and status-code breakdown remains visible for investigation.
 
 ## Polling behavior
 
@@ -40,4 +42,4 @@ Use the route breakdown with the existing service graphs. A practical first scal
 
 The next infrastructure step should be selected by the constrained dimension: database pool/query latency, model/provider concurrency, or background work. Crawls, embeddings, certification, and report generation should move to workers before they compete with customer conversations.
 
-Migration `infra/db/079_api_request_metrics.sql` is included in the normal forward-only migration chain.
+Migrations `infra/db/079_api_request_metrics.sql` and `infra/db/080_api_request_status_metrics.sql` are included in the normal forward-only migration chain.

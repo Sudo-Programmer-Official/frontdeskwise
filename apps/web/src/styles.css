@@ -313,9 +313,18 @@ button:disabled { cursor: wait; opacity: .7; }
 .request-metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .request-metrics-grid .ds-card { box-shadow: none; }
 .request-metrics-grid .detail-list-row span:last-child { flex: 0 0 auto; text-align: right; }
+.request-health-stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.request-attention-card { border-color: #f0d7a4; background: #fffdf7; }
+.request-routes-card { grid-column: 1 / -1; }
+.request-error-danger { color: var(--ds-color-danger) !important; }
+.request-error-warning { color: #b46b08 !important; }
+.request-error-muted { color: var(--ds-color-ink-500) !important; }
 
 @media (max-width: 780px) {
   .request-metrics-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 1060px) {
+  .request-health-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) { .ds-stat-grid { grid-template-columns: 1fr; }.admin-section-tabs { overflow-x: auto; flex-wrap: nowrap; }.admin-section-tabs button { flex: 0 0 auto; }.admin-only-mode .content-header { align-items: center; }.admin-only-mode .content-header .text-button { display: inline-flex; }.admin-only-mode .view-content { padding-left: 18px; padding-right: 18px; } }
 @media (max-width: 760px) { .knowledge-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -882,6 +891,11 @@ button, input, textarea, select { font-family: var(--ds-font-body); }
 .product-shell .nav-icon { width: 18px; color: #d4e2f8; font-size: 15px; }
 .product-shell .nav-item b { padding: 2px 6px; color: #eaf3ff; background: rgba(255,255,255,.15); font-size: 10px; }
 .product-shell .sidebar-link { color: #b4c9e9; font-size: 11px; }
+.product-shell .admin-sign-out { display: inline-flex; width: 100%; min-height: 44px; align-items: center; justify-content: flex-start; gap: 9px; padding: 0 13px; border: 1px solid rgba(190,213,247,.25); border-radius: 10px; color: #dbe8fb; background: rgba(255,255,255,.07); font-size: 12px; font-weight: 700; text-align: left; transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease; }
+.product-shell .admin-sign-out svg { flex: 0 0 auto; color: #aec6eb; }
+.product-shell .admin-sign-out:hover { border-color: rgba(255,177,177,.48); color: #fff; background: rgba(180,59,59,.18); transform: translateY(-1px); }
+.product-shell .admin-sign-out:hover svg { color: #ffc1bc; }
+.product-shell .admin-sign-out:focus-visible { outline: 2px solid rgba(190,220,255,.9); outline-offset: 3px; }
 .product-shell .setup-card {
   display: grid;
   gap: 0;

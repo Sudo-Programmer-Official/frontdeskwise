@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   classifyRequestTraffic,
   normalizeRequestRoute,
+  requestFailureClass,
   RequestTelemetryBuffer,
 } from "../src/request-telemetry.js";
 
@@ -34,5 +35,13 @@ test("request telemetry aggregates counts, errors, latency buckets, and hourly d
   assert.equal(row.errorCount, 1);
   assert.equal(row.durationLe50, 1);
   assert.equal(row.durationLe2000, 1);
+  assert.deepEqual(row.statusCounts, { "200": 1, "503": 1 });
   assert.equal(row.bucketStart.toISOString(), "2026-11-22T15:00:00.000Z");
+});
+
+test("request telemetry classifies polling lifecycle failures separately from actionable failures", () => {
+  assert.equal(requestFailureClass(404, "polling"), "expected_lifecycle");
+  assert.equal(requestFailureClass(401, "customer_value"), "auth");
+  assert.equal(requestFailureClass(429, "polling"), "rate_limit");
+  assert.equal(requestFailureClass(500, "customer_value"), "internal_server");
 });

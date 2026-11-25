@@ -27,6 +27,7 @@ import {
   House,
   Inbox,
   LayoutDashboard,
+  LogOut,
   Mail,
   Menu,
   MessageSquare,
@@ -1249,7 +1250,23 @@ interface AdminRequestMetricRow {
   averageDurationMs: number;
   p50ApproxMs?: number | null;
   p95ApproxMs?: number | null;
+  p99ApproxMs?: number | null;
+  statusBreakdown?: Array<{ statusCode: number; requests: number; failureClass: string }>;
   lastSeenAt?: string | null;
+}
+
+interface AdminRequestErrorClass {
+  failureClass: string;
+  requests: number;
+  errorRate: number;
+}
+
+interface AdminResponseStage {
+  stage: string;
+  samples: number;
+  averageDurationMs: number | null;
+  p50DurationMs: number | null;
+  p95DurationMs: number | null;
 }
 
 interface AdminRequestMetrics {
@@ -1261,10 +1278,16 @@ interface AdminRequestMetrics {
     errorRate: number;
     averageDurationMs: number;
     averageRequestsPerMinute: number;
+    p50ApproxMs?: number | null;
+    p95ApproxMs?: number | null;
+    p99ApproxMs?: number | null;
+    statusBreakdown?: Array<{ statusCode: number; requests: number; failureClass: string }>;
   };
   routes: AdminRequestMetricRow[];
   trafficClasses: AdminRequestMetricRow[];
   live: AdminRequestMetricRow[];
+  errorClasses: AdminRequestErrorClass[];
+  responseStages: AdminResponseStage[];
   unavailable?: boolean;
 }
 
@@ -1717,6 +1740,32 @@ function requestMetricPercent(value: number): string {
 function requestMetricDuration(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return value >= 5_001 ? ">5s" : `${value}ms`;
+}
+
+function requestMetricStatusSummary(item: AdminRequestMetricRow): string {
+  const statuses = (item.statusBreakdown ?? []).filter((status) => status.statusCode >= 400);
+  if (!statuses.length) return "No non-2xx responses recorded";
+  return statuses.slice(0, 3).map((status) => `${status.statusCode} · ${status.requests.toLocaleString()}`).join(" · ");
+}
+
+function requestMetricErrorClassLabel(value: string): string {
+  const labels: Record<string, string> = {
+    expected_lifecycle: "Expected lifecycle",
+    client_misuse: "Client misuse",
+    auth: "Auth",
+    rate_limit: "Rate limit",
+    not_found: "Not found",
+    conflict: "Conflict",
+    timeout: "Timeout",
+    dependency: "Dependency",
+    internal_server: "Internal server",
+    client_error: "Client error",
+  };
+  return labels[value] ?? formatLabel(value);
+}
+
+function requestMetricErrorClassTone(value: string): string {
+  return value === "expected_lifecycle" || value === "client_misuse" ? "muted" : value === "internal_server" || value === "dependency" || value === "timeout" ? "danger" : "warning";
 }
 const installationSupportRequests = ref<InstallationSupportRequest[]>([]);
 const installationSupportAssignees = ref<InstallationSupportAssignee[]>([]);
@@ -9211,7 +9260,7 @@ function startMarketingDemo() {
           </div>
           <button v-if="isSuperAdmin" type="button" :class="['nav-item', { active: view === 'admin' }]" @click="navigateToAdmin"><span class="nav-icon"><ShieldCheck :size="19" :stroke-width="1.8" aria-hidden="true" /></span><span>Admin control plane</span></button>
         </nav>
-        <div v-if="adminSurfaceMode" class="sidebar-bottom"><div class="admin-sidebar-note"><strong>Operations access</strong><small>Manage platform health, organizations, users, and demos from one place.</small></div><button v-if="!adminOnlyMode" class="sidebar-link" type="button" @click="view = 'overview'">← Back to workspace</button><button class="sidebar-link" type="button" @click="signOut">Sign out</button></div>
+        <div v-if="adminSurfaceMode" class="sidebar-bottom"><div class="admin-sidebar-note"><strong>Operations access</strong><small>Manage platform health, organizations, users, and demos from one place.</small></div><button v-if="!adminOnlyMode" class="sidebar-link" type="button" @click="view = 'overview'">← Back to workspace</button><button class="admin-sign-out" type="button" @click="signOut"><LogOut :size="16" :stroke-width="1.9" aria-hidden="true" /><span>Sign out</span></button></div>
         <div v-else class="sidebar-bottom">
           <div v-if="showSetupCard" class="setup-card" aria-label="AI front desk setup">
             <template v-if="!availableBusinesses.length">
@@ -10026,8 +10075,19 @@ function startMarketingDemo() {
             <section class="panel request-metrics-panel">
               <div class="section-toolbar"><div><p class="eyebrow">Capacity planning · last {{ adminRequestMetrics?.windowHours ?? 24 }}h</p><h2>Where API traffic is coming from</h2><p>Aggregated route counts separate customer work, polling, background telemetry, health checks, and internal traffic.</p></div><button class="outline-button small" type="button" :disabled="adminRequestMetricsLoading" @click="loadAdminRequestMetrics">{{ adminRequestMetricsLoading ? 'Refreshing…' : 'Refresh metrics' }}</button></div>
               <p v-if="adminRequestMetricsError" class="form-error">{{ adminRequestMetricsError }}</p>
-              <div v-if="adminRequestMetrics" class="ds-stat-grid admin-detail-stat-grid"><article class="ds-stat-card"><span class="ds-stat-icon blue"><Activity :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRequestMetrics.totals.requests.toLocaleString() }}</strong><small>Requests</small><em>{{ adminRequestMetrics.totals.averageRequestsPerMinute.toFixed(2) }} / minute average</em></article><article class="ds-stat-card"><span class="ds-stat-icon green"><Gauge :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ requestMetricDuration(adminRequestMetrics.totals.averageDurationMs) }}</strong><small>Average latency</small><em>p50/p95 are shown by route below</em></article><article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ requestMetricPercent(adminRequestMetrics.totals.errorRate) }}</strong><small>Error rate</small><em>{{ adminRequestMetrics.totals.errors.toLocaleString() }} 5xx responses</em></article></div>
-              <div v-if="adminRequestMetrics" class="request-metrics-grid"><article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">Traffic mix</p><h3>Requests by purpose</h3></div></div><div v-if="!adminRequestMetrics.trafficClasses.length" class="diagnostics-empty">No persisted samples yet. Metrics appear after the next flush.</div><div v-for="item in adminRequestMetrics.trafficClasses" :key="item.trafficClass" class="detail-list-row"><span><strong>{{ formatLabel(item.trafficClass || 'other') }}</strong><small>{{ item.requests.toLocaleString() }} requests · {{ requestMetricDuration(item.averageDurationMs) }} average</small></span><span><strong>{{ requestMetricPercent(item.requests / Math.max(1, adminRequestMetrics.totals.requests)) }}</strong><small>{{ requestMetricPercent(item.errorRate) }} errors</small></span></div></article><article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">Top routes</p><h3>Highest request volume</h3></div></div><div v-if="!adminRequestMetrics.routes.length" class="diagnostics-empty">No route samples yet.</div><div v-for="item in adminRequestMetrics.routes.slice(0, 12)" :key="`${item.method}-${item.route}-${item.trafficClass}`" class="detail-list-row"><span><strong>{{ item.method }} {{ item.route }}</strong><small>{{ formatLabel(item.trafficClass || 'other') }} · {{ item.requests.toLocaleString() }} requests</small></span><span><strong>{{ requestMetricDuration(item.p95ApproxMs) }}</strong><small>{{ requestMetricPercent(item.errorRate) }} errors · {{ requestMetricDuration(item.averageDurationMs) }} avg</small></span></div></article></div>
+              <div v-if="adminRequestMetrics" class="ds-stat-grid admin-detail-stat-grid request-health-stat-grid">
+                <article class="ds-stat-card"><span class="ds-stat-icon blue"><MessageSquare :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ adminRequestMetrics.trafficClasses.find((item) => item.trafficClass === 'customer_value')?.requests.toLocaleString() ?? '0' }}</strong><small>Customer traffic</small><em>Infrastructure noise excluded</em></article>
+                <article class="ds-stat-card"><span class="ds-stat-icon green"><CircleCheck :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ ((adminRequestMetrics.trafficClasses.find((item) => item.trafficClass === 'customer_value')?.requests ?? 0) - (adminRequestMetrics.trafficClasses.find((item) => item.trafficClass === 'customer_value')?.errors ?? 0)).toLocaleString() }}</strong><small>Successful customer responses</small><em>Based on 5xx responses</em></article>
+                <article class="ds-stat-card"><span class="ds-stat-icon purple"><Gauge :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ requestMetricDuration(adminRequestMetrics.trafficClasses.find((item) => item.trafficClass === 'customer_value')?.p95ApproxMs) }}</strong><small>Customer p95 latency</small><em>p50 {{ requestMetricDuration(adminRequestMetrics.trafficClasses.find((item) => item.trafficClass === 'customer_value')?.p50ApproxMs) }} · p99 {{ requestMetricDuration(adminRequestMetrics.trafficClasses.find((item) => item.trafficClass === 'customer_value')?.p99ApproxMs) }}</em></article>
+                <article class="ds-stat-card"><span class="ds-stat-icon orange"><TriangleAlert :size="18" :stroke-width="1.8" aria-hidden="true" /></span><strong>{{ requestMetricPercent(adminRequestMetrics.totals.errorRate) }}</strong><small>5xx rate</small><em>{{ adminRequestMetrics.totals.errors.toLocaleString() }} server errors</em></article>
+              </div>
+              <div v-if="adminRequestMetrics" class="request-metrics-grid">
+                <article class="ds-card request-attention-card"><div class="panel-heading"><div><p class="eyebrow">Actionable attention</p><h3>What needs investigation</h3><small>Lifecycle 404/410s are shown separately from failures.</small></div></div><div v-if="!adminRequestMetrics.routes.some((item) => (item.trafficClass === 'polling' && item.route?.endsWith('/status') && item.errorRate > 0.01) || item.errorRate > 0.01)" class="diagnostics-empty">No route is above the 1% 5xx investigation threshold.</div><div v-for="item in adminRequestMetrics.routes.filter((route) => (route.trafficClass === 'polling' && route.route?.endsWith('/status') && route.errorRate > 0.01) || route.errorRate > 0.01).slice(0, 6)" :key="`${item.method}-${item.route}-${item.trafficClass}-attention`" class="detail-list-row"><span><strong>{{ item.method }} {{ item.route }}</strong><small>{{ formatLabel(item.trafficClass || 'other') }} · {{ item.requests.toLocaleString() }} requests</small><small>{{ requestMetricStatusSummary(item) }}</small></span><span><strong>{{ requestMetricPercent(item.errorRate) }} 5xx</strong><small>p95 {{ requestMetricDuration(item.p95ApproxMs) }}</small></span></div></article>
+                <article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">Traffic mix</p><h3>Customer-value first</h3><small>Health checks remain visible, but do not lead the headline.</small></div></div><div v-if="!adminRequestMetrics.trafficClasses.length" class="diagnostics-empty">No persisted samples yet. Metrics appear after the next flush.</div><div v-for="item in adminRequestMetrics.trafficClasses" :key="item.trafficClass" class="detail-list-row"><span><strong>{{ formatLabel(item.trafficClass || 'other') }}</strong><small>{{ item.requests.toLocaleString() }} requests · {{ requestMetricDuration(item.averageDurationMs) }} average</small><small>p50 {{ requestMetricDuration(item.p50ApproxMs) }} · p95 {{ requestMetricDuration(item.p95ApproxMs) }} · p99 {{ requestMetricDuration(item.p99ApproxMs) }}</small></span><span><strong>{{ requestMetricPercent(item.requests / Math.max(1, adminRequestMetrics.totals.requests)) }}</strong><small>{{ requestMetricPercent(item.errorRate) }} 5xx</small></span></div></article>
+                <article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">Error classification</p><h3>Why requests failed</h3><small>Derived from response status codes; status breakdown is the source of truth.</small></div></div><div v-if="!adminRequestMetrics.errorClasses.length" class="diagnostics-empty">No non-2xx response classes recorded.</div><div v-for="item in adminRequestMetrics.errorClasses" :key="item.failureClass" class="detail-list-row"><span><strong :class="`request-error-${requestMetricErrorClassTone(item.failureClass)}`">{{ requestMetricErrorClassLabel(item.failureClass) }}</strong><small>{{ item.requests.toLocaleString() }} responses</small></span><span><strong>{{ requestMetricPercent(item.errorRate) }}</strong><small>of all requests</small></span></div></article>
+                <article class="ds-card"><div class="panel-heading"><div><p class="eyebrow">AI response stages</p><h3>Where message time goes</h3><small>Instrumented message-backend timings.</small></div></div><div v-if="!adminRequestMetrics.responseStages.length" class="diagnostics-empty">No message stage samples yet.</div><div v-for="item in adminRequestMetrics.responseStages" :key="item.stage" class="detail-list-row"><span><strong>{{ formatLabel(item.stage) }}</strong><small>{{ item.samples.toLocaleString() }} samples · avg {{ requestMetricDuration(item.averageDurationMs) }}</small></span><span><strong>p95 {{ requestMetricDuration(item.p95DurationMs) }}</strong><small>p50 {{ requestMetricDuration(item.p50DurationMs) }}</small></span></div></article>
+                <article class="ds-card request-routes-card"><div class="panel-heading"><div><p class="eyebrow">Top routes</p><h3>Highest request volume</h3><small>Each row includes p50, p95, p99, and the observed non-2xx statuses.</small></div></div><div v-if="!adminRequestMetrics.routes.length" class="diagnostics-empty">No route samples yet.</div><div v-for="item in adminRequestMetrics.routes.slice(0, 12)" :key="`${item.method}-${item.route}-${item.trafficClass}`" class="detail-list-row"><span><strong>{{ item.method }} {{ item.route }}</strong><small>{{ formatLabel(item.trafficClass || 'other') }} · {{ item.requests.toLocaleString() }} requests · {{ requestMetricPercent(item.errorRate) }} 5xx</small><small>p50 {{ requestMetricDuration(item.p50ApproxMs) }} · p95 {{ requestMetricDuration(item.p95ApproxMs) }} · p99 {{ requestMetricDuration(item.p99ApproxMs) }} · {{ requestMetricStatusSummary(item) }}</small></span><span><strong>{{ requestMetricDuration(item.averageDurationMs) }}</strong><small>average</small></span></div></article>
+              </div>
               <p v-else class="diagnostics-empty">Request metrics are loading…</p>
             </section>
           </div>
