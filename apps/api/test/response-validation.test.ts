@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   customerSafeFallbacks,
+  isInternalCustomerCopy,
+  rewriteCustomerFacingTerminology,
   shouldRunSemanticVerifier,
   validateCustomerResponse,
 } from "../src/response-validation.js";
@@ -56,5 +58,55 @@ test("semantic verification is recorded as the third validation tier", () => {
     semanticVerified: true,
   });
   assert.equal(result.tier, 3);
+});
+
+test("customer-facing terminology is rewritten before a response is accepted", () => {
+  const result = validateCustomerResponse({
+    answer: "I couldn’t check live jackrabbit availability right now. The provider API workflow uses retrieval.",
+    route: "system",
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.customerCopyRewritten, true);
+  assert.equal(result.answer, "I can’t confirm live availability right now. The connected system next steps uses business information.");
+  assert.equal(isInternalCustomerCopy(result.answer), false);
+});
+
+test("explicit verified brand questions may retain Jackrabbit while hiding other plumbing", () => {
+  const result = validateCustomerResponse({
+    question: "Do you use Jackrabbit?",
+    answer: "Yes, Jackrabbit is connected through our provider API.",
+    route: "knowledge",
+    grounded: true,
+    confidenceScore: 0.95,
+    hasReliableEvidence: true,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.match(result.answer, /Jackrabbit/);
+  assert.doesNotMatch(result.answer, /\bprovider\b|\bAPI\b/i);
+  assert.equal(isInternalCustomerCopy(result.answer, "Do you use Jackrabbit?"), false);
+});
+
+test("terminology rewriting is available as a standalone customer-copy guard", () => {
+  const result = rewriteCustomerFacingTerminology("The workflow called the provider endpoint through RAG.");
+
+  assert.equal(result.rewritten, true);
+  assert.equal(result.text, "The next steps called the connected system link through business information.");
+});
+
+test("business-owned phrases and URLs are preserved by the terminology guard", () => {
+  const result = validateCustomerResponse({
+    answer: "Use API Workflow or Provider Portal here: https://api.example.com/workflow.",
+    route: "knowledge",
+    grounded: true,
+    confidenceScore: 0.95,
+    hasReliableEvidence: true,
+    publicTerms: ["API Workflow", "Provider Portal"],
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.customerCopyRewritten, false);
+  assert.equal(result.answer, "Use API Workflow or Provider Portal here: https://api.example.com/workflow.");
 });
 

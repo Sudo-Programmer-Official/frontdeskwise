@@ -17,6 +17,7 @@ import {
   CircleAlert,
   CircleCheck,
   CircleHelp,
+  ContactRound,
   Code2,
   Database,
   DollarSign,
@@ -1935,7 +1936,7 @@ const navSections: Array<{ label: string; items: WorkspaceNavItem[] }> = [
     { id: "settings", label: "Handoff & alerts", icon: CircleAlert, settingsTab: "notifications" },
   ] },
   { label: "Convert", items: [
-    { id: "leads", label: "Leads", icon: UserRoundPlus },
+    { id: "leads", label: "Leads", icon: ContactRound },
     { id: "actions", label: "Actions", icon: CalendarCheck },
   ] },
   { label: "Improve", items: [
@@ -2079,7 +2080,7 @@ const visibleNavSections = computed(() => {
   return [
     { label: "Operate", items: [{ id: "inbox" as View, label: "Inbox", icon: Inbox }] },
     { label: "Convert", items: [
-      { id: "leads" as View, label: "Assigned leads", icon: UserRoundPlus },
+      { id: "leads" as View, label: "Assigned leads", icon: ContactRound },
     ] },
     { label: "Improve", items: [
       { id: "knowledge" as View, label: "Knowledge", icon: BookOpen },

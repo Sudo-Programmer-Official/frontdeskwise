@@ -269,6 +269,7 @@ import { answerConversationAcknowledgement, answerConversationStateQuestion, typ
 import { buildExecutiveAnalytics } from "./executive-analytics.js";
 import {
   customerSafeFallbacks,
+  rewriteCustomerFacingTerminology,
   shouldRunSemanticVerifier,
   validateCustomerResponse,
 } from "./response-validation.js";
@@ -8591,6 +8592,18 @@ function customerBusinessName(business: Business): string {
   return declared || explicit || candidate || "the business";
 }
 
+function customerOwnedCopyTerms(business: Business): string[] {
+  const terms = [
+    business.name,
+    business.agentConfig.assistantName,
+    ...business.actions.flatMap((action) => [action.name, action.completion.linkLabel ?? ""]),
+    ...business.facts.flatMap((fact) => [fact.subject]),
+  ];
+  return [...new Set(terms
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0 && term.length <= 120 && !/^https?:\/\//i.test(term)))];
+}
+
 function customerFallbackMessage(business: Business): string {
   const configured = business.agentConfig.fallbackMessage.trim();
   if (!configured) return "I don’t have enough verified information to answer that confidently.";
@@ -9318,6 +9331,7 @@ async function answerQuestion(
     const qnaValidation = validateCustomerResponse({
       question,
       answer: qnaMatch.qna.canonicalAnswer,
+      publicTerms: customerOwnedCopyTerms(business),
       route: "knowledge",
       grounded: true,
       confidenceScore: qnaMatch.score,
@@ -9342,7 +9356,8 @@ async function answerQuestion(
       latencyMs: 0,
     };
     return {
-      answer: qnaMatch.qna.canonicalAnswer,
+      answer: qnaValidation.answer,
+      ...(qnaValidation.customerCopyRewritten ? { customerCopyRewritten: true, customerCopyRewriteReason: "internal_terminology" as const } : {}),
       grounded: true,
       citations: qnaMatch.qna.sourceReferences
         .filter((reference) => Boolean(reference.url))
@@ -9630,6 +9645,7 @@ async function answerQuestion(
   let generated: Awaited<ReturnType<typeof generateGroundedAnswer>> = null;
   let generationUsage: ModelUsage | null = null;
   let groundingCheckUsage: ModelUsage | null = null;
+  let customerCopyRewritten = false;
   let groundingCheckStatus: "not_run" | "passed" | "rejected" | "failed" | "skipped" = "not_run";
   if (materiallyRelevant && match && confidenceBand !== "low" && decision.model) {
     try {
@@ -9650,6 +9666,7 @@ async function answerQuestion(
         const deterministicValidation = validateCustomerResponse({
           question,
           answer: generated.answer,
+          publicTerms: customerOwnedCopyTerms(business),
           route: "generative",
           grounded: true,
           confidenceScore,
@@ -9657,6 +9674,7 @@ async function answerQuestion(
           evidence: context,
         });
         performanceTiming.validationMs += deterministicValidation.latencyMs;
+        customerCopyRewritten = deterministicValidation.customerCopyRewritten;
         if (!deterministicValidation.accepted) {
           generated = null;
           groundingCheckStatus = "rejected";
@@ -9670,12 +9688,14 @@ async function answerQuestion(
           businessId: business.id,
           isInternal: business.isInternalDemo === true || isInternalDemoSlug(business.slug),
         })).enabled) {
+          generated.answer = deterministicValidation.answer;
           const groundingCheck = await verifyGroundedAnswer({ question, answer: generated.answer, context });
           groundingCheckUsage = groundingCheck.usage;
           performanceTiming.llmTotalMs += groundingCheck.usage.latencyMs;
           groundingCheckStatus = groundingCheck.grounded ? "passed" : "rejected";
           if (!groundingCheck.grounded) generated = null;
         } else {
+          generated.answer = deterministicValidation.answer;
           groundingCheckStatus = "skipped";
         }
       }
@@ -9786,6 +9806,7 @@ async function answerQuestion(
   if (generated) {
     return {
       answer: answerWithGettingStartedCta(generated.answer, intent, options.workflow ? null : customerPrimaryCta(business, primaryCtaForQuestion(business, question, intent))),
+      ...(customerCopyRewritten ? { customerCopyRewritten: true, customerCopyRewriteReason: "internal_terminology" as const } : {}),
       grounded: true,
       citations,
       knowledgeGap: null,
@@ -9834,6 +9855,8 @@ type ActionFormSchema = {
 };
 
 type ConversationAnswerResult = Omit<AnswerResult, "failure" | "action"> & {
+  customerCopyRewritten?: boolean;
+  customerCopyRewriteReason?: "internal_terminology";
   recommendation?: {
     recommendedPlan: string;
     verifiedPrice: string | null;
@@ -9947,6 +9970,7 @@ function conversationStateAnswer(
 function finalizeCustomerResponse(
   question: string,
   input: ConversationAnswerResult,
+  business?: Business,
 ): ConversationAnswerResult {
   const route: "state" | "workflow" | "provider" | "knowledge" | "generative" | "handoff" | "system" =
     input.retrieval.mode === "conversation_state"
@@ -9965,6 +9989,7 @@ function finalizeCustomerResponse(
   const validation = validateCustomerResponse({
     question,
     answer: input.answer,
+    publicTerms: business ? customerOwnedCopyTerms(business) : undefined,
     route,
     grounded: input.grounded,
     confidenceScore: input.confidenceScore,
@@ -9991,9 +10016,14 @@ function finalizeCustomerResponse(
             : null),
     validationLatencyMs: validation.latencyMs,
   };
-  if (validation.accepted) return { ...input, retrieval };
+  if (validation.accepted) return {
+    ...input,
+    retrieval,
+    ...(validation.customerCopyRewritten ? { customerCopyRewritten: true, customerCopyRewriteReason: "internal_terminology" as const } : {}),
+  };
   return {
     ...input,
+    ...(validation.customerCopyRewritten ? { customerCopyRewritten: true, customerCopyRewriteReason: "internal_terminology" as const } : {}),
     answer: validation.answer,
     grounded: false,
     citations: [],
@@ -12101,8 +12131,8 @@ async function submitActionForm(
   return completeActionConversation(business, conversation, action, state);
 }
 
-function customerAnswerPayload(result: ConversationAnswerResult, question?: string) {
-  const safeResult = question ? finalizeCustomerResponse(question, result) : result;
+function customerAnswerPayload(result: ConversationAnswerResult, question?: string, business?: Business) {
+  const safeResult = question ? finalizeCustomerResponse(question, result, business) : result;
   return {
     answer: safeResult.answer,
     grounded: safeResult.grounded,
@@ -13318,6 +13348,8 @@ function experienceTraceForTurn(
     status: retrieval.validationStatus ?? null,
     reason: retrieval.validationReason ?? retrieval.reason ?? null,
     mode: retrieval.mode ?? null,
+    customerCopyRewritten: result.customerCopyRewritten === true,
+    customerCopyRewriteReason: result.customerCopyRewriteReason ?? null,
   };
   const providerState = provider
     ? { provider: provider.provider, operations: provider.operations, lookupSteps: provider.lookupSteps, capabilities: provider.capabilities, actionDelivery: provider.actionDelivery }
@@ -13573,6 +13605,8 @@ async function recordConversationDecisionTrace(
       confidence_band: result.confidenceBand,
       handoff: result.handoff?.status ?? null,
       action_delivery: result.actionDelivery?.status ?? null,
+      customer_copy_rewritten: result.customerCopyRewritten === true,
+      customer_copy_rewrite_reason: result.customerCopyRewriteReason ?? null,
     },
     latency_ms: Math.max(0, Math.round(performance.now() - context.startedAt)),
   }, {
@@ -13590,7 +13624,7 @@ async function persistConversationExchange(
   clientMessageId?: string,
   traceContext?: ConversationDecisionTraceContext,
 ): Promise<ConversationAnswerResult> {
-  result = finalizeCustomerResponse(userContent, result);
+  result = finalizeCustomerResponse(userContent, result, business);
   const experienceAssessment = experienceAssessmentForTurn(business, conversation, userContent, result, traceContext);
   result = applyExperienceRuntimeAdaptation(result, experienceAssessment);
   const exchangeWorkflow = conversation.actionState
@@ -13907,7 +13941,8 @@ async function recordConversationQuestionUnlocked(business: Business, conversati
       return persistTurn(guarded);
     }
   }
-  result = { ...result, answer: canonicalizeCustomerCopy(business, result.answer) };
+  const customerCopy = rewriteCustomerFacingTerminology(canonicalizeCustomerCopy(business, result.answer), question, customerOwnedCopyTerms(business)).text;
+  result = { ...result, answer: customerCopy };
   return persistTurn(result);
 }
 
@@ -17819,7 +17854,7 @@ app.post("/api/v1/demo/:slug/public/test", async (request) => {
   const question = requiredString(asRecord(request.body).question, "question", 1_000);
   // Public samples are intentionally read-only: prospects can test the agent,
   // but their questions do not mutate the seeded demo's conversations or gaps.
-  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false }), question), businessName: customerBusinessName(business) };
+  return { ...customerAnswerPayload(await answerQuestion(business, question, { recordGap: false }), question, business), businessName: customerBusinessName(business) };
 });
 
 app.get("/api/v1/demo/:slug", async (request) => {

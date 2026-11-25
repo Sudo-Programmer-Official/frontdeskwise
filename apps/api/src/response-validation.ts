@@ -31,6 +31,7 @@ export const customerSafeFallbacks: Record<SafeFallbackKind, string> = {
 export type ResponseValidationInput = {
   question?: string;
   answer: unknown;
+  publicTerms?: readonly string[];
   route?: "state" | "workflow" | "provider" | "knowledge" | "generative" | "handoff" | "system";
   grounded?: boolean;
   confidenceScore?: number;
@@ -50,6 +51,7 @@ export type ResponseValidationResult = {
   reason: ResponseValidationReason | null;
   fallbackKind: SafeFallbackKind | null;
   suspicious: boolean;
+  customerCopyRewritten: boolean;
 };
 
 // These phrases describe implementation details and are never appropriate in
@@ -57,9 +59,68 @@ export type ResponseValidationResult = {
 // while allowing the intentionally generic "I'm having trouble" fallback.
 const internalFailureCopy = /(?:trouble\s+(?:formatting|parsing|rendering)|found relevant information[\s\S]{0,80}(?:format|parse|render)|json\s+(?:parsing|parse)|structured\s+output|tool\s+(?:returned|failed|error)|retrieval\s+(?:failed|error)|model\s+(?:failure|error)|stack\s+trace|uncaught\s+(?:exception|error)|internal\s+(?:error|failure)|parse\s+(?:failed|error)|validation\s+(?:failed|error)|insufficient_evidence)/i;
 const implementationPayload = /^\s*[\[{][\s\S]*(?:"?(?:tool|retrieval|error|stack|trace|json|reason)"?\s*:|```(?:json|javascript|typescript))/i;
+const customerFacingInternalTerms = /\b(?:jackrabbit|providers?|apis?|endpoints?|workflows?|tools?|rag|retrieval|databases?|authorization\s+gates?)\b/i;
+
+function explicitlyAskedAboutJackrabbit(question: string): boolean {
+  const value = question.trim();
+  return /\bjackrabbit\b/i.test(value)
+    && (/[?]/.test(value) || /^(?:do|does|is|are|what|which|can|how)\b/i.test(value))
+    && /\b(?:use|using|connected|connect|integration|system|platform|jackrabbit)\b/i.test(value);
+}
+
+/** Rewrite implementation vocabulary at the customer-facing boundary. */
+export function rewriteCustomerFacingTerminology(value: string, question = "", publicTerms: readonly string[] = []): { text: string; rewritten: boolean } {
+  const allowJackrabbit = explicitlyAskedAboutJackrabbit(question);
+  const original = value;
+  const protectedCopy = protectCustomerCopyTokens(value, [
+    ...publicTerms,
+    ...(allowJackrabbit ? ["Jackrabbit"] : []),
+  ]);
+  const text = protectedCopy.restore(protectedCopy.text
+    .replace(/\b(?:I|we) couldn['’]t check live jackrabbit availability right now\b/gi, "I can’t confirm live availability right now")
+    .replace(/\blive\s+jackrabbit\s+availability\b/gi, "live availability")
+    .replace(/\bjackrabbit\b/gi, (match) => allowJackrabbit ? match : "the scheduling system")
+    .replace(/\bprovider\s+API\b/gi, "connected system")
+    .replace(/\bproviders?\b/gi, "connected system")
+    .replace(/\bAPIs?\b/gi, "system connection")
+    .replace(/\bendpoints?\b/gi, "link")
+    .replace(/\bworkflows?\b/gi, "next steps")
+    .replace(/\btool calls?\b/gi, "system actions")
+    .replace(/\btools?\b/gi, "capabilities")
+    .replace(/\bRAG\b/gi, "business information")
+    .replace(/\bretrieval\b/gi, "business information")
+    .replace(/\bdatabases?\b/gi, "records")
+    .replace(/\bauthorization gates?\b/gi, "verification")
+    .replace(/\bauthorization\b/gi, "access verification"));
+  return { text, rewritten: text !== original };
+}
 
 function asCustomerText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function protectCustomerCopyTokens(value: string, publicTerms: readonly string[]): { text: string; restore: (value: string) => string } {
+  const protectedValues: string[] = [];
+  let text = value.replace(/https?:\/\/[^\s<>"']+/gi, (match) => {
+    const token = `__CUSTOMER_COPY_TOKEN_${protectedValues.length}__`;
+    protectedValues.push(match);
+    return token;
+  });
+  for (const term of [...publicTerms].map((item) => item.trim()).filter(Boolean).sort((left, right) => right.length - left.length)) {
+    text = text.replace(new RegExp(escapeRegExp(term), "gi"), (match) => {
+      const token = `__CUSTOMER_COPY_TOKEN_${protectedValues.length}__`;
+      protectedValues.push(match);
+      return token;
+    });
+  }
+  return {
+    text,
+    restore: (input) => input.replace(/__CUSTOMER_COPY_TOKEN_(\d+)__/g, (_match, index: string) => protectedValues[Number(index)] ?? _match),
+  };
 }
 
 function fallbackKindFor(reason: ResponseValidationReason): SafeFallbackKind {
@@ -94,8 +155,10 @@ function reasonForInput(input: ResponseValidationInput, answer: string): Respons
  */
 export function validateCustomerResponse(input: ResponseValidationInput): ResponseValidationResult {
   const startedAt = performance.now();
-  const answer = asCustomerText(input.answer);
-  const reason = reasonForInput(input, answer);
+  const rawAnswer = asCustomerText(input.answer);
+  const terminology = rewriteCustomerFacingTerminology(rawAnswer, input.question, input.publicTerms);
+  const answer = terminology.text;
+  const reason = reasonForInput(input, rawAnswer) ?? reasonForInput(input, answer);
   const suspicious = Boolean(
     reason
     || (input.route === "knowledge" || input.route === "generative")
@@ -113,6 +176,7 @@ export function validateCustomerResponse(input: ResponseValidationInput): Respon
     reason,
     fallbackKind,
     suspicious,
+    customerCopyRewritten: terminology.rewritten,
   };
 }
 
@@ -137,8 +201,13 @@ export function shouldRunSemanticVerifier(input: {
     || complex;
 }
 
-export function isInternalCustomerCopy(value: unknown): boolean {
+export function isInternalCustomerCopy(value: unknown, question = "", publicTerms: readonly string[] = []): boolean {
   const answer = asCustomerText(value);
-  return Boolean(answer && (internalFailureCopy.test(answer) || implementationPayload.test(answer)));
+  const rewritten = rewriteCustomerFacingTerminology(answer, question, publicTerms).text;
+  const remainingTerms = explicitlyAskedAboutJackrabbit(question)
+    ? /\b(?:providers?|apis?|endpoints?|workflows?|tools?|rag|retrieval|databases?|authorization\s+gates?)\b/i
+    : customerFacingInternalTerms;
+  const withoutUrls = rewritten.replace(/https?:\/\/[^\s<>"']+/gi, "");
+  return Boolean(rewritten && (internalFailureCopy.test(withoutUrls) || implementationPayload.test(withoutUrls) || remainingTerms.test(withoutUrls)));
 }
 
