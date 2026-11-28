@@ -92,9 +92,13 @@ test("dental consultation is available from the same action engine", () => {
   assert.equal(detectAction(actions, "Schedule a consultation")?.key, "schedule_consultation");
 });
 
-test("daycare tour is available from the same action engine", () => {
+test("daycare recommendations focus on parent search and provider onboarding", () => {
   const actions = defaultActionFlows("Little Sprouts Daycare", "childcare and preschool tours", ids);
-  assert.equal(detectAction(actions, "Book a tour")?.key, "book_tour");
+  assert.deepEqual(actions.map((action) => action.key), ["find_daycare", "claim_daycare", "contact_team", "capture_lead"]);
+  assert.equal(detectAction(actions, "Find a daycare near me")?.key, "find_daycare");
+  assert.equal(detectAction(actions, "I want to claim my daycare")?.key, "claim_daycare");
+  assert.equal(detectAction(actions, "Schedule a tour"), null);
+  assert.equal(actions.find((action) => action.key === "find_daycare")?.steps?.find((step) => step.id === "search-daycares")?.config?.capabilityKey, "search_daycares");
 });
 
 test("field validation keeps the backend in control of structured answers", () => {

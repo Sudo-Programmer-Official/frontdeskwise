@@ -47,7 +47,7 @@
       "message": "Schedule a tour.",
       "expectedMode": "transactional",
       "expectedIntent": "tour",
-      "expectedActionType": "external_booking"
+      "expectedActionType": null
     },
     {
       "id": "hours-knowledge",

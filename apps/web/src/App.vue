@@ -422,7 +422,9 @@ interface ActionFlow {
   origin?: "discovered" | "configured";
   confidence?: number;
   safetyPolicy?: string;
+  sourceLabel?: string | null;
   lifecycleStatus?: string;
+  reviewReason?: string | null;
   archived?: boolean;
   version?: number;
   createdAt: string;
@@ -1705,6 +1707,43 @@ const visibleActionFlows = computed(() => actionFlows.value.filter((action) => a
 const primaryActionFlow = computed(() => visibleActionFlows.value.find((action) => action.isPrimary) ?? null);
 const savedAction = computed(() => visibleActionFlows.value.find((action) => action.id === savedActionId.value) ?? null);
 const recommendedPrimaryAction = computed(() => visibleActionFlows.value.find((action) => action.key === "request_demo" || /\b(try|start|see|view|explore)\b.*\b(demo|trial)\b/i.test(action.name)) ?? null);
+const daycareWorkspace = computed(() => /daycare|childcare|preschool|nursery|daycarespots/i.test(`${businessName.value} ${websiteUrl.value} ${actionFlows.value.map((action) => `${action.name} ${action.description}`).join(" ")}`));
+const actionRecommendationOrder = computed(() => daycareWorkspace.value
+  ? ["find_daycare", "claim_daycare", "contact_team", "capture_lead"]
+  : ["enroll_child", "book_tour", "book_appointment", "request_quote", "schedule_consultation", "capture_lead", "contact_team"]);
+
+function actionHasOwnerApproval(action: ActionFlow): boolean {
+  return Boolean(
+    action.isPrimary
+      || action.reviewReason === "owner_override"
+      || (action.workflowCount ?? 0) > 0
+      || action.completion.workflow?.name,
+  );
+}
+
+const recommendedActionFlows = computed(() => {
+  const pending = visibleActionFlows.value.filter((action) => !actionHasOwnerApproval(action));
+  const order = actionRecommendationOrder.value;
+  const score = (action: ActionFlow) => {
+    const preferredIndex = order.indexOf(action.key);
+    const preferredScore = preferredIndex >= 0 ? 1_000 - preferredIndex * 20 : 0;
+    const evidenceScore = action.origin === "discovered" ? 120 : 0;
+    const confidenceScore = Math.round((action.confidence ?? 0) * 20);
+    return preferredScore + evidenceScore + confidenceScore;
+  };
+  return [...pending].sort((left, right) => score(right) - score(left)).slice(0, daycareWorkspace.value ? 4 : 5);
+});
+const configuredActionFlows = computed(() => visibleActionFlows.value.filter(actionHasOwnerApproval));
+const actionTemplateKeysInUse = computed(() => new Set(visibleActionFlows.value.map((action) => action.key)));
+const availableActionTemplates = computed(() => {
+  const daycareLaterKeys = new Set(["book_tour", "join_waitlist", "external_booking", "open_link"]);
+  const templates = actionTemplates.value.filter((template) => {
+    if (actionTemplateKeysInUse.value.has(template.key)) return false;
+    if (daycareWorkspace.value) return daycareLaterKeys.has(template.key);
+    return true;
+  });
+  return templates.slice(0, daycareWorkspace.value ? 4 : 6);
+});
 const actionConnectorProvider = computed(() => actionDraft.value?.completion.connector?.provider ?? "none");
 const activeActionIntegrations = computed(() => integrations.value.filter((integration) => integration.connectionStatus === "active"
   && ((actionConnectorProvider.value === "generic_webhook" && integration.provider === "webhook")
@@ -5984,6 +6023,15 @@ function actionPrimarySetupHint(action: ActionFlow): string {
   return !canSetPrimaryAction(action) ? "Approve, enable, and complete this action before making it primary" : "";
 }
 
+function actionRecommendationReason(action: ActionFlow): string {
+  if (daycareWorkspace.value && action.key === "find_daycare") return "Your Business Brain points to a parent-facing daycare search as the clearest first outcome.";
+  if (daycareWorkspace.value && action.key === "claim_daycare") return "Your website also serves daycare providers who need to claim or create a listing.";
+  if (action.origin === "discovered" && action.sourceLabel) return `Suggested from the website signal “${action.sourceLabel}”.`;
+  if (action.key === "capture_lead") return "A reusable fallback for visitors who need help or are not ready to choose a specific next step.";
+  if (action.key === "contact_team") return "A safe support path for questions that need a person or do not fit another outcome.";
+  return "Suggested from the business type, website content, and available capabilities.";
+}
+
 function clearSavedActionHighlight() {
   savedActionId.value = "";
   if (savedActionHighlightTimer !== null) {
@@ -6454,6 +6502,49 @@ async function setPrimaryAction(action: ActionFlow) {
   }
 }
 
+async function approveAction(action: ActionFlow) {
+  if (actionsLoading.value) return;
+  actionsLoading.value = true;
+  actionsError.value = "";
+  actionsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/actions/${action.id}`), {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...ownerHeaders() },
+      body: JSON.stringify({ ...action, enabled: true, reviewReason: "owner_override" }),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not approve this Action.");
+    actionsMessage.value = `${action.name} approved. Generate its workflow when you’re ready.`;
+    await loadActions();
+  } catch (error) {
+    actionsError.value = error instanceof Error ? error.message : "Could not approve this Action.";
+  } finally {
+    actionsLoading.value = false;
+  }
+}
+
+async function ignoreAction(action: ActionFlow) {
+  if (actionsLoading.value || !window.confirm(`Ignore “${action.name}” for this workspace?`)) return;
+  actionsLoading.value = true;
+  actionsError.value = "";
+  actionsMessage.value = "";
+  try {
+    const response = await trackedFetch(apiUrl(`/api/v1/demo/${demoSlug.value}/actions/${action.id}`), {
+      method: "DELETE",
+      headers: ownerHeaders(),
+    });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not ignore this Action.");
+    actionsMessage.value = `${action.name} ignored`;
+    await loadActions();
+  } catch (error) {
+    actionsError.value = error instanceof Error ? error.message : "Could not ignore this Action.";
+  } finally {
+    actionsLoading.value = false;
+  }
+}
+
 function openPrimaryGoalChooser() {
   if (visibleActionFlows.value.length) {
     primaryGoalChooserOpen.value = true;
@@ -6539,7 +6630,7 @@ async function addActionTemplate(template: ActionTemplate) {
         });
       }
     }
-    actionsMessage.value = "Action added · generate a workflow when you’re ready";
+    actionsMessage.value = "Action added to Recommendations · approve it before generating a workflow";
     selectedActionId.value = payload.action?.id ?? "";
     actionTemplateChooserOpen.value = false;
     await loadActions();
@@ -6583,6 +6674,7 @@ async function saveAction() {
       body: JSON.stringify({
         ...actionDraft.value,
         triggerPhrases: actionTriggerText.value.split("\n").map((item) => item.trim()).filter(Boolean),
+        reviewReason: "owner_override",
       }),
     });
     const payload = await response.json() as { error?: string; primaryActionCleared?: boolean; action?: ActionFlow };
@@ -9676,8 +9768,8 @@ function startMarketingDemo() {
 
         <div v-else-if="view === 'actions'" class="view-content action-page">
           <div class="actions-page-header">
-            <div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Define what your AI front desk can help visitors do.</p></div>
-            <div v-if="!actionDraft" class="toolbar-actions"><button class="text-button" type="button" @click="openSupportReport('actions')">Report a problem</button><button class="primary-button" type="button" @click="openActionTemplateChooser()">+ Create action</button></div>
+            <div><p class="eyebrow">AI front desk</p><h2>Actions</h2><p>Choose the customer outcomes your AI front desk should help visitors accomplish.</p></div>
+            <div v-if="!actionDraft" class="toolbar-actions"><button class="text-button" type="button" @click="openSupportReport('actions')">Report a problem</button><button class="primary-button" type="button" @click="openActionTemplateChooser()">Browse templates</button></div>
             <div v-else class="toolbar-actions"><button class="outline-button small" type="button" @click="selectAction(null)">← All actions</button><button class="primary-button small" type="button" :disabled="actionsLoading" @click="saveAction">{{ actionsLoading ? 'Saving…' : 'Save changes' }}</button></div>
           </div>
           <p v-if="integrationError" class="form-error">{{ integrationError }}</p>
@@ -9690,20 +9782,31 @@ function startMarketingDemo() {
               <div><strong>✓ {{ savedAction.name }} saved.</strong><span>{{ savedAction.isPrimary ? 'This is now your primary conversion goal.' : 'It is ready for the next step.' }}</span></div>
               <div class="action-save-success-actions"><button v-if="!savedAction.isPrimary && canSetPrimaryAction(savedAction)" class="outline-button small" type="button" :disabled="actionsLoading" @click="setPrimaryAction(savedAction)">Set as primary</button><button v-if="canSetPrimaryAction(savedAction)" class="primary-button small" type="button" @click="runActionTest(savedAction)">Test flow</button></div>
             </div>
+            <section class="actions-setup-hero">
+              <div><p class="eyebrow">Business Brain → Actions → Workflow</p><h2>We found these likely customer outcomes from your website.</h2><p>Choose what you want your AI front desk to help visitors accomplish. Approve, edit, or ignore each suggestion before generating a Workflow.</p></div>
+              <div class="actions-setup-steps" aria-label="Action setup progress"><span class="complete">✓ Website connected</span><span class="complete">✓ Business Brain ready</span><span class="active">3 Review Actions</span><span>4 Generate Workflow</span></div>
+            </section>
             <section class="primary-goal-card">
-              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose what visitors should do next' }}</h2><p>{{ primaryActionFlow ? 'This is the preferred outcome FrontDeskWise may recommend when no more specific workflow outcome takes precedence.' : 'Your assistant can answer questions, but no primary conversion goal is configured yet.' }}</p><div v-if="primaryActionFlow" class="primary-goal-details"><span>{{ actionCompletionLabel(primaryActionFlow) }} · {{ formatLabel(primaryActionFlow.attachmentPolicy || 'explicit_request_only') }}</span><span v-if="primaryActionFlow.executionMode === 'PROVIDER_FLOW'">Provider: {{ formatLabel(actionProvider(primaryActionFlow) || 'Not selected') }} · {{ providerIsConnected(actionProvider(primaryActionFlow)) ? 'Connected' : 'Needs connection' }}</span><a v-if="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" :href="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" target="_blank" rel="noreferrer">{{ primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url }}</a></div></div>
+              <div class="primary-goal-copy"><p class="eyebrow">Primary conversion goal</p><h2>{{ primaryActionFlow?.name || 'Choose a primary Action after approval' }}</h2><p>{{ primaryActionFlow ? 'This is the preferred outcome FrontDeskWise may recommend when no more specific Workflow outcome takes precedence.' : 'Finalize an Action first. Once it is approved and ready, make it the outcome your front desk prioritizes.' }}</p><div v-if="primaryActionFlow" class="primary-goal-details"><span>{{ actionCompletionLabel(primaryActionFlow) }} · {{ formatLabel(primaryActionFlow.attachmentPolicy || 'explicit_request_only') }}</span><span v-if="primaryActionFlow.executionMode === 'PROVIDER_FLOW'">Provider: {{ formatLabel(actionProvider(primaryActionFlow) || 'Not selected') }} · {{ providerIsConnected(actionProvider(primaryActionFlow)) ? 'Connected' : 'Needs connection' }}</span><a v-if="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" :href="primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url" target="_blank" rel="noreferrer">{{ primaryActionFlow.completion.linkUrl || primaryActionFlow.destination?.url }}</a></div></div>
               <div class="primary-goal-actions"><span v-if="primaryActionFlow" class="primary-goal-status">✓ Active</span><template v-if="primaryActionFlow"><button class="outline-button small" type="button" @click="openPrimaryGoalChooser">Change goal</button><button class="primary-button small" type="button" @click="runActionTest(primaryActionFlow)">Test</button></template><button v-else class="primary-button small" type="button" @click="openPrimaryGoalChooser">Choose a primary goal</button></div>
               <div v-if="!primaryActionFlow && recommendedPrimaryAction" class="primary-goal-recommendation"><span>Recommended from your website</span><strong>{{ recommendedPrimaryAction.name }}</strong><small>{{ recommendedPrimaryAction.destination?.url || recommendedPrimaryAction.completion.linkUrl || 'Owner-confirmed action' }}</small></div>
             </section>
-            <section v-if="visibleActionFlows.length" class="action-dashboard-list">
-              <div class="action-section-heading"><div><p class="eyebrow">Your actions</p><h3>Conversion flows</h3><p>Give visitors a clear next step and keep the outcome visible to your team.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
-              <article v-for="action in visibleActionFlows" :key="action.id" :class="['action-summary-card', { 'action-summary-card-saved': action.id === savedActionId }]">
-                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><h3>{{ action.name }}</h3><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}<template v-if="action.isPrimary"> · Primary</template></span><span v-if="action.workflowCount">Used by {{ action.workflowCount }} workflow{{ action.workflowCount === 1 ? '' : 's' }}</span></div><p class="action-card-description">{{ action.description }}</p><div class="action-card-outcome"><span class="eyebrow">Outcome</span><strong>{{ actionCompletionLabel(action) }}</strong><span>{{ actionOutcomeDetail(action) }}</span></div><div class="action-card-inputs"><div><span class="eyebrow">Required information</span><strong>{{ actionRequiredInputLabels(action).length ? actionRequiredInputLabels(action).join(' · ') : 'None' }}</strong></div><div v-if="actionRecommendedInputLabels(action).length"><span class="eyebrow">Useful for your business</span><strong>{{ actionRecommendedInputLabels(action).join(' · ') }}</strong></div></div><div v-if="action.workflowNames?.length" class="action-card-relationships"><span class="eyebrow">Used by</span><button v-for="(workflowName, workflowIndex) in action.workflowNames" :key="`${action.id}-${workflowName}`" class="text-button" type="button" @click="openWorkflowForAction(action, workflowIndex)">{{ workflowName }} <ArrowRight :size="12" :stroke-width="1.8" aria-hidden="true" /></button></div><p v-else class="action-card-no-workflow">No workflow currently guides visitors to this outcome.</p></div></div>
+            <section v-if="recommendedActionFlows.length" class="action-dashboard-list action-group">
+              <div class="action-section-heading"><div><p class="eyebrow">Recommended for this business</p><h3>Review the outcomes we found</h3><p>These suggestions are based on your website and Business Brain. Nothing becomes a Workflow until you approve it.</p></div><span class="action-section-count">{{ recommendedActionFlows.length }} suggested</span></div>
+              <article v-for="action in recommendedActionFlows" :key="action.id" :class="['action-summary-card', 'action-recommendation-card', { 'action-summary-card-saved': action.id === savedActionId }]">
+                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><div class="action-card-kicker"><span class="action-recommended-label">Recommended for this business</span><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}</span></div><h3>{{ action.name }}</h3><p class="action-card-description">{{ action.description }}</p><p class="action-recommendation-reason">{{ actionRecommendationReason(action) }}</p><div class="action-card-outcome"><span class="eyebrow">Outcome</span><strong>{{ actionCompletionLabel(action) }}</strong><span>{{ actionOutcomeDetail(action) }}</span></div><div class="action-card-inputs"><div><span class="eyebrow">Required information</span><strong>{{ actionRequiredInputLabels(action).length ? actionRequiredInputLabels(action).join(' · ') : 'None' }}</strong></div><div v-if="actionRecommendedInputLabels(action).length"><span class="eyebrow">Useful for your business</span><strong>{{ actionRecommendedInputLabels(action).join(' · ') }}</strong></div></div></div></div>
+                <div class="action-summary-actions action-review-actions"><div class="action-readiness-note"><span>Readiness</span><strong>{{ actionStatusLabel(action) }}</strong></div><button class="primary-button small" type="button" :disabled="actionsLoading" @click="approveAction(action)">Approve</button><button class="outline-button small" type="button" :disabled="actionsLoading" @click="selectAction(action)">Edit</button><button class="text-button danger-text" type="button" :disabled="actionsLoading" @click="ignoreAction(action)">Ignore</button></div>
+              </article>
+            </section>
+            <section v-if="configuredActionFlows.length" class="action-dashboard-list action-group">
+              <div class="action-section-heading"><div><p class="eyebrow">Configured</p><h3>Approved Actions</h3><p>These outcomes are ready to connect to a customer journey.</p></div><span v-if="actionsLoading" class="conversation-status">Refreshing…</span></div>
+              <article v-for="action in configuredActionFlows" :key="action.id" :class="['action-summary-card', { 'action-summary-card-saved': action.id === savedActionId }]">
+                <div class="action-summary-main"><span class="action-summary-icon"><Zap :size="21" :stroke-width="1.8" aria-hidden="true" /></span><div><div class="action-summary-meta"><span :class="['action-status-badge', `action-status-${actionStatusTone(actionStatusLabel(action))}`]">{{ actionStatusLabel(action) }}<template v-if="action.isPrimary"> · Primary</template></span><span v-if="action.workflowCount">Used by {{ action.workflowCount }} workflow{{ action.workflowCount === 1 ? '' : 's' }}</span></div><h3>{{ action.name }}</h3><p class="action-card-description">{{ action.description }}</p><div class="action-card-outcome"><span class="eyebrow">Outcome</span><strong>{{ actionCompletionLabel(action) }}</strong><span>{{ actionOutcomeDetail(action) }}</span></div><div class="action-card-inputs"><div><span class="eyebrow">Required information</span><strong>{{ actionRequiredInputLabels(action).length ? actionRequiredInputLabels(action).join(' · ') : 'None' }}</strong></div><div v-if="actionRecommendedInputLabels(action).length"><span class="eyebrow">Useful for your business</span><strong>{{ actionRecommendedInputLabels(action).join(' · ') }}</strong></div></div><div v-if="action.workflowNames?.length" class="action-card-relationships"><span class="eyebrow">Used by</span><button v-for="(workflowName, workflowIndex) in action.workflowNames" :key="`${action.id}-${workflowName}`" class="text-button" type="button" @click="openWorkflowForAction(action, workflowIndex)">{{ workflowName }} <ArrowRight :size="12" :stroke-width="1.8" aria-hidden="true" /></button></div><p v-else class="action-card-no-workflow">No Workflow currently guides visitors to this outcome.</p></div></div>
                 <div class="action-summary-actions"><div class="action-summary-progress"><strong>{{ actionCompletionRate(action) }}%</strong><span>completion</span><div class="progress-bar"><span :style="{ width: `${Math.min(100, actionCompletionRate(action))}%` }"></span></div></div><button v-if="!action.workflowCount" class="primary-button small" type="button" @click="openWorkflowForAction(action)">Generate workflow</button><button v-else class="text-button" type="button" @click="openWorkflowForAction(action)">Open workflow <ArrowRight :size="13" :stroke-width="1.8" aria-hidden="true" /></button><button class="outline-button small" type="button" @click="runActionTest(action)">Test</button><button class="outline-button small" type="button" @click="selectAction(action)">Edit</button></div>
               </article>
             </section>
-            <section v-else class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Set up an action so visitors can book, request a quote, leave their details, or contact your team.</p><button class="primary-button small" type="button" @click="openActionTemplateChooser()">Create your first action <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
-            <section class="action-template-strip"><div><p class="eyebrow">Quick-start templates</p><h3>Start with a proven flow</h3></div><div class="action-template-chips"><button v-for="template in actionTemplates.slice(0, 5)" :key="template.key" type="button" @click="openActionTemplateChooser()">{{ template.name }}</button><button type="button" @click="openActionTemplateChooser()">Custom action</button></div></section>
+            <section v-if="availableActionTemplates.length" class="action-template-strip action-template-library"><div><p class="eyebrow">Quick-start templates</p><h3>Templates</h3><p>Add another capability when the business is ready for it.</p></div><div class="action-template-chips"><button v-for="template in availableActionTemplates" :key="template.key" type="button" :disabled="actionsLoading" @click="addActionTemplate(template)">{{ template.name }} <span>+</span></button><button type="button" @click="openActionTemplateChooser()">Custom action <span>+</span></button></div></section>
+            <section v-if="!visibleActionFlows.length" class="panel action-empty-state"><span class="action-empty-icon"><Sparkles :size="26" :stroke-width="1.8" aria-hidden="true" /></span><div><p class="eyebrow">Start with an outcome</p><h2>Your AI can do more than answer questions.</h2><p>Choose a focused customer outcome, then approve it before creating the Workflow.</p><button class="primary-button small" type="button" @click="openActionTemplateChooser()">Browse templates <ArrowRight :size="14" :stroke-width="1.8" aria-hidden="true" /></button></div></section>
           </template>
 
           <div v-else-if="actionDraft">
@@ -9778,7 +9881,7 @@ function startMarketingDemo() {
             </section>
           </div>
 
-          <div v-if="primaryGoalChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="primaryGoalChooserOpen = false"><section class="action-template-modal primary-goal-chooser" role="dialog" aria-modal="true" aria-labelledby="primary-goal-title"><button class="auth-close" type="button" aria-label="Close" @click="primaryGoalChooserOpen = false">×</button><p class="eyebrow">Business objective</p><h2 id="primary-goal-title">Choose a primary goal</h2><p>Pick the approved action the assistant should recommend after relevant answers.</p><div class="primary-goal-choice-list"><button v-for="action in visibleActionFlows" :key="action.id" class="primary-goal-choice" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" @click="setPrimaryAction(action)"><span><strong>{{ action.name }}</strong><small>{{ action.description }}</small></span><em>{{ action.isPrimary ? 'Current primary' : formatLabel(action.executionMode || 'FORM_FLOW') }}</em></button></div><div class="primary-goal-chooser-actions"><button v-if="primaryActionFlow" class="text-button danger-text" type="button" :disabled="actionsLoading" @click="clearPrimaryAction(primaryActionFlow); primaryGoalChooserOpen = false">Clear primary goal</button><button class="outline-button small" type="button" @click="primaryGoalChooserOpen = false">Cancel</button><button class="primary-button small" type="button" @click="primaryGoalChooserOpen = false; openActionTemplateChooser('primary')">Create an action</button></div></section></div>
+          <div v-if="primaryGoalChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="primaryGoalChooserOpen = false"><section class="action-template-modal primary-goal-chooser" role="dialog" aria-modal="true" aria-labelledby="primary-goal-title"><button class="auth-close" type="button" aria-label="Close" @click="primaryGoalChooserOpen = false">×</button><p class="eyebrow">Business objective</p><h2 id="primary-goal-title">Choose a primary goal</h2><p>Pick an approved Action the assistant should recommend after relevant answers.</p><div v-if="configuredActionFlows.length" class="primary-goal-choice-list"><button v-for="action in configuredActionFlows" :key="action.id" class="primary-goal-choice" type="button" :disabled="actionsLoading || !canSetPrimaryAction(action)" @click="setPrimaryAction(action)"><span><strong>{{ action.name }}</strong><small>{{ action.description }}</small></span><em>{{ action.isPrimary ? 'Current primary' : formatLabel(action.executionMode || 'FORM_FLOW') }}</em></button></div><div v-else class="action-modal-empty">Approve an Action above before choosing a primary goal.</div><div class="primary-goal-chooser-actions"><button v-if="primaryActionFlow" class="text-button danger-text" type="button" :disabled="actionsLoading" @click="clearPrimaryAction(primaryActionFlow); primaryGoalChooserOpen = false">Clear primary goal</button><button class="outline-button small" type="button" @click="primaryGoalChooserOpen = false">Cancel</button><button class="primary-button small" type="button" @click="primaryGoalChooserOpen = false; openActionTemplateChooser('primary')">Create an action</button></div></section></div>
           <div v-if="actionTemplateChooserOpen" class="action-modal-backdrop" role="presentation" @click.self="actionTemplateChooserOpen = false"><section class="action-template-modal" role="dialog" aria-modal="true" aria-labelledby="create-action-title"><button class="auth-close" type="button" aria-label="Close" @click="actionTemplateChooserOpen = false">×</button><p class="eyebrow">Quick start</p><h2 id="create-action-title">Create an action</h2><p>What should visitors be able to do?</p><div class="action-template-modal-grid"><button v-for="template in actionTemplates" :key="template.key" type="button" :disabled="actionsLoading || visibleActionFlows.some((action) => action.key === template.key)" @click="addActionTemplate(template)"><strong>{{ template.name }}</strong><small>{{ visibleActionFlows.some((action) => action.key === template.key) ? 'Already configured' : template.description }}</small></button><button type="button" :disabled="actionsLoading" @click="addCustomAction"><strong>Custom action</strong><small>Start with a blank conversion flow.</small></button></div></section></div>
           <div v-if="actionFieldDrawerIndex !== null && selectedActionField" class="action-modal-backdrop" role="presentation" @click.self="closeActionField"><aside class="action-field-drawer" role="dialog" aria-modal="true" aria-labelledby="question-editor-title"><div class="action-drawer-header"><div><p class="eyebrow">Question {{ actionFieldDrawerIndex + 1 }}</p><h2 id="question-editor-title">Edit question</h2></div><button class="auth-close" type="button" aria-label="Close" @click="closeActionField">×</button></div><label>Label<input v-model="selectedActionField.label" type="text" /></label><label>How the AI asks<input v-model="selectedActionField.question" type="text" /></label><label>Type<select v-model="selectedActionField.type"><option value="text">Text</option><option value="email">Email</option><option value="phone">Phone</option><option value="select">Single select</option><option value="multi_select">Multi-select</option><option value="date">Date</option><option value="number">Number</option></select></label><label class="toggle-row"><span>Required</span><input v-model="selectedActionField.required" type="checkbox" /></label><label>Show when<select :value="selectedActionField.condition?.field ?? ''" @change="setFieldCondition(selectedActionField, $event)"><option value="">Always</option><option v-for="conditionField in actionDraft?.fields.slice(0, actionFieldDrawerIndex)" :key="conditionField.key" :value="conditionField.key">{{ conditionField.label }}</option></select></label><div v-if="selectedActionField.type === 'select' || selectedActionField.type === 'multi_select'"><label>Choices <span class="optional">comma separated</span><input :value="(selectedActionField.options ?? []).join(', ')" type="text" @input="setFieldOptions(selectedActionField, $event)" /></label></div><details class="action-advanced" :open="actionAdvancedOpen"><summary @click.prevent="actionAdvancedOpen = !actionAdvancedOpen">Advanced <span>{{ actionAdvancedOpen ? 'Hide' : 'Show' }}</span></summary><div v-if="actionAdvancedOpen" class="action-advanced-body"><label>Field key<input v-model="selectedActionField.key" type="text" /></label><label>Visibility<select v-model="selectedActionField.visibility"><option value="visible">Visible</option><option value="hidden">Hidden</option></select></label><label v-if="selectedActionField.condition?.field">Equals<input :value="selectedActionField.condition?.equals ?? ''" type="text" @input="setFieldConditionEquals(selectedActionField, $event)" /></label></div></details><div class="action-drawer-footer"><div class="action-drawer-reorder"><button class="outline-button small" type="button" :disabled="actionFieldDrawerIndex === 0" @click="moveSelectedActionField(-1)">↑ Move up</button><button class="outline-button small" type="button" :disabled="actionDraft ? actionFieldDrawerIndex === actionDraft.fields.length - 1 : true" @click="moveSelectedActionField(1)">Move down ↓</button></div><button class="text-button danger-text" type="button" @click="removeActionField(actionFieldDrawerIndex); closeActionField()">Remove question</button><button class="primary-button small" type="button" @click="closeActionField">Done</button></div></aside></div>
         </div>

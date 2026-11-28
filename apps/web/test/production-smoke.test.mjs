@@ -158,7 +158,7 @@ test("deleted Actions are archived server-side and hidden from the dashboard", (
   assert.match(apiServer, /archived: true/);
   assert.match(apiServer, /archived = excluded\.archived/);
   assert.match(app, /const visibleActionFlows = computed\(\(\) => actionFlows\.value\.filter\(\(action\) => action\.archived !== true\)/);
-  assert.match(app, /v-for="action in visibleActionFlows"/);
+  assert.match(app, /v-for="action in (recommendedActionFlows|configuredActionFlows)"/);
 });
 
 test("deleted Actions can be recreated without a stale key collision", () => {
@@ -602,6 +602,8 @@ test("application feedback is visible for async work and notifications", () => {
   assert.match(feedback, /app-toast-region/);
   assert.match(styles, /app-loading-overlay/);
   assert.match(styles, /notification-trigger/);
+  assert.match(styles, /notification-menu \{[^}]*inline-size: min\(360px, calc\(100vw - 32px\)\)/);
+  assert.match(styles, /notification-row > span:last-child \{ display: grid;/);
 });
 
 test("Agent Test keeps conversation loading local to the chat thread", () => {

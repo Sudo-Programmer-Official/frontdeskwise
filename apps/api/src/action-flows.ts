@@ -4,6 +4,8 @@ import type { WebsiteActionCandidate, WebsiteActionType } from "./website-action
 
 export const BUSINESS_ACTION_TYPES = [
   "open_link",
+  "search_directory",
+  "provider_onboarding",
   "request_demo",
   "book_appointment",
   "enroll",
@@ -277,6 +279,8 @@ type ActionMetadata = Pick<ActionFlow, "actionType" | "businessId" | "mode" | "d
 type ActionTemplate = Omit<ActionFlow, "id" | "createdAt" | "updatedAt" | keyof ActionMetadata> & Partial<ActionMetadata>;
 
 const actionTypeForKey: Record<string, BusinessActionType> = {
+  find_daycare: "search_directory",
+  claim_daycare: "provider_onboarding",
   capture_lead: "contact_team",
   book_appointment: "book_appointment",
   request_demo: "request_demo",
@@ -473,6 +477,60 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
       field("phone", "Phone", "phone", "What’s the best phone number?", false),
     ],
     completion: completion("Thanks — your tour request is ready for the team.", "qualified"),
+    enabled: true,
+  },
+  {
+    key: "find_daycare",
+    name: "Find the right daycare",
+    description: "Help parents find verified daycare options that fit their location, child, and start date.",
+    actionType: "search_directory",
+    triggerPhrases: ["find a daycare", "find childcare", "find a daycare near me", "help me choose a daycare", "look for childcare"],
+    triggerIntents: ["daycare_search", "directory_search", "lead"],
+    captureMode: "conversational",
+    executionMode: "PROVIDER_FLOW",
+    attachmentPolicy: "high_intent_only",
+    provider: "daycare_directory",
+    fields: [
+      field("location", "ZIP code or location", "text", "What ZIP code or location should I search?"),
+      field("child_age", "Child’s age", "number", "How old is your child?"),
+      field("desired_start_date", "Desired start date", "date", "When would you like care to start?"),
+      field("preferences", "Useful preferences", "text", "Any preferences I should use when comparing options?", false),
+      field("parent_name", "Parent or guardian name", "text", "What’s the parent or guardian name?", false),
+      field("email", "Email", "email", "What email address should we use?", false),
+      field("phone", "Phone", "phone", "What’s the best phone number?", false),
+    ],
+    steps: [
+      { id: "parent-location", type: "capture", label: "Parent location or ZIP code", question: "What ZIP code or location should I search?", fieldKey: "location" },
+      { id: "child-age", type: "capture", label: "Child’s age", question: "How old is your child?", fieldKey: "child_age" },
+      { id: "start-date", type: "capture", label: "Desired start date", question: "When would you like care to start?", fieldKey: "desired_start_date" },
+      { id: "daycare-preferences", type: "capture", label: "Useful preferences", question: "Any preferences I should use when comparing options?", fieldKey: "preferences", required: false },
+      { id: "search-daycares", type: "lookup", label: "Search verified daycares", config: { provider: "daycare_directory", capabilityKey: "search_daycares", operation: "search_daycares", searchFields: "location, child_age, desired_start_date, preferences", failureBehavior: "capture_lead", providerUnavailableBehavior: "capture_request_and_notify" } },
+      { id: "daycare-matches", type: "recommend", label: "Show verified matches", question: "I found these verified daycare options. Which one would you like to compare?", config: { sourceStepId: "search-daycares", requiresProviderResult: true, maxResults: 5 } },
+      { id: "daycare-selection", type: "select", label: "Let the parent select a daycare", question: "Reply with the number of the daycare you want to explore.", config: { sourceStepId: "search-daycares", requiresProviderResult: true, maxResults: 5 } },
+      { id: "parent-contact", type: "form", label: "Parent contact details", config: { fieldKeys: ["parent_name", "email", "phone"], ensureContact: true, contactFields: ["email", "phone"], providerFallback: true } },
+      { id: "daycare-search-complete", type: "complete", label: "Complete daycare search", config: { requiresSelection: true } },
+    ],
+    completion: completion("I’ve saved the daycare options you selected so you can continue with the provider.", "qualified", "Continue"),
+    enabled: true,
+  },
+  {
+    key: "claim_daycare",
+    name: "Claim / list my daycare",
+    description: "Help daycare providers verify their business details and start the listing or claim process.",
+    actionType: "provider_onboarding",
+    triggerPhrases: ["claim my daycare", "list my daycare", "add my daycare", "I own a daycare", "list our childcare center"],
+    triggerIntents: ["provider_onboarding", "claim_listing", "lead"],
+    captureMode: "hybrid",
+    executionMode: "HANDOFF",
+    attachmentPolicy: "high_intent_only",
+    fields: [
+      field("daycare_name", "Daycare or business name", "text", "What is the daycare or business name?"),
+      field("provider_name", "Your name", "text", "What’s your name?"),
+      field("location", "Location", "text", "Where is the daycare located?"),
+      field("email", "Email", "email", "What email address should the team use?"),
+      field("phone", "Phone", "phone", "What’s the best phone number?", false),
+    ],
+    completion: { ...completion("Thanks — I’ve sent your daycare claim request to the team.", "qualified"), requiresStaff: true, completionMode: "human_follow_up" },
     enabled: true,
   },
   {
@@ -750,6 +808,7 @@ export function defaultActionFlows(
 ): ActionFlow[] {
   const value = (name + " " + websiteContent).toLowerCase();
   const isSwimSchool = /\bswim(?:ming)?\b|\bswim school\b/.test(value);
+  const isDaycareBusiness = /daycare|childcare|preschool|nursery|daycare\s*spots/.test(value);
   const keys = new Set<string>(["capture_lead"]);
   const bestCandidateByType = new Map<string, WebsiteActionCandidate>();
   for (const candidate of candidates.sort((left, right) => right.priority - left.priority || right.confidence - left.confidence)) {
@@ -759,7 +818,13 @@ export function defaultActionFlows(
     const key = templateKeyForActionType(candidate.actionType);
     if (key) keys.add(key);
   }
-  if (keys.size === 1 && /daycare|childcare|preschool|nursery|tour/.test(value)) keys.add("book_tour");
+  if (isDaycareBusiness) {
+    // DaycareSpots has two distinct audiences. Keep the initial owner review
+    // focused on the marketplace outcome, the provider branch, and a safe
+    // fallback instead of surfacing generic booking/quote templates.
+    keys.clear();
+    ["find_daycare", "claim_daycare", "contact_team", "capture_lead"].forEach((key) => keys.add(key));
+  } else if (keys.size === 1 && /daycare|childcare|preschool|nursery|tour/.test(value)) keys.add("book_tour");
   else if (/swim|lesson|student/.test(value)) keys.add("enroll_child");
   else if (/salon|stylist|barber|spa|appointment/.test(value)) keys.add("book_appointment");
   else if (/hvac|air condition|heating|cooling|plumb|roof|repair/.test(value)) keys.add("request_quote");
@@ -845,7 +910,7 @@ export function classifyVisitorRequest(question: string): VisitorRequestClassifi
   const value = normalize(question);
   const informational = /^(how|what|when|where|why|does|is|are|can i|could i|tell me|explain)\b/.test(value)
     || /\bhow does\b|\bwhat happens\b|\bwhat is the process\b/.test(value);
-  const explicitRequest = /^(i want|i d like|id like|i need|please|help me|sign|enroll|register|book|schedule|request|get|try|see|view|watch|explore|open|call|connect me|send me|take me|let s|lets|join)\b/.test(value)
+  const explicitRequest = /^(i want|i d like|id like|i need|please|help me|find|sign|enroll|register|book|schedule|request|get|try|see|view|watch|explore|open|call|connect me|send me|take me|let s|lets|join)\b/.test(value)
     || /\b(sign my child up|sign me up|book an appointment|schedule service|request a demo|book a demo|try the demo|see the demo|open the demo|join the waitlist|call now|call emergency)\b/.test(value)
     || /^(?:can|could)\s+(?:someone|you|a team|the team)\b.*\b(?:demo|walk me through|talk to)\b/.test(value);
   const pricingKnowledge = /\b(pricing|price|prices|cost|costs|how much)\b/.test(value)
@@ -854,6 +919,8 @@ export function classifyVisitorRequest(question: string): VisitorRequestClassifi
   if (/\b(choose|choosing|recommend|right|best)\b.{0,32}\bplans?\b|\bplans?\b.{0,32}\b(choose|recommend|right|best)\b|\bsolo\b|\bteam\b.{0,24}\bplans?\b/.test(value)) actionIntent = "plan_selection";
   else if (/demo/.test(value)) actionIntent = "demo";
   else if (/sign my child up|sign me up|enroll|registration|new student|current student|swim(?:ming)?\s+lessons?|lessons?\s+for\s+(?:my|a)\s+(?:child|kid|student)/.test(value)) actionIntent = "enrollment";
+  else if (/find.*(?:daycare|childcare)|(?:daycare|childcare).*(?:find|search)|search.*(?:daycare|childcare)/.test(value)) actionIntent = "daycare_search";
+  else if (/claim|list my daycare|add my daycare|own a daycare/.test(value)) actionIntent = "provider_onboarding";
   else if (/tour|visit the (daycare|school)/.test(value)) actionIntent = "tour";
   else if (/book|appointment|schedule|reserve|birthday|open play/.test(value)) actionIntent = "booking";
   else if (/quote|estimate|how much|cost|pricing/.test(value)) actionIntent = "quote";

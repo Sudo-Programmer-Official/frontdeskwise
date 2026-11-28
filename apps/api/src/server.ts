@@ -21389,10 +21389,11 @@ async function updateActionOrWorkflow(request: FastifyRequest) {
   }
   if (action.origin === "discovered" && action.enabled && action.lifecycleStatus === "needs_review") {
     const workflowGenerationRequested = body.workflowGeneration === true;
-    if (!workflowGenerationRequested && action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
-    if (!workflowGenerationRequested && action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");
+    const ownerApproved = body.reviewReason === "owner_override";
+    if (!workflowGenerationRequested && !ownerApproved && action.confidence < 0.88) throw httpError(400, "This discovered action needs stronger website evidence before it can be enabled");
+    if (!workflowGenerationRequested && !ownerApproved && action.safetyPolicy === "manual_review") throw httpError(400, "This discovered action requires manual review before it can be enabled");
     action.lifecycleStatus = "active";
-    action.reviewReason = workflowGenerationRequested ? "owner_override" : null;
+    action.reviewReason = workflowGenerationRequested || ownerApproved ? "owner_override" : null;
   }
   const duplicate = business.actions.find((item, index) => index !== actionIndex && item.key === action.key);
   if (duplicate) throw httpError(409, "An action with this key already exists");

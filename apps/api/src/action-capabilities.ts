@@ -49,6 +49,8 @@ function normalizedUrl(value: string | null): string | null {
 
 export function actionIntent(action: Pick<ActionFlow, "key" | "name" | "description" | "actionType">): string {
   const text = normalized(`${action.key} ${action.name} ${action.description} ${action.actionType}`);
+  if (/claim|list my|provider onboarding/.test(text)) return "provider_onboarding";
+  if (/find daycare|daycare|childcare|directory|search directory/.test(text)) return "daycare_search";
   if (/demo|trial/.test(text)) return "demo_request";
   if (/enroll|registration|swim lesson|class/.test(text)) return "enrollment";
   if (/waitlist|waiting list/.test(text)) return "waitlist_join";
